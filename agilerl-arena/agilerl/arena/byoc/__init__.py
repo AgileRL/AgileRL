@@ -20,6 +20,7 @@ from agilerl.arena.byoc.commands import (
     build_cluster_rotate_token_command,
     build_cluster_status_command,
     build_cluster_unregister_command,
+    build_cluster_upgrade_command,
 )
 from agilerl.arena.byoc.endpoints import SetupKind
 from agilerl.arena.byoc.group import (
@@ -56,6 +57,7 @@ __all__ = [
     "build_cluster_rotate_token_command",
     "build_cluster_status_command",
     "build_cluster_unregister_command",
+    "build_cluster_upgrade_command",
     "build_installer",
     "caps_allow_byoc_at_root",
     "normalize_setup_type",

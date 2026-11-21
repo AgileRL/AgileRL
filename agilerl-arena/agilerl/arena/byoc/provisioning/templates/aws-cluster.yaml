@@ -2,6 +2,10 @@
 provider: aws
 name: __CLUSTER_NAME__
 values:
+    # customer keeps this org's bucket. platform shares the Arena catalog and
+    # bucket and requires a platform admin. Omit placement with platform to
+    # use ephemeral.
+    byoc_scope: customer
     # in-cluster runs jobs in this cluster. ephemeral hunts capacity outside it.
     placement: in-cluster
 arena:

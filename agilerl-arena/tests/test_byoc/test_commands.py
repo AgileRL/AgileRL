@@ -52,6 +52,9 @@ from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
     resource_classes,
     service_account_credentials,
 )
+from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
+    storage_project_id,
+)
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
 from agilerl.arena.config import CommandConfig
@@ -551,6 +554,7 @@ def test_cluster_group_includes_hardcoded_commands() -> None:
     assert cluster.name == "cluster"
     assert "unregister" in cluster.commands
     assert "rotate-token" in cluster.commands
+    assert "upgrade" in cluster.commands
     assert "register" in cluster.commands
     assert "register-classes" in cluster.commands
 
@@ -723,7 +727,7 @@ class TestGpuResourceClasses:
 
         compute = classes[0].metadata["computeResource"]
         assert compute["numCpus"] == 4
-        assert compute["memoryBytes"] == "16 GB"
+        assert compute["memoryBytes"] == "16 GiB"
 
     def test_keeps_a_one_vcpu_preset(self) -> None:
         spec = _nebius_spec(workers=[{"name": "gpu", "preset": "1gpu-1vcpu-1gb"}])
@@ -732,7 +736,7 @@ class TestGpuResourceClasses:
 
         compute = classes[0].metadata["computeResource"]
         assert compute["numCpus"] == 1
-        assert compute["memoryBytes"] == "1 GB"
+        assert compute["memoryBytes"] == "1 GiB"
 
 
 class TestRegistrationValuesFromSpec:
@@ -829,6 +833,7 @@ nebius:
                 "cluster_id": "mk8s-1",
                 "service_account_private_key": "pem-should-not-print",
                 "storage_secret_access_key": "secret-access-should-not-print",
+                "catalog_secret_access_key": "catalog-secret-should-not-print",
             }
             result = CliRunner().invoke(
                 build_cluster_status_command(),
@@ -842,6 +847,8 @@ nebius:
         assert "storage_secret_access_key: <sensitive>" in result.output
         assert "pem-should-not-print" not in result.output
         assert "secret-access-should-not-print" not in result.output
+        assert "catalog_secret_access_key: <sensitive>" in result.output
+        assert "catalog-secret-should-not-print" not in result.output
 
 
 class TestProvisionCommand:
@@ -937,6 +944,17 @@ class TestRegistrationValuesFromSpecJson:
         assert overridden.values.placement == "ephemeral"
         assert overridden_registration["placement"] == "ephemeral"
 
+    def test_platform_scope_defaults_placement_when_omitted(self) -> None:
+        spec, registration = _registration_values_from_spec(
+            _nebius_spec(),
+            byoc_scope="platform",
+        )
+
+        assert spec.values.byoc_scope == "platform"
+        assert spec.values.placement == "ephemeral"
+        assert registration["byoc_scope"] == "platform"
+        assert registration["placement"] == "ephemeral"
+
     def test_name_only_register_defaults_placement(self) -> None:
         fields = _register_runtime_fields(
             None,
@@ -948,6 +966,20 @@ class TestRegistrationValuesFromSpecJson:
         )
 
         assert fields["placement"] == "in-cluster"
+
+    def test_name_only_platform_register_defaults_placement(self) -> None:
+        fields = _register_runtime_fields(
+            None,
+            {
+                "placement": None,
+                "byoc_scope": "platform",
+                "domain": None,
+                "gateway_api_parent_refs": None,
+            },
+        )
+
+        assert fields["placement"] == "ephemeral"
+        assert fields["byoc_scope"] == "platform"
 
 
 class TestKubeconfigEnvironmentUnset:
@@ -1020,6 +1052,38 @@ class TestSpecWithStoredNebiusConfig:
         spec = _nebius_spec()
 
         assert recover_stored_config(spec, {"project_id": "other"}) is spec
+
+    def test_recovered_project_ids_are_not_terraform_inputs(self) -> None:
+        spec = _nebius_spec(
+            project_id=None,
+            storage_project_id=None,
+            subnet_id=None,
+            region="eu-north1",
+        )
+
+        recovered = recover_stored_config(
+            spec,
+            {"project_id": "project-stored", "storage_project_id": "storage-stored"},
+        )
+
+        values = recovered.terraform_values()
+        assert values["project_id"] == ""
+        assert values["storage_project_id"] == ""
+        assert storage_project_id(recovered) == "storage-stored"
+        assert recovered.nebius_cloud().project_id == "project-stored"
+
+    def test_spec_project_ids_stay_terraform_inputs(self) -> None:
+        spec = _nebius_spec(storage_project_id=None, region="eu-north1")
+
+        recovered = recover_stored_config(
+            spec, {"project_id": "other", "storage_project_id": "storage-stored"}
+        )
+
+        values = recovered.terraform_values()
+        assert values["project_id"] == "project"
+        assert values["subnet_id"] == "subnet"
+        assert values["storage_project_id"] == ""
+        assert storage_project_id(recovered) == "storage-stored"
 
 
 class TestStoredStateLocationEndpoint:
@@ -1415,7 +1479,7 @@ class TestRegisterGpuResourceClasses:
                 return_value=runner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[],
             ),
         ):
@@ -1433,6 +1497,46 @@ class TestRegisterGpuResourceClasses:
                     module_version=None,
                     register_node_group=False,
                 )
+
+    def test_rejects_an_empty_preset_list_for_an_ephemeral_cluster(
+        self, command_config: CommandConfig, tmp_path: Path
+    ) -> None:
+        api = MagicMock()
+        api.find_cluster.return_value = {"name": "test"}
+        spec = _nebius_spec().model_copy(
+            update={
+                "values": _nebius_spec().values.model_copy(
+                    update={"placement": "ephemeral"}
+                )
+            }
+        )
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands._cluster_provisioner",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
+                return_value=[],
+            ),
+            pytest.raises(
+                click.ClickException, match="No GPU presets in region projects"
+            ),
+        ):
+            _register_gpu_resource_classes(
+                command_config,
+                api,
+                spec,
+                tmp_path / "cluster.yaml",
+                tmp_path / "terraform",
+                tmp_path / "out",
+                register_all=True,
+                requested_presets=(),
+                yes=True,
+                module_version=None,
+                register_node_group=False,
+            )
 
 
 class TestSelectedWorkerNames:

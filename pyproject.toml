@@ -10,7 +10,7 @@ requires-python = ">=3.10,<3.14"
 
 dependencies = [
     "accelerate>=1.7.0",
-    "agilerl-arena>=1.31.0,<2.0",
+    "agilerl-arena>=1.37.0,<2.0",
     "dill>=0.3.7",
     "fastrand>=1.3.0",
     "flatten_dict>=0.4.2",
@@ -39,7 +39,7 @@ dependencies = [
     "tabulate>=0.9.0",
     "termcolor>=1.1.0",
     "torch>=2.13.0",
-    "tensordict==0.13.0",
+    "tensordict==0.15.1",
     "tqdm>=4.66.4",
     "wandb>=0.18.0",
 ]
@@ -69,8 +69,15 @@ llm = [
     "agilerl[cpu-llm,vllm]",
     "flash-linear-attention==0.5.2; sys_platform == 'linux'",
 ]
+verifiers = [
+    # verifiers needs Python >=3.11; agilerl supports 3.10.
+    # Custom runtime backends (type: custom) first ship in the 0.4.1 dev builds.
+    "verifiers==0.4.2.dev6; python_version >= '3.11'",
+    # Tool envs are served as OpenEnv MCP environments.
+    "openenv>=0.4.1,<0.5; python_version >= '3.11'",
+]
 all = [
-    "agilerl[box2d,llm]",
+    "agilerl[box2d,llm,verifiers]",
 ]
 
 [dependency-groups]
@@ -178,6 +185,12 @@ git_describe_command = [
 ]
 
 [tool.uv]
+# Not solved for s390x: Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 there.
+environments = [
+    "sys_platform == 'linux' and platform_machine != 's390x'",
+    "sys_platform == 'darwin'",
+    "sys_platform == 'win32'",
+]
 conflicts = [
     [
         { extra = "cpu" },
@@ -232,23 +245,32 @@ python-version = "3.13"
 include = ["agilerl", "agilerl/arena"]
 
 # Imports that only resolve on some platforms/extras: vllm is Linux-only and
-# conflicts with cpu. Box2D needs the box2d extra. GPU Linux (`--extra all`)
+# conflicts with cpu. Triton ships only with CUDA torch builds. Box2D needs the
+# box2d extra. flash-linear-attention and flash-attn are optional CUDA kernels.
+# GPU Linux (`--extra all`)
 # resolves vllm; GitHub-hosted CPU Linux (`--extra cpu --extra cpu-llm`) and
 # macOS/Windows cannot.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",
-    "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/architectures/glm5_next/liger.py",
+    "agilerl/architectures/granite_liger.py",
+    "agilerl/architectures/liger_rope.py",
     "agilerl/architectures/nemotron_h/liger.py",
+    "agilerl/architectures/mimo_v2/liger.py",
     "agilerl/lora/moe/layouts.py",
     "agilerl/architectures/qwen3_5/causal_lm.py",
     "agilerl/architectures/vllm_language.py",
     "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
+    "agilerl/lora/moe/triton_kernels.py",
+    "agilerl/distributed/context_parallel/gdn.py",
+    "agilerl/distributed/context_parallel/ulysses.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/utils/llm_utils.py",
     "agilerl/utils/sampling_supports.py",
     "agilerl/utils/utils.py",
+    "agilerl/lora/moe/layouts.py",
 ]
 
 [tool.ty.overrides.rules]
@@ -323,6 +345,15 @@ allow-star-arg-any = true
 "{benchmarking,demos,tutorials,scripts}/**" = ["ALL"]
 ".github/**" = [
     "INP001",        # standalone CI scripts, not a package
+]
+"agilerl/lora/moe/triton_kernels.py" = [
+    "ANN001", "ANN201", # Triton's JIT reads kernel parameter annotations as kernel types; non-Triton annotations fail to compile
+]
+"agilerl-arena/snowflake_app/**" = [
+    "S608",          # SQL values pass through setup_sql.string_literal
+]
+"agilerl-arena/hatch_build.py" = [
+    "INP001",        # hatchling build hook at the project root, not a package
 ]
 "scripts/**" = [
     "INP001",        # standalone scripts, not a package

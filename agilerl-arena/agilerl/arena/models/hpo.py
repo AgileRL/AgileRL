@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
+from annotated_types import Ge, Gt, Le, Lt
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.fields import FieldInfo
 from typing_extensions import Self
 
 from agilerl.arena.models.networks import min_max_validator
@@ -35,6 +37,49 @@ class RLHyperparameter(BaseModel):
     @model_validator(mode="after")
     def _validate_range(self) -> Self:
         return min_max_validator("min", "max")(self)
+
+
+def require_mutation_range_inside_field(
+    bounds: RLHyperparameter, field: FieldInfo
+) -> None:
+    """Reject a mutation window that leaves the numeric limits on ``field``.
+
+    :param bounds: Requested mutation window.
+    :param field: Algorithm field the window mutates.
+    :raises ValueError: If either end falls outside the field.
+    """
+    problems: list[str] = []
+    for item in field.metadata:
+        if isinstance(item, Ge) and bounds.min < item.ge:
+            problems.append(f"min {bounds.min} is below {item.ge}")
+        elif isinstance(item, Gt) and bounds.min <= item.gt:
+            problems.append(f"min {bounds.min} must be > {item.gt}")
+        elif isinstance(item, Le) and bounds.max > item.le:
+            problems.append(f"max {bounds.max} is above {item.le}")
+        elif isinstance(item, Lt) and bounds.max >= item.lt:
+            problems.append(f"max {bounds.max} must be < {item.lt}")
+    if not problems:
+        return
+    msg = (
+        f"range [{bounds.min}, {bounds.max}] leaves the field limits "
+        f"({_limit_text(field)}): " + "; ".join(problems)
+    )
+    raise ValueError(msg)
+
+
+def _limit_text(field: FieldInfo) -> str:
+    """Field limits, in the order they are declared."""
+    parts: list[str] = []
+    for item in field.metadata:
+        if isinstance(item, Gt):
+            parts.append(f"> {item.gt}")
+        elif isinstance(item, Ge):
+            parts.append(f">= {item.ge}")
+        elif isinstance(item, Lt):
+            parts.append(f"< {item.lt}")
+        elif isinstance(item, Le):
+            parts.append(f"<= {item.le}")
+    return " and ".join(parts)
 
 
 class MutationProbabilities(BaseModel):

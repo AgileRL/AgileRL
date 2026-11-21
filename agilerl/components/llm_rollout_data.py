@@ -52,6 +52,8 @@ class Trajectory(BaseModel):
     :param segments: Segment layout when the episode context restarted, else ``None``.
     :param sampling_supports: Optional ``(n, K)`` token ids the sampler could
         draw at each generated token, ``-1`` padded, parallel to ``sampling_logps``.
+    :param teacher_logps: Optional 1-D distillation-teacher logprobs of the
+        generated tokens, parallel to ``sampling_logps``.
     """
 
     token_ids: torch.Tensor
@@ -62,6 +64,7 @@ class Trajectory(BaseModel):
     pixel_values: torch.Tensor | None = None
     segments: EpisodeSegments | None = None
     sampling_supports: torch.Tensor | None = None
+    teacher_logps: torch.Tensor | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra="forbid")
 

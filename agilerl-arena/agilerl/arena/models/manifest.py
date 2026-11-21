@@ -38,7 +38,7 @@ from agilerl.arena.memory.resolve.rollout import (
     rollout_engines_blocker,
 )
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
-from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
 from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
@@ -51,6 +51,7 @@ from agilerl.arena.models.hpo import (
     SelectionStrategySpec,
     TournamentSelectionSpec,
     no_op_mutation_probabilities,
+    require_mutation_range_inside_field,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import (
@@ -62,7 +63,7 @@ from agilerl.arena.models.networks import (
     network_arch_is_resolvable,
     normalize_manifest_network,
 )
-from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
 from agilerl.arena.models.training import (
     BufferSpec,
     LLMRolloutBufferSpec,
@@ -74,13 +75,18 @@ API_VERSION = "agilerl.com/v1"
 # Algorithm fields the run picks from the memory estimate, fastest that fits.
 RESOLVED_MEMORY_FIELDS = (
     ("micro_batch_size_per_gpu",),
+    ("micro_batch_tokens_per_gpu",),
     ("gradient_checkpointing",),
     ("activation_offload",),
+    ("routed_expert_chunk_mib",),
     ("fsdp", "reshard_after_forward"),
     ("fsdp", "optim_cpu_offload"),
     ("fsdp", "routed_expert_chunk_mib"),
     ("fsdp", "activation_offload"),
     ("fsdp", "cpu_offload"),
+    ("fsdp", "shard_frozen_tp"),
+    ("fsdp", "save_moe_collectives"),
+    ("fsdp", "checkpoint_every_n_blocks"),
 )
 
 
@@ -196,6 +202,11 @@ class DeferredNetworkSpec(BaseModel):
     )
 
 
+def _registered_algorithms() -> str:
+    """The sentence listing every registered algorithm once."""
+    return f"Registered: {', '.join(MANIFEST_REGISTRY.alias_groups())}."
+
+
 def _resolve_algorithm(data: object) -> object:
     """Dispatch the algorithm section to its registered spec class via ``name``."""
     if isinstance(data, BaseModel):
@@ -212,7 +223,7 @@ def _resolve_algorithm(data: object) -> object:
     if name is None:
         msg = (
             "The algorithm section must include a 'name' field naming a registered "
-            f"algorithm. Registered: {', '.join(MANIFEST_REGISTRY.names())}."
+            f"algorithm. {_registered_algorithms()}"
         )
         raise ValueError(msg)
     try:
@@ -221,8 +232,9 @@ def _resolve_algorithm(data: object) -> object:
         # Surface an unknown name as a validation error like any other bad
         # field, rather than a KeyError a caller cannot tell from a crash.
         msg = (
-            f"'name' is not a registered algorithm: {name!r}. "
-            f"Registered: {', '.join(MANIFEST_REGISTRY.names())}."
+            f"'name' is not a registered algorithm: {name!r}."
+            f"{did_you_mean(str(name), MANIFEST_REGISTRY.names())} "
+            f"{_registered_algorithms()}"
         )
         raise ValueError(msg) from err
 
@@ -494,6 +506,22 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_mutation_ranges_inside_field_limits(self) -> Self:
+        """Reject a mutation window outside the hyperparameter it changes."""
+        if self.mutation is None or not self.mutation.rl_hp_selection:
+            return self
+        spec = type(self.algorithm)
+        accepted = _mutable_names(spec)
+        for spelling, bounds in self.mutation.rl_hp_selection.items():
+            field = spec.model_fields[accepted[spelling]]
+            try:
+                require_mutation_range_inside_field(bounds, field)
+            except ValueError as exc:
+                msg = f"mutation.rl_hp_selection cannot mutate {spelling!r}: {exc}"
+                raise ValueError(msg) from exc
+        return self
+
+    @model_validator(mode="after")
     def _check_mutated_sampling_support(self) -> Self:
         """Reject HPO moving ``temperature`` or ``top_p`` to values rollout cannot score."""
         if (
@@ -512,14 +540,6 @@ class TrainingManifest(BaseModel):
             if field in lowest:
                 lowest[field] = min(lowest[field], bounds.min)
         prefix = "mutation.rl_hp_selection can reach sampling rollout cannot score"
-        # vLLM rejects temperature <= 0 on an engine that records supports.
-        if self.algorithm.top_k > 0 and lowest["temperature"] <= 0:
-            msg = (
-                f"{prefix}: temperature min {lowest['temperature']} must be > 0 "
-                f"with top_k={self.algorithm.top_k}, which records sampling "
-                "supports only at temperature > 0."
-            )
-            raise ValueError(msg)
         try:
             records_sampling_supports(
                 lowest["temperature"],
@@ -619,6 +639,13 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_max_output_tokens(self) -> Self:
+        """A completion cap has to fit inside the model's context length."""
+        if isinstance(self.algorithm, RolloutLLMSpec):
+            self.algorithm.check_output_fits_context()
+        return self
+
+    @model_validator(mode="after")
     def _check_async_rollout_buffer(self) -> Self:
         """Async rollout queues generated groups, so it needs the LLM buffer."""
         if not self.training.async_rollout:
@@ -675,38 +702,73 @@ class TrainingManifest(BaseModel):
         raise ValueError(msg)
 
     @model_validator(mode="after")
-    def _check_prefix_cache_reuse(self) -> Self:
-        """Prefix cache reuse spans ``max_rollout_version_lag`` versions, so it needs a bound."""
-        if not self.training.reuse_prefix_cache_across_syncs:
+    def _check_dataset_rollout_rubric(self) -> Self:
+        """A rollout over dataset rows needs a rubric, unless OPD trains on its teacher alone."""
+        environment = self.environment
+        if (
+            not isinstance(environment, LLMEnvSpec)
+            or not environment.dataset_backed_rollout
+            or environment.rubric_file_path is not None
+            or isinstance(self.algorithm, OPDSpec)
+        ):
             return self
-        lag = (
-            self.replay_buffer.max_rollout_version_lag
-            if isinstance(self.replay_buffer, LLMRolloutBufferSpec)
-            else None
+        msg = (
+            "rubric_file_path is required for dataset-backed rollout "
+            "environments; only OPD may leave it unset, and then every turn "
+            "scores 0."
         )
-        if lag is None or lag < 1:
-            msg = (
-                "training.reuse_prefix_cache_across_syncs requires an LLM "
-                f"replay_buffer with max_rollout_version_lag >= 1, got {lag}"
-            )
-            raise ValueError(msg)
-        return self
+        raise ValueError(msg)
 
     @model_validator(mode="after")
-    def _check_group_replay(self) -> Self:
-        """Group replay swaps a member of a group whose returns tie, so it needs groups."""
-        if not (
-            isinstance(self.replay_buffer, LLMRolloutBufferSpec)
-            and self.replay_buffer.group_replay_max_age > 0
-        ):
+    def _check_distillation_teacher(self) -> Self:
+        """The teacher rescores each rollout's text, so the env must be text-only."""
+        if not isinstance(self.algorithm, OPDSpec):
             return self
-        # A single-completion group always ties, so every completion would be replaced.
         if not (
-            isinstance(self.algorithm, GRPOSpec) and self.algorithm.group_size >= 2
+            isinstance(self.environment, LLMEnvSpec) and self.environment.text_only
         ):
             msg = (
-                "replay_buffer.group_replay_max_age > 0 requires a GRPO-family "
-                f"algorithm with group_size >= 2, got {self.algorithm.name}"
+                "algorithm.teacher rescores each rollout's text, so the "
+                "environment must be a text-only LLM rollout env (modality text "
+                "or a dataset-backed rollout)."
+            )
+            raise ValueError(msg)
+        model = self.algorithm.teacher.model
+        if model is None:
+            return self
+        teacher_info = SUPPORTED_MODEL_INFO.get(model.pretrained_model_name_or_path)
+        if teacher_info is None:
+            msg = (
+                f"algorithm.teacher.model {model.pretrained_model_name_or_path!r} is "
+                "not in the model catalog, so its engine memory cannot be sized."
+            )
+            raise ValueError(msg)
+        student_id = self.algorithm.pretrained_model_name_or_path
+        student_info = SUPPORTED_MODEL_INFO.get(student_id) if student_id else None
+        if (
+            student_info is not None
+            and student_info.vocab_size != teacher_info.vocab_size
+        ):
+            msg = (
+                "algorithm.teacher.model scores the student's token ids, so both "
+                f"need one vocabulary; {student_id} has {student_info.vocab_size} "
+                f"tokens and {model.pretrained_model_name_or_path} has "
+                f"{teacher_info.vocab_size}."
+            )
+            raise ValueError(msg)
+        vllm = self.algorithm.vllm_config
+        if (
+            vllm is None
+            or vllm.tensor_parallel_size is None
+            or not {"training_gpus_per_agent", "rollout_engines_per_agent"}
+            & self.training.model_fields_set
+        ):
+            msg = (
+                "algorithm.teacher.model needs its GPU layout written out, since "
+                "the automatic GPU split does not count teacher engines. Set "
+                "algorithm.vllm_config.tensor_parallel_size and "
+                "training.training_gpus_per_agent or "
+                "training.rollout_engines_per_agent."
             )
             raise ValueError(msg)
         return self
@@ -737,6 +799,38 @@ class TrainingManifest(BaseModel):
         if model is not None:
             self.algorithm.check_thinking_budget_parser(model.model_type)
         return self
+
+    @model_validator(mode="after")
+    def _check_speculative_logit_bias(self) -> Self:
+        """vLLM rejects ``logit_bias`` requests on a drafting engine."""
+        if not isinstance(self.algorithm, RolloutLLMSpec):
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids are known offline; the rollout engine checks the rest.
+        if model is not None:
+            self.algorithm.check_speculative_sampling(model.biases_image_token)
+        return self
+
+    @model_validator(mode="after")
+    def _check_expert_parallel_covers_tensor_parallel(self) -> Self:
+        """MoE models need ep >= tp; tensor parallel leaves routed experts whole."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        fsdp = self.algorithm.fsdp
+        if fsdp is None or fsdp.ep >= fsdp.tp:
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids are known offline; the trainer checks the rest.
+        if model is None or not model.supports_expert_parallel:
+            return self
+        # Without EP, experts sit on tp times fewer FSDP ranks, so each GPU
+        # holds tp times the expert memory. The trainer raises this at startup too.
+        msg = (
+            f"algorithm.fsdp.ep={fsdp.ep} is below tp={fsdp.tp}: "
+            f"{model.hub_id} is a mixture-of-experts model, and tensor parallel "
+            "does not split routed experts. Set ep >= tp."
+        )
+        raise ValueError(msg)
 
     @field_serializer("network", mode="wrap")
     def _serialize_network(
@@ -845,18 +939,8 @@ class TrainingManifest(BaseModel):
             and not self.network.model_fields_set
         ):
             payload.pop("network", None)
-        # Omit dumped defaults that parsers treat as explicit choices.
-        if (
-            "rollout_mode" not in self.training.model_fields_set
-            and "training" in payload
-        ):
-            payload["training"].pop("rollout_mode", None)
         if "training" in payload:
-            training = payload["training"]
-            if not isinstance(self.algorithm, LLMAlgorithmSpec) or (
-                "training_gpus_per_agent" not in self.training.model_fields_set
-            ):
-                training.pop("training_gpus_per_agent", None)
+            self._drop_unset_training_fields(payload["training"])
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:
@@ -872,6 +956,12 @@ class TrainingManifest(BaseModel):
                     and "tensor_parallel_size" not in vllm_config.model_fields_set
                 ):
                     vllm_payload.pop("tensor_parallel_size", None)
+        if (
+            isinstance(self.network, FinetuningNetworkSpec)
+            and "lora_config" in self.network.model_fields_set
+            and self.network.lora_config is None
+        ):
+            payload.setdefault("network", {})["lora_config"] = None
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
@@ -879,3 +969,25 @@ class TrainingManifest(BaseModel):
             if environment.get("goal_images_field") is None:
                 environment.pop("goal_images_field", None)
         return payload
+
+    def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
+        """Omit dumped training defaults that parsers treat as explicit choices.
+
+        An unset engine count leaves the trainer / engine split to the driver,
+        and an unset step cap would dump the default million.
+
+        :param training: The dumped ``training`` section, edited in place.
+        :type training: dict[str, Any]
+        """
+        authored = self.training.model_fields_set
+        if not isinstance(self.algorithm, LLMAlgorithmSpec) or (
+            "training_gpus_per_agent" not in authored
+        ):
+            training.pop("training_gpus_per_agent", None)
+        for field in (
+            "rollout_mode",
+            "rollout_engines_per_agent",
+            "max_steps",
+        ):
+            if field not in authored:
+                training.pop(field, None)

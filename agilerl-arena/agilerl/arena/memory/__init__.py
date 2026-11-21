@@ -16,14 +16,14 @@ from agilerl.arena.memory.estimator import (
     estimate_training,
     generation_can_serve,
 )
-from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.solver import (
     SOLVABLE_FIELDS,
     CannotSolve,
+    ServingWidth,
     SolveResult,
     inference_run_config,
+    size_serving_engine,
     solve,
-    solve_inference,
 )
 from agilerl.arena.memory.specs import (
     DeviceSpec,
@@ -47,6 +47,7 @@ __all__ = [
     "PhaseBreakdown",
     "RunConfig",
     "RunEstimate",
+    "ServingWidth",
     "SolveResult",
     "TrainingSettings",
     "WeightVariant",
@@ -56,7 +57,6 @@ __all__ = [
     "estimate_training",
     "generation_can_serve",
     "inference_run_config",
-    "resolve_fsdp_memory",
+    "size_serving_engine",
     "solve",
-    "solve_inference",
 ]

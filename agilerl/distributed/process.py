@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 import os
 import random
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import ContextDecorator
 from typing import Any
 
@@ -189,6 +189,22 @@ def allreduce_sum_ints(values: Sequence[int]) -> list[int]:
     return sums.tolist()
 
 
+def allreduce_max_ints(values: Sequence[int]) -> list[int]:
+    """Take the max of each of ``values`` across ranks (``values`` locally).
+
+    :param values: This rank's values, the same count on every rank.
+    :type values: Sequence[int]
+    :return: Per-position maxima across ranks.
+    :rtype: list[int]
+    """
+    values = [int(value) for value in values]
+    if not is_distributed() or dist.get_world_size() == 1:
+        return values
+    maxima = torch.tensor(values, device=resolve_device(), dtype=torch.long)
+    dist.all_reduce(maxima, op=dist.ReduceOp.MAX)
+    return maxima.tolist()
+
+
 def any_rank(flag: bool) -> bool:
     """True if any data-parallel rank has ``flag`` set.
 
@@ -232,7 +248,7 @@ def aggregate_metrics_across_gpus(
 
 
 def aggregate_metrics_dict(
-    metrics: dict[str, torch.Tensor | np.ndarray | float],
+    metrics: Mapping[str, torch.Tensor | np.ndarray | float],
     excluded: Collection[str] = (),
     maximized: Collection[str] = (),
 ) -> dict[str, float]:
@@ -242,7 +258,7 @@ def aggregate_metrics_dict(
     each metric is its local mean.
 
     :param metrics: Metric values on this rank, by name.
-    :type metrics: dict[str, torch.Tensor | np.ndarray | float]
+    :type metrics: Mapping[str, torch.Tensor | np.ndarray | float]
     :param excluded: Metrics this rank leaves out of their cross-rank mean. A
         metric every rank excludes averages to NaN.
     :type excluded: Collection[str]
@@ -319,19 +335,21 @@ class raise_on_any_rank(ContextDecorator):
         return False
 
 
-def sync_grads(params: Sequence[nn.Parameter]) -> None:
+def sync_grads(params: Sequence[nn.Parameter], cp: int = 1) -> None:
     """Average gradients across data-parallel ranks.
 
     One coalesced all-reduce of every ``.grad`` in ``params`` (SUM, then
-    divide by world size so Gloo works). See :func:`all_reduce_grads` for
-    params without a grad. No-op on a single device.
+    divide by world size / ``cp`` so Gloo works). See :func:`all_reduce_grads`
+    for params without a grad. No-op on a single device.
 
     :param params: Optimizer parameters whose ``.grad`` should be averaged.
+    :param cp: Context-parallel degree. CP ranks hold slices of one
+        sequence's grad, so they sum rather than average.
     """
     if not params or not is_distributed() or dist.get_world_size() == 1:
         return
 
-    all_reduce_grads(params, divisor=dist.get_world_size())
+    all_reduce_grads(params, divisor=dist.get_world_size() // cp)
 
 
 def all_reduce_grads(

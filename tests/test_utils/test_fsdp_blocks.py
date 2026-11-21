@@ -16,12 +16,16 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.utils.checkpoint import CheckpointError, checkpoint
+from torch.utils.checkpoint import checkpoint
 from transformers import GptOssConfig, GptOssForCausalLM
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssTopKRouter
 
 from agilerl.distributed import FSDPConfig, init_distributed
-from agilerl.distributed.fsdp_blocks import _block_checkpoint_contexts, apply_fsdp2
+from agilerl.distributed.fsdp_blocks import (
+    _block_checkpoint_contexts,
+    _checkpoint_block,
+    apply_fsdp2,
+)
 from agilerl.lora.moe import upgrade_moe_param_wrappers
 
 VOCAB = 64
@@ -96,6 +100,17 @@ def tiny_gpt_oss_mlp_with_lora() -> nn.Module:
     return tiny_gpt_oss_with_lora().get_submodule("base_model.model.model.layers.0.mlp")
 
 
+class MlpBlock(nn.Module):
+    """Decoder-block stand-in whose only child is a MoE MLP."""
+
+    def __init__(self, mlp: nn.Module) -> None:
+        super().__init__()
+        self.mlp = mlp
+
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.mlp(hidden_states)
+
+
 def trainable_grads(module: nn.Module) -> dict[str, torch.Tensor]:
     """Full gradient of each trainable parameter, keyed by its unwrapped name."""
     return {
@@ -135,14 +150,13 @@ class TestBlockCheckpointContexts:
         reference_hidden = hidden.clone().requires_grad_()
         (reference(reference_hidden)[0] * upstream).sum().backward()
         hidden.requires_grad_()
+        block = _checkpoint_block(
+            MlpBlock(mlp),
+            FSDPConfig(param_dtype="float32", checkpoint_every_n_blocks=1),
+        )
 
         # Act
-        out, _scores = checkpoint(
-            mlp,
-            hidden,
-            use_reentrant=False,
-            context_fn=_block_checkpoint_contexts(True),
-        )
+        out, _scores = block(hidden)
         (out * upstream).sum().backward()
 
         # Assert
@@ -155,19 +169,27 @@ class TestBlockCheckpointContexts:
 
     def test_recomputed_router_reroutes_gpt_oss_tokens(self) -> None:
         # Arrange
+        reference = tiny_gpt_oss_mlp_with_lora()
         mlp = tiny_gpt_oss_mlp_with_lora()
         torch.manual_seed(2)
-        hidden = torch.randn(2, 6, HIDDEN, requires_grad=True)
+        hidden = torch.randn(2, 6, HIDDEN)
+        upstream = torch.randn(2, 6, HIDDEN)
+        reference_hidden = hidden.clone().requires_grad_()
+        (reference(reference_hidden)[0] * upstream).sum().backward()
+        hidden.requires_grad_()
+
+        # Act
         out, _scores = checkpoint(
             mlp,
             hidden,
             use_reentrant=False,
             context_fn=_block_checkpoint_contexts(False),
         )
+        (out * upstream).sum().backward()
 
-        # Act / Assert
-        with pytest.raises(CheckpointError, match="different metadata"):
-            out.sum().backward()
+        # Assert: the grouped GEMMs save routing-independent shapes, so the
+        # rerouted backward runs and its gradients leave the forward routing.
+        assert not torch.allclose(hidden.grad, reference_hidden.grad)
 
 
 class TestApplyFsdp2:
@@ -183,7 +205,9 @@ class TestApplyFsdp2:
 
         # Act
         apply_fsdp2(
-            model, FSDPConfig(param_dtype="float32"), gradient_checkpointing=True
+            model,
+            FSDPConfig(param_dtype="float32", checkpoint_every_n_blocks=1),
+            gradient_checkpointing=True,
         )
         (model(input_ids=input_ids).logits * upstream).sum().backward()
 
@@ -193,3 +217,12 @@ class TestApplyFsdp2:
         assert grads.keys() == expected.keys()
         for name, grad in grads.items():
             assert torch.equal(grad, expected[name]), name
+
+    @pytest.mark.usefixtures("world_size_one")
+    def test_context_parallel_without_a_mesh_raises(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"FSDPConfig\.cp=2 needs an FSDP device mesh"
+        ):
+            apply_fsdp2(
+                tiny_gpt_oss_with_lora(), FSDPConfig(param_dtype="float32", cp=2)
+            )

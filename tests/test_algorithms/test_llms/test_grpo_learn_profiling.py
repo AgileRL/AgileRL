@@ -36,9 +36,7 @@ def cpu_grpo(**kwargs) -> GRPO:
         "device": "cpu",
     }
     defaults.update(kwargs)
-    agent = GRPO(**defaults)
-    agent.liger_loss = False
-    return agent
+    return GRPO(**defaults)
 
 
 def experiences(

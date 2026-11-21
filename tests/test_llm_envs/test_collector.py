@@ -530,7 +530,7 @@ def _start_group(collector: RolloutCollector, group_seed: int) -> list[str]:
 
 
 class TestRolloutCollectorAssignGroupTask:
-    def test_overlapping_groups_cover_every_row_once_per_cycle(self) -> None:
+    def test_epoch_shuffle_covers_every_row_once_per_cycle(self) -> None:
         # Arrange
         resets: list[int | None] = []
         collector = RolloutCollector(
@@ -538,6 +538,7 @@ class TestRolloutCollectorAssignGroupTask:
             batch_size=8,
             group_size=2,
             base_seed=3,
+            adaptive_task_sampling=False,
         )
         try:
             # Act: each group starts while every earlier group is still live.
@@ -560,7 +561,7 @@ class TestRolloutCollectorAssignGroupTask:
         finally:
             collector.close()
 
-    def test_adaptive_sampling_favours_rows_whose_groups_were_informative(
+    def test_default_sampling_favours_rows_whose_groups_were_informative(
         self,
     ) -> None:
         # Arrange
@@ -570,7 +571,6 @@ class TestRolloutCollectorAssignGroupTask:
             batch_size=8,
             group_size=2,
             base_seed=3,
-            adaptive_task_sampling=True,
         )
         try:
             for seed in range(8):

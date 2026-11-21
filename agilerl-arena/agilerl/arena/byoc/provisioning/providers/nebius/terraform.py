@@ -46,6 +46,8 @@ MISSING_BUCKET_MARKERS = (
     "bucket doesn't exist",
     "bucket does not exist",
 )
+STORAGE_SIZE_QUOTA = "storage.bucket.size.standard"
+STATE_BUCKET_MAX_BYTES = 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -197,6 +199,8 @@ def ensure_terraform_state_bucket(
 ) -> dict[str, str]:
     """Require a Terraform state bucket, creating it with the Nebius CLI if asked."""
     if terraform_state_bucket_exists(spec, run=run):
+        _ensure_project_storage_quota(spec, run)
+        _ensure_state_bucket_limit(spec, run)
         credentials = read_terraform_state_credentials(state_dir)
         if credentials is None:
             credentials = fetch_terraform_state_credentials(spec, run=run)
@@ -214,9 +218,130 @@ def ensure_terraform_state_bucket(
                 "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
             )
             raise click.ClickException(msg)
+    _ensure_project_storage_quota(spec, run)
     credentials = provision_terraform_state_bucket(spec, run=run)
     write_terraform_state_credentials(state_dir, credentials)
     return credentials.environ()
+
+
+def _storage_quota_bytes(spec: ClusterSpec) -> int:
+    """Return the standard-storage quota for the experiment bucket and state."""
+    data_bytes = spec.nebius_cloud().object_storage.size_gib * 1024 * 1024 * 1024
+    return data_bytes + STATE_BUCKET_MAX_BYTES
+
+
+def _ensure_project_storage_quota(spec: ClusterSpec, run: NebiusRun) -> None:
+    """Set the project standard-storage quota when it is below the buckets."""
+    region = nebius_region_from_endpoint(
+        spec.terraform_state.s3_endpoint(spec.arena.storage.endpoint)
+    )
+    limit = _storage_quota_bytes(spec)
+    _raise_quota_allowance(storage_project_id(spec), region, limit, run)
+    _require_tenant_storage_quota(spec, region, limit, run)
+
+
+def _quota_allowance(
+    parent_id: str, region: str, run: NebiusRun
+) -> dict[str, Any] | None:
+    """Return one standard-storage quota allowance, if Nebius has it."""
+    return _get_by_name(
+        [
+            "quotas",
+            "quota-allowance",
+            "get-by-name",
+            "--name",
+            STORAGE_SIZE_QUOTA,
+            "--parent-id",
+            parent_id,
+            "--region",
+            region,
+        ],
+        run=run,
+    )
+
+
+def _raise_quota_allowance(
+    parent_id: str, region: str, limit: int, run: NebiusRun
+) -> None:
+    """Replace a standard-storage allowance that is below ``limit`` bytes."""
+    current = _quota_allowance(parent_id, region, run)
+    granted = _spec_int(current, "limit") if current is not None else None
+    if granted is not None and granted >= limit:
+        return
+    _run_nebius_json(
+        [
+            "quotas",
+            "quota-allowance",
+            "create",
+            "--parent-id",
+            parent_id,
+            "--name",
+            STORAGE_SIZE_QUOTA,
+            "--region",
+            region,
+            "--limit",
+            str(limit),
+        ],
+        run=run,
+    )
+
+
+def _require_tenant_storage_quota(
+    spec: ClusterSpec, region: str, limit: int, run: NebiusRun
+) -> None:
+    """Stop when the tenant standard-storage quota is below the buckets."""
+    tenant_id = spec.nebius_cloud().tenant_id
+    current = _quota_allowance(tenant_id, region, run)
+    granted = _spec_int(current, "limit") if current is not None else None
+    if granted is None or granted >= limit:
+        return
+    msg = (
+        f"Nebius tenant {tenant_id} standard storage quota in {region} "
+        f"is {granted} bytes. This cluster needs {limit} bytes. "
+        f"A tenant admin must raise {STORAGE_SIZE_QUOTA} in {region}."
+    )
+    raise click.ClickException(msg)
+
+
+def _ensure_state_bucket_limit(spec: ClusterSpec, run: NebiusRun) -> None:
+    """Set a state-bucket max size when the current max is zero."""
+    bucket = _find_named_resource(
+        ["storage", "bucket"],
+        name=spec.terraform_state.bucket,
+        parent_id=storage_project_id(spec),
+        run=run,
+    )
+    if bucket is None:
+        return
+    current = _spec_int(bucket, "max_size_bytes")
+    if current is None or current >= STATE_BUCKET_MAX_BYTES:
+        return
+    _run_nebius(
+        [
+            "storage",
+            "bucket",
+            "update",
+            "--id",
+            _resource_id(bucket),
+            "--max-size-bytes",
+            str(STATE_BUCKET_MAX_BYTES),
+        ],
+        run=run,
+        check=True,
+    )
+
+
+def _spec_int(payload: dict[str, Any], field: str) -> int | None:
+    """Return one non-negative integer from a Nebius resource spec."""
+    spec = payload.get("spec")
+    if not isinstance(spec, dict) or field not in spec:
+        return None
+    raw = spec[field]
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return None
 
 
 def read_terraform_state_credentials(
@@ -347,14 +472,97 @@ def delete_terraform_state_bucket(
     )
 
 
+def nebius_project_exists(
+    project_id: str,
+    run: NebiusRun = subprocess.run,
+) -> bool:
+    """Return whether a Nebius project still exists."""
+    result = _run_nebius(
+        ["iam", "v2", "project", "get", "--id", project_id], run=run, check=False
+    )
+    if result.returncode == 0:
+        return True
+    if is_missing_bucket_error(result.stdout, result.stderr):
+        return False
+    detail = (result.stderr or result.stdout).strip()
+    msg = f"Could not look up Nebius project {project_id!r}.{f' {detail}' if detail else ''}"
+    raise click.ClickException(msg)
+
+
+def nebius_project_name(
+    project_id: str,
+    run: NebiusRun = subprocess.run,
+) -> str | None:
+    """Return a Nebius project's name, or ``None`` when the project is gone."""
+    result = _run_nebius(
+        ["iam", "v2", "project", "get", "--id", project_id], run=run, check=False
+    )
+    if result.returncode != 0:
+        if is_missing_bucket_error(result.stdout, result.stderr):
+            return None
+        detail = (result.stderr or result.stdout).strip()
+        msg = (
+            f"Could not look up Nebius project {project_id!r}."
+            f"{f' {detail}' if detail else ''}"
+        )
+        raise click.ClickException(msg)
+    payload = _parse_nebius_json(result.stdout)
+    if not isinstance(payload, dict):
+        msg = "Nebius CLI returned invalid JSON."
+        raise click.ClickException(msg)
+    return _resource_name(payload)
+
+
+def delete_project_storage_buckets(
+    project_id: str,
+    run: NebiusRun = subprocess.run,
+) -> None:
+    """Delete object-storage buckets in a project, including ones already scheduled."""
+    for item in _nebius_list_items(
+        ["storage", "bucket", "list", "--parent-id", project_id],
+        run=run,
+    ):
+        bucket_id = _resource_id(item)
+        status = item.get("status")
+        state = status.get("state") if isinstance(status, dict) else ""
+        scheduled = (
+            isinstance(state, str)
+            and state.upper().replace("_", "") == "SCHEDULEDFORDELETION"
+        )
+        if not scheduled:
+            click.echo(f"Deleting storage bucket {bucket_id}.")
+            _delete_nebius_resource(
+                ["storage", "bucket", "delete", "--id", bucket_id, "--ttl", "0s"],
+                run,
+            )
+        # A scheduled bucket still belongs to the project until it is purged.
+        click.echo(f"Purging storage bucket {bucket_id}.")
+        _delete_nebius_resource(
+            ["storage", "bucket", "purge", "--id", bucket_id],
+            run,
+        )
+
+
+def delete_project_compute_disks(
+    project_id: str,
+    run: NebiusRun = subprocess.run,
+) -> None:
+    """Delete compute disks left in a project by Kubernetes PVCs."""
+    for item in _nebius_list_items(
+        ["compute", "disk", "list", "--parent-id", project_id],
+        run=run,
+    ):
+        disk_id = _resource_id(item)
+        click.echo(f"Deleting compute disk {disk_id}.")
+        _delete_nebius_resource(["compute", "disk", "delete", "--id", disk_id], run)
+
+
 def delete_nebius_project(
     project_id: str,
     run: NebiusRun = subprocess.run,
 ) -> None:
     """Delete a Nebius project that Terraform created for a cluster."""
-    _run_nebius(
-        ["iam", "v2", "project", "delete", "--id", project_id], run=run, check=True
-    )
+    _delete_nebius_resource(["iam", "v2", "project", "delete", "--id", project_id], run)
 
 
 def delete_cluster_terraform_state(
@@ -448,6 +656,8 @@ def provision_terraform_state_bucket(
             spec.terraform_state.bucket,
             "--parent-id",
             project_id,
+            "--max-size-bytes",
+            str(STATE_BUCKET_MAX_BYTES),
             "--bucket-policy-rules",
             policy,
         ],

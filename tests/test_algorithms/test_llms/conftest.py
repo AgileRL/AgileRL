@@ -125,3 +125,8 @@ def liger_kernel_installed(monkeypatch: pytest.MonkeyPatch) -> None:
             lambda model, fused_linear_cross_entropy: None,
             raising=False,
         )
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.base.pin_triton_rope",
+            lambda model: None,
+            raising=False,
+        )

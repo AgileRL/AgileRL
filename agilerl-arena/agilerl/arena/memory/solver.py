@@ -3,8 +3,8 @@
 """Invert one memory setting: the largest value that still fits, given the rest.
 
 Scan up from the minimum to the first fit, then bisect for the top of that
-run. Generation context is not monotonic (the resident bar dips while the
-engine is underfilled), so plain bisection can miss.
+run. A rebuilt config can widen the engine or drop its fast paths at a larger
+value, so a generation miss can clear and plain bisection can miss.
 """
 
 from __future__ import annotations
@@ -15,16 +15,25 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.arena.memory.breakdown import PhaseName
+from agilerl.arena.memory.breakdown import PhaseBreakdown, PhaseName
 from agilerl.arena.memory.estimator import (
     RunEstimate,
+    estimate_generation,
     estimate_run,
+    estimate_training,
     generation_can_serve,
 )
-from agilerl.arena.memory.formulas import KV_BLOCK_SIZE_DEFAULT
+from agilerl.arena.memory.generation import (
+    KV_MARGIN_BYTES,
+    lean_engine_settings,
+    sequences_held,
+)
+from agilerl.arena.memory.kv_cache import KV_BLOCK_SIZE_DEFAULT
+from agilerl.arena.memory.resolve.sequences import ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
+    GiB,
     ModelSpec,
     RunConfig,
 )
@@ -32,9 +41,6 @@ from agilerl.arena.memory.specs import (
 LimitReason = Literal["memory", "bound"]
 SyncTarget = tuple[PhaseName, str]
 
-# vLLM's own default. Dedicated inference has the card to itself, so the
-# engine may take nearly all of it.
-INFERENCE_GPU_MEMORY_UTILIZATION = 0.9
 # Concurrent sequences a dedicated serving GPU is sized for when the caller does not
 # say. ``1`` gives the longest single-request context; raise this to trade
 # context for throughput.
@@ -104,6 +110,20 @@ class SolveResult(BaseModel):
     unchecked_over_budget: tuple[str, ...] = ()
 
 
+class ServingWidth(BaseModel):
+    """One vLLM serving engine sized at the width :func:`size_serving_engine` picks."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tensor_parallel_size: int
+    # The engine starts and holds one full-context sequence.
+    fits: bool
+    # The KV pool holds every ``max_num_seqs`` sequence at full context, with margin.
+    serves_all: bool
+    full_context_sequences: int
+    reason: str | None
+
+
 def architectural_context_limit(model_config: dict[str, Any]) -> int:
     """Hard cap from the checkpoint: RoPE / ``max_position_embeddings``."""
     text = model_config.get("text_config", model_config)
@@ -121,13 +141,14 @@ def inference_run_config(
     """A dedicated serving GPU: generation only, no job overhead.
 
     Training settings stay at defaults and are ignored — inference has no
-    trainer on the card.
+    trainer on the card. The server merges the adapter into the base weights,
+    so the engine runs with LoRA off.
     """
     generation = (
         settings
         if settings is not None
         else GenerationSettings(
-            gpu_memory_utilization=INFERENCE_GPU_MEMORY_UTILIZATION,
+            gpu_memory_utilization=ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
             max_num_seqs=INFERENCE_MAX_NUM_SEQS,
         )
     )
@@ -135,20 +156,67 @@ def inference_run_config(
         model=model,
         train_device=device,
         gen_device=device,
-        generation=generation,
+        generation=generation.model_copy(update={"merged_lora_sync": True}),
     )
 
 
-def solve_inference(
-    config: RunConfig,
-    field: str,
-    *,
-    hi: int | None = None,
-) -> SolveResult:
-    """``solve`` for a dedicated serving GPU: only the generation bar counts."""
-    result = solve(config, field, hi=hi, phases=("generation",))
-    # No trainer on a serving GPU; the dummy training bar is not a signal.
-    return result.model_copy(update={"unchecked_over_budget": ()})
+def size_serving_engine(
+    model: ModelSpec,
+    device: DeviceSpec,
+    num_gpus: int,
+    settings: GenerationSettings,
+) -> ServingWidth:
+    """The widest width <= ``num_gpus`` that :meth:`ModelArch.splits_heads` allows, sized on ``device``.
+
+    Width 1 always splits. A widest width that does not fit is still
+    returned with ``fits`` False: each narrower width holds a larger weight
+    shard per GPU and less KV.
+
+    :param model: The served model.
+    :param device: One GPU of the node.
+    :param num_gpus: GPUs on the node.
+    :param settings: Serving engine settings; the width is set here.
+    :return: The sized engine.
+    """
+    width = next(tp for tp in range(num_gpus, 0, -1) if model.arch.splits_heads(tp))
+    config = inference_run_config(
+        model,
+        device,
+        settings.model_copy(update={"tensor_parallel_size": width}),
+    )
+    bar = estimate_generation(
+        config.model,
+        config.gen_device,
+        config.generation,
+        orchestrated=config.orchestrated,
+    )
+    return _serving_width(bar, config.generation)
+
+
+def _serving_width(bar: PhaseBreakdown, settings: GenerationSettings) -> ServingWidth:
+    """Fit, full-context sequences and the miss reason of one serving engine bar."""
+    width = settings.tensor_parallel_size
+    held = sequences_held(bar, settings.max_num_seqs) if bar.fits else 0
+    fits = bar.fits and held >= 1
+    reason = None
+    if not fits and bar.total_bytes > bar.device_usable_bytes:
+        reason = (
+            f"the engine needs {bar.total_bytes / GiB:.1f} GiB per GPU at "
+            f"tensor_parallel_size={width}; the GPU has "
+            f"{bar.device_usable_bytes / GiB:.1f} GiB usable"
+        )
+    elif not fits:
+        reason = (
+            f"the KV cache cannot hold one {settings.max_model_len}-token "
+            f"sequence at tensor_parallel_size={width}"
+        )
+    return ServingWidth(
+        tensor_parallel_size=width,
+        fits=fits,
+        serves_all=generation_can_serve(bar, KV_MARGIN_BYTES),
+        full_context_sequences=held,
+        reason=reason,
+    )
 
 
 def solve(
@@ -159,6 +227,7 @@ def solve(
     phases: tuple[PhaseName, ...] | None = None,
     kv_margin_bytes: int = 0,
     rebuild: Callable[[int], RunConfig] | None = None,
+    widest_engine_width: int | None = None,
 ) -> SolveResult:
     """Largest value of ``field`` at which ``config`` still fits.
 
@@ -166,11 +235,13 @@ def solve(
     Generation stays on the point estimate.
 
     :param phases: Phases to check; defaults to the phases ``field`` moves.
-        Dedicated inference passes ``("generation",)``.
     :param kv_margin_bytes: KV pool bytes worst-case demand must leave free.
     :param rebuild: Config at a candidate value, for settings resolved from
         it (a manifest's omitted micro-batch or engine width). ``None`` holds
         them at ``config``.
+    :param widest_engine_width: Widest engine ``rebuild`` gives at any value,
+        when it keeps the engine count and every setting but the weight-sync
+        mode and engine fast paths. ``None`` when it can change them.
     :raises CannotSolve: No value fits; a ``ValueError`` subclass.
     """
     if field not in SOLVABLE_FIELDS:
@@ -191,48 +262,34 @@ def solve(
         return _apply(base, spec, value)
 
     # Generation fits() has one valley, so scan to the first fit, then bisect.
-    found = _first_fit(candidate, spec, checked, aligned_hi, kv_margin_bytes)
+    found = _first_fit(
+        candidate, spec, checked, aligned_hi, kv_margin_bytes, widest_engine_width
+    )
     if found is None:
         msg = (
             f"no {field} value up to {bound} fits on this device; "
             "the model is larger than the card at the other settings given."
         )
         raise CannotSolve(msg)
-    first, first_config, first_estimate = found
 
     solved = candidate(aligned_hi)
-    ok, estimate = _fits(solved, spec, checked, kv_margin_bytes)
-    if ok:
-        return SolveResult(
-            field=field,
-            value=aligned_hi,
-            limited_by="bound",
-            bound=bound,
-            config=solved,
-            estimate=estimate,
-            unchecked_over_budget=_unchecked(estimate, checked),
+    if _fits(solved, spec, checked, kv_margin_bytes):
+        best, best_config, limited_by = aligned_hi, solved, "bound"
+    else:
+        best, best_config = _top_of_run(
+            candidate, spec, checked, found, aligned_hi, kv_margin_bytes
         )
+        limited_by = "memory"
 
-    best, best_config, best_estimate = first, first_config, first_estimate
-    low, high = first, aligned_hi
-    while low <= high:
-        mid = _align_down((low + high) // 2, spec.align)
-        trial = candidate(mid)
-        ok, estimate = _fits(trial, spec, checked, kv_margin_bytes)
-        if ok:
-            best, best_config, best_estimate = mid, trial, estimate
-            low = mid + spec.align
-        else:
-            high = mid - spec.align
-
+    estimate = estimate_run(best_config)
     return SolveResult(
         field=field,
         value=best,
-        limited_by="memory",
+        limited_by=limited_by,
         bound=bound,
         config=best_config,
-        estimate=best_estimate,
-        unchecked_over_budget=_unchecked(best_estimate, checked),
+        estimate=estimate,
+        unchecked_over_budget=_unchecked(estimate, checked),
     )
 
 
@@ -270,16 +327,90 @@ def _first_fit(
     phases: tuple[PhaseName, ...],
     aligned_hi: int,
     kv_margin_bytes: int,
-) -> tuple[int, RunConfig, RunEstimate] | None:
-    """Lowest fitting value, scanning up from the minimum in align steps."""
+    widest_engine_width: int | None,
+) -> tuple[int, RunConfig] | None:
+    """Lowest fitting value, scanning up from the minimum in align steps.
+
+    Training memory only grows with the field, so the scan stops at the
+    first value training does not fit. A generation miss can clear at a
+    larger value, where the rebuilt engine is wider or drops its fast paths;
+    the scan stops at one :func:`_generation_stays_over` rules that out for.
+    """
     value = spec.lo
     while value <= aligned_hi:
         trial = candidate(value)
-        ok, estimate = _fits(trial, spec, phases, kv_margin_bytes)
-        if ok:
-            return value, trial, estimate
+        failing = _failing_phase(trial, spec, phases, kv_margin_bytes)
+        if failing is None:
+            return value, trial
+        if failing == "training" or _generation_stays_over(
+            trial, spec, kv_margin_bytes, widest_engine_width
+        ):
+            return None
         value += spec.align
     return None
+
+
+def _top_of_run(
+    candidate: Callable[[int], RunConfig],
+    spec: FieldSpec,
+    phases: tuple[PhaseName, ...],
+    found: tuple[int, RunConfig],
+    aligned_hi: int,
+    kv_margin_bytes: int,
+) -> tuple[int, RunConfig]:
+    """Bisect from the first fit ``found`` up to ``aligned_hi`` for the largest fitting value."""
+    best, best_config = found
+    low, high = best, aligned_hi
+    while low <= high:
+        mid = _align_down((low + high) // 2, spec.align)
+        trial = candidate(mid)
+        if _fits(trial, spec, phases, kv_margin_bytes):
+            best, best_config = mid, trial
+            low = mid + spec.align
+        else:
+            high = mid - spec.align
+    return best, best_config
+
+
+def _generation_stays_over(
+    config: RunConfig,
+    spec: FieldSpec,
+    kv_margin_bytes: int,
+    widest_engine_width: int | None,
+) -> bool:
+    """Whether a generation miss at ``config`` holds at every larger value.
+
+    At a fixed engine width and count, the lean settings in either weight-sync
+    mode are the least memory a rebuild gives the engine, and at fixed
+    settings generation memory only grows with the field.
+
+    :param config: A candidate whose generation does not fit.
+    :param spec: The field being solved.
+    :param kv_margin_bytes: KV pool bytes worst-case demand must leave free.
+    :param widest_engine_width: Widest engine the rebuild gives; ``None`` when it can change.
+    :return: True when the lean engine misses in both modes.
+    """
+    generation = config.generation
+    if (
+        widest_engine_width is None
+        or generation.tensor_parallel_size < widest_engine_width
+    ):
+        return False
+    lean = lean_engine_settings(generation)
+    return all(
+        _failing_phase(
+            config.model_copy(
+                update={
+                    "generation": lean.model_copy(update={"merged_lora_sync": merged})
+                }
+            ),
+            spec,
+            ("generation",),
+            kv_margin_bytes,
+        )
+        is not None
+        for merged in (True, False)
+    )
 
 
 def _unchecked(
@@ -297,16 +428,39 @@ def _fits(
     spec: FieldSpec,
     phases: tuple[PhaseName, ...],
     kv_margin_bytes: int,
-) -> tuple[bool, RunEstimate]:
-    estimate = estimate_run(config)
+) -> bool:
+    """Whether ``config`` fits the checked phases; unchecked phases are not priced."""
+    return _failing_phase(config, spec, phases, kv_margin_bytes) is None
+
+
+def _failing_phase(
+    config: RunConfig,
+    spec: FieldSpec,
+    phases: tuple[PhaseName, ...],
+    kv_margin_bytes: int,
+) -> PhaseName | None:
+    """The first checked phase ``config`` does not fit, in ``phases`` order; ``None`` when all fit."""
     for name in phases:
-        breakdown = estimate.generation if name == "generation" else estimate.training
+        if name == "generation":
+            breakdown = estimate_generation(
+                config.model,
+                config.gen_device,
+                config.generation,
+                orchestrated=config.orchestrated,
+            )
+        else:
+            breakdown = estimate_training(
+                config.model,
+                config.train_device,
+                config.training,
+                orchestrated=config.orchestrated,
+            )
         if spec.require_kv_headroom and name == "generation":
             if not generation_can_serve(breakdown, kv_margin_bytes):
-                return False, estimate
+                return name
         elif not breakdown.fits_with_buffer:
-            return False, estimate
-    return True, estimate
+            return name
+    return None
 
 
 def _align_down(value: int, align: int) -> int:

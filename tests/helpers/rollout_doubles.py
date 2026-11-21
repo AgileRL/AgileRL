@@ -150,6 +150,9 @@ class RolloutEnvDoubleMixin:
         full_completion, sampling_logps = self._pending_step
         return self.step(full_completion, sampling_logps=sampling_logps)
 
+    def _take_unscored_turn(self) -> None:
+        return None
+
 
 class MiniTokenizer:
     """Minimal tokenizer for the non-chat-template token path."""
@@ -257,7 +260,7 @@ def bare_rollout_env() -> RolloutHarness:
     w._segment_prompt_tokens = None  # __init__ default, read by the feedback path
     w._segment_max_images = None  # __init__ default, read by the feedback path
     w._restart_keep_turns = 0  # __init__ default, read by the feedback path
-    w._tool_parser = None  # __init__ default, read by the step phases
+    w._chat_format = None  # __init__ default, read by the step phases
     w._takes_tool_calls = None  # __init__ default, read by the step phases
     w._min_reward = 0.0  # __init__ default, read by the step phases
     w._pending_tool_calls = []  # __init__ default, read by the step phases

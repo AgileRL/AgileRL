@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -17,6 +18,62 @@ if TYPE_CHECKING:
         ClusterOutputs,
         TerraformRunner,
     )
+
+
+@dataclass(frozen=True)
+class CreatedProjectsQuery:
+    """Inputs for deciding whether this cluster created its cloud projects."""
+
+    spec: ClusterSpec
+    # Resource addresses from Terraform state.
+    addresses: tuple[str, ...] = ()
+    # The state bucket is gone, so project names stand in for those addresses.
+    state_missing: bool = False
+
+
+@dataclass(frozen=True)
+class InstallCni:
+    """Terraform work dir for installing the CNI before nodes are created."""
+
+    spec: ClusterSpec
+    work_dir: Path
+    runner: TerraformRunner
+
+
+@dataclass(frozen=True)
+class EnsureGateway:
+    """Gateway settings and the kubeconfig that receives them."""
+
+    spec: ClusterSpec
+    kubeconfig_path: Path
+    terraform_outputs: dict[str, object]
+
+
+@dataclass(frozen=True)
+class DeleteGateway:
+    """Terraform work dir for deleting the gateway before destroy."""
+
+    spec: ClusterSpec
+    work_dir: Path
+    runner: TerraformRunner
+
+
+@dataclass(frozen=True)
+class DestroyExclusions:
+    """Which Terraform addresses destroy must leave in place."""
+
+    spec: ClusterSpec
+    delete_storage: bool
+
+
+@dataclass(frozen=True)
+class DestroyDeferred:
+    """Resources the first Terraform destroy left for a second pass."""
+
+    spec: ClusterSpec
+    work_dir: Path
+    runner: TerraformRunner
+    delete_storage: bool
 
 
 class CloudProvider(Protocol):
@@ -60,8 +117,12 @@ class CloudProvider(Protocol):
         state_dir: Path,
         create_state_bucket: bool = False,
         prompt_create: bool = False,
+        require_state_bucket: bool = True,
     ) -> tuple[ClusterSpec, Path]:
-        """Validate the spec, write provider auth, and open a Terraform work dir."""
+        """Validate the spec, write provider auth, and open a Terraform work dir.
+
+        :param require_state_bucket: When false, a missing state bucket is left alone.
+        """
 
     def open_state(
         self,
@@ -74,17 +135,10 @@ class CloudProvider(Protocol):
     def write_backend(self, work_dir: Path, spec: ClusterSpec) -> None:
         """Write the Terraform state backend file."""
 
-    def install_cni(
-        self, spec: ClusterSpec, work_dir: Path, runner: TerraformRunner
-    ) -> None:
+    def install_cni(self, query: InstallCni) -> None:
         """Install the CNI before Terraform creates nodes."""
 
-    def ensure_gateway(
-        self,
-        spec: ClusterSpec,
-        kubeconfig_path: Path,
-        terraform_outputs: dict[str, object],
-    ) -> list[dict[str, str]] | None:
+    def ensure_gateway(self, query: EnsureGateway) -> list[dict[str, str]] | None:
         """Create the cluster Gateway when the spec enables it."""
 
     def cluster_outputs(
@@ -109,32 +163,20 @@ class CloudProvider(Protocol):
     ) -> None:
         """Reject deletion of a storage project the spec did not create."""
 
-    def created_projects(
-        self, spec: ClusterSpec, addresses: tuple[str, ...] = ()
-    ) -> tuple[bool, bool]:
+    def created_projects(self, query: CreatedProjectsQuery) -> tuple[bool, bool]:
         """Return whether compute and storage projects were created by this cluster."""
 
-    def delete_gateway(
-        self,
-        spec: ClusterSpec,
-        work_dir: Path,
-        runner: TerraformRunner,
-    ) -> None:
+    def delete_gateway(self, query: DeleteGateway) -> None:
         """Delete the cluster Gateway before Terraform destroy."""
 
-    def destroy_exclusions(
-        self, spec: ClusterSpec, delete_storage: bool
-    ) -> tuple[str, ...]:
+    def destroy_exclusions(self, query: DestroyExclusions) -> tuple[str, ...]:
         """Return Terraform addresses ``destroy`` must leave in place."""
 
-    def destroy_deferred(
-        self,
-        spec: ClusterSpec,
-        work_dir: Path,
-        runner: TerraformRunner,
-        delete_storage: bool,
-    ) -> None:
+    def destroy_deferred(self, query: DestroyDeferred) -> None:
         """Destroy resources left out of the first Terraform destroy."""
+
+    def remote_state_available(self, spec: ClusterSpec) -> bool:
+        """Return whether destroy can open this cluster's remote Terraform state."""
 
     def finish_destroy(
         self,

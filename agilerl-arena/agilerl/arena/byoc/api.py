@@ -17,7 +17,7 @@ from typing_extensions import NotRequired, Unpack
 
 from agilerl.arena.byoc import endpoints
 from agilerl.arena.byoc.endpoints import SetupKind
-from agilerl.arena.byoc.provisioning.spec import api_placement
+from agilerl.arena.byoc.provisioning.spec import api_byoc_scope, api_placement
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaAPIError
 
@@ -98,6 +98,7 @@ class RegisterClusterFields(TypedDict):
     ray_data_storage_class_name: NotRequired[str | None]
     ray_data_pvc_size: NotRequired[str | None]
     placement: NotRequired[str | None]
+    byoc_scope: NotRequired[str | None]
     byoc_provider: NotRequired[dict[str, Any] | None]
 
 
@@ -197,8 +198,10 @@ class ByocApi:
         ray_data_storage_class_name = fields.get("ray_data_storage_class_name")
         ray_data_pvc_size = fields.get("ray_data_pvc_size")
         placement = fields.get("placement")
+        byoc_scope = fields.get("byoc_scope")
         byoc_provider = fields.get("byoc_provider")
         wire_placement = None if placement is None else api_placement(placement)
+        wire_scope = None if byoc_scope is None else api_byoc_scope(byoc_scope)
         body: dict[str, Any] = {"name": name}
         optional_fields: list[tuple[str, Any]] = [
             ("installStorage", install_storage),
@@ -216,6 +219,7 @@ class ByocApi:
             ("rayDataStorageClassName", ray_data_storage_class_name),
             ("rayDataPvcSize", ray_data_pvc_size),
             ("placement", wire_placement),
+            ("byocScope", wire_scope),
             ("byocProvider", byoc_provider),
         ]
         for key, value in optional_fields:
@@ -423,6 +427,27 @@ class ByocApi:
         )
         if not isinstance(result, dict):
             msg = "Unexpected resource class update response from Arena."
+            raise ArenaAPIError(msg)
+        return result
+
+    def fetch_cluster_install_artifacts(self, name: str) -> dict[str, Any]:
+        """Return current agent Helm values for the cluster named *name*.
+
+        Arena renders the values for the chart it would ship now. The response
+        names existing Secrets and does not include a new cluster token.
+
+        :param name: The registered cluster name.
+        :type name: str
+        :returns: Install-artifacts payload with ``agentHelmValuesYaml``.
+        :rtype: dict[str, Any]
+        """
+        logger.info("Fetching BYOC install artifacts for %r…", name)
+        result = self._client._invoke_manifest_command(
+            endpoints.INSTALL_CLUSTER_ARTIFACTS,
+            {"name": name},
+        )
+        if not isinstance(result, dict):
+            msg = "Unexpected cluster install artifacts response from Arena."
             raise ArenaAPIError(msg)
         return result
 

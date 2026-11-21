@@ -10,7 +10,6 @@ import copy
 import io
 import json
 import logging
-import runpy
 import sys
 import types
 from contextlib import contextmanager
@@ -22,6 +21,7 @@ import yaml
 from click.testing import CliRunner
 
 from agilerl.arena.cli import main as arena_main
+from agilerl.arena.exceptions import ArenaAuthError
 from agilerl.arena.memory.cli import (
     BAR_WIDTH,
     EXIT_OK,
@@ -29,18 +29,22 @@ from agilerl.arena.memory.cli import (
     EXIT_USAGE,
     SolveRequest,
     _load_model_config,
+    _model_spec_from_checkpoint,
     checkpoint_param_count,
     main,
     memory_group,
     solve_main,
 )
+from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunEstimate
+from agilerl.arena.memory.generation import KV_MARGIN_BYTES
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.output import handle_error
 
 
-def run_solve(field: str, manifest_path: str | None = None, **kwargs: Any) -> int:
-    return solve_main(SolveRequest(field=field, manifest_path=manifest_path, **kwargs))
+def run_solve(manifest_path: str, **kwargs: Any) -> int:
+    return solve_main(SolveRequest(manifest_path=manifest_path, **kwargs))
 
 
 TINY_CONFIG = str(Path(__file__).parent / "assets" / "tiny_llm" / "config.json")
@@ -139,6 +143,39 @@ UNSET_WIDTH_MOE = {
     "replay_buffer": {"kind": "llm", "name": "async_llm", "memory_size": 256},
 }
 
+#: Qwen3-4B GRPO at 4 trainers and 4 engines; a 5.25 GiB GPU fits only adapter-sync trainers.
+KEPT_COUNTDOWN = {
+    "algorithm": {
+        "name": "GRPO",
+        "batch_size": 64,
+        "group_size": 8,
+        "max_output_tokens": 1024,
+        "fsdp": {},
+    },
+    "environment": {
+        "env_type": "rollout",
+        "dataset": "dataset.json",
+        "rubric_file_path": "countdown_reward.py",
+        "prompt_template": {
+            "system_prompt": "Answer in <answer> </answer> tags.",
+            "user_prompt": "Make {answer} from {question}.",
+        },
+        "max_reward": 2.0,
+    },
+    "network": {
+        "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+        "max_context_length": 1536,
+        "lora_config": {"lora_r": 16, "lora_alpha": 32},
+    },
+    "training": {
+        "rollout_mode": "async",
+        "training_gpus_per_agent": 4,
+        "rollout_engines_per_agent": 4,
+        "pop_size": 1,
+    },
+    "replay_buffer": {"kind": "llm", "drop_uninformative_groups": False},
+}
+
 #: SFT trains without a rollout engine.
 SFT_MANIFEST = {
     "algorithm": {"name": "SFT"},
@@ -216,6 +253,19 @@ class TestPinnedMemoryFields:
         )
 
 
+@pytest.fixture
+def without_huggingface_hub(monkeypatch):
+    real_import = builtins.__import__
+
+    def block_hub(name, *args, **kwargs):
+        if name == "huggingface_hub" or name.startswith("huggingface_hub."):
+            msg = "no hub"
+            raise ImportError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_hub)
+
+
 def _fake_hub(monkeypatch, get_safetensors_metadata):
     module = types.ModuleType("huggingface_hub")
     module.get_safetensors_metadata = get_safetensors_metadata
@@ -231,7 +281,7 @@ def _fake_hub(monkeypatch, get_safetensors_metadata):
 def _metadata(tensors: dict[str, int]):
     """Safetensors metadata for one file holding ``tensors`` (name -> parameter count)."""
     infos = {
-        name: types.SimpleNamespace(parameter_count=count)
+        name: types.SimpleNamespace(parameter_count=count, dtype="BF16")
         for name, count in tensors.items()
     }
     return types.SimpleNamespace(
@@ -342,17 +392,29 @@ class TestCheckpointParamCount:
         _fake_hub(monkeypatch, lambda _m: _metadata({}))
         assert checkpoint_param_count("whatever", TIED) is None
 
-    def test_without_huggingface_hub_there_is_no_count(self, monkeypatch):
-        real_import = builtins.__import__
+    def test_packed_weights_have_no_usable_count(self, monkeypatch):
+        metadata = _metadata({"model.embed_tokens.weight": EMBED})
+        packed = types.SimpleNamespace(parameter_count=BODY, dtype="U8")
+        tensors = metadata.files_metadata["model.safetensors"].tensors
+        tensors["model.layers.0.mlp.experts.down_proj_blocks"] = packed
+        _fake_hub(monkeypatch, lambda _m: metadata)
 
-        def block_hub(name, *args, **kwargs):
-            if name == "huggingface_hub" or name.startswith("huggingface_hub."):
-                msg = "no hub"
-                raise ImportError(msg)
-            return real_import(name, *args, **kwargs)
+        assert checkpoint_param_count("org/packed-model", TIED) is None
 
-        monkeypatch.setattr(builtins, "__import__", block_hub)
+    def test_unreachable_hub_falls_back_to_the_analytic_count(self, monkeypatch):
+        class ConnectError(Exception):
+            """Hub HTTP clients raise connection errors that are not ``OSError``."""
 
+        def refuse(_model_id):
+            msg = "connection refused"
+            raise ConnectError(msg)
+
+        _fake_hub(monkeypatch, refuse)
+
+        assert checkpoint_param_count("org/model", TIED) is None
+
+    @pytest.mark.usefixtures("without_huggingface_hub")
+    def test_without_huggingface_hub_there_is_no_count(self):
         assert checkpoint_param_count("org/model", TIED) is None
 
 
@@ -379,19 +441,35 @@ class TestLoadModelConfig:
         with pytest.raises(ValueError, match="could not fetch the config"):
             _load_model_config(str(tmp_path / "absent"), config_path=None)
 
-    def test_without_huggingface_hub_a_hub_id_needs_a_config_file(self, monkeypatch):
-        real_import = builtins.__import__
+    def test_catalog_count_counts_values_where_the_hub_counts_bytes(self, monkeypatch):
+        def no_hub(_model_id):
+            pytest.fail("a catalog model with a count does not call the Hub")
 
-        def block_hub(name, *args, **kwargs):
-            if name == "huggingface_hub" or name.startswith("huggingface_hub."):
-                msg = "no hub"
-                raise ImportError(msg)
-            return real_import(name, *args, **kwargs)
+        _fake_hub(monkeypatch, no_hub)
 
-        monkeypatch.setattr(builtins, "__import__", block_hub)
+        _, model = _model_spec_from_checkpoint("openai/gpt-oss-20b", None)
 
+        assert model.n_params == 20_914_757_184
+
+    def test_catalog_model_without_a_count_asks_the_hub(self, monkeypatch):
+        _fake_hub(monkeypatch, lambda _m: _metadata({"model.layers": BODY}))
+        hub_id = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+        assert SUPPORTED_MODEL_INFO[hub_id].num_params is None
+
+        _, model = _model_spec_from_checkpoint(hub_id, None)
+
+        assert model.n_params == BODY
+
+    @pytest.mark.usefixtures("without_huggingface_hub")
+    def test_catalog_model_uses_the_bundled_config_without_the_hub(self):
+        config = _load_model_config("Qwen/Qwen3.5-0.8B", config_path=None)
+
+        assert config == SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+
+    @pytest.mark.usefixtures("without_huggingface_hub")
+    def test_without_huggingface_hub_a_hub_id_needs_a_config_file(self):
         with pytest.raises(ValueError, match="huggingface_hub is not installed"):
-            _load_model_config("Qwen/Qwen2.5-0.5B-Instruct", config_path=None)
+            _load_model_config("org/not-in-the-catalog", config_path=None)
 
 
 class TestMain:
@@ -428,6 +506,125 @@ class TestMain:
         payload = json.loads(capsys.readouterr().out)
         assert code == EXIT_OK
         assert payload["engine"] == {"tensor_parallel_size": width, "max_num_seqs": 16}
+
+    def test_gpus_per_node_keeps_an_unset_width_on_one_node(
+        self, tmp_path, moe_config_path, capsys
+    ):
+        # Arrange: one 8-GPU node resolves TP=2 at 32768 tokens.
+        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml", 32768)
+
+        # Act
+        main(
+            path,
+            config_path=moe_config_path,
+            gpu="A100-80GB",
+            num_gpus=8,
+            gpus_per_node=1,
+            as_json=True,
+        )
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["engine"] == {"tensor_parallel_size": 1, "max_num_seqs": 16}
+
+    @pytest.mark.parametrize(
+        ("device_gb", "send_buffer"),
+        [(None, "Merged weight send buffer"), (5.25, "LoRA send buffer")],
+    )
+    def test_num_gpus_prices_the_weight_sync_the_run_picks(
+        self, tmp_path, capsys, device_gb, send_buffer
+    ):
+        # Arrange: at TP 1 the merged send buffer puts the trainers over 5.25 GiB.
+        doc = copy.deepcopy(KEPT_COUNTDOWN)
+        doc["algorithm"]["fsdp"] = {"tp": 1}
+        path = write_manifest(tmp_path, doc, "countdown.yaml")
+        config_path = tmp_path / "qwen3" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].config))
+
+        # Act
+        main(
+            path,
+            config_path=str(config_path),
+            gpu="NVIDIA L4",
+            device_gb=device_gb,
+            num_gpus=8,
+            as_json=True,
+        )
+
+        # Assert
+        components = json.loads(capsys.readouterr().out)["training"]["components"]
+        labels = {component["key"]: component["label"] for component in components}
+        assert labels["lora_send_buffer"] == send_buffer
+
+    @pytest.mark.parametrize("device_gb", [None, 8], ids=["split_fits", "no_split"])
+    def test_searched_split_prices_merged_sync(self, tmp_path, capsys, device_gb):
+        # Arrange: no counts set, so the split is searched; on 8 GiB none fits
+        # and the manifest's own counts are priced, still merged first.
+        doc = copy.deepcopy(KEPT_COUNTDOWN)
+        del doc["training"]["training_gpus_per_agent"]
+        del doc["training"]["rollout_engines_per_agent"]
+        path = write_manifest(tmp_path, doc, "countdown.yaml")
+        config_path = tmp_path / "qwen3" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].config))
+
+        # Act
+        main(
+            path,
+            config_path=str(config_path),
+            gpu="NVIDIA L4",
+            device_gb=device_gb,
+            num_gpus=8,
+            as_json=True,
+        )
+
+        # Assert
+        components = json.loads(capsys.readouterr().out)["training"]["components"]
+        labels = {component["key"]: component["label"] for component in components}
+        assert labels["lora_send_buffer"] == "Merged weight send buffer"
+
+    def test_num_gpus_prices_the_layout_the_tier_search_picks(self, tmp_path, capsys):
+        # Arrange: Qwen3.5-9B with no counts or width searches its split on 4 L4s.
+        doc = copy.deepcopy(UNSET_WIDTH_MOE)
+        doc["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-9B"
+        del doc["training"]["training_gpus_per_agent"]
+        del doc["training"]["rollout_engines_per_agent"]
+        path = write_manifest(tmp_path, doc, "nine_b.yaml")
+        config_path = tmp_path / "qwen3.5" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(
+            json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-9B"].config)
+        )
+        tier = {
+            "name": "l4-4x",
+            "gpu_type": "NVIDIA L4",
+            "num_gpus": 4,
+            "price_per_node_hour": 4.0,
+        }
+
+        # Act
+        sized_code = main(
+            path,
+            config_path=str(config_path),
+            gpu="NVIDIA L4",
+            num_gpus=4,
+            as_json=True,
+        )
+        sized = json.loads(capsys.readouterr().out)
+        main(path, config_path=str(config_path), tiers=[tier], as_json=True)
+        tiered = json.loads(capsys.readouterr().out)
+
+        # Assert
+        assert sized_code == EXIT_OK
+        assert sized["fits"] is True
+        assert (
+            tiered["training_gpus_per_agent"],
+            tiered["rollout_engines_per_agent"],
+        ) == (2, 1)
+        assert sized["engine"] == {"tensor_parallel_size": 2, "max_num_seqs": 16}
+        for key in ("engine", "parallelism", "training", "generation"):
+            assert sized[key] == tiered[key]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
@@ -500,6 +697,39 @@ class TestMain:
         payload = json.loads(capsys.readouterr().out)
         assert code == EXIT_OK
         assert payload["fits"] is True
+
+    def test_json_reports_the_pinned_parallel_layout(self, tmp_path, capsys):
+        # Arrange
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"cp": 2}
+        doc["training"]["training_gpus_per_agent"] = 2
+        path = write_manifest(tmp_path, doc, "cp.yaml")
+
+        # Act
+        code = main(path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert payload["parallelism"] == {
+            "tp": 1,
+            "ep": 1,
+            "cp": 2,
+            "shard_group_size": None,
+        }
+
+    def test_text_reports_the_pinned_parallel_layout(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"cp": 2}
+        doc["training"]["training_gpus_per_agent"] = 2
+        path = write_manifest(tmp_path, doc, "cp.yaml")
+
+        main(path, config_path=TINY_CONFIG, device_gb=24)
+
+        assert (
+            "Training parallelism: tp=1, ep=1, cp=2, shard_group_size=None"
+            in capsys.readouterr().out
+        )
 
     def test_over_budget_blocks_and_prints_fixes(self, oversize_path, capsys, caplog):
         with caplog.at_level(logging.INFO):
@@ -607,30 +837,11 @@ class TestMain:
         assert code == EXIT_USAGE
         assert "async rollout only" in capsys.readouterr().err
 
-    def test_python_m_invokes_the_memory_command(self, monkeypatch):
-        monkeypatch.setattr("agilerl.arena.memory.cli.memory_group", lambda: None)
-
-        runpy.run_module("agilerl.arena.memory", run_name="__main__")
-
     def test_unknown_gpu_is_a_usage_error(self, manifest_path, capsys):
         assert (
             main(manifest_path, config_path=TINY_CONFIG, gpu="not-a-gpu") == EXIT_USAGE
         )
         assert "unknown GPU" in capsys.readouterr().err
-
-    def test_unknown_gen_gpu_is_a_usage_error(self, manifest_path, capsys):
-        assert (
-            main(
-                manifest_path,
-                config_path=TINY_CONFIG,
-                gpu="NVIDIA L4",
-                gen_gpu="not-a-gpu",
-            )
-            == EXIT_USAGE
-        )
-        err = capsys.readouterr().err
-        assert "unknown GPU" in err
-        assert "--gen-device-gb" in err
 
     def test_a_classic_rl_manifest_is_a_usage_error(self, tmp_path, capsys):
         path = tmp_path / "dqn.yaml"
@@ -678,6 +889,26 @@ class TestMain:
         code = main(manifest_path, config_path=str(config_path), device_gb=24)
         assert code == EXIT_USAGE
         assert "missing" in capsys.readouterr().err
+
+
+class TestMainColocatedTrainers:
+    def test_num_gpus_sizes_a_colocated_member_on_every_gpu(self, tmp_path, capsys):
+        # Arrange
+        pinned = copy.deepcopy(SFT_MANIFEST)
+        pinned["training"]["training_gpus_per_agent"] = 4
+        path = write_manifest(tmp_path, SFT_MANIFEST, "sft.yaml")
+        pinned_path = write_manifest(tmp_path, pinned, "sft_pinned.yaml")
+        main(pinned_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", as_json=True)
+        expected = json.loads(capsys.readouterr().out)["training"]
+
+        # Act
+        code = main(
+            path, config_path=TINY_CONFIG, gpu="NVIDIA L4", num_gpus=4, as_json=True
+        )
+
+        # Assert
+        assert code == EXIT_OK
+        assert json.loads(capsys.readouterr().out)["training"] == expected
 
 
 class TestReportColour:
@@ -739,61 +970,9 @@ class TestMemoryEstimateCommand:
         assert result.exit_code == EXIT_OVER_BUDGET
 
 
-ASYNC_MANIFEST = {
-    **MANIFEST,
-    "algorithm": {
-        **MANIFEST["algorithm"],
-        "vllm_config": {
-            "gpu_memory_utilization": 0.9,
-            "max_num_seqs": 8,
-            "tensor_parallel_size": 1,
-        },
-    },
-    "training": {
-        "max_steps": 100,
-        "rollout_mode": "async",
-        "rollout_engines_per_agent": 1,
-    },
-    "replay_buffer": {"kind": "llm"},
-}
-
-
 class TestSolveMain:
-    def test_inference_max_model_len_on_l4(self, capsys):
-        code = run_solve(
-            "max_model_len",
-            inference=True,
-            gpu="NVIDIA L4",
-            model_id="tiny",
-            config_path=TINY_CONFIG,
-        )
-        out = capsys.readouterr().out
-        assert code == EXIT_OK
-        assert "Solved max_model_len = 32768" in out
-        assert "checkpoint / --hi cap" in out
-        assert "Generation" in out
-        assert "Training" not in out
-
-    def test_inference_json(self, capsys):
-        code = run_solve(
-            "max_model_len",
-            inference=True,
-            gpu="NVIDIA L4",
-            model_id="tiny",
-            config_path=TINY_CONFIG,
-            as_json=True,
-        )
-        payload = json.loads(capsys.readouterr().out)
-        assert code == EXIT_OK
-        assert payload["value"] == 32768
-        assert payload["limited_by"] == "bound"
-        assert payload["mode"] == "inference"
-        assert "training" not in payload
-        assert payload["generation"]["components"]
-
     def test_from_manifest(self, manifest_path, capsys):
         code = run_solve(
-            "max_model_len",
             manifest_path,
             gpu="NVIDIA L4",
             config_path=TINY_CONFIG,
@@ -807,12 +986,13 @@ class TestSolveMain:
     def test_unset_width_is_resolved_at_each_candidate_context(
         self, tmp_path, moe_config_path, capsys
     ):
-        # Arrange
-        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
+        # Arrange: tensor and context parallel off, so training memory caps the context.
+        doc = copy.deepcopy(UNSET_WIDTH_MOE)
+        doc["algorithm"]["fsdp"] = {"tp": 1, "cp": 1}
+        path = write_manifest(tmp_path, doc, "moe.yaml")
 
         # Act
         code = run_solve(
-            "max_model_len",
             path,
             gpu="A100-80GB",
             num_gpus=8,
@@ -822,9 +1002,7 @@ class TestSolveMain:
         payload = json.loads(capsys.readouterr().out)
         verdicts = []
         for context in (payload["value"], payload["value"] + 16):
-            submitted = write_manifest(
-                tmp_path, UNSET_WIDTH_MOE, f"at-{context}.yaml", context
-            )
+            submitted = write_manifest(tmp_path, doc, f"at-{context}.yaml", context)
             verdict = main(
                 submitted,
                 config_path=moe_config_path,
@@ -835,35 +1013,24 @@ class TestSolveMain:
             engine = json.loads(capsys.readouterr().out)["engine"]
             verdicts.append((verdict, engine["tensor_parallel_size"]))
 
-        # Assert: the cutoff is the run's at TP=2, past the TP=1 KV limit.
+        # Assert: near the cap merged-sync trainers fit only inside the
+        # underprediction buffer, so the run syncs the adapter. Adapter-sync
+        # training caps the context, and its engines' LoRA slot needs TP=4 to
+        # hold all their sequences. The estimate agrees at and past the cap;
+        # past it no mode fits, so the run keeps merged sync at TP=2.
         assert code == EXIT_OK
         assert payload["limited_by"] == "memory"
-        assert payload["engine"]["tensor_parallel_size"] == 2
+        assert payload["engine"]["tensor_parallel_size"] == 4
         assert payload["value"] > 32768
-        assert verdicts == [(EXIT_OK, 2), (EXIT_OVER_BUDGET, 2)]
+        assert verdicts == [(EXIT_OK, 4), (EXIT_OVER_BUDGET, 2)]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
 
-        code = run_solve(
-            "max_model_len", path, gpu="A100-80GB", config_path=TINY_CONFIG
-        )
+        code = run_solve(path, gpu="A100-80GB", config_path=TINY_CONFIG)
 
         assert code == EXIT_USAGE
         assert "pass --num-gpus" in capsys.readouterr().err
-
-    def test_inference_with_num_gpus_is_a_usage_error(self, capsys):
-        code = run_solve(
-            "max_model_len",
-            inference=True,
-            gpu="NVIDIA L4",
-            num_gpus=2,
-            model_id="tiny",
-            config_path=TINY_CONFIG,
-        )
-
-        assert code == EXIT_USAGE
-        assert "drop --num-gpus" in capsys.readouterr().err
 
     def test_omitted_micro_batch_is_resolved_at_each_candidate_context(
         self, tmp_path, capsys
@@ -880,7 +1047,6 @@ class TestSolveMain:
 
         # Act
         code = run_solve(
-            "max_model_len",
             str(path),
             gpu="NVIDIA L4",
             config_path=str(config_path),
@@ -901,106 +1067,9 @@ class TestSolveMain:
         assert payload["limited_by"] == "bound"
         assert estimate_code == EXIT_OK
 
-    def test_solves_max_num_seqs_from_a_manifest(self, manifest_path, capsys):
-        # Act
-        code = run_solve(
-            "max_num_seqs",
-            manifest_path,
-            gpu="NVIDIA L4",
-            config_path=TINY_CONFIG,
-        )
-
-        # Assert
-        assert code == EXIT_OK
-        assert "Solved max_num_seqs = 256" in capsys.readouterr().out
-
-    def test_max_model_len_override_reaches_both_sides(self, manifest_path, capsys):
-        # Act
-        plain = run_solve(
-            "max_num_seqs",
-            manifest_path,
-            gpu="NVIDIA L4",
-            config_path=TINY_CONFIG,
-            as_json=True,
-        )
-        plain_payload = json.loads(capsys.readouterr().out)
-        overridden = run_solve(
-            "max_num_seqs",
-            manifest_path,
-            gpu="NVIDIA L4",
-            config_path=TINY_CONFIG,
-            max_model_len=4096,
-            as_json=True,
-        )
-        overridden_payload = json.loads(capsys.readouterr().out)
-
-        # Assert
-        assert plain == EXIT_OK
-        assert overridden == EXIT_OK
-
-        def total(bar):
-            return sum(component["bytes"] for component in bar["components"])
-
-        def kv_demand(bar):
-            kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
-            return kv["detail"]["worst_case_demand"]
-
-        assert total(plain_payload["training"]) == 1686160028
-        assert total(overridden_payload["training"]) == 1739861537
-        # The generation bar fills the utilization budget at either context.
-        assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
-            plain_payload["generation"]
-        )
-
-    def test_async_defaults_the_gen_device_to_the_training_gpu(self, tmp_path, capsys):
-        # Arrange
-        path = tmp_path / "async.yaml"
-        path.write_text(yaml.safe_dump(ASYNC_MANIFEST))
-
-        # Act
-        code = run_solve(
-            "max_num_seqs", str(path), gpu="NVIDIA L4", config_path=TINY_CONFIG
-        )
-
-        # Assert
-        assert code == EXIT_OK
-        assert "Solved max_num_seqs = 256" in capsys.readouterr().out
-
-    def test_unchecked_phase_warns_in_text(self, oversize_path, capsys):
-        # Act
-        code = run_solve(
-            "max_num_seqs",
-            oversize_path,
-            config_path=TINY_CONFIG,
-            device_gb=1,
-            gen_device_gb=24,
-        )
-
-        # Assert
-        assert code == EXIT_OK
-        err = capsys.readouterr().err
-        assert "warning: training is over budget" in err
-
-    def test_unchecked_phase_flags_in_json(self, oversize_path, capsys):
-        # Act
-        code = run_solve(
-            "max_num_seqs",
-            oversize_path,
-            config_path=TINY_CONFIG,
-            device_gb=1,
-            gen_device_gb=24,
-            as_json=True,
-        )
-
-        # Assert
-        assert code == EXIT_OK
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["unchecked_over_budget"] == ["training"]
-
     def test_unsolvable_manifest_exits_over_budget(self, oversize_path, capsys):
         # Act
         code = run_solve(
-            "max_model_len",
             oversize_path,
             config_path=TINY_CONFIG,
             device_gb=1,
@@ -1010,60 +1079,32 @@ class TestSolveMain:
         assert code == EXIT_OVER_BUDGET
         assert "no max_model_len value up to" in capsys.readouterr().err
 
-    def test_async_fails_on_a_small_gen_device(self, tmp_path, capsys):
-        # Arrange
-        path = tmp_path / "async.yaml"
-        path.write_text(yaml.safe_dump(ASYNC_MANIFEST))
-
-        # Act
-        code = run_solve(
-            "max_num_seqs",
-            str(path),
-            gpu="NVIDIA L4",
-            gen_device_gb=4,
-            config_path=TINY_CONFIG,
-        )
-
-        # Assert
-        assert code == EXIT_OVER_BUDGET
-        assert "no max_num_seqs value up to" in capsys.readouterr().err
-
-    def test_inference_rejects_a_manifest(self, manifest_path, capsys):
-        assert (
-            run_solve(
-                "max_model_len",
-                manifest_path,
-                inference=True,
-                gpu="NVIDIA L4",
-                config_path=TINY_CONFIG,
-            )
-            == EXIT_USAGE
-        )
-        assert "does not take a training manifest" in capsys.readouterr().err
-
-    def test_without_inference_needs_a_manifest(self, capsys):
-        assert run_solve("max_model_len", gpu="NVIDIA L4") == EXIT_USAGE
-        assert "Pass a MANIFEST" in capsys.readouterr().err
-
     def test_without_a_gpu_is_a_usage_error(self, manifest_path, capsys):
-        code = run_solve("max_model_len", manifest_path, config_path=TINY_CONFIG)
+        code = run_solve(manifest_path, config_path=TINY_CONFIG)
 
         assert code == EXIT_USAGE
         assert "Pass --gpu or --device-gb" in capsys.readouterr().err
 
-    def test_a_missing_manifest_file_is_a_usage_error(self, capsys):
-        code = run_solve(
-            "max_model_len", "/tmp/no-such-memory-manifest.yaml", gpu="NVIDIA L4"
+    def test_an_unknown_gpu_is_a_usage_error(self, manifest_path, capsys):
+        code = run_solve(manifest_path, gpu="Not A GPU", config_path=TINY_CONFIG)
+
+        assert code == EXIT_USAGE
+        assert "--gpu: unknown GPU 'Not A GPU'" in capsys.readouterr().err
+
+    def test_a_ceiling_below_one_kv_page_is_a_usage_error(self, manifest_path, capsys):
+        code = run_solve(manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, hi=8)
+
+        assert code == EXIT_USAGE
+        assert (
+            "max_model_len upper bound 8 is below the minimum 16."
+            in capsys.readouterr().err
         )
+
+    def test_a_missing_manifest_file_is_a_usage_error(self, capsys):
+        code = run_solve("/tmp/no-such-memory-manifest.yaml", gpu="NVIDIA L4")
 
         assert code == EXIT_USAGE
         assert capsys.readouterr().err
-
-    def test_inference_without_a_model_is_a_usage_error(self, capsys):
-        code = run_solve("max_model_len", inference=True, gpu="NVIDIA L4")
-
-        assert code == EXIT_USAGE
-        assert "--inference needs --model or --config." in capsys.readouterr().err
 
     def test_a_manifest_without_a_model_is_a_usage_error(
         self, manifest_path, monkeypatch, capsys
@@ -1079,7 +1120,6 @@ class TestSolveMain:
         )
 
         code = run_solve(
-            "max_model_len",
             manifest_path,
             gpu="NVIDIA L4",
             config_path=TINY_CONFIG,
@@ -1088,26 +1128,11 @@ class TestSolveMain:
         assert code == EXIT_USAGE
         assert "manifest names no pretrained model." in capsys.readouterr().err
 
-    def test_inference_rejects_an_unknown_field(self, capsys):
-        # Act
-        code = run_solve(
-            "learning_rate",
-            inference=True,
-            gpu="NVIDIA L4",
-            model_id="tiny",
-            config_path=TINY_CONFIG,
-        )
-
-        # Assert
-        assert code == EXIT_USAGE
-        assert "Unknown field" in capsys.readouterr().err
-
     def test_missing_model_config_key_is_a_usage_error(
         self, manifest_path, no_layers_config, capsys
     ):
         # Act
         code = run_solve(
-            "max_model_len",
             manifest_path,
             gpu="NVIDIA L4",
             config_path=no_layers_config,
@@ -1120,77 +1145,18 @@ class TestSolveMain:
             "nor a per-layer type list'"
         ) in capsys.readouterr().err
 
-    def test_inference_with_a_gen_device_is_a_usage_error(self, capsys):
-        # Act
-        code = run_solve(
-            "max_model_len",
-            inference=True,
-            gpu="NVIDIA L4",
-            gen_gpu="NVIDIA L4",
-            model_id="tiny",
-            config_path=TINY_CONFIG,
-        )
-
-        # Assert
-        assert code == EXIT_USAGE
-        assert (
-            "--inference sizes one GPU; drop --gen-gpu/--gen-device-gb."
-            in capsys.readouterr().err
-        )
-
-    @pytest.mark.parametrize(
-        ("field", "override", "flag"),
-        [
-            ("max_model_len", {"max_model_len": 4096}, "--max-model-len"),
-            ("max_num_seqs", {"max_num_seqs": 4}, "--max-num-seqs"),
-        ],
-    )
-    def test_passing_the_solved_field_is_a_usage_error(
-        self, manifest_path, capsys, field, override, flag
-    ):
-        # Act
-        code = run_solve(
-            field,
-            manifest_path,
-            gpu="NVIDIA L4",
-            config_path=TINY_CONFIG,
-            **override,
-        )
-
-        # Assert
-        assert code == EXIT_USAGE
-        assert (
-            f"{flag} is the setting being solved; drop it." in capsys.readouterr().err
-        )
-
-    def test_unknown_gen_gpu_is_a_usage_error(self, manifest_path, capsys):
-        # Act
-        code = run_solve(
-            "max_model_len",
-            manifest_path,
-            gpu="NVIDIA L4",
-            gen_gpu="RTX 9999",
-            config_path=TINY_CONFIG,
-        )
-
-        # Assert
-        assert code == EXIT_USAGE
-        assert "--gen-gpu" in capsys.readouterr().err
-
 
 class TestMemorySolveCommand:
-    def test_solves_from_the_command_line(self):
+    def test_solves_from_the_command_line(self, manifest_path):
         # Act
         result = CliRunner().invoke(
             memory_group,
             [
                 "solve",
                 "max_model_len",
-                "--inference",
+                manifest_path,
                 "--gpu",
                 "NVIDIA L4",
-                "--model",
-                "tiny",
                 "--config",
                 TINY_CONFIG,
                 "--no-color",
@@ -1199,7 +1165,18 @@ class TestMemorySolveCommand:
 
         # Assert
         assert result.exit_code == EXIT_OK
-        assert "Solved max_model_len = 32768" in result.output
+        assert "Solved max_model_len = 32768  (checkpoint / --hi cap)" in result.output
+
+    def test_only_max_model_len_is_solvable(self, manifest_path):
+        # Act
+        result = CliRunner().invoke(
+            memory_group,
+            ["solve", "max_num_seqs", manifest_path, "--gpu", "NVIDIA L4"],
+        )
+
+        # Assert
+        assert result.exit_code == EXIT_USAGE
+        assert "'max_num_seqs' is not 'max_model_len'" in result.stderr
 
 
 TIERS = [
@@ -1247,8 +1224,8 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "Cheapest resource tier that fits: l4-2x" in out
 
-    def test_unset_width_on_a_tier_without_room_for_an_engine(self, tmp_path, capsys):
-        # Arrange: the run starts a width-1 engine, which one GPU cannot host.
+    def test_unset_width_uses_a_second_node_for_the_engine(self, tmp_path, capsys):
+        # Arrange: one GPU cannot host a trainer and an engine. Two 1-GPU nodes can.
         doc = copy.deepcopy(MANIFEST)
         del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
         path = tmp_path / "unset.yaml"
@@ -1259,6 +1236,7 @@ class TestMainResourceTier:
                 "gpu_type": "NVIDIA L4",
                 "num_gpus": 1,
                 "price_per_node_hour": 1.0,
+                "node_counts": [1, 2],
             }
         ]
 
@@ -1267,8 +1245,8 @@ class TestMainResourceTier:
 
         # Assert
         out = capsys.readouterr().out
-        assert code == EXIT_OVER_BUDGET
-        assert "l4-1x: 1 GPUs, the job needs 2" in out
+        assert code == EXIT_OK
+        assert "2 nodes of l4-1x" in out
 
     def test_num_gpus_with_a_tier_search_is_a_usage_error(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, num_gpus=2)
@@ -1276,7 +1254,19 @@ class TestMainResourceTier:
         assert code == EXIT_USAGE
         assert "--num-gpus needs --gpu or --device-gb" in capsys.readouterr().err
 
-    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
+    def test_gpus_per_node_with_a_tier_search_is_a_usage_error(
+        self, manifest_path, capsys
+    ):
+        code = main(
+            manifest_path, tiers=TIERS, config_path=TINY_CONFIG, gpus_per_node=1
+        )
+
+        assert code == EXIT_USAGE
+        assert "gpus_per_node needs --gpu or --device-gb" in capsys.readouterr().err
+
+    def test_tensor_parallel_engine_wider_than_a_node_is_ruled_out(
+        self, tmp_path, capsys
+    ):
         doc = copy.deepcopy(MANIFEST)
         doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
         path = tmp_path / "tp.yaml"
@@ -1286,7 +1276,79 @@ class TestMainResourceTier:
 
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
-        assert "the job needs 5" in out
+        assert "l4-2x: engine tensor_parallel_size 4 exceeds 2 GPUs on one node" in out
+
+    @pytest.fixture
+    def queued_estimate(self, monkeypatch):
+        """Every estimate holds 2 of 8 sequences; only a queue check adds the warning."""
+        pool = 5 * KV_MARGIN_BYTES
+        queued = RunEstimate(
+            training=PhaseBreakdown(
+                phase="training",
+                components=(
+                    MemoryComponent(key="weights", label="Weights", n_bytes=1),
+                ),
+                device_total_bytes=10_000,
+                device_usable_bytes=10_000,
+            ),
+            generation=PhaseBreakdown(
+                phase="generation",
+                components=(
+                    MemoryComponent(
+                        key="kv_cache",
+                        label="KV cache pool",
+                        n_bytes=pool,
+                        detail={
+                            "pool": pool,
+                            "worst_case_demand": 16 * KV_MARGIN_BYTES,
+                            "startup_pool": pool,
+                            "full_sequence_bytes": 1,
+                        },
+                    ),
+                ),
+                device_total_bytes=pool * 4,
+                device_usable_bytes=pool * 4,
+            ),
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resources.estimate_run", lambda _config: queued
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.cli.estimate_run", lambda _config: queued
+        )
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_tier_search_report_keeps_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, no_color=True)
+
+        # Assert
+        assert code == EXIT_OK
+        assert "generation may queue" in capsys.readouterr().out
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_tier_search_json_keeps_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert any(
+            "generation may queue" in warning
+            for warning in payload["generation"]["warnings"]
+        )
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_one_gpu_report_attaches_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(
+            manifest_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", no_color=True
+        )
+
+        # Assert
+        assert code == EXIT_OK
+        assert "generation may queue" in capsys.readouterr().out
 
     def test_json_names_the_tier_and_every_verdict(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)
@@ -1308,6 +1370,12 @@ class TestMainResourceTier:
                 "name": "t4-2x",
                 "gpu_type": "Tesla T4",
                 "num_gpus": 2,
+                "price_per_node_hour": 0.5,
+            },
+            {
+                "name": "l4-2x",
+                "gpu_type": "NVIDIA L4",
+                "num_gpus": 2,
                 "price_per_node_hour": 1.0,
             },
             {
@@ -1323,7 +1391,8 @@ class TestMainResourceTier:
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
         assert "No resource tier fits this manifest:" in out
-        assert "  - t4-2x: generation over budget" in out
+        assert "  - t4-2x: Tesla T4 (SM75) cannot run LLM training" in out
+        assert "  - l4-2x: generation over budget" in out
         assert "  - l4-1x: 1 GPUs, the job needs 2" in out
 
     def test_json_lists_every_tier_when_none_fits(self, no_tier_fits_path, capsys):
@@ -1346,16 +1415,6 @@ class TestMainResourceTier:
         assert payload["resource"] is None
         assert payload["tiers"][0]["name"] == "t4-2x"
         assert payload["tiers"][0]["fits"] is False
-
-    def test_gen_gpu_without_a_training_gpu_is_a_usage_error(
-        self, manifest_path, capsys
-    ):
-        code = main(
-            manifest_path, tiers=TIERS, gen_gpu="NVIDIA L4", config_path=TINY_CONFIG
-        )
-
-        assert code == EXIT_USAGE
-        assert "--gen-gpu/--gen-device-gb needs --gpu" in capsys.readouterr().err
 
     def test_arena_command_fetches_tiers_when_no_gpu_is_given(
         self, manifest_path, monkeypatch
@@ -1387,3 +1446,30 @@ class TestMainResourceTier:
         # Assert
         assert result.exit_code == EXIT_OK, result.output
         assert "Cheapest resource tier that fits: l4-2x" in result.output
+
+    def test_arena_command_without_a_login_says_tiers_need_one(
+        self, manifest_path, monkeypatch
+    ):
+        # Arrange
+        def list_resources():
+            msg = "Client has not been authenticated with Arena."
+            raise ArenaAuthError(msg)
+
+        @contextmanager
+        def fake_client(_config):
+            try:
+                yield types.SimpleNamespace(list_resources=list_resources)
+            except Exception as exc:
+                handle_error(exc)
+
+        monkeypatch.setattr("agilerl.arena.memory.cli.arena_client", fake_client)
+
+        # Act
+        result = CliRunner().invoke(
+            arena_main, ["memory", "estimate", manifest_path, "--no-color"]
+        )
+
+        # Assert
+        assert result.exit_code == 1
+        assert "Picking a resource tier needs an Arena login" in result.output
+        assert "--gpu" in result.output

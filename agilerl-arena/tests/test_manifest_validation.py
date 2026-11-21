@@ -10,10 +10,11 @@ import json
 import re
 import subprocess
 import sys
+from typing import ClassVar
 
 import pytest
 from jsonschema import Draft202012Validator
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
@@ -28,18 +29,38 @@ from agilerl.arena.models import (
     RainbowDQNSpec,
     ReplayBufferSpec,
     SFTSpec,
+    SingleAgentAlgorithmSpec,
     TrainingManifest,
     TrainingSpec,
     __version__,
     manifest_schema,
 )
-from agilerl.arena.models.algorithms import RolloutLLMSpec
+from agilerl.arena.models.algorithms import (
+    CISPOSpec,
+    DDPGSpec,
+    DQNSpec,
+    GSPOSpec,
+    IPPOSpec,
+    LLMPPOSpec,
+    LLMREINFORCESpec,
+    MADDPGSpec,
+    MATD3Spec,
+    NeuralUCBSpec,
+    RolloutLLMSpec,
+    TD3Spec,
+)
 from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
 from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.hpo import (
+    RLHyperparameter,
+    require_mutation_range_inside_field,
+)
 from agilerl.arena.models.manifest import strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.networks import LoraConfigDict
 from agilerl.arena.models.schema import (
     LORA_CONFIG_REF,
+    _add_hpo_ranges,
     _inline_lora_config_inplace,
     algorithm_name_if,
     algorithm_schema,
@@ -210,12 +231,29 @@ class TestResolvedMemoryFields:
         assert validated.algorithm.micro_batch_size_per_gpu == 2
         assert validated.algorithm.fsdp.reshard_after_forward is False
 
+    def test_picked_shard_frozen_tp_validates_on_the_model(self) -> None:
+        doc = manifest(GRPO, algorithm={"fsdp": {"tp": 2, "shard_frozen_tp": False}})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp.shard_frozen_tp is False
+        assert validated.algorithm.fsdp.frozen_tp_resident is True
+
+    def test_picked_save_moe_collectives_validates_on_the_model(self) -> None:
+        doc = manifest(GRPO, algorithm={"fsdp": {"save_moe_collectives": True}})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp.save_moe_collectives is True
+
     @pytest.mark.parametrize(
         ("algorithm", "dotted"),
         [
             ({"micro_batch_size_per_gpu": 1}, "micro_batch_size_per_gpu"),
+            ({"micro_batch_tokens_per_gpu": 4096}, "micro_batch_tokens_per_gpu"),
             ({"gradient_checkpointing": False}, "gradient_checkpointing"),
             ({"activation_offload": True}, "activation_offload"),
+            ({"routed_expert_chunk_mib": 512}, "routed_expert_chunk_mib"),
             ({"fsdp": {"reshard_after_forward": True}}, "fsdp.reshard_after_forward"),
             ({"fsdp": {"optim_cpu_offload": True}}, "fsdp.optim_cpu_offload"),
             (
@@ -224,6 +262,12 @@ class TestResolvedMemoryFields:
             ),
             ({"fsdp": {"activation_offload": False}}, "fsdp.activation_offload"),
             ({"fsdp": {"cpu_offload": True}}, "fsdp.cpu_offload"),
+            ({"fsdp": {"shard_frozen_tp": False}}, "fsdp.shard_frozen_tp"),
+            ({"fsdp": {"save_moe_collectives": True}}, "fsdp.save_moe_collectives"),
+            (
+                {"fsdp": {"checkpoint_every_n_blocks": 2}},
+                "fsdp.checkpoint_every_n_blocks",
+            ),
         ],
     )
     def test_a_pinned_field_is_refused(self, algorithm: dict, dotted: str) -> None:
@@ -324,7 +368,7 @@ class TestResolution:
         validated = TrainingManifest.model_validate(GRPO)
         assert validated.training.rollout_mode == "colocated"
         assert validated.algorithm.vllm_config is not None
-        assert validated.algorithm.vllm_config.max_num_seqs == 16
+        assert validated.algorithm.vllm_config.max_num_seqs is None
         assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.9
 
     def test_gym_num_envs_default_does_not_overwrite_ppo(self) -> None:
@@ -475,9 +519,9 @@ class TestNothingIsStrippedInTransit:
 
     def test_max_output_tokens_survives(self) -> None:
         payload = TrainingManifest.model_validate(
-            manifest(GRPO, algorithm={"max_output_tokens": 4096})
+            manifest(GRPO, algorithm={"max_output_tokens": 64})
         ).to_payload()
-        assert payload["algorithm"]["max_output_tokens"] == 4096
+        assert payload["algorithm"]["max_output_tokens"] == 64
 
     def test_reward_fn_name_survives(self) -> None:
         payload = TrainingManifest.model_validate(
@@ -508,10 +552,10 @@ class TestNothingIsStrippedInTransit:
         )
         assert validated.algorithm.vllm_engine_args == {"reasoning_parser": "gemma4"}
 
-    def test_a_reasoning_parser_without_a_known_end_marker_is_rejected(self) -> None:
+    def test_an_unsupported_reasoning_parser_is_rejected(self) -> None:
         with pytest.raises(
             ValidationError,
-            match=r"reasoning_parser='mistral' has no known reasoning-end marker",
+            match=r"reasoning_parser='mistral' is not a supported reasoning parser",
         ):
             TrainingManifest.model_validate(
                 manifest(
@@ -530,6 +574,28 @@ class TestNothingIsStrippedInTransit:
             mode="json",
         )
         assert payload["algorithm"]["use_separate_reference_adapter"] is False
+
+    def test_reference_update_interval_survives(self) -> None:
+        payload = TrainingManifest.model_validate(
+            manifest(GRPO, algorithm={"reference_update_interval": 25})
+        ).to_payload()
+        assert payload["algorithm"]["reference_update_interval"] == 25
+
+    def test_reference_update_interval_defaults_to_unset(self) -> None:
+        validated = TrainingManifest.model_validate(manifest(GRPO))
+        assert validated.algorithm.reference_update_interval is None
+
+    def test_reference_update_interval_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match="reference_update_interval"):
+            TrainingManifest.model_validate(
+                manifest(GRPO, algorithm={"reference_update_interval": 0})
+            )
+
+    def test_dpo_reference_update_interval(self) -> None:
+        assert DPOSpec().reference_update_interval is None
+        assert DPOSpec(reference_update_interval=25).reference_update_interval == 25
+        with pytest.raises(ValidationError, match="reference_update_interval"):
+            DPOSpec(reference_update_interval=0)
 
 
 class TestEnvironment:
@@ -719,7 +785,6 @@ class TestRolloutLLMSpecSamplingSupport:
                 {"top_k": 0, "constrain_answer_pattern": r"\\boxed\{\d+\}"},
                 "constrain_answer_pattern",
             ),
-            ({"top_k": 20, "temperature": 0.0, "top_p": 0.9}, "top_p"),
         ],
     )
     def test_a_narrowed_distribution_without_a_reported_support_is_rejected(
@@ -729,6 +794,67 @@ class TestRolloutLLMSpecSamplingSupport:
             ValidationError, match=f"{narrowed} narrows the distribution rollout"
         ):
             TrainingManifest.model_validate(manifest(GRPO, algorithm=sampling))
+
+
+def speculative_manifest(model: str, speculative_config: object, **algorithm) -> dict:
+    """GRPO manifest for *model* with ``vllm_engine_args.speculative_config``."""
+    return manifest(
+        GRPO,
+        algorithm={
+            "vllm_engine_args": {"speculative_config": speculative_config},
+            **algorithm,
+        },
+        network={"pretrained_model_name_or_path": model},
+    )
+
+
+class TestRolloutLLMSpecCheckSpeculativeSampling:
+    def test_drafting_without_min_p_on_a_text_model_validates(self) -> None:
+        doc = speculative_manifest("Qwen/Qwen2.5-0.5B-Instruct", {"method": "ngram"})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.vllm_engine_args["speculative_config"] == {
+            "method": "ngram"
+        }
+
+    def test_null_speculative_config_validates_with_min_p(self) -> None:
+        doc = speculative_manifest(
+            "Qwen/Qwen2.5-0.5B-Instruct", None, top_k=20, min_p=0.05
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.min_p == 0.05
+
+    def test_null_speculative_config_validates_on_a_vision_model(self) -> None:
+        doc = speculative_manifest("google/gemma-4-E4B-it", None)
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.vllm_engine_args["speculative_config"] is None
+
+    def test_drafting_with_min_p_is_rejected(self) -> None:
+        doc = speculative_manifest(
+            "Qwen/Qwen2.5-0.5B-Instruct", {"method": "ngram"}, top_k=20, min_p=0.05
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match=r"vLLM rejects every request that sets min_p on a drafting engine\. "
+            r"Set vllm_engine_args\.speculative_config to null",
+        ):
+            TrainingManifest.model_validate(doc)
+
+    def test_drafting_on_a_vision_model_is_rejected(self) -> None:
+        doc = speculative_manifest("google/gemma-4-E4B-it", {"method": "ngram"})
+
+        with pytest.raises(
+            ValidationError,
+            match=r"sets logit_bias on a drafting engine; google/gemma-4-E4B-it "
+            r"rollouts mask the tokenizer's image token",
+        ):
+            TrainingManifest.model_validate(doc)
 
 
 class TestTrainingManifestMutatedSamplingSupport:
@@ -756,28 +882,158 @@ class TestTrainingManifestMutatedSamplingSupport:
         ):
             TrainingManifest.model_validate(doc)
 
-    def test_temperature_mutation_to_zero_with_top_k_is_rejected(self) -> None:
+    @pytest.mark.parametrize("top_k", [0, 20])
+    def test_temperature_mutation_on_the_open_floor_is_rejected(
+        self, top_k: int
+    ) -> None:
         doc = manifest(
             GRPO,
-            algorithm={"top_k": 20},
+            algorithm={"top_k": top_k},
             mutation={"rl_hp_selection": {"temperature": {"min": 0.0, "max": 1.2}}},
         )
 
-        with pytest.raises(
-            ValidationError, match=r"temperature min 0\.0 must be > 0 with top_k=20"
-        ):
+        with pytest.raises(ValidationError, match=r"min 0.0 must be > 0.0"):
             TrainingManifest.model_validate(doc)
 
-    def test_temperature_mutation_to_zero_without_top_k_validates(self) -> None:
+    def test_temperature_mutation_above_the_field_ceiling_is_rejected(self) -> None:
         doc = manifest(
             GRPO,
-            algorithm={"top_k": 0},
-            mutation={"rl_hp_selection": {"temperature": {"min": 0.0, "max": 1.2}}},
+            mutation={"rl_hp_selection": {"temperature": {"min": 0.2, "max": 3.0}}},
+        )
+
+        with pytest.raises(ValidationError, match=r"max 3.0 is above 2.0"):
+            TrainingManifest.model_validate(doc)
+
+
+class TestMutationRangeInsideField:
+    def test_schema_generation_names_a_default_window_outside_the_field(self) -> None:
+        class BrokenWindowSpec(SingleAgentAlgorithmSpec):
+            hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = {
+                "gamma": RLHyperparameter(min=0.9, max=1.5),
+            }
+
+        with pytest.raises(
+            ValueError, match=r"BrokenWindowSpec\.gamma:.*max 1.5 is above 1.0"
+        ):
+            _add_hpo_ranges({}, BrokenWindowSpec)
+
+    def test_a_window_inside_the_field_is_accepted(self) -> None:
+        bounds = RLHyperparameter(min=0.2, max=1.0)
+
+        require_mutation_range_inside_field(
+            bounds, GRPOSpec.model_fields["temperature"]
+        )
+
+    def test_a_manifest_keeps_a_window_inside_the_field(self) -> None:
+        doc = manifest(
+            DQN, mutation={"rl_hp_selection": {"lr": {"min": 1e-4, "max": 0.01}}}
         )
 
         validated = TrainingManifest.model_validate(doc)
 
-        assert validated.mutation.rl_hp_selection["temperature"].min == 0.0
+        lr = validated.mutation.rl_hp_selection["lr"]
+        assert lr.min == 1e-4
+        assert lr.max == 0.01
+
+    def test_an_open_floor_and_a_ceiling_are_both_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"min 0.0 must be > 0.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.0, max=0.5), DQNSpec.model_fields["lr"]
+            )
+
+        with pytest.raises(ValueError, match=r"max 5.0 is above 1.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=1e-4, max=5.0), DQNSpec.model_fields["lr"]
+            )
+
+    def test_an_inclusive_window_below_or_above_the_field_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"min -1.0 is below 0.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=-1.0, max=1.0),
+                DDPGSpec.model_fields["expl_noise"],
+            )
+
+        with pytest.raises(ValueError, match=r"max 9.0 is above 5.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.0, max=9.0),
+                DDPGSpec.model_fields["expl_noise"],
+            )
+
+    def test_an_open_integer_window_on_either_end_is_rejected(self) -> None:
+        class Sample(BaseModel):
+            value: int = Field(gt=0, lt=10)
+
+        field = Sample.model_fields["value"]
+
+        require_mutation_range_inside_field(RLHyperparameter(min=1, max=9), field)
+        with pytest.raises(ValueError, match=r"min 0.0 must be > 0"):
+            require_mutation_range_inside_field(RLHyperparameter(min=0, max=9), field)
+        with pytest.raises(ValueError, match=r"max 10.0 must be < 10"):
+            require_mutation_range_inside_field(RLHyperparameter(min=1, max=10), field)
+
+    def test_an_optional_float_rejects_either_open_end(self) -> None:
+        class Sample(BaseModel):
+            value: float | None = Field(default=None, gt=0.0, lt=1.0)
+
+        field = Sample.model_fields["value"]
+
+        with pytest.raises(ValueError, match=r"min 0.0 must be > 0.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.0, max=0.5), field
+            )
+        with pytest.raises(ValueError, match=r"max 1.0 must be < 1.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.5, max=1.0), field
+            )
+
+    def test_an_optional_int_rejects_a_min_below_the_floor(self) -> None:
+        class Sample(BaseModel):
+            value: int | None = Field(default=None, ge=1)
+
+        with pytest.raises(ValueError, match=r"min 0.0 is below 1"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0, max=8), Sample.model_fields["value"]
+            )
+
+    def test_a_window_that_misses_the_field_names_the_limits(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"range \[2.0, 3.0\] leaves the field limits \(> 0.0 and <= 1.0\)",
+        ):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=2, max=3), DQNSpec.model_fields["lr"]
+            )
+
+    def test_a_manifest_rejects_a_learning_rate_above_the_field(self) -> None:
+        doc = manifest(
+            DQN, mutation={"rl_hp_selection": {"lr": {"min": 1e-4, "max": 5}}}
+        )
+
+        with pytest.raises(ValidationError, match=r"max 5.0 is above 1.0"):
+            TrainingManifest.model_validate(doc)
+
+    def test_a_manifest_rejects_a_window_that_misses_the_field(self) -> None:
+        doc = manifest(DQN, mutation={"rl_hp_selection": {"lr": {"min": 2, "max": 3}}})
+
+        with pytest.raises(ValidationError, match="leaves the field limits"):
+            TrainingManifest.model_validate(doc)
+
+    def test_an_aliased_learning_rate_uses_the_actor_field_limit(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": "LLMPPO"}
+        doc["mutation"] = {"rl_hp_selection": {"lr": {"min": 1e-8, "max": 5}}}
+
+        with pytest.raises(ValidationError, match=r"max 5.0 is above 1.0"):
+            TrainingManifest.model_validate(doc)
+
+    def test_an_output_token_window_below_one_is_rejected(self) -> None:
+        doc = manifest(
+            GRPO,
+            mutation={"rl_hp_selection": {"max_output_tokens": {"min": 0, "max": 64}}},
+        )
+
+        with pytest.raises(ValidationError, match=r"min 0.0 is below 1"):
+            TrainingManifest.model_validate(doc)
 
 
 def env_rollout(
@@ -825,7 +1081,7 @@ class TestStripMultimodalTowersResolution:
         # Assert
         assert payload["training"]["rollout_mode"] == "async"
         assert resolved_strip(doc) is True
-        assert payload["algorithm"]["vllm_config"]["max_num_seqs"] == 16
+        assert "max_num_seqs" not in payload["algorithm"]["vllm_config"]
         assert payload["algorithm"]["vllm_config"]["gpu_memory_utilization"] == 0.9
 
     def test_dataset_rollout_on_a_vl_model_strips_the_towers(self) -> None:
@@ -1036,10 +1292,10 @@ class TestGroupReplay:
         assert validated.replay_buffer.group_replay_max_age == 4
         assert validated.to_payload()["replay_buffer"]["group_replay_max_age"] == 4
 
-    def test_group_replay_is_off_by_default(self) -> None:
+    def test_group_replay_is_on_by_default(self) -> None:
         spec = LLMRolloutBufferSpec()
 
-        assert spec.group_replay_max_age == 0
+        assert spec.group_replay_max_age == 20
 
     def test_negative_max_age_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="group_replay_max_age"):
@@ -1055,30 +1311,34 @@ class TestGroupReplay:
         assert isinstance(replay_buffer, LLMRolloutBufferSpec)
         assert replay_buffer.group_replay_max_age == 10
 
-    def test_llmppo_is_rejected(self) -> None:
-        # LLMPPO samples one completion per prompt, so every group ties and
-        # every completion would be replaced by a replay.
-        doc = group_replay_manifest()
-        doc["algorithm"] = {"name": "LLMPPO", "batch_size": 2}
-
-        with pytest.raises(ValidationError, match="GRPO-family algorithm"):
-            TrainingManifest.model_validate(doc)
-
-    def test_zero_max_age_is_off_and_skips_the_checks(self) -> None:
-        doc = group_replay_manifest(group_replay_max_age=0)
-        doc["algorithm"] = {"name": "LLMPPO", "batch_size": 2}
-
-        validated = TrainingManifest.model_validate(doc)
+    def test_zero_max_age_turns_group_replay_off(self) -> None:
+        validated = TrainingManifest.model_validate(
+            group_replay_manifest(group_replay_max_age=0)
+        )
 
         assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
         assert validated.replay_buffer.group_replay_max_age == 0
 
-    def test_group_size_one_is_rejected(self) -> None:
+    @pytest.mark.parametrize(
+        "algorithm",
+        [
+            {"name": "LLMPPO", "batch_size": 2},
+            {"name": "GRPO", "batch_size": 2, "group_size": 1},
+        ],
+        ids=["llmppo", "grpo-group-size-1"],
+    )
+    def test_default_buffer_accepts_one_completion_groups(
+        self, algorithm: dict
+    ) -> None:
+        # Group replay leaves a one-completion group alone, so the default applies.
         doc = group_replay_manifest()
-        doc["algorithm"]["group_size"] = 1
+        doc["algorithm"] = algorithm
+        doc["replay_buffer"] = {"kind": "llm"}
 
-        with pytest.raises(ValidationError, match="group_size >= 2"):
-            TrainingManifest.model_validate(doc)
+        validated = TrainingManifest.model_validate(doc)
+
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.group_replay_max_age == 20
 
     def test_accepts_group_replay_without_rollout_mode(self) -> None:
         # The ray trainer drops training.rollout_mode before validating.
@@ -1092,55 +1352,190 @@ class TestGroupReplay:
         assert replay_buffer.group_replay_max_age == 10
 
 
-def prefix_cache_reuse_manifest(**replay_buffer: object) -> dict:
-    """An async GRPO manifest that reuses the prefix cache across weight syncs."""
-    doc = manifest(
-        GRPO,
-        training={
-            "rollout_mode": "async",
-            "rollout_engines_per_agent": 1,
-            "reuse_prefix_cache_across_syncs": True,
-        },
-    )
-    doc["replay_buffer"] = {"kind": "llm", **replay_buffer}
-    return doc
+class TestDropUninformativeGroups:
+    def test_tied_groups_are_dropped_by_default(self) -> None:
+        spec = LLMRolloutBufferSpec()
 
+        assert spec.drop_uninformative_groups is True
 
-class TestPrefixCacheReuse:
-    def test_accepts_a_bounded_version_lag(self) -> None:
+    def test_dropping_can_be_turned_off(self) -> None:
         validated = TrainingManifest.model_validate(
-            prefix_cache_reuse_manifest(max_rollout_version_lag=4)
+            manifest(
+                GRPO,
+                training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+                replay_buffer={"kind": "llm", "drop_uninformative_groups": False},
+            )
         )
 
-        assert validated.training.reuse_prefix_cache_across_syncs is True
         assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
-        assert validated.replay_buffer.max_rollout_version_lag == 4
+        assert validated.replay_buffer.drop_uninformative_groups is False
 
-    @pytest.mark.parametrize("replay_buffer", [{}, {"max_rollout_version_lag": 0}])
-    def test_rejects_an_unbounded_or_zero_version_lag(
-        self, replay_buffer: dict[str, object]
-    ) -> None:
-        with pytest.raises(ValidationError, match="max_rollout_version_lag >= 1"):
-            TrainingManifest.model_validate(
-                prefix_cache_reuse_manifest(**replay_buffer)
-            )
 
-    def test_off_by_default_without_a_version_lag(self) -> None:
-        doc = prefix_cache_reuse_manifest()
-        del doc["training"]["reuse_prefix_cache_across_syncs"]
+def async_grpo(batch_size: int, **training: object) -> dict:
+    """An async GRPO manifest with one rollout engine."""
+    return manifest(
+        GRPO,
+        algorithm={"batch_size": batch_size},
+        training={"rollout_mode": "async", "rollout_engines_per_agent": 1, **training},
+        replay_buffer={"kind": "llm"},
+    )
+
+
+class TestAsyncRolloutDefaults:
+    def test_rollout_batch_size_stays_unset_for_the_driver(self) -> None:
+        validated = TrainingManifest.model_validate(
+            async_grpo(64, training_gpus_per_agent=4)
+        )
+
+        assert validated.training.rollout_batch_size is None
+
+    def test_payload_omits_split_and_cycle_the_author_left_unset(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"batch_size": 8},
+            training={"rollout_mode": "async"},
+            replay_buffer={"kind": "llm"},
+        )
+
+        training = TrainingManifest.model_validate(doc).to_payload()["training"]
+
+        assert "training_gpus_per_agent" not in training
+        assert "rollout_engines_per_agent" not in training
+        assert "rollout_batch_size" not in training
+
+    def test_payload_keeps_split_and_cycle_the_author_set(self) -> None:
+        doc = async_grpo(
+            8,
+            training_gpus_per_agent=2,
+            rollout_engines_per_agent="auto",
+            rollout_batch_size=4,
+        )
+
+        training = TrainingManifest.model_validate(doc).to_payload()["training"]
+
+        assert training["training_gpus_per_agent"] == 2
+        assert training["rollout_engines_per_agent"] == "auto"
+        assert training["rollout_batch_size"] == 4
+
+    def test_explicit_rollout_batch_size_is_kept(self) -> None:
+        validated = TrainingManifest.model_validate(
+            async_grpo(64, training_gpus_per_agent=4, rollout_batch_size=16)
+        )
+
+        assert validated.training.rollout_batch_size == 16
+
+    def test_version_lag_defaults_to_two(self) -> None:
+        validated = TrainingManifest.model_validate(async_grpo(8))
+
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.max_rollout_version_lag == 2
+
+    def test_zero_version_lag_is_accepted_as_strict_on_policy(self) -> None:
+        doc = async_grpo(8)
+        doc["replay_buffer"] = {"kind": "llm", "max_rollout_version_lag": 0}
 
         validated = TrainingManifest.model_validate(doc)
 
-        assert validated.training.reuse_prefix_cache_across_syncs is False
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.max_rollout_version_lag == 0
+
+    def test_null_version_lag_is_rejected(self) -> None:
+        doc = async_grpo(8)
+        doc["replay_buffer"] = {"kind": "llm", "max_rollout_version_lag": None}
+
+        with pytest.raises(ValidationError, match="max_rollout_version_lag"):
+            TrainingManifest.model_validate(doc)
 
 
 class TestEpochDrivenTraining:
     """A run may state its schedule in epochs; the trainer converts to steps."""
 
+    @pytest.mark.parametrize(
+        ("name", "objective"),
+        [("SFT", "sft"), ("DPO", "preference")],
+    )
+    def test_dataset_llm_rejects_num_epochs_and_max_steps(
+        self, name: str, objective: str
+    ) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": name}
+        doc["environment"] = {
+            "env_type": "dataset",
+            "objective": objective,
+            "dataset": "d",
+        }
+        doc["training"] = {"num_epochs": 1, "max_steps": 50}
+
+        with pytest.raises(ValidationError, match="are both set; set one"):
+            TrainingManifest.model_validate(doc)
+
+    @pytest.mark.parametrize(
+        ("name", "objective"),
+        [("SFT", "sft"), ("DPO", "preference")],
+    )
+    def test_dataset_llm_accepts_only_num_epochs(
+        self, name: str, objective: str
+    ) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": name}
+        doc["environment"] = {
+            "env_type": "dataset",
+            "objective": objective,
+            "dataset": "d",
+        }
+        doc["training"] = {"num_epochs": 1}
+
+        validated = TrainingManifest.model_validate(doc)
+        payload = validated.to_payload()
+
+        assert validated.training.num_epochs == 1
+        assert "max_steps" not in validated.training.model_fields_set
+        assert "max_steps" not in payload["training"]
+        TrainingManifest.model_validate(payload)
+
+    @pytest.mark.parametrize(
+        ("name", "objective"),
+        [("SFT", "sft"), ("DPO", "preference")],
+    )
+    def test_dataset_llm_accepts_only_max_steps(
+        self, name: str, objective: str
+    ) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": name}
+        doc["environment"] = {
+            "env_type": "dataset",
+            "objective": objective,
+            "dataset": "d",
+        }
+        doc["training"] = {"max_steps": 50}
+
+        validated = TrainingManifest.model_validate(doc)
+        payload = validated.to_payload()
+
+        assert validated.training.max_steps == 50
+        assert validated.training.num_epochs is None
+        assert payload["training"]["max_steps"] == 50
+        TrainingManifest.model_validate(payload)
+
+    def test_dataset_backed_grpo_epoch_only_payload_round_trips(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["training"] = {"num_epochs": 1}
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert "max_steps" not in payload["training"]
+        TrainingManifest.model_validate(payload)
+
+    def test_grpo_rejects_num_epochs_and_max_steps(self) -> None:
+        with pytest.raises(ValidationError, match="are both set; set one"):
+            TrainingManifest.model_validate(manifest(GRPO, training={"num_epochs": 1}))
+
     def test_accepts_num_epochs_with_evo_epochs(self) -> None:
-        validated = TrainingManifest.model_validate(
-            manifest(DQN, training={"num_epochs": 4, "evo_epochs": 1})
-        )
+        doc = copy.deepcopy(DQN)
+        doc["training"] = {"num_epochs": 4, "evo_epochs": 1, "pop_size": 2}
+
+        validated = TrainingManifest.model_validate(doc)
+
         assert validated.training.num_epochs == 4
         assert validated.training.evo_epochs == 1
 
@@ -1153,9 +1548,11 @@ class TestEpochDrivenTraining:
     def test_evo_steps_is_not_defaulted_alongside_evo_epochs(self) -> None:
         # Two intervals in one payload would contradict each other; the trainer
         # computes evo_steps from evo_epochs once it knows the dataset size.
-        validated = TrainingManifest.model_validate(
-            manifest(DQN, training={"num_epochs": 4, "evo_epochs": 1})
-        )
+        doc = copy.deepcopy(DQN)
+        doc["training"] = {"num_epochs": 4, "evo_epochs": 1, "pop_size": 2}
+
+        validated = TrainingManifest.model_validate(doc)
+
         assert validated.training.evo_steps is None
 
     def test_a_step_driven_run_still_gets_its_evo_steps_default(self) -> None:
@@ -1630,6 +2027,40 @@ class TestSchema:
         assert llmreinforce["max_grad_norm"] == max_grad_norm_bounds
         assert llmreinforce["gamma"] == gamma_bounds
 
+    def test_opd_temperature_window_is_the_only_legal_value(self) -> None:
+        temperature = _algorithm_variant("OPD")["x-hpo-ranges"]["temperature"]
+
+        assert temperature["min"] == 1.0
+        assert temperature["max"] == 1.0
+
+    def test_default_mutation_windows_lie_inside_field_limits(self) -> None:
+        offenders: list[str] = []
+        for spec_cls in MANIFEST_REGISTRY.names_by_class():
+            for name, bounds in spec_cls.hpo_ranges.items():
+                field = spec_cls.model_fields.get(name)
+                if field is None:
+                    continue
+                try:
+                    require_mutation_range_inside_field(bounds, field)
+                except ValueError as exc:
+                    offenders.append(f"{spec_cls.__name__}.{name}: {exc}")
+
+        assert offenders == []
+
+    def test_published_hpo_ranges_lie_inside_field_limits(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        for variant in variants:
+            for name, bounds in variant.get("x-hpo-ranges", {}).items():
+                prop = variant["properties"][name]
+                if "minimum" in prop:
+                    assert bounds["min"] >= prop["minimum"]
+                if "exclusiveMinimum" in prop:
+                    assert bounds["min"] > prop["exclusiveMinimum"]
+                if "maximum" in prop:
+                    assert bounds["max"] <= prop["maximum"]
+                if "exclusiveMaximum" in prop:
+                    assert bounds["max"] < prop["exclusiveMaximum"]
+
     def test_hpo_ranges_are_valid_rl_hyperparameters(self) -> None:
         # They are emitted as plain JSON, but rl_hp_selection has to accept them
         # back verbatim — that round trip is the whole point of the shape.
@@ -1843,7 +2274,12 @@ class TestSchema:
             and c.get("then")
             == {
                 "properties": {
-                    "training": {"properties": {"num_epochs": {"default": 1}}}
+                    "training": {
+                        "properties": {
+                            "num_epochs": {"default": 1},
+                            "max_steps": {"default": None},
+                        }
+                    }
                 }
             }
         )
@@ -1860,6 +2296,7 @@ class TestSchema:
         }
         applied = self._applied_training_defaults(dataset_rollout)
         assert applied["num_epochs"] == 1
+        assert applied["max_steps"] is None
         assert applied["evo_steps"] == 20
 
         generative_rollout = {
@@ -2141,7 +2578,7 @@ class TestSchema:
         assert properties["lora_r"]["default"] == 1
         assert properties["lora_r"]["title"] == "Rank"
         assert properties["lora_alpha"]["default"] == 32
-        assert properties["lora_dropout"]["default"] == 0.05
+        assert properties["lora_dropout"]["default"] == 0.0
 
         grpo = next(
             v
@@ -2196,8 +2633,14 @@ class TestSchema:
         )
         then_props = ou["then"]["properties"]
         assert then_props["theta"]["default"] == 0.15
+        assert then_props["theta"]["minimum"] == 0.0
+        assert then_props["theta"]["maximum"] == 10.0
         assert then_props["dt"]["default"] == 0.01
+        assert then_props["dt"]["exclusiveMinimum"] == 0.0
+        assert then_props["dt"]["maximum"] == 1.0
         assert then_props["mean_noise"]["default"] == 0.0
+        assert then_props["mean_noise"]["minimum"] == -5.0
+        assert then_props["mean_noise"]["maximum"] == 5.0
 
         ppo = next(v for v in variants if v["title"] == "PPO")
         assert not any(
@@ -2493,7 +2936,8 @@ class TestThinkingBudgetParser:
                 r"reasoning start and end tokens, and "
                 rf"{re.escape(model)} has none\. Unset thinking_token_budget, or "
                 r"set algorithm\.vllm_engine_args\.reasoning_parser to one that "
-                r"has them: deepseek_r1, gemma4, nemotron_v3, qwen3\."
+                r"has them: deepseek_r1, deepseek_v4, gemma4, glm47, mimo, "
+                r"nemotron_v3, qwen3\."
             ),
         ):
             TrainingManifest.model_validate(thinking_budget_manifest(model))
@@ -2541,3 +2985,518 @@ class TestThinkingBudgetParser:
         validated = TrainingManifest.model_validate(GRPO)
 
         assert validated.algorithm.thinking_token_budget is None
+
+
+def parallel_manifest(model: str, tp: int, ep: int) -> dict:
+    """GRPO manifest for *model* with the given tensor and expert parallel sizes."""
+    return manifest(
+        GRPO,
+        algorithm={"fsdp": {"tp": tp, "ep": ep}},
+        network={"pretrained_model_name_or_path": model},
+    )
+
+
+class TestExpertParallelCoversTensorParallel:
+    @pytest.mark.parametrize(("tp", "ep"), [(2, 2), (2, 4), (1, 2)])
+    def test_accepts_ep_at_or_above_tp_for_a_moe_model(self, tp: int, ep: int) -> None:
+        validated = TrainingManifest.model_validate(
+            parallel_manifest("openai/gpt-oss-20b", tp, ep)
+        )
+
+        assert (validated.algorithm.fsdp.tp, validated.algorithm.fsdp.ep) == (tp, ep)
+
+    def test_accepts_tp_without_ep_for_a_dense_model(self) -> None:
+        validated = TrainingManifest.model_validate(
+            parallel_manifest("Qwen/Qwen3-4B", 2, 1)
+        )
+
+        assert validated.algorithm.fsdp.tp == 2
+
+    def test_rejects_ep_below_tp_for_a_moe_model(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=(
+                r"algorithm\.fsdp\.ep=1 is below tp=2: openai/gpt-oss-20b is a "
+                r"mixture-of-experts model, and tensor parallel does not split "
+                r"routed experts\. Set ep >= tp\."
+            ),
+        ):
+            TrainingManifest.model_validate(
+                parallel_manifest("openai/gpt-oss-20b", 2, 1)
+            )
+
+    def test_leaves_an_unsupported_model_to_the_trainer(self) -> None:
+        validated = TrainingManifest.model_validate(
+            parallel_manifest("org/untracked", 2, 1)
+        )
+
+        assert validated.algorithm.fsdp.tp == 2
+
+
+class TestLoraDropoutResolution:
+    @pytest.mark.parametrize(
+        "spec_cls",
+        [GRPOSpec, GSPOSpec, CISPOSpec, LLMPPOSpec, LLMREINFORCESpec, SFTSpec, DPOSpec],
+    )
+    def test_llm_algorithms_default_to_no_dropout(self, spec_cls) -> None:
+        spec = spec_cls(lora_config={"lora_r": 8})
+
+        assert spec.lora_config.lora_dropout == 0.0
+
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, SFTSpec, DPOSpec])
+    def test_explicit_dropout_is_kept(self, spec_cls) -> None:
+        spec = spec_cls(lora_config=LoraConfigDict(lora_dropout=0.1))
+
+        assert spec.lora_config.lora_dropout == 0.1
+
+    def test_network_lora_lifted_onto_a_rollout_algorithm_has_no_dropout(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert
+        assert validated.algorithm.lora_config.lora_dropout == 0.0
+        assert validated.to_payload()["network"]["lora_config"]["lora_dropout"] == 0.0
+
+    def test_network_lora_lifted_onto_sft_has_no_dropout(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": "SFT"}
+        doc["environment"] = {"env_type": "dataset", "objective": "sft", "dataset": "d"}
+        doc["network"]["lora_config"] = {"lora_r": 8}
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.lora_config.lora_dropout == 0.0
+
+    def test_explicit_network_dropout_on_a_rollout_algorithm_is_kept(self) -> None:
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": {"lora_dropout": 0.1},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.lora_config.lora_dropout == 0.1
+
+
+def _algorithm_variant(title: str) -> dict:
+    return next(
+        variant
+        for variant in manifest_schema()["properties"]["algorithm"]["oneOf"]
+        if variant["title"] == title
+    )
+
+
+def _schema_types(prop: dict) -> set[str]:
+    raw = prop.get("type")
+    found = set(raw if isinstance(raw, list) else [raw] if raw else [])
+    for branch in prop.get("anyOf", []):
+        branch_type = branch.get("type")
+        if isinstance(branch_type, str):
+            found.add(branch_type)
+    return found
+
+
+def _schema_keys(prop: dict) -> set[str]:
+    keys = set(prop)
+    for branch in prop.get("anyOf", []):
+        keys.update(branch)
+    return keys
+
+
+# Lengths and counts scale with the job. Return support and the seed have no
+# fixed range. The trainer settings listed here have no ceiling the code
+# enforces, so a static maximum would reject a saved run.
+NO_STATIC_MAXIMUM = frozenset(
+    {
+        "action_batch_size",
+        "adv_clip_range",
+        "adv_filter_eps",
+        "batch_size",
+        "critic_warmup_steps",
+        "group_size",
+        "kl_clamp",
+        "learn_step",
+        "max_grad_norm",
+        "max_model_len",
+        "max_output_tokens",
+        "max_row_tokens",
+        "max_seq_len",
+        "micro_batch_size_per_gpu",
+        "micro_batch_tokens_per_gpu",
+        "min_output_tokens",
+        "mini_batch_size",
+        "n_step",
+        "nll_alpha",
+        "num_atoms",
+        "num_envs",
+        "reference_update_interval",
+        "repetition_penalty",
+        "routed_expert_chunk_mib",
+        "seed",
+        "thinking_token_budget",
+        "top_k",
+        "v_max",
+        "v_min",
+        "vect_noise_dim",
+        "vllm_importance_sampling_cap",
+        "vllm_max_logprob_gap",
+    }
+)
+NO_STATIC_MINIMUM = frozenset({"seed", "v_max", "v_min"})
+
+
+class TestAlgorithmHpSchemaBounds:
+    @pytest.mark.parametrize(
+        ("title", "field", "bounds"),
+        [
+            (
+                "DQN",
+                "tau",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 0.001},
+            ),
+            (
+                "RainbowDQN",
+                "tau",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 0.001},
+            ),
+            (
+                "RainbowDQN",
+                "beta",
+                {"minimum": 0.0, "maximum": 1.0, "default": 0.4},
+            ),
+            (
+                "RainbowDQN",
+                "noise_std",
+                {"minimum": 0.0, "maximum": 1.0, "default": 0.5},
+            ),
+            ("RainbowDQN", "n_step", {"minimum": 1, "default": 3}),
+            (
+                "TD3",
+                "tau",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 0.005},
+            ),
+            ("DDPG", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("MADDPG", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("MATD3", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("TD3", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("DDPG", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            (
+                "IPPO",
+                "action_std_init",
+                {"minimum": 0.0, "maximum": 10.0, "default": 0.6},
+            ),
+            (
+                "IPPO",
+                "max_grad_norm",
+                {"minimum": 0.0, "default": 0.5},
+            ),
+            (
+                "IPPO",
+                "target_kl",
+                {"minimum": 0.0, "maximum": 10.0, "default": None},
+            ),
+            ("IPPO", "action_batch_size", {"minimum": 1, "default": None}),
+            ("MADDPG", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            ("MATD3", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            ("TD3", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            (
+                "GRPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.9},
+            ),
+            (
+                "GSPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.9},
+            ),
+            (
+                "CISPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.9},
+            ),
+            (
+                "LLMPPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 1.0},
+            ),
+            (
+                "LLMREINFORCE",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 1.0},
+            ),
+            (
+                "GRPO",
+                "top_p",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 1.0},
+            ),
+            ("GRPO", "top_k", {"minimum": 0, "default": 50}),
+            ("GRPO", "min_p", {"minimum": 0.0, "maximum": 1.0, "default": 0.0}),
+            ("GRPO", "group_size", {"minimum": 1, "default": 8}),
+            (
+                "GRPO",
+                "kl_clamp",
+                {"exclusiveMinimum": 0.0, "default": 10.0},
+            ),
+            (
+                "LLMPPO",
+                "kl_clamp",
+                {"exclusiveMinimum": 0.0, "default": 10.0},
+            ),
+            ("LLMPPO", "critic_warmup_steps", {"minimum": 0, "default": 0}),
+            (
+                "LLMREINFORCE",
+                "top_p",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 1.0},
+            ),
+            (
+                "LLMPPO",
+                "top_p",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 1.0},
+            ),
+            ("GRPO", "update_epochs", {"minimum": 1, "maximum": 10, "default": 1}),
+            (
+                "GRPO",
+                "repetition_penalty",
+                {"exclusiveMinimum": 0.0, "default": 1.0},
+            ),
+            ("DPO", "nll_alpha", {"minimum": 0.0, "default": 1.0}),
+            ("LLMREINFORCE", "top_k", {"minimum": 0, "default": 50}),
+            ("DPO", "reference_update_interval", {"minimum": 1, "default": None}),
+        ],
+    )
+    def test_served_schema_states_the_bound(
+        self, title: str, field: str, bounds: dict
+    ) -> None:
+        prop = _algorithm_variant(title)["properties"][field]
+        keys = _schema_keys(prop)
+
+        for key, value in bounds.items():
+            assert prop[key] == value
+        if "maximum" not in bounds and "exclusiveMaximum" not in bounds:
+            assert "maximum" not in keys
+            assert "exclusiveMaximum" not in keys
+        if "exclusiveMinimum" in bounds:
+            assert "minimum" not in keys
+
+    def test_prior_eps_must_be_above_zero(self) -> None:
+        prop = _algorithm_variant("RainbowDQN")["properties"]["prior_eps"]
+
+        assert prop["exclusiveMinimum"] == 0.0
+        assert prop["maximum"] == 1.0
+        assert prop["default"] == 1e-6
+        assert "minimum" not in prop
+
+    @pytest.mark.parametrize("title", ["DDPG", "MADDPG", "MATD3", "TD3"])
+    def test_ou_timestep_must_be_above_zero(self, title: str) -> None:
+        prop = _algorithm_variant(title)["properties"]["dt"]
+
+        assert prop["exclusiveMinimum"] == 0.0
+        assert prop["maximum"] == 1.0
+        assert prop["default"] == 0.01
+        assert "minimum" not in prop
+
+    @pytest.mark.parametrize(
+        "title", ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"]
+    )
+    def test_max_output_tokens_min_is_one_and_has_no_static_max(
+        self, title: str
+    ) -> None:
+        prop = _algorithm_variant(title)["properties"]["max_output_tokens"]
+
+        assert prop["minimum"] == 1
+        assert prop["default"] is None
+        assert prop["type"] == ["integer", "null"]
+        assert "maximum" not in prop
+        assert "exclusiveMaximum" not in prop
+
+    @pytest.mark.parametrize(
+        "title",
+        ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE", "DPO", "SFT"],
+    )
+    def test_constrain_answer_pattern_stays_with_default_none(self, title: str) -> None:
+        prop = _algorithm_variant(title)["properties"]["constrain_answer_pattern"]
+
+        assert prop["default"] is None
+        assert prop["type"] == ["string", "null"]
+
+    @pytest.mark.parametrize(
+        "title", ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"]
+    )
+    def test_mini_batch_size_stays_with_default_none(self, title: str) -> None:
+        prop = _algorithm_variant(title)["properties"]["mini_batch_size"]
+
+        assert prop["default"] is None
+        assert prop["minimum"] == 1
+        assert prop["type"] == ["integer", "null"]
+
+    @pytest.mark.parametrize(
+        "title", ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"]
+    )
+    def test_sampling_fields_are_on_the_schema(self, title: str) -> None:
+        props = _algorithm_variant(title)["properties"]
+
+        assert props["top_p"]["default"] == 1.0
+        assert props["top_k"]["default"] == 50
+        assert props["min_p"]["default"] == 0.0
+        assert props["min_output_tokens"]["default"] is None
+        assert props["reference_update_interval"]["default"] is None
+        assert props["reference_update_interval"]["minimum"] == 1
+
+    def test_llmppo_schema_has_no_group_size(self) -> None:
+        assert "group_size" not in _algorithm_variant("LLMPPO")["properties"]
+
+    def test_grpo_schema_includes_group_size(self) -> None:
+        assert _algorithm_variant("GRPO")["properties"]["group_size"]["default"] == 8
+
+    def test_numeric_hparams_are_bounded_on_both_sides(self) -> None:
+        missing: list[str] = []
+        for variant in manifest_schema()["properties"]["algorithm"]["oneOf"]:
+            for name, prop in variant["properties"].items():
+                if not _schema_types(prop) & {"number", "integer"}:
+                    continue
+                keys = _schema_keys(prop)
+                if name not in NO_STATIC_MINIMUM and not (
+                    {"minimum", "exclusiveMinimum"} & keys
+                ):
+                    missing.append(f"{variant['title']}.{name} has no minimum")
+                if name not in NO_STATIC_MAXIMUM and not (
+                    {"maximum", "exclusiveMaximum"} & keys
+                ):
+                    missing.append(f"{variant['title']}.{name} has no maximum")
+
+        assert missing == []
+
+    @pytest.mark.parametrize(
+        ("spec_cls", "kwargs"),
+        [
+            (DQNSpec, {"tau": 0.0}),
+            (DQNSpec, {"tau": -0.01}),
+            (DQNSpec, {"tau": 1.01}),
+            (DQNSpec, {"lr": 0.0}),
+            (DQNSpec, {"lr": 1.1}),
+            (RainbowDQNSpec, {"beta": 1.5}),
+            (RainbowDQNSpec, {"prior_eps": 0.0}),
+            (RainbowDQNSpec, {"noise_std": -0.1}),
+            (DDPGSpec, {"tau": 0.0}),
+            (DDPGSpec, {"expl_noise": -0.1}),
+            (DDPGSpec, {"expl_noise": 5.1}),
+            (DDPGSpec, {"theta": -0.1}),
+            (DDPGSpec, {"theta": 10.1}),
+            (DDPGSpec, {"mean_noise": 5.1}),
+            (DDPGSpec, {"dt": 0.0}),
+            (DDPGSpec, {"dt": 1.1}),
+            (TD3Spec, {"tau": 0.0}),
+            (TD3Spec, {"tau": 1.1}),
+            (TD3Spec, {"policy_freq": 1001}),
+            (MADDPGSpec, {"dt": 0.0}),
+            (MATD3Spec, {"expl_noise": -1.0}),
+            (IPPOSpec, {"action_std_init": -0.1}),
+            (IPPOSpec, {"action_std_init": 10.1}),
+            (IPPOSpec, {"max_grad_norm": -0.1}),
+            (IPPOSpec, {"target_kl": -0.01}),
+            (IPPOSpec, {"target_kl": 10.1}),
+            (IPPOSpec, {"update_epochs": 101}),
+            (IPPOSpec, {"action_batch_size": 0}),
+            (GRPOSpec, {"temperature": 0.0}),
+            (GRPOSpec, {"temperature": -0.1}),
+            (GRPOSpec, {"temperature": 2.1}),
+            (GRPOSpec, {"top_p": 0.0}),
+            (GRPOSpec, {"lr": 0.0}),
+            (GRPOSpec, {"kl_clamp": 0.0}),
+            (GRPOSpec, {"repetition_penalty": 0.0}),
+            (GRPOSpec, {"vllm_importance_sampling_cap": 0.0}),
+            (GRPOSpec, {"update_epochs": 11}),
+            (GRPOSpec, {"max_output_tokens": 0}),
+            (NeuralUCBSpec, {"gamma": 0.0}),
+            (NeuralUCBSpec, {"lamb": 0.0}),
+            (NeuralUCBSpec, {"reg": 0.0}),
+            (NeuralUCBSpec, {"lr": 0.0}),
+            (LLMPPOSpec, {"temperature": 0.0}),
+            (LLMPPOSpec, {"temperature": 3.0}),
+            (LLMREINFORCESpec, {"temperature": 0.0}),
+            (LLMREINFORCESpec, {"temperature": -1.0}),
+            (DDPGSpec, {"theta": 10.0, "dt": 1.0}),
+            (TD3Spec, {"theta": 4.0, "dt": 0.5}),
+            (MADDPGSpec, {"theta": 10.0, "dt": 1.0}),
+            (MATD3Spec, {"theta": 10.0, "dt": 1.0}),
+        ],
+    )
+    def test_out_of_range_hyperparameters_are_rejected(
+        self, spec_cls: type, kwargs: dict
+    ) -> None:
+        with pytest.raises(ValidationError):
+            spec_cls(**kwargs)
+
+    def test_values_above_the_old_ui_caps_are_kept(self) -> None:
+        grpo = GRPOSpec(
+            kl_clamp=1000.0,
+            repetition_penalty=10.0,
+            max_grad_norm=1000.0,
+            vllm_importance_sampling_cap=1000.0,
+            vllm_max_logprob_gap=1000.0,
+            update_epochs=10,
+        )
+        ippo = IPPOSpec(max_grad_norm=500.0)
+        dpo = DPOSpec(nll_alpha=50.0)
+
+        assert grpo.kl_clamp == 1000.0
+        assert grpo.repetition_penalty == 10.0
+        assert grpo.max_grad_norm == 1000.0
+        assert grpo.vllm_importance_sampling_cap == 1000.0
+        assert grpo.vllm_max_logprob_gap == 1000.0
+        assert grpo.update_epochs == 10
+        assert ippo.max_grad_norm == 500.0
+        assert dpo.nll_alpha == 50.0
+
+    @pytest.mark.parametrize("spec_cls", [DDPGSpec, TD3Spec, MADDPGSpec, MATD3Spec])
+    def test_ou_step_at_the_stability_boundary_is_kept(self, spec_cls: type) -> None:
+        on = spec_cls(theta=1.0, dt=1.0)
+        off = spec_cls(theta=10.0, dt=1.0, O_U_noise=False)
+
+        assert on.theta * on.dt == 1.0
+        assert off.O_U_noise is False
+
+    def test_sampling_penalties_match_vllm(self) -> None:
+        props = manifest_schema()["$defs"]["VLLMConfig"]["properties"]
+
+        assert props["presence_penalty"]["minimum"] == -2.0
+        assert props["presence_penalty"]["maximum"] == 2.0
+        assert props["frequency_penalty"]["minimum"] == -2.0
+        assert props["frequency_penalty"]["maximum"] == 2.0
+
+    def test_max_output_tokens_below_the_model_context_is_kept(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(
+                GRPO,
+                algorithm={"max_output_tokens": 2048},
+                network={"max_context_length": 4096},
+            )
+        )
+
+        assert validated.algorithm.max_output_tokens == 2048
+        assert validated.algorithm.max_model_len == 4096
+
+    def test_max_output_tokens_at_the_model_context_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="context length \\(512\\)"):
+            TrainingManifest.model_validate(
+                manifest(GRPO, algorithm={"max_output_tokens": 512})
+            )
+
+    def test_omitted_max_output_tokens_skips_the_context_check(self) -> None:
+        validated = TrainingManifest.model_validate(GRPO)
+
+        assert validated.algorithm.max_output_tokens is None

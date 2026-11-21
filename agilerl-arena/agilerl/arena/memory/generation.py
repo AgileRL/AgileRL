@@ -4,17 +4,50 @@
 
 from __future__ import annotations
 
+import agilerl.arena.memory.block_activations as block_activations
 import agilerl.arena.memory.formulas as formulas
+import agilerl.arena.memory.kv_cache as kv_cache
+import agilerl.arena.memory.lora_formulas as lora_formulas
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
+from agilerl.arena.memory.resolve.rollout import (
+    drafts_by_default,
+    merged_sync_bucket_bytes,
+    runs_dual_stream_lora,
+)
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     DeviceSpec,
     GenerationSettings,
     GiB,
+    MiB,
     ModelArch,
     ModelSpec,
 )
+
+# The predicted KV pool can run up to ~0.44 GiB above the pool vLLM allocates,
+# so a predicted pool must clear the bytes it is relied on for by this much.
+KV_MARGIN_BYTES = 512 * MiB
+# Hidden-width activations per step token above a ROLLOUT_ENGINE_MAX_NUM_BATCHED_TOKENS
+# step that vLLM's KV sizing loses outside its activation peak. Fitted to the
+# KV pool of Qwen3.6-35B-A3B LoRA on H100 under vLLM 0.32: 49.7 / 46.9 / 42.4
+# GiB per GPU at 8192 / 32768 / 65536 on TP4, 33.1 / 30.0 / 25.2 on TP2.
+# Unmeasured on other models.
+ENGINE_STEP_BUFFER_HIDDEN_COPIES = 20
+
+
+def engine_step_buffer_bytes(
+    arch: ModelArch, batched_tokens: int, act_bytes: float
+) -> int:
+    """Step-sized engine memory outside the activation peak, per GPU.
+
+    :param arch: Engine-side model architecture.
+    :param batched_tokens: The engine's scheduler-step token cap.
+    :param act_bytes: Bytes per activation element.
+    :return: 0 at or below :data:`~agilerl.arena.memory.kv_cache.ROLLOUT_ENGINE_MAX_NUM_BATCHED_TOKENS`.
+    """
+    extra = max(batched_tokens - kv_cache.ROLLOUT_ENGINE_MAX_NUM_BATCHED_TOKENS, 0)
+    return int(ENGINE_STEP_BUFFER_HIDDEN_COPIES * extra * arch.hidden_size * act_bytes)
 
 
 def engine_terms(
@@ -30,23 +63,22 @@ def engine_terms(
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
     counts = formulas.param_counts(arch, model.n_params)
     variant = model.variant(settings.weight_variant)
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
+    batched_tokens = kv_cache.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
     tp = settings.tensor_parallel_size
     # Sampler buffers: per-sequence fp32 logits and probs over the vocab.
     # Tensor parallel shards the lm_head, so each rank holds 1/tp of the vocab.
     sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4 // tp
-    weight_elems = formulas.weight_bytes(counts, settings.weight_dtype, variant)
-    weight_byte = (
-        1.0
-        if settings.weight_quantization == "fp8"
-        else DTYPE_BYTES[settings.weight_dtype]
+    unsharded_weights = formulas.weight_bytes(counts, settings.weight_dtype, variant)
+    weights = int(
+        formulas.engine_weight_bytes(
+            arch, counts, settings.weight_dtype, variant, settings.weight_quantization
+        )
+        / tp
     )
-    unsharded_weights = weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte
-    weights = int(unsharded_weights / tp)
     decoder_startup = (
-        formulas.block_recompute_bytes(
+        block_activations.block_recompute_bytes(
             arch,
             1,
             batched_tokens,
@@ -62,27 +94,30 @@ def engine_terms(
         * act_bytes
         / tp
     )
+    serves_lora = not settings.merged_lora_sync
     terms = {
         "weights": weights,
         "startup_peak": _with_encoder_profile(
             model, settings, batched_tokens, decoder_startup
         )
         + compile_copy,
-        "cuda_graphs": formulas.CUDA_GRAPH_POOL_BYTES,
-        # Engines serve one adapter (``max_loras=1``).
-        "lora_slots": int(
-            formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
-        )
-        + formulas.engine_expert_lora_param_count(
-            arch,
-            settings.max_lora_rank,
-            tp,
-            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
-        )
-        * act_bytes,
-        "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
+        "cuda_graphs": formulas.CUDA_GRAPH_POOL_BYTES
+        + (formulas.SPECULATIVE_DRAFTING_BYTES if _engine_drafts(arch, settings) else 0)
+        + (
+            formulas.LORA_DUAL_STREAM_BYTES
+            if serves_lora
+            and settings.lora_dual_stream
+            and runs_dual_stream_lora(arch.is_moe)
+            else 0
+        ),
+        "lora_slots": _lora_slot_bytes(arch, settings, act_bytes, tp),
+        "engine_runtime": min(
+            int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
+            formulas.ENGINE_RUNTIME_MAX_BYTES,
+        ),
+        "step_buffers": engine_step_buffer_bytes(arch, batched_tokens, act_bytes),
         "kv_demand": _kv_demand_per_rank(arch, settings),
-        "mamba_state": formulas.mamba_state_bytes(
+        "mamba_state": kv_cache.mamba_state_bytes(
             arch,
             settings.max_num_seqs,
             state_dtype=settings.weight_dtype,
@@ -90,6 +125,50 @@ def engine_terms(
         ),
     }
     return terms, batched_tokens, sampler
+
+
+def _lora_slot_bytes(
+    arch: ModelArch, settings: GenerationSettings, act_bytes: float, tp: int
+) -> float:
+    """LoRA adapter slot bytes on one engine rank.
+
+    :param arch: Engine-side model architecture.
+    :param settings: Generation settings.
+    :param act_bytes: Bytes per activation element.
+    :param tp: Engine tensor parallel size.
+    :return: 0 when weight sync pushes merged weights, else one slot per served adapter.
+    """
+    if settings.merged_lora_sync:
+        return 0
+    # Each served adapter (``max_loras``) holds a slot at ``max_lora_rank``.
+    return settings.served_loras * (
+        int(
+            lora_formulas.engine_lora_param_count(arch, settings.max_lora_rank)
+            * act_bytes
+            / tp
+        )
+        + lora_formulas.engine_expert_lora_param_count(
+            arch,
+            settings.max_lora_rank,
+            tp,
+            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
+        )
+        * act_bytes
+    )
+
+
+def _engine_drafts(arch: ModelArch, settings: GenerationSettings) -> bool:
+    """Whether the engine runs speculative decoding.
+
+    :param arch: Engine-side model architecture.
+    :param settings: Generation settings.
+    :return: The manifest's ``speculative_config`` choice, else the multi-turn default.
+    """
+    if settings.speculative_drafting is not None:
+        return settings.speculative_drafting
+    return drafts_by_default(
+        settings.multi_turn, arch.is_hybrid_ssm, settings.min_p, settings.logit_bias
+    )
 
 
 def _with_encoder_profile(
@@ -123,29 +202,29 @@ def _with_encoder_profile(
 
 def _kv_demand_per_rank(arch: ModelArch, settings: GenerationSettings) -> int:
     """KV bytes on one engine rank, replicating heads when TP exceeds them."""
-    if formulas.shares_hybrid_pool(arch):
-        return formulas.hybrid_kv_demand_bytes(
+    if kv_cache.shares_hybrid_pool(arch):
+        return kv_cache.hybrid_kv_demand_bytes(
             arch,
             settings.weight_dtype,
             settings.concurrency,
             settings.max_model_len,
             settings.tensor_parallel_size,
         )
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
+    batched_tokens = kv_cache.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
-    demand = formulas.kv_cache_demand_bytes(
+    demand = kv_cache.kv_cache_demand_bytes(
         arch,
         settings.weight_dtype,
         settings.concurrency,
         settings.max_model_len,
-        formulas.VLLM_ASYNC_CONCURRENT_BATCHES * batched_tokens,
+        kv_cache.VLLM_ASYNC_CONCURRENT_BATCHES * batched_tokens,
     )
     if arch.n_kv_heads == 0:
         return demand
     return (
         demand
-        * formulas.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
+        * kv_cache.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
         // arch.n_kv_heads
     )
 
@@ -176,7 +255,7 @@ def generation_warnings(
             "gpu_memory_utilization; construction can peak above this bar."
         )
     if arch.is_hybrid_ssm:
-        block_size = formulas.aligned_kv_block_size(
+        block_size = kv_cache.aligned_kv_block_size(
             arch, settings.weight_dtype, settings.tensor_parallel_size
         )
         warnings.append(
@@ -244,7 +323,7 @@ def estimate_generation(
         model,
         settings,
         batched_tokens,
-        formulas.block_recompute_bytes(
+        block_activations.block_recompute_bytes(
             model.arch,
             1,
             runtime_tokens,
@@ -253,6 +332,8 @@ def estimate_generation(
         )
         + sampler,
     )
+    if settings.scores_prompt_logprobs:
+        runtime_activation += formulas.prompt_logprob_bytes(model.arch)
     return PhaseBreakdown(
         phase="generation",
         components=_kv_bar_components(
@@ -266,7 +347,11 @@ def estimate_generation(
             batched_tokens,
             sampler,
         )
-        + _residency_bar_components(model, device, terms, job_overhead),
+        + _residency_bar_components(model, device, terms, job_overhead)
+        + (
+            _lora_receive_buffer_component(model.arch, settings),
+            _expert_lora_copy_component(model.arch, settings),
+        ),
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.generation_usable_bytes,
         warnings=tuple(warnings),
@@ -281,6 +366,8 @@ def _generation_pools(
 ) -> tuple[int, int, int]:
     """KV pool, start-up pool, and one-sequence demand of the engine bar."""
     budget = int(settings.gpu_memory_utilization * device.total_bytes)
+    if settings.reserves_prompt_logprobs:
+        budget -= formulas.prompt_logprob_bytes(model.arch)
     non_kv = (
         terms["weights"]
         + terms["startup_peak"]
@@ -288,19 +375,57 @@ def _generation_pools(
         + terms["lora_slots"]
         + terms["mamba_state"]
         + terms["engine_runtime"]
+        + terms["step_buffers"]
     )
     kv_pool = max(budget - non_kv, 0)
     # vLLM holds Mamba state in the KV pool and checks room for one request at start-up.
     startup_pool = max(budget - (non_kv - terms["mamba_state"]), 0)
     full_sequence = terms[
         "kv_demand"
-    ] // settings.concurrency + formulas.mamba_state_bytes(
+    ] // settings.concurrency + kv_cache.mamba_state_bytes(
         model.arch,
         1,
         state_dtype=settings.weight_dtype,
         tensor_parallel=settings.tensor_parallel_size,
     )
     return kv_pool, startup_pool, full_sequence
+
+
+def drop_engine_fast_paths(
+    model: ModelSpec, device: DeviceSpec, settings: GenerationSettings
+) -> GenerationSettings:
+    """Rollout engine settings with its memory-costly defaults off when they leave no KV.
+
+    Default n-gram drafting, dual-stream LoRA and the
+    :data:`~agilerl.arena.memory.kv_cache.ROLLOUT_ENGINE_MAX_NUM_BATCHED_TOKENS`
+    step each hold memory outside the KV pool. When the engine's start-up pool
+    cannot hold one full sequence plus :data:`KV_MARGIN_BYTES`, the defaults
+    the settings did not pin are turned off.
+
+    :param model: Engine-side model spec.
+    :param device: The engine's GPU.
+    :param settings: Rollout engine generation settings.
+    :return: ``settings`` when the engine starts with them, else the lean settings.
+    """
+    terms, _, _ = engine_terms(model, settings)
+    _, startup_pool, full_sequence = _generation_pools(model, settings, terms, device)
+    if startup_pool >= full_sequence + KV_MARGIN_BYTES:
+        return settings
+    return lean_engine_settings(settings)
+
+
+def lean_engine_settings(settings: GenerationSettings) -> GenerationSettings:
+    """``settings`` with the memory-costly engine defaults it does not pin turned off.
+
+    :param settings: Rollout engine generation settings.
+    :return: The lean settings.
+    """
+    update: dict[str, object] = {"lora_dual_stream": False}
+    if settings.speculative_drafting is None:
+        update["speculative_drafting"] = False
+    if settings.max_num_batched_tokens is None:
+        update["max_num_batched_tokens"] = kv_cache.VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS
+    return settings.model_copy(update=update)
 
 
 def _kv_bar_components(
@@ -372,7 +497,7 @@ def _residency_bar_components(
             n_bytes=max(int(terms["mamba_state"]), 0),
             detail={
                 "recurrent_layers": arch.n_mamba_layers,
-                "state_blocks_per_seq": formulas.mamba_state_blocks_per_seq(arch),
+                "state_blocks_per_seq": kv_cache.mamba_state_blocks_per_seq(arch),
             },
             note=(
                 f"{arch.n_mamba_layers} recurrent layers against "
@@ -391,13 +516,108 @@ def _residency_bar_components(
             key="overhead",
             label="Overhead (CUDA context, runtime)",
             n_bytes=max(
-                int(device.context_bytes + job_overhead + terms["engine_runtime"]), 0
+                int(
+                    device.context_bytes
+                    + job_overhead
+                    + terms["engine_runtime"]
+                    + terms["step_buffers"]
+                ),
+                0,
             ),
             detail={
                 "cuda_context": int(device.context_bytes),
                 "job_overhead": int(job_overhead),
                 "engine_runtime": int(terms["engine_runtime"]),
+                "step_buffers": int(terms["step_buffers"]),
             },
+        ),
+    )
+
+
+def _lora_receive_buffer_component(
+    arch: ModelArch, settings: GenerationSettings
+) -> MemoryComponent:
+    """The NIXL buffer each rollout-engine GPU READs the adapter or merged weights into, or its ``nccl_reshard`` misc bucket."""
+    note = "Allocated after vLLM sizes the KV pool, outside gpu_memory_utilization."
+    if settings.lora_sync_scope is None:
+        return MemoryComponent(
+            key="lora_receive_buffer", label="LoRA receive buffer", n_bytes=0, note=note
+        )
+    dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
+    if settings.merged_lora_sync and settings.nccl_reshard_trainer_shards is not None:
+        bucket = lora_formulas.nccl_reshard_receive_bucket_bytes(
+            arch,
+            settings.lora_sync_scope,
+            lora_formulas.NcclReshardLayout(
+                settings.nccl_reshard_trainer_shards, settings.tensor_parallel_size
+            ),
+            dtype_bytes,
+        )
+        # The refit's bulk and misc groups and their transfer buffers: 3.0-4.2
+        # GiB past the misc bucket over merged NIXL on 8x H100 TP 2 engines
+        # (Qwen3.5-2B to Qwen3.8-27B); the largest is charged.
+        refit_groups = 4300 * MiB
+        return MemoryComponent(
+            key="lora_receive_buffer",
+            label="nccl_reshard misc receive bucket and groups",
+            n_bytes=bucket + refit_groups,
+            detail={"misc_bucket": bucket, "refit_groups": refit_groups},
+            note=f"{note} Bulk weights reshard into the live weights.",
+        )
+    if settings.merged_lora_sync:
+        return MemoryComponent(
+            key="lora_receive_buffer",
+            label="Merged weight receive buffer",
+            n_bytes=merged_sync_bucket_bytes(
+                *lora_formulas.merged_lora_sync_bytes(
+                    arch,
+                    settings.lora_sync_scope,
+                    settings.lora_packed_target_matrices,
+                    dtype_bytes,
+                )
+            ),
+            note=note,
+        )
+    return MemoryComponent(
+        key="lora_receive_buffer",
+        label="LoRA receive buffer",
+        n_bytes=lora_formulas.lora_sync_buffer_bytes(
+            arch,
+            settings.max_lora_rank,
+            settings.lora_sync_scope,
+            settings.lora_packed_target_matrices,
+            dtype_bytes,
+        ),
+        note=note,
+    )
+
+
+def _expert_lora_copy_component(
+    arch: ModelArch, settings: GenerationSettings
+) -> MemoryComponent:
+    """The expert ``lora_B`` copies vLLM keeps of the adapter read into the receive buffer.
+
+    :param arch: Engine-side model architecture.
+    :param settings: Generation settings.
+    :return: 0 bytes unless a rollout engine receives a packed-expert adapter.
+    """
+    receives_experts = (
+        settings.lora_sync_scope is not None
+        and not settings.merged_lora_sync
+        and settings.lora_packed_target_matrices > 0
+    )
+    params = (
+        lora_formulas.received_expert_lora_b_param_count(arch, settings.max_lora_rank)
+        if receives_experts
+        else 0
+    )
+    return MemoryComponent(
+        key="expert_lora_copy",
+        label="Expert LoRA copy",
+        n_bytes=int(params * DTYPE_BYTES[settings.weight_dtype]),
+        note=(
+            "vLLM re-lays the received expert lora_B per expert and keeps that "
+            "copy while the adapter is loaded, outside gpu_memory_utilization."
         ),
     )
 
@@ -419,3 +639,21 @@ def generation_can_serve(breakdown: PhaseBreakdown, kv_margin_bytes: int = 0) ->
     pool = kv.detail["pool"]
     demand = kv.detail["worst_case_demand"]
     return pool > 0 and demand + kv_margin_bytes <= pool
+
+
+def sequences_held(breakdown: PhaseBreakdown, requested: int) -> int:
+    """How many of ``requested`` sequences this generation bar can keep resident.
+
+    :param breakdown: Generation-phase breakdown.
+    :param requested: Sequences the engine was asked to hold.
+    :return: ``requested`` when the KV pool covers them, otherwise the share
+        of them the pool can hold.
+    """
+    kv = next((c for c in breakdown.components if c.key == "kv_cache"), None)
+    if kv is None:
+        return requested
+    demand = kv.detail["worst_case_demand"]
+    usable = max(kv.detail["pool"] - KV_MARGIN_BYTES, 0)
+    if demand <= usable:
+        return requested
+    return int(requested * usable / demand)

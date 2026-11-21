@@ -621,6 +621,45 @@ class TestCreatePopulation:
         not HAS_LLM_DEPENDENCIES,
         reason="agilerl[llm] not installed",
     )
+    def test_omitted_learning_rates_match_constructor_defaults(self, vector_space):
+        init_hp = {
+            "BATCH_SIZE": 2,
+            "BETA": 0.01,
+            "MAX_GRAD_NORM": 0.5,
+            "UPDATE_EPOCHS": 1,
+            "MAX_MODEL_LEN": 96,
+        }
+        actor = MagicMock(name="actor_network")
+        actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+        common = {
+            "observation_space": vector_space,
+            "action_space": copy.deepcopy(vector_space),
+            "net_config": None,
+            "INIT_HP": init_hp,
+            "hp_config": None,
+            "population_size": 1,
+            "device": "cpu",
+            "actor_network": actor,
+            "algo_kwargs": {"pad_token_id": 999, "pad_token": "<pad>"},
+        }
+
+        with (
+            patch("agilerl.utils.utils.clone_llm", return_value=MagicMock()),
+            patch("agilerl.utils.utils.LLMPPO") as mock_llmppo,
+            patch("agilerl.utils.utils.LLMREINFORCE") as mock_reinforce,
+        ):
+            create_population(algo="LLMPPO", **common)
+            common["action_space"] = copy.deepcopy(vector_space)
+            create_population(algo="LLMREINFORCE", **common)
+
+        assert mock_llmppo.call_args.kwargs["lr_actor"] == 1e-5
+        assert mock_llmppo.call_args.kwargs["lr_critic"] == 1e-4
+        assert mock_reinforce.call_args.kwargs["lr"] == 1e-5
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="agilerl[llm] not installed",
+    )
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES,
         reason="agilerl[llm] not installed",

@@ -18,8 +18,11 @@ import yaml
 
 from agilerl.arena import console
 from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
+from agilerl.arena.cli_agent import register_deployment_commands
+from agilerl.arena.cli_datasets import datasets_group
 from agilerl.arena.cli_manifest import handle_help_option
-from agilerl.arena.client import DATASET_CATEGORIES, MEMORY_SCOPES, MemoryScope
+from agilerl.arena.cli_secrets import secrets_group
+from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
 from agilerl.arena.inference import Agent, SessionInfo
@@ -35,13 +38,16 @@ from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.output import (
+    JSON_OUTPUT_META_KEY,
     emit_csv_preview,
+    emit_json_result,
     emit_result,
     emit_session_transcript,
+    json_output_enabled,
     select_row,
     supports_interactive_selection,
 )
-from agilerl.arena.utils import sort_dataset_search_by_downloads
+from agilerl.arena.snowflake.cli import snowflake_group
 
 ArenaError.enable_cli_mode()
 
@@ -53,6 +59,18 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
 @click.group(
     cls=ArenaRootGroup,
     add_help_option=False,
+    context_settings={"show_default": True},
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    envvar="ARENA_JSON",
+    help=(
+        "Print each result as one JSON document on stdout, with every field. "
+        "Progress, logs and errors go to stderr. Commands that stream text "
+        "(agent run/generate, sessions) stay as text."
+    ),
 )
 @click.option(
     "--api-key",
@@ -117,6 +135,7 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
 @click.pass_context
 def main(
     ctx: click.Context,
+    as_json: bool,
     api_key: str | None,
     org_key: str | None,
     external_user_id: str | None,
@@ -130,6 +149,7 @@ def main(
     module_catalog_public_key: str | None,
 ) -> None:
     """Arena CLI - Interact with the Arena RLOps platform directly from the command-line."""
+    ctx.meta[JSON_OUTPUT_META_KEY] = as_json
     ctx.obj = CommandConfig(
         api_key=api_key,
         org_key=org_key,
@@ -206,7 +226,7 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
         sys.exit(manifest_verdict.EXIT_FAILED)
 
     result = manifest_verdict.verdict(document)
-    if as_json:
+    if as_json or json_output_enabled():
         click.echo(json.dumps(result))
         return
     if not result["ok"]:
@@ -214,10 +234,67 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
             where = f"{error['path']}: " if error["path"] else ""
             click.echo(f"{where}{error['message']}", err=True)
         sys.exit(manifest_verdict.EXIT_INVALID)
+    for warning in result["warnings"]:
+        click.echo(f"warning: {warning}", err=True)
     if payload:
         click.echo(json.dumps(result["payload"], indent=2))
     else:
         click.echo(f"{manifest}: valid ({result['payload']['algorithm']['name']})")
+
+
+@manifest_group.command("template")
+@click.argument("algorithm")
+@click.option("--model", default=None, help="Catalog model id for an LLM algorithm.")
+@click.option("--dataset", default=None, help="Dataset name to fill in.")
+@click.option("--gym-env", default=None, help="Gym environment name to fill in.")
+@click.option(
+    "--gym-env-version",
+    default=None,
+    help="Gym environment version; required with --gym-env-entrypoint.",
+)
+@click.option("--gym-env-entrypoint", default=None, help="Gym entrypoint to fill in.")
+@click.option(
+    "--section",
+    type=click.Choice(
+        [
+            "algorithm",
+            "environment",
+            "mutation",
+            "network",
+            "replay_buffer",
+            "tournament_selection",
+            "training",
+        ]
+    ),
+    default=None,
+    help="Print one section instead of the whole manifest.",
+)
+@click.pass_obj
+def manifest_template(
+    config: CommandConfig,
+    algorithm: str,
+    model: str | None,
+    dataset: str | None,
+    gym_env: str | None,
+    gym_env_version: str | None,
+    gym_env_entrypoint: str | None,
+    section: str | None,
+) -> None:
+    """Print Arena's default manifest for ALGORITHM as YAML, ready to edit."""
+    with arena_client(config) as client:
+        spec = client.get_default_run_spec(
+            algorithm,
+            gym_env=gym_env,
+            gym_env_version=gym_env_version,
+            gym_env_entrypoint=gym_env_entrypoint,
+            dataset_name=dataset,
+            field=section,
+            pretrained_model_name_or_path=model,
+        )
+    if json_output_enabled():
+        emit_json_result(spec)
+    else:
+        click.echo(yaml.safe_dump(spec, sort_keys=False), nl=False)
 
 
 @manifest_group.command("schema")
@@ -239,6 +316,9 @@ def user_profile(
     """Get current authenticated user profile."""
     with arena_client(config) as client:
         user = client.get_current_user()
+        if json_output_enabled():
+            emit_json_result(user)
+            return
         click.echo(f"User: {user.get('first_name', '')} {user.get('last_name', '')}")
         click.echo(f"Email: {user.get('email', '')}")
 
@@ -266,19 +346,21 @@ def resources_list(config: CommandConfig) -> None:
         data = client.list_resources()
         tiers = data.get("tiers", {})
         sorted_tiers = sorted(tiers.values(), key=lambda t: t["price_per_node_hour"])
-        rows = [
-            {
-                "Resource ID": tier["name"],
-                "GPUs": f"{tier['num_gpus']}x {tier['gpu_type']}"
-                if tier.get("gpu_type")
-                else "—",
-                "CPUs": tier["num_cpus"],
-                "RAM (GB)": tier["ram_gb"],
-                "credits/node-hour": f"{tier['price_per_node_hour']:.2f}",
-            }
-            for tier in sorted_tiers
-        ]
-        emit_result(rows)
+        emit_result(
+            sorted_tiers,
+            display=lambda tiers: [
+                {
+                    "Resource ID": tier["name"],
+                    "GPUs": f"{tier['num_gpus']}x {tier['gpu_type']}"
+                    if tier.get("gpu_type")
+                    else "—",
+                    "CPUs": tier["num_cpus"],
+                    "RAM (GB)": tier["ram_gb"],
+                    "credits/node-hour": f"{tier['price_per_node_hour']:.2f}",
+                }
+                for tier in tiers
+            ],
+        )
 
 
 @main.group("env")
@@ -397,7 +479,7 @@ def env_validate(
     inferred from --source.
     """
     with arena_client(config) as client:
-        client.validate_environment(
+        result = client.validate_environment(
             name=name,
             version=version,
             source=source,
@@ -409,6 +491,7 @@ def env_validate(
             language_based=language_based,
             do_rollouts=do_rollouts,
         )
+    emit_json_result(result)
 
 
 _PROFILE_METRIC_LABELS: dict[str, str] = {
@@ -431,15 +514,24 @@ def _format_profile_metrics(raw: dict[str, float]) -> dict[str, str]:
 @env.command("profile")
 @click.argument("name")
 @click.option("--version", default=None, show_default=True)
+@click.option(
+    "--multi-agent/--single-agent",
+    "multi_agent",
+    default=None,
+    help="Override the stored multi-agent flag. Omit it to use the saved value.",
+)
 @click.pass_obj
 def env_profile(
     config: CommandConfig,
     name: str,
     version: str | None,
+    multi_agent: bool | None,
 ) -> None:
     """Profile a validated environment in Arena and get its resource requirements."""
     with arena_client(config) as client:
-        result = client.profile_environment(name=name, version=version)
+        result = client.profile_environment(
+            name=name, version=version, multi_agent=multi_agent
+        )
         if result:
             emit_result(
                 _format_profile_metrics(result),
@@ -488,140 +580,6 @@ def env_duplicate(
         )
 
 
-@main.group("datasets")
-def datasets_group() -> None:
-    """Manage your language model datasets in Arena."""
-
-
-@datasets_group.command("list")
-@click.option("--search", default=None, help="Search HuggingFace datasets.")
-@click.pass_obj
-def datasets_list(config: CommandConfig, search: str | None) -> None:
-    """List datasets registered for your organization."""
-    with arena_client(config) as client:
-        result = client.list_datasets(search=search)
-        if search is not None:
-            for res in result:
-                res.pop("description", None)
-            result = sort_dataset_search_by_downloads(result)
-
-        emit_result(result)
-
-
-@datasets_group.command("exists")
-@click.argument("name")
-@click.pass_obj
-def datasets_exists(config: CommandConfig, name: str) -> None:
-    """Check whether a dataset name exists in Arena."""
-    with arena_client(config) as client:
-        emit_result(client.dataset_exists(name=name))
-
-
-@datasets_group.command("create")
-@click.argument("name")
-@click.option(
-    "--category",
-    required=True,
-    type=click.Choice(sorted(DATASET_CATEGORIES), case_sensitive=False),
-    help="Dataset category.",
-)
-@click.option(
-    "--column-mapping",
-    default=None,
-    help="Column mapping as a JSON object string.",
-)
-@click.option(
-    "--column-mapping-file",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    default=None,
-    help="Path to a JSON file containing the column mapping.",
-)
-@click.option("--description", default=None, help="Optional description.")
-@click.option(
-    "--file",
-    "dataset_file",
-    type=click.Path(exists=True, dir_okay=True, path_type=Path),
-    default=None,
-    help="Local CSV or parquet file, or a Hugging Face parquet folder.",
-)
-@click.option(
-    "--config",
-    "parquet_config",
-    default=None,
-    help="Parquet config when --file is a folder with more than one config.",
-)
-@click.option(
-    "--hf-dataset",
-    "hf_dataset_name",
-    default=None,
-    help="HuggingFace dataset id to import.",
-)
-@click.option(
-    "--hf-config",
-    default=None,
-    help="HuggingFace dataset config (default on the server: default).",
-)
-@click.option(
-    "--hf-split",
-    default=None,
-    help="HuggingFace split (required when using --hf-dataset).",
-)
-@click.pass_obj
-def datasets_create(
-    config: CommandConfig,
-    name: str,
-    category: str,
-    column_mapping: str | None,
-    column_mapping_file: Path | None,
-    description: str | None,
-    dataset_file: Path | None,
-    parquet_config: str | None,
-    hf_dataset_name: str | None,
-    hf_config: str | None,
-    hf_split: str | None,
-) -> None:
-    """Create a dataset on Arena."""
-    mapping = (
-        column_mapping_file.read_text()
-        if column_mapping_file is not None
-        else column_mapping
-    )
-    if mapping is None:
-        msg = "Provide --column-mapping or --column-mapping-file."
-        raise click.UsageError(msg)
-    with arena_client(config) as client:
-        client.create_dataset(
-            name=name,
-            category=category,
-            column_mapping=mapping,
-            description=description,
-            file=dataset_file,
-            config=parquet_config,
-            hf_dataset_name=hf_dataset_name,
-            hf_config=hf_config,
-            hf_split=hf_split,
-        )
-
-
-@datasets_group.command("delete")
-@click.argument("name")
-@click.option(
-    "--yes",
-    is_flag=True,
-    default=False,
-    help="Confirm deletion without interactive prompt.",
-)
-@click.pass_obj
-def datasets_delete(
-    config: CommandConfig,
-    name: str,
-    yes: bool,
-) -> None:
-    """Archive a dataset by name."""
-    with arena_client(config) as client:
-        client.delete_dataset(name=name, confirm=yes)
-
-
 @main.group("models")
 def models_group() -> None:
     """List HuggingFace models in the Arena catalog."""
@@ -630,9 +588,13 @@ def models_group() -> None:
 @models_group.command("list")
 @click.pass_obj
 def models_list(config: CommandConfig) -> None:
-    """List HuggingFace models in the Arena catalog."""
+    """List HuggingFace models in the Arena catalog.
+
+    LoRA modules and ranks for one model: ``arena models info MODEL_NAME``.
+    """
     with arena_client(config) as client:
-        emit_result(client.list_models())
+        rows = client.list_models()
+    emit_result(rows, display=lambda rows: [_model_summary_row(row) for row in rows])
 
 
 @models_group.command("supported")
@@ -667,14 +629,38 @@ def experiment() -> None:
 @click.option(
     "--resource-id",
     type=str,
-    default="arena-medium",
-    help="Arena cluster type to submit the experiment to.",
+    default=None,
+    help=(
+        "Arena cluster type to submit the experiment to. Omit every resource "
+        "flag to let Arena pick the cheapest fit."
+    ),
 )
 @click.option(
     "--num-nodes",
     type=int,
-    default=2,
-    help="Number of nodes to use for the experiment.",
+    default=None,
+    help=(
+        "Number of nodes to use for the experiment. Omit every resource flag "
+        "to let Arena pick the cheapest fit."
+    ),
+)
+@click.option(
+    "--num-gpus",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Total GPUs. Arena uses the fewest nodes. Not combinable with "
+        "--resource-id or --num-nodes."
+    ),
+)
+@click.option(
+    "--gpu-type",
+    type=str,
+    default=None,
+    help=(
+        "Short GPU name such as h100-80, b200 or l4. Not combinable with "
+        "--resource-id or --num-nodes."
+    ),
 )
 @click.option(
     "--project",
@@ -693,8 +679,8 @@ def experiment() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help=(
-        "Python reward function for reasoning dataset jobs (multipart submit). "
-        "Required when the manifest targets a reasoning dataset."
+        "Python rubric or reward function scoring a rollout job (multipart "
+        "submit). Required when the manifest targets a reasoning dataset."
     ),
 )
 @click.option(
@@ -705,28 +691,40 @@ def experiment() -> None:
         "answer from the first dataset row when omitted."
     ),
 )
+@click.option(
+    "--idempotency-key",
+    default=None,
+    help="Reuse this key to replay the same submit instead of starting another job.",
+)
 @click.pass_obj
 def experiment_submit(
     config: CommandConfig,
     manifest: Path,
     resource_id: str | None,
     num_nodes: int | None,
+    num_gpus: int | None,
+    gpu_type: str | None,
     project: str | None,
     experiment_name: str | None,
     reward_file: Path | None,
     completion: str | None,
+    idempotency_key: str | None,
 ) -> None:
     """Submit an experiment from a manifest."""
     with arena_client(config) as client:
-        client.submit_experiment(
+        result = client.submit_experiment(
             manifest=manifest,
             resource_id=resource_id,
             num_nodes=num_nodes,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
             project=project,
             experiment_name=experiment_name,
             reward_file=reward_file,
             completion=completion,
+            idempotency_key=idempotency_key,
         )
+    emit_json_result(result)
 
 
 @experiment.command("list")
@@ -739,7 +737,13 @@ def experiment_submit(
 def experiment_list(config: CommandConfig, project: str | None) -> None:
     """List experiments in a project."""
     with arena_client(config) as client:
-        emit_result(client.list_experiments(project=project))
+        rows = client.list_experiments(project=project)
+    emit_result(
+        rows,
+        empty_message=(
+            "No experiments yet. Submit one with: arena experiments submit <manifest>"
+        ),
+    )
 
 
 @experiment.command("resume")
@@ -750,17 +754,39 @@ def experiment_list(config: CommandConfig, project: str | None) -> None:
     required=True,
     help="Maximum training steps for the resumed run.",
 )
+@click.option(
+    "--checkpoint",
+    default=None,
+    help="Checkpoint to resume from. Omit it to use the best checkpoint.",
+)
+@click.option(
+    "--new-name",
+    default=None,
+    help="Name for the resumed experiment.",
+)
+@click.option(
+    "--project",
+    default=None,
+    help="Project, when the experiment name exists in more than one.",
+)
 @click.pass_obj
 def experiment_resume(
     config: CommandConfig,
     experiment_name: str,
     max_steps: int,
+    checkpoint: str | None,
+    new_name: str | None,
+    project: str | None,
 ) -> None:
     """Resume an experiment by name."""
     with arena_client(config) as client:
         emit_result(
             client.resume_experiment(
-                experiment_name=experiment_name, max_steps=max_steps
+                experiment_name=experiment_name,
+                max_steps=max_steps,
+                checkpoint=checkpoint,
+                new_name=new_name,
+                project=project,
             )
         )
 
@@ -787,7 +813,11 @@ def experiment_checkpoints(
     """List checkpoints for an experiment."""
     with arena_client(config) as client:
         rows = client.list_checkpoints(experiment_name=experiment_name)
-        emit_result(_format_checkpoint_rows_for_display(rows))
+    emit_result(
+        rows,
+        display=_format_checkpoint_rows_for_display,
+        empty_message=f"No checkpoints for {experiment_name}.",
+    )
 
 
 @experiment.command("metrics")
@@ -856,6 +886,19 @@ def _redact_agent_rows_for_display(
             copy_row["spec"] = spec_copy
         out.append(copy_row)
     return out
+
+
+def _model_summary_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One catalog row reduced to the columns that fit a terminal table."""
+    num_params = row.get("num_params")
+    return {
+        "model": row["model_name"],
+        "params": f"{num_params / 1e9:.2f}B" if num_params else "—",
+        "max_context": row.get("max_context_length") or "—",
+        "status": "disabled"
+        if row.get("enabled") is False
+        else row.get("status") or "—",
+    }
 
 
 def _format_checkpoint_rows_for_display(
@@ -977,7 +1020,15 @@ def agent_list(
             experiment_name=experiment_name,
             project_name=project_name,
         )
-        emit_result(_redact_agent_rows_for_display(rows))
+    filtered = name or experiment_name or project_name
+    emit_result(
+        _redact_agent_rows_for_display(rows),
+        empty_message=(
+            "No deployed agents match those filters."
+            if filtered
+            else "No deployed agents. Deploy one with: arena agent deploy <experiment>"
+        ),
+    )
 
 
 @agent_cli.command("deploy")
@@ -995,24 +1046,47 @@ def agent_list(
     help="Who an LLM deployment keeps chat sessions for. New deployments default "
     "to 'user'. Redeploying without this flag keeps the stored scope.",
 )
+@click.option(
+    "--num-gpus",
+    type=click.IntRange(min=1),
+    default=None,
+    help="GPUs on the deployment's node.",
+)
+@click.option(
+    "--gpu-type",
+    type=str,
+    default=None,
+    help="Short GPU name such as h100-80, b200 or l4.",
+)
 @click.pass_obj
 def agent_deploy(
     config: CommandConfig,
     experiment_name: str,
     checkpoint: str | None,
     memory_scope: MemoryScope | None,
+    num_gpus: int | None,
+    gpu_type: str | None,
 ) -> None:
     """Deploy an agent from an experiment checkpoint.
 
     A deployment's memory scope is fixed once it exists, so ``--memory-scope``
     only takes effect on the first deploy.
+
+    ``--num-gpus`` and ``--gpu-type`` are for LLM agents. Without them, a redeploy
+    keeps the agent's resources and a new deployment uses Arena's default.
     """
     with arena_client(config) as client:
-        client.deploy_agent(
+        result = client.deploy_agent(
             experiment_name=experiment_name,
             checkpoint=checkpoint,
             memory_scope=memory_scope,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
         )
+    emit_json_result(result)
+
+
+register_deployment_commands(agent_cli)
 
 
 @agent_cli.command("run")
@@ -1151,12 +1225,10 @@ def agent_sessions_list(
             }
             for session in agent.list_sessions()
         ]
-        if not rows:
-            console.print(f"No chat sessions on {deployment} yet.")
-            return
         emit_result(
             rows,
             columns=["Current", *SESSION_COLUMNS],
+            empty_message=f"No chat sessions on {deployment} yet.",
         )
 
 
@@ -1388,7 +1460,9 @@ def projects_get_default(config: CommandConfig) -> None:
     """Show the current default project."""
     with arena_client(config) as client:
         project = client.get_default_project()
-    if project:
+    if json_output_enabled():
+        emit_json_result({"project": project})
+    elif project:
         click.echo(project)
     else:
         click.echo("No default project set. Use 'arena projects set-default <name>'.")
@@ -1409,10 +1483,17 @@ def load_cli_plugins(group: click.Group) -> None:
         plugin.load()(group)
 
 
+main.add_command(datasets_group)
 main.add_command(memory_group)
-load_cli_plugins(main)
-register_byoc_manifest_group(main)
-
+main.add_command(secrets_group)
+main.add_command(snowflake_group)
 
 if __name__ == "__main__":
-    main()
+    # Plugins import agilerl.arena.cli, a second copy of this module under
+    # ``-m``; run that copy's group, which loads them once.
+    from agilerl.arena.cli import main as package_main
+
+    package_main()
+else:
+    load_cli_plugins(main)
+    register_byoc_manifest_group(main)

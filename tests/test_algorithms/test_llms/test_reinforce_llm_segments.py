@@ -26,18 +26,19 @@ from peft import LoraConfig
 
 from agilerl.algorithms import reinforce_llm
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
+from agilerl.components.llm_rollout_data import EpisodeSegments
+from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES, masked_mean
 from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
     optimizer_state,
-    record_outputs,
+    record_calls,
     scale_losses,
+    score_every_token,
     trainable_weights,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
-    MEAN_SEGMENT_ROW_ACTION_TOKENS,
     balanced_learn_worker,
     episode_sampling_logps,
     episode_sampling_supports,
@@ -49,7 +50,6 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     record_step_gradients,
     rows_from_other_ranks,
     segment_experiences,
-    use_fake_liger_policy_loss,
 )
 
 PAD_TOKEN_ID = 63
@@ -85,9 +85,7 @@ def _make_reinforce(**overrides: Any) -> REINFORCE:
         ),
         **overrides,
     }
-    agent = REINFORCE(**kwargs)
-    agent.liger_loss = False
-    return agent
+    return REINFORCE(**kwargs)
 
 
 def _experiences() -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
@@ -101,7 +99,11 @@ class TestREINFORCELearnEpisodeSegments:
         before = lora_weights(agent)
 
         # Act
-        metrics = agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        metrics = agent.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
 
         # Assert
         for key in ("loss", "pg_loss", "kl", "entropy"):
@@ -109,15 +111,8 @@ class TestREINFORCELearnEpisodeSegments:
         after = lora_weights(agent)
         assert any(not torch.equal(after[name], before[name]) for name in before)
 
-    @pytest.mark.parametrize(
-        "sampling_logps",
-        [None, episode_sampling_logps(PAD_TOKEN_ID)],
-        ids=["no_sampling_logps", "sampling_logps"],
-    )
     def test_one_micro_batch_matches_the_unsegmented_gradient(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        sampling_logps: list[torch.Tensor | None] | None,
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: every row fits one micro-batch, so the episode returns and the
         # token-mean loss cover the same action tokens either way.
@@ -132,10 +127,12 @@ class TestREINFORCELearnEpisodeSegments:
         segmented_grads = record_step_gradients(segmented, monkeypatch)
 
         # Act
-        unsegmented.learn(_experiences(), sampling_logps=sampling_logps)
+        unsegmented.learn(
+            _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+        )
         segmented.learn(
             _experiences(),
-            sampling_logps=sampling_logps,
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
             episode_segments=EPISODE_SEGMENTS,
         )
 
@@ -160,9 +157,17 @@ class TestREINFORCELearnEpisodeSegments:
         padded_grads = record_step_gradients(padded, monkeypatch)
 
         # Act
-        alone.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        alone.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
         pad_to_eight_rows(monkeypatch)
-        padded_metrics = padded.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        padded_metrics = padded.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
 
         # Assert
         assert padded_metrics["train_rows_padded"] == pytest.approx(8.0)
@@ -176,24 +181,6 @@ class TestREINFORCELearnEpisodeSegments:
         for key in ("loss", "pg_loss", "kl", "entropy"):
             assert math.isfinite(padded_metrics[key]), key
 
-    def test_liger_metrics_leave_out_filler_micro_batches(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: the Liger kernel reports each micro-batch's action tokens as
-        # its KL; 6 real 1-row micro-batches pad to 8 for a simulated second rank.
-        agent = _make_reinforce(micro_batch_size_per_gpu=1, mini_batch_size=4)
-        use_fake_liger_policy_loss(
-            agent, monkeypatch, "agilerl.algorithms.reinforce_llm"
-        )
-        pad_to_eight_rows(monkeypatch)
-
-        # Act
-        metrics = agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
-
-        # Assert
-        assert metrics["train_rows_padded"] == pytest.approx(8.0)
-        assert metrics["kl"] == pytest.approx(MEAN_SEGMENT_ROW_ACTION_TOKENS)
-
     def test_rows_from_other_ranks_train_to_the_same_gradient(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -204,12 +191,20 @@ class TestREINFORCELearnEpisodeSegments:
         dealt_grads = record_step_gradients(dealt, monkeypatch)
 
         # Act
-        local_metrics = local.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        local_metrics = local.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.balance_rows_across_ranks",
             rows_from_other_ranks,
         )
-        dealt_metrics = dealt.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        dealt_metrics = dealt.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
 
         # Assert
         assert len(local_grads) == len(dealt_grads) == 1
@@ -230,8 +225,16 @@ class TestREINFORCELearnEpisodeSegments:
         all_none = _make_reinforce()
 
         # Act
-        unset_metrics = unset.learn(_experiences(), episode_segments=None)
-        all_none_metrics = all_none.learn(_experiences(), episode_segments=[None] * 4)
+        unset_metrics = unset.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=None,
+        )
+        all_none_metrics = all_none.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=[None] * 4,
+        )
 
         # Assert
         timings = set(LEARN_PHASE_METRIC_NAMES)
@@ -250,7 +253,11 @@ class TestREINFORCELearnEpisodeSegments:
         with pytest.raises(
             ValueError, match="episode_segments has 3 entries for 4 episodes"
         ):
-            agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS[:3])
+            agent.learn(
+                _experiences(),
+                sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+                episode_segments=EPISODE_SEGMENTS[:3],
+            )
 
     def test_trajectory_importance_sampling_is_rejected(self) -> None:
         agent = _make_reinforce(importance_sampling_level="trajectory")
@@ -258,7 +265,11 @@ class TestREINFORCELearnEpisodeSegments:
         with pytest.raises(
             ValueError, match="Set importance_sampling_level='token' or 'turn'"
         ):
-            agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+            agent.learn(
+                _experiences(),
+                sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+                episode_segments=EPISODE_SEGMENTS,
+            )
 
 
 def scale_surrogate_losses(
@@ -267,9 +278,43 @@ def scale_surrogate_losses(
     """Make each policy surrogate loss carry the next scale."""
     monkeypatch.setattr(
         reinforce_llm,
-        "clipped_is_surrogate",
-        scale_losses(reinforce_llm.clipped_is_surrogate, scales),
+        "clipped_token_surrogate",
+        scale_losses(reinforce_llm.clipped_token_surrogate, scales),
     )
+
+
+class TestREINFORCELearnScoredTokenHead:
+    def test_gradient_matches_the_full_head(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        full = _make_reinforce()
+        scored = _make_reinforce()
+        score_every_token(full, monkeypatch)
+        full_grads = record_step_gradients(full, monkeypatch)
+        scored_grads = record_step_gradients(scored, monkeypatch)
+
+        # Act
+        full.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
+        scored.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
+
+        # Assert
+        assert len(full_grads) == len(scored_grads) == 1
+        assert any(grad.abs().sum() > 0 for grad in full_grads[0].values())
+        for name, grad in full_grads[0].items():
+            # The head sees the scored rows as one flat row; fp32 GEMM
+            # blocking follows the row count.
+            torch.testing.assert_close(
+                scored_grads[0][name], grad, rtol=1e-5, atol=1e-7, msg=name
+            )
 
 
 @pytest.mark.skipif(
@@ -284,10 +329,18 @@ class TestREINFORCELearnBalancedAcrossRanks:
         # step averages rank 0's 4 local rows and rank 1's 2. Without a
         # reachable clip norm the step gradient is linear in the rows.
         make_agent = partial(_make_reinforce, max_grad_norm=1e30)
-        rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
+        rank0, rank1 = rank_local_step_gradients(
+            make_agent, monkeypatch, sampling_ranks=(0, 1)
+        )
 
         # Act
-        reports = run_ranks(balanced_learn_worker, 2, make_agent, backend=None)
+        reports = run_ranks(
+            balanced_learn_worker,
+            2,
+            make_agent,
+            partial(learn_rank_episodes, sampling_ranks=(0, 1)),
+            backend=None,
+        )
 
         # Assert: 4 and 2 rows are dealt out as 3 and 3.
         for padded_rows, steps in reports:
@@ -304,45 +357,12 @@ class TestREINFORCELearnBalancedAcrossRanks:
                     msg=lambda detail, name=name: f"{name}\n{detail}",
                 )
 
-    def test_sampling_log_probs_on_one_rank_reweight_only_its_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: only rank 0's episodes carry vLLM sampling log-probs, and
-        # one of its rows trains on rank 1.
-        make_agent = partial(_make_reinforce, max_grad_norm=1e30)
-        uncorrected, _ = rank_local_step_gradients(make_agent, monkeypatch)
-        rank0, rank1 = rank_local_step_gradients(
-            make_agent, monkeypatch, sampling_ranks=(0,)
-        )
-
-        # Act
-        reports = run_ranks(
-            balanced_learn_worker,
-            2,
-            make_agent,
-            partial(learn_rank_episodes, sampling_ranks=(0,)),
-            backend=None,
-        )
-
-        # Assert
-        assert any(not torch.allclose(rank0[name], uncorrected[name]) for name in rank0)
-        for padded_rows, steps in reports:
-            assert padded_rows == pytest.approx(3.0)
-            assert len(steps) == 1
-            for name in rank0:
-                # fp32 sums over a different micro-batch order and rank split.
-                torch.testing.assert_close(
-                    torch.from_numpy(steps[0][name]),
-                    (4 * rank0[name] + 2 * rank1[name]) / 6,
-                    rtol=1e-5,
-                    atol=1e-5,
-                    msg=lambda detail, name=name: f"{name}\n{detail}",
-                )
-
     def test_a_non_finite_loss_on_one_rank_raises_on_every_rank(self) -> None:
         # Arrange: every loss of rank 0 is NaN, every loss of rank 1 finite.
         learn = partial(
-            learn_with_nan_loss_on_rank_zero, scale_loss=scale_surrogate_losses
+            learn_with_nan_loss_on_rank_zero,
+            scale_loss=scale_surrogate_losses,
+            sampling_ranks=(0, 1),
         )
 
         # Act
@@ -361,17 +381,29 @@ class TestREINFORCELearnMetrics:
     def test_metrics_are_means_of_the_micro_batch_losses(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange: one optimizer step of four 1-row micro-batches.
-        agent = _make_reinforce(micro_batch_size_per_gpu=1)
-        surrogate, outputs = record_outputs(reinforce_llm.clipped_is_surrogate)
-        monkeypatch.setattr(reinforce_llm, "clipped_is_surrogate", surrogate)
+        # Arrange: one optimizer step of four 1-row micro-batches. The
+        # fixture's sampling log-probs are far from the policy's, so no
+        # off-policy mask keeps each loss its surrogate mean.
+        agent = _make_reinforce(
+            micro_batch_size_per_gpu=1, off_policy_token_mask_bounds=None
+        )
+        surrogate, calls = record_calls(reinforce_llm.clipped_token_surrogate)
+        monkeypatch.setattr(reinforce_llm, "clipped_token_surrogate", surrogate)
 
         # Act
-        metrics = agent.learn(_experiences())
+        metrics = agent.learn(
+            _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+        )
 
         # Assert
-        assert len(outputs) == 4
-        mean_loss = sum(loss.item() for loss, _ in outputs) / 4
+        assert len(calls) == 4
+        mean_loss = (
+            sum(
+                masked_mean(token_loss, args[2]).item()
+                for args, _kwargs, (token_loss, _clipped) in calls
+            )
+            / 4
+        )
         assert metrics["loss"] == pytest.approx(mean_loss, rel=1e-6)
         assert metrics["pg_loss"] == pytest.approx(mean_loss, rel=1e-6)
 
@@ -382,13 +414,13 @@ class TestREINFORCELearnNonFiniteLoss:
         agent = _make_reinforce(micro_batch_size_per_gpu=1)
         monkeypatch.setattr(
             reinforce_llm,
-            "clipped_is_surrogate",
-            scale_losses(reinforce_llm.clipped_is_surrogate, iter([1.0] * 4)),
+            "clipped_token_surrogate",
+            scale_losses(reinforce_llm.clipped_token_surrogate, iter([1.0] * 4)),
         )
         before = trainable_weights(agent.actor)
 
         # Act
-        agent.learn(_experiences())
+        agent.learn(_experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID))
 
         # Assert
         after = trainable_weights(agent.actor)
@@ -410,16 +442,18 @@ class TestREINFORCELearnNonFiniteLoss:
         scales = iter([1.0] * 4 + window_scales)
         monkeypatch.setattr(
             reinforce_llm,
-            "clipped_is_surrogate",
-            scale_losses(reinforce_llm.clipped_is_surrogate, scales),
+            "clipped_token_surrogate",
+            scale_losses(reinforce_llm.clipped_token_surrogate, scales),
         )
-        agent.learn(_experiences())
+        agent.learn(_experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID))
         before = trainable_weights(agent.actor)
         state_before = optimizer_state(agent.optimizer)
 
         # Act
         with pytest.raises(ValueError, match="Loss is not finite"):
-            agent.learn(_experiences())
+            agent.learn(
+                _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+            )
 
         # Assert: it raises at the window's last micro-batch, before the step.
         assert list(scales) == []
@@ -441,13 +475,15 @@ class TestREINFORCELearnNonFiniteLoss:
         scales = iter([1.0, 1.0, 1.0, float("nan")])
         monkeypatch.setattr(
             reinforce_llm,
-            "clipped_is_surrogate",
-            scale_losses(reinforce_llm.clipped_is_surrogate, scales),
+            "clipped_token_surrogate",
+            scale_losses(reinforce_llm.clipped_token_surrogate, scales),
         )
 
         # Act / Assert
         with pytest.raises(ValueError, match="Loss is not finite"):
-            agent.learn(_experiences())
+            agent.learn(
+                _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+            )
         assert list(scales) == []
 
 
@@ -457,7 +493,9 @@ class TestREINFORCELearnPhaseTimings:
         agent = _make_reinforce()
 
         # Act
-        metrics = agent.learn(_experiences())
+        metrics = agent.learn(
+            _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+        )
 
         # Assert
         assert set(LEARN_PHASE_METRIC_NAMES) <= set(metrics)
@@ -486,11 +524,13 @@ class TestREINFORCELearnSamplingSupports:
     def test_segment_rows_match_the_unsegmented_gradient(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange
+        # Arrange: the fixture's sampling log-probs are far from the policy's,
+        # so the off-policy mask would zero every token.
         overrides = {
             "batch_size": 8,
             "micro_batch_size_per_gpu": 8,
             "mini_batch_size": 8,
+            "off_policy_token_mask_bounds": None,
         }
         unsegmented = _make_reinforce(**overrides)
         segmented = _make_reinforce(**overrides)
@@ -515,3 +555,81 @@ class TestREINFORCELearnSamplingSupports:
             assert torch.allclose(
                 segmented_grads[0][name], grad, rtol=1e-5, atol=1e-7
             ), name
+
+
+def _record_no_grad_forwards(
+    agent: REINFORCE, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[tuple[Any, ...], dict[str, Any], Any]]:
+    recorded, calls = record_calls(agent._fused_forward_no_grad)
+    monkeypatch.setattr(agent, "_fused_forward_no_grad", recorded)
+    return calls
+
+
+class TestREINFORCELearnNoGradRows:
+    """The learn-start forward runs only for the KL reward penalty."""
+
+    @pytest.mark.parametrize(
+        "episode_segments", [None, EPISODE_SEGMENTS], ids=["episodes", "segments"]
+    )
+    def test_without_kl_skips_the_no_grad_forward(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        episode_segments: list[EpisodeSegments | None] | None,
+    ) -> None:
+        # Arrange
+        agent = _make_reinforce(beta=0.0)
+        calls = _record_no_grad_forwards(agent, monkeypatch)
+
+        # Act
+        metrics = agent.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=episode_segments,
+        )
+
+        # Assert
+        assert calls == []
+        assert math.isfinite(metrics["loss"])
+        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert math.isfinite(metrics["vllm_is_delta_mean"])
+
+    def test_kl_penalty_scores_reference_and_actor_on_every_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = _make_reinforce(beta=0.01)
+        calls = _record_no_grad_forwards(agent, monkeypatch)
+
+        # Act
+        metrics = agent.learn(
+            _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+        )
+
+        # Assert
+        ((args, kwargs, _),) = calls
+        assert args[0].shape[0] == 4
+        assert kwargs["include_reference"] is True
+        assert kwargs.get("include_actor", True) is True
+        assert math.isfinite(metrics["loss"])
+
+    def test_a_row_without_sampling_log_probs_raises(self) -> None:
+        agent = _make_reinforce()
+        logps = episode_sampling_logps(PAD_TOKEN_ID)
+
+        with pytest.raises(
+            ValueError,
+            match=r"REINFORCE needs sampling_logps on every action token; row 2 has none, expected 4\.",
+        ):
+            agent.learn(
+                _experiences(), sampling_logps=[logps[0], logps[1], None, logps[3]]
+            )
+
+    def test_a_short_row_raises(self) -> None:
+        agent = _make_reinforce()
+        logps = episode_sampling_logps(PAD_TOKEN_ID)
+
+        with pytest.raises(ValueError, match=r"row 1 has 5, expected 6\."):
+            agent.learn(
+                _experiences(),
+                sampling_logps=[logps[0], logps[1][:-1], logps[2], logps[3]],
+            )

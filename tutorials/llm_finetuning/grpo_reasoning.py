@@ -154,7 +154,6 @@ def main():
             "gate_proj",
         ],
         task_type="CAUSAL_LM",
-        lora_dropout=0.05,
     )
 
     # Instantiate the grpo agent

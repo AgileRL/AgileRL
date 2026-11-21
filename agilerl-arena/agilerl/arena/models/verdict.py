@@ -6,13 +6,16 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
-from agilerl.arena.models import __version__
+from agilerl.arena.models import LLMAlgorithmSpec, __version__
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.registry import did_you_mean
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -73,6 +76,37 @@ def read_manifest(source: str) -> dict[str, Any]:
     return TrainingManifest.load(source)
 
 
+def model_warnings(manifest: TrainingManifest) -> list[str]:
+    """Warn when an LLM manifest's model is outside the Arena catalog, deprecated or in preview.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one warning.
+    :rtype: list[str]
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, LLMAlgorithmSpec):
+        return []
+    hub_id = algorithm.pretrained_model_name_or_path
+    if hub_id is None:
+        return []
+    info = SUPPORTED_MODEL_INFO.get(hub_id)
+    if info is not None:
+        notice = info.status_notice
+        return [notice] if notice else []
+    # A path prefix, or a checkout that already has config.json, is not a Hub id.
+    if (
+        hub_id.startswith((".", "/", "~"))
+        or (Path(hub_id).expanduser() / "config.json").is_file()
+    ):
+        return []
+    msg = (
+        f"Model {hub_id} is not in the Arena supported model catalog; "
+        f"see 'arena models supported'.{did_you_mean(hub_id, SUPPORTED_MODEL_INFO)}"
+    )
+    return [msg]
+
+
 def verdict(document: dict[str, Any]) -> dict[str, Any]:
     """Validate *document* and report the outcome as one JSON-safe record.
 
@@ -84,10 +118,16 @@ def verdict(document: dict[str, Any]) -> dict[str, Any]:
     try:
         manifest = TrainingManifest.model_validate(document)
     except (ValidationError, ValueError) as err:
-        return {"ok": False, "errors": errors(err), "manifest_version": __version__}
+        return {
+            "ok": False,
+            "errors": errors(err),
+            "warnings": [],
+            "manifest_version": __version__,
+        }
     return {
         "ok": True,
         "payload": manifest.to_payload(),
+        "warnings": model_warnings(manifest),
         "manifest_version": __version__,
     }
 
@@ -98,6 +138,7 @@ __all__ = [
     "EXIT_OK",
     "errors",
     "loc_to_path",
+    "model_warnings",
     "read_manifest",
     "verdict",
 ]

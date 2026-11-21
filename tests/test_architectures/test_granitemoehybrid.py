@@ -17,6 +17,4 @@ class TestGranitemoehybridRuntimeConfig:
         assert "hf_overrides" not in vllm_kwargs
 
     def test_tool_calls_use_the_tool_call_tag_parser(self) -> None:
-        assert FAMILY_RUNTIME_CONFIGS["granitemoehybrid"].tool_call_parser == (
-            "tool_call"
-        )
+        assert FAMILY_RUNTIME_CONFIGS["granitemoehybrid"].chat_format == ("tool_call")

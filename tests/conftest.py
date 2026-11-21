@@ -8,6 +8,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 
 # xdist workers already fill the CPUs. Per-worker OpenMP pools on top of that
 # contend for cores and run the suite 2-4x slower. Set before numpy/torch load.
@@ -289,6 +290,38 @@ def cleanup():
     # Only run garbage collection every 10 tests
     if cleanup.call_count % 5 == 0:
         gc.collect()
+
+
+def hf_modeling_modules() -> list[ModuleType]:
+    """HF modeling modules imported so far."""
+    return [
+        module
+        for name, module in list(sys.modules.items())
+        if name.startswith("transformers.models.") and ".modeling_" in name
+    ]
+
+
+@pytest.fixture(scope="session")
+def hf_modeling_attrs() -> dict[ModuleType, dict[str, object]]:
+    """Attributes of the HF modeling modules imported at collection."""
+    return {module: dict(vars(module)) for module in hf_modeling_modules()}
+
+
+@pytest.fixture(autouse=True)
+def restore_hf_modeling_modules(
+    hf_modeling_attrs: dict[ModuleType, dict[str, object]],
+) -> Iterator[None]:
+    """Undo module-level class swaps, such as Liger's, on loaded HF modeling modules."""
+    # Session scope captures the modules before module-scoped fixtures patch them.
+    for module in hf_modeling_modules():
+        hf_modeling_attrs.setdefault(module, dict(vars(module)))
+
+    yield
+
+    for module, attrs in hf_modeling_attrs.items():
+        for attr, value in attrs.items():
+            if vars(module).get(attr) is not value:
+                setattr(module, attr, value)
 
 
 @pytest.fixture(scope="session", autouse=True)

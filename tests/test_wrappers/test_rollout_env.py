@@ -45,6 +45,7 @@ def test_max_prompt_tokens_for_model_len() -> None:
 
 
 class _ChrTokenizer:
+    name_or_path = "chr"
     pad_token_id = 0
     pad_token = "<pad>"
     unk_token_id = None
@@ -1373,6 +1374,7 @@ class TestFeedbackTerminatorDedupe:
         w._max_model_len = None
         w._turn_idx = 0
         w.turn_rewards = []
+        w.rubric_score_sums = {}
         w.turn_boundaries = []
         # Frame whose prefix begins with the terminator (chr(7) encodes to id 7).
         w._boundary_parts = {("user",): ("\x07U:", ":A")}
@@ -1523,7 +1525,7 @@ class TestBatchRolloutEnvHelpers:
         vec.rubric_component_names = ("fmt", "correct", "missing")
         means = vec.get_rubric_score_means()
         assert means["fmt"] == 2.0
-        assert means["correct"] == 2.0
+        assert means["correct"] == 1.0  # e1 was kept from it: counts as 0
         assert means["missing"] != means["missing"]  # NaN
 
 
@@ -1814,7 +1816,9 @@ class TestBatchRolloutEnvPerEpisode:
         assert seen == [_mix_seed(12)] * 2 + [_mix_seed(13)] * 2
 
     def test_dataset_rows_are_group_contiguous(self) -> None:
-        vec_env = self._collector(env_factory=_RowRecordingEnv)
+        vec_env = self._collector(
+            env_factory=_RowRecordingEnv, adaptive_task_sampling=False
+        )
         for i in range(4):
             vec_env.reset_episode(f"ep{i}", logical_slot=i)
         rows = [env.row_calls[-1] for env in vec_env.envs]

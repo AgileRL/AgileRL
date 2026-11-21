@@ -31,10 +31,15 @@ PROVISIONER_SERVICE_ACCOUNT = "arena-byoc-provisioner"
 PROVISIONER_ROLE = "admin"
 
 
+def region_project_name(cluster_name: str, region: str) -> str:
+    """Return the ephemeral IAM project name for one cluster in one region."""
+    return f"{cluster_name}-{region}"
+
+
 def ensure_ephemeral_regions(
     spec: ClusterSpec, run: NebiusRun = subprocess.run
 ) -> None:
-    """Ensure an ``arena-{region}`` project for every region this tenant uses.
+    """Ensure a ``{cluster}-{region}`` project for every region this tenant uses.
 
     :param spec: Cluster spec. No-op unless ``values.placement`` is ephemeral.
     :param run: Subprocess runner for the Nebius CLI.
@@ -66,7 +71,7 @@ def ensure_ephemeral_regions(
         )
         raise click.ClickException(msg)
     click.echo(f"Ensuring ephemeral Nebius projects for {', '.join(regions)}.")
-    provisioner_id = _provisioner_service_account(default_project_ids, run)
+    provisioner_id = _provisioner_service_account(spec, default_project_ids, run)
     provisioners_group_id = _ensure_named(
         ["iam", "group"],
         PROVISIONERS_GROUP,
@@ -75,27 +80,42 @@ def ensure_ephemeral_regions(
     )
     _ensure_membership(provisioners_group_id, provisioner_id, run)
     for region in regions:
-        project_id = _ensure_region_project(cloud.tenant_id, region, run)
+        project_id = _ensure_region_project(spec.name, cloud.tenant_id, region, run)
         _ensure_tunnel_agent(project_id, run)
         _ensure_permit(provisioners_group_id, PROVISIONER_ROLE, project_id, run)
+
+
+def cluster_region_project_ids(
+    spec: ClusterSpec, run: NebiusRun = subprocess.run
+) -> list[str]:
+    """Return this cluster's ``{cluster}-{region}`` project ids."""
+    return [
+        _resource_id(project)
+        for project in _nebius_list_items(
+            ["iam", "project", "list", "--parent-id", spec.nebius_cloud().tenant_id],
+            run=run,
+        )
+        if _is_region_project(project, spec.name)
+    ]
 
 
 def delete_ephemeral_regions(
     spec: ClusterSpec, run: NebiusRun = subprocess.run
 ) -> None:
-    """Delete ``arena-{region}`` projects and the tenant provisioners group.
+    """Delete this cluster's region projects, leaving the shared provisioners group while another cluster has one.
 
-    :param spec: Cluster spec. The existing provisioner service account is kept.
+    :param spec: Cluster spec. The provisioner service account is kept.
     :param run: Subprocess runner for the Nebius CLI.
     """
     cloud = spec.nebius_cloud()
+    projects = _nebius_list_items(
+        ["iam", "project", "list", "--parent-id", cloud.tenant_id],
+        run=run,
+    )
     project_ids = [
         _resource_id(project)
-        for project in _nebius_list_items(
-            ["iam", "project", "list", "--parent-id", cloud.tenant_id],
-            run=run,
-        )
-        if _is_region_project(project)
+        for project in projects
+        if _is_region_project(project, spec.name)
     ]
     group = _find_named_resource(
         ["iam", "group"],
@@ -104,17 +124,55 @@ def delete_ephemeral_regions(
         run=run,
     )
     if group is not None:
-        _delete_group(_resource_id(group), run)
+        group_id = _resource_id(group)
+        if any(_is_other_region_project(project, spec.name) for project in projects):
+            _revoke_project_permits(group_id, project_ids, run)
+        else:
+            _delete_group(group_id, run)
     for project_id in project_ids:
         delete_nebius_project(project_id, run=run)
     if project_ids:
-        click.echo(f"Deleted {len(project_ids)} Nebius arena region projects.")
+        click.echo(f"Deleted {len(project_ids)} Nebius region projects.")
 
 
-def _is_region_project(project: dict[str, object]) -> bool:
-    """Return whether this project is an ephemeral ``arena-{region}`` project."""
+def _is_region_project(project: dict[str, object], cluster_name: str) -> bool:
+    """Return whether this project is this cluster's ephemeral region project."""
     region = _project_region(project)
-    return bool(region) and _resource_name(project) == f"arena-{region}"
+    return bool(region) and _resource_name(project) == region_project_name(
+        cluster_name, region
+    )
+
+
+def _is_other_region_project(project: dict[str, object], cluster_name: str) -> bool:
+    """Return whether this is another cluster's ``{cluster}-{region}`` project."""
+    if _is_region_project(project, cluster_name):
+        return False
+    region = _project_region(project)
+    if not region:
+        return False
+    name = _resource_name(project)
+    suffix = f"-{region}"
+    if name.startswith("default") or not name.endswith(suffix):
+        return False
+    return len(name) > len(suffix)
+
+
+def _revoke_project_permits(
+    group_id: str, project_ids: list[str], run: NebiusRun
+) -> None:
+    """Remove this cluster's admin permits from the shared provisioners group."""
+    targets = set(project_ids)
+    for item in _nebius_list_items(
+        ["iam", "access-permit", "list", "--parent-id", group_id],
+        run=run,
+    ):
+        permit = item.get("spec")
+        if not isinstance(permit, dict) or permit.get("resource_id") not in targets:
+            continue
+        _delete_nebius_resource(
+            ["iam", "access-permit", "delete", "--id", _resource_id(item)],
+            run,
+        )
 
 
 def _delete_group(group_id: str, run: NebiusRun) -> None:
@@ -138,8 +196,10 @@ def _delete_group(group_id: str, run: NebiusRun) -> None:
     _delete_nebius_resource(["iam", "group", "delete", "--id", group_id], run)
 
 
-def _provisioner_service_account(default_project_ids: list[str], run: NebiusRun) -> str:
-    """Return the existing ``arena-byoc-provisioner`` service account id."""
+def _provisioner_service_account(
+    spec: ClusterSpec, default_project_ids: list[str], run: NebiusRun
+) -> str:
+    """Return the provisioner service account, creating it in the cluster project."""
     parents = [_cli_parent_id(run), *default_project_ids]
     seen: set[str] = set()
     for parent_id in parents:
@@ -154,11 +214,32 @@ def _provisioner_service_account(default_project_ids: list[str], run: NebiusRun)
         )
         if found is not None:
             return _resource_id(found)
-    msg = (
-        f"Service account {PROVISIONER_SERVICE_ACCOUNT!r} was not found "
-        "in the CLI parent project or a default project."
+    return _ensure_named(
+        ["iam", "service-account"],
+        PROVISIONER_SERVICE_ACCOUNT,
+        _cluster_project_id(spec, run),
+        run,
     )
-    raise click.ClickException(msg)
+
+
+def _cluster_project_id(spec: ClusterSpec, run: NebiusRun) -> str:
+    """Return the managed-Kubernetes project, looked up by cluster name if needed."""
+    project_id = spec.nebius_cloud().project_id
+    if project_id is not None:
+        return project_id
+    found = _find_named_resource(
+        ["iam", "project"],
+        spec.name,
+        spec.nebius_cloud().tenant_id,
+        run=run,
+    )
+    if found is None:
+        msg = (
+            f"Nebius project {spec.name!r} was not found. "
+            f"Service account {PROVISIONER_SERVICE_ACCOUNT!r} is created there."
+        )
+        raise click.ClickException(msg)
+    return _resource_id(found)
 
 
 def _cli_parent_id(run: NebiusRun) -> str:
@@ -171,9 +252,11 @@ def _cli_parent_id(run: NebiusRun) -> str:
     return parent_id
 
 
-def _ensure_region_project(tenant_id: str, region: str, run: NebiusRun) -> str:
-    """Return the ``arena-{region}`` project id, creating the project if needed."""
-    name = f"arena-{region}"
+def _ensure_region_project(
+    cluster_name: str, tenant_id: str, region: str, run: NebiusRun
+) -> str:
+    """Return this cluster's region project id, creating the project if needed."""
+    name = region_project_name(cluster_name, region)
     found = _find_named_resource(["iam", "project"], name, tenant_id, run=run)
     if found is not None:
         return _resource_id(found)

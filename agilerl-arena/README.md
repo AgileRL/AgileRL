@@ -64,21 +64,29 @@ arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
 # An unset engine width or max_num_seqs is resolved from the node's GPUs:
 arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4" --num-gpus 4
 
-# Longest context one dedicated L4 serving GPU can hold:
-arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
-    --model Qwen/Qwen2.5-7B-Instruct
+# Longest context the training run fits on an L4:
+arena memory solve max_model_len path/to/manifest.yaml --gpu "NVIDIA L4"
 ```
 
 `estimate` is a pre-submission gate (exit 0 fits, 3 over budget, 2 usage error).
-`solve` holds every other input fixed and returns the largest value of one
-field. Install `agilerl-arena[hub]` unless you pass `--config path/to/config.json`.
+`solve` holds the rest of the manifest fixed and returns the largest
+`max_model_len` that fits. For a model outside the Arena catalog, install
+`agilerl-arena[hub]` or pass `--config path/to/config.json`.
 See `agilerl/arena/memory/README.md`.
 
 ### 5) Submit a training manifest
 
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
+
+# Ask for GPUs instead of a node type; Arena uses the fewest nodes:
+arena experiments submit path/to/manifest.yaml --project my-project \
+    --num-gpus 8 --gpu-type h100-80
 ```
+
+Without `--resource-id`, `--num-nodes`, `--num-gpus` or `--gpu-type`, Arena
+picks the cheapest resource that fits. The GPU flags can't be combined with
+`--resource-id` / `--num-nodes`.
 
 ## Python SDK example
 
@@ -125,9 +133,13 @@ Use the deployment URL from `arena agent list`.
 
 ## BYOC cluster registration
 
-Register a customer Kubernetes cluster against Arena (enterprise BYOC v1) and
+Register a Kubernetes cluster against Arena (enterprise BYOC) and
 write Helm values files locally. Re-running with the same cluster name updates
 the existing registration (upsert) instead of creating a duplicate.
+`--byoc-scope` is `customer` (the default when omitted) or `platform`.
+A platform cluster shares the Arena catalog and bucket and needs a platform
+admin. Choosing platform uses ephemeral placement unless `--placement`
+is set, or the spec already sets both scope and placement.
 
 ```bash
 arena cluster register --name my-cluster \

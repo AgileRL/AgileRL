@@ -24,8 +24,8 @@ from agilerl.architectures.runtime import (
 
 
 def recording_install(sink: list[object]):
-    def install(patch: PatchRuntimeConfig, model=None):
-        sink.append((patch, model))
+    def install(patch: PatchRuntimeConfig, model=None, use_sequence_packing=False):
+        sink.append((patch, model, use_sequence_packing))
 
     return install
 
@@ -58,7 +58,7 @@ class TestInstallFamilyPatches:
 
         architectures.install_family_patches(actor.config.model_type, actor)
 
-        assert seen == [(NEMOTRON_PATCH, actor)]
+        assert seen == [(NEMOTRON_PATCH, actor, False)]
 
     def test_type_lookup_runs_patch_when_no_model(self, monkeypatch) -> None:
         seen: list[object] = []
@@ -66,7 +66,7 @@ class TestInstallFamilyPatches:
 
         architectures.install_family_patches("nemotron_h")
 
-        assert seen == [(NEMOTRON_PATCH, None)]
+        assert seen == [(NEMOTRON_PATCH, None, False)]
 
     def test_unpatched_type_is_a_no_op(self, monkeypatch) -> None:
         seen: list[object] = []
@@ -89,7 +89,7 @@ class TestInstallFamilyPatches:
 
         architectures.install_family_patches(actor.config.model_type, actor)
 
-        assert seen == [(other_patch, actor)]
+        assert seen == [(other_patch, actor, False)]
 
     def test_type_without_install_leaves_classes_alone(self, monkeypatch) -> None:
         seen: list[object] = []
@@ -133,7 +133,7 @@ class TestInstallFamilyPatches:
 
         architectures.install_family_patches(actor.config.model_type, actor)
 
-        assert seen == [(patch, actor)]
+        assert seen == [(patch, actor, False)]
 
     def test_nemotron_catalog_install_is_mamba_patches(self) -> None:
         patch = FAMILY_RUNTIME_CONFIGS["nemotron_h"].patch
@@ -154,6 +154,35 @@ class TestInstallFamilyPatches:
         for model_type in ("qwen3_5_text", "qwen3_5_moe_text"):
             patch = FAMILY_RUNTIME_CONFIGS[model_type].patch
             assert patch.install is install_qwen_gdn_patches, model_type
+
+    def test_qwen_catalog_lists_gdn_mixers_and_checkpoint_children(self) -> None:
+        for model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            patch = FAMILY_RUNTIME_CONFIGS[model_type].patch
+            assert patch.gdn is not None, model_type
+            assert patch.gdn.clone_conv_output is True
+            assert tuple(
+                (entry.mixer, entry.text_model) for entry in patch.gdn.mixers
+            ) == (
+                (
+                    (
+                        "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe."
+                        "Qwen3_5MoeGatedDeltaNet"
+                    ),
+                    (
+                        "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe."
+                        "Qwen3_5MoeTextModel"
+                    ),
+                ),
+                (
+                    "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
+                    "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel",
+                ),
+            )
 
 
 class TestFamilyRuntime:

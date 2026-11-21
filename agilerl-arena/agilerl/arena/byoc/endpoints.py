@@ -179,6 +179,12 @@ REGISTER_CLUSTER: ManifestInvoke = {
             "required": False,
         },
         {
+            "name": "byocScope",
+            "in": "body",
+            "type": "string",
+            "required": False,
+        },
+        {
             "name": "byocProvider",
             "in": "body",
             "type": "json",
@@ -230,6 +236,15 @@ INSTALL_CLUSTER_PACKAGE: ManifestInvoke = {
             "type": "string",
             "required": False,
         },
+    ],
+}
+
+INSTALL_CLUSTER_ARTIFACTS: ManifestInvoke = {
+    "method": "POST",
+    "path": "/api/cli/v1/byoc/clusters/install-artifacts",
+    "responseKind": "json",
+    "params": [
+        {"name": "name", "in": "body", "type": "string", "required": True},
     ],
 }
 

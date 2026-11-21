@@ -202,6 +202,14 @@ LLM Datasets
              --column-mapping '{"question": "prompt", "answer": "completion"}' \
              --file ./my_dataset/data.csv
 
+Recorded model calls (agent traces) go in a ``traces`` dataset: OpenAI chat
+messages in prompt-completion rows, checked locally before upload and trained
+by SFT or on-policy distillation with no column mapping. See :doc:`traces`.
+
+.. code-block:: bash
+
+   arena datasets create helpdesk-traces --category traces --file ./traces.jsonl
+
 Additional Tools
 ^^^^^^^^^^^^^^^^
 
@@ -299,6 +307,46 @@ Some useful command to manage your projects:
 
       arena projects set-default <project-name>
 
+.. _arena_secrets:
+
+Organization Secrets
+--------------------
+
+Secrets hold API keys your training jobs need, such as an LLM judge's provider key.
+In a manifest, ``judge.api_key_env`` names one of these secrets, and Arena passes it
+to the job as an environment variable of that name. Any org member can list, set and
+delete secrets. Arena never shows any part of a value, only each secret's name, when
+it was created and last updated, and who last updated it.
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         import os
+
+         client.list_secrets()
+         client.set_secret(name="OPENAI_API_KEY", value=os.environ["OPENAI_API_KEY"])
+         client.delete_secret("OPENAI_API_KEY")
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena secrets list
+
+         # Hidden prompt; or pipe the value on stdin, or use --from-env VAR
+         arena secrets set OPENAI_API_KEY
+         arena secrets set OPENAI_API_KEY --from-env OPENAI_API_KEY
+
+         arena secrets delete OPENAI_API_KEY --yes
+
+The CLI never takes the value as an argument, so it stays out of your shell history.
+
 .. _arena_training:
 
 Submitting Experiments
@@ -394,7 +442,7 @@ and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrai
 
 For an LLM manifest, check the GPU before you submit. ``arena memory estimate``
 prints the training and generation bars against the card; ``arena memory solve``
-inverts one field (context length or concurrency) given the rest.
+finds the longest context the run fits, given the rest of the manifest.
 See :ref:`llm_memory_estimate`.
 
 Here is an example manifest for training DQN on LunarLander-v3:
@@ -551,6 +599,39 @@ will be deployed by default.
 
          # Deploy a specific checkpoint
          arena agent deploy lunar-lander-dqn --checkpoint step_500000
+
+GPUs
+~~~~
+
+For an LLM agent, pick the GPUs it is served on with ``num_gpus`` and
+``gpu_type`` (a short GPU name such as ``h100-80``, ``b200`` or ``l4``):
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         client.deploy_agent(
+            experiment_name="<experiment-name>",
+            num_gpus=2,
+            gpu_type="h100-80",
+         )
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena agent deploy my-chat-model --num-gpus 2 --gpu-type h100-80
+
+Without either option (``--num-gpus`` / ``--gpu-type`` on the CLI), a redeploy
+keeps the agent's resources. A new deployment runs on the cluster the agent was
+trained on if that is your own cluster, else on the cheapest node type that can
+serve the model. If Arena can't size the model, it uses its default node type
+and rejects ``num_gpus`` and ``gpu_type``.
 
 Memory Scope
 ~~~~~~~~~~~~
@@ -753,3 +834,15 @@ Multi-agent RL passes per-agent observations and returns a dict of actions:
 
    :ref:`tutorial_arena_grpo_gsm8k`
       Complete walkthrough of fine-tuning an LLM with GRPO on the GSM8K dataset in Arena.
+
+In-account Snowflake
+--------------------
+
+Train on a Snowflake table and serve the model without the data leaving the
+account. See :doc:`snowflake`.
+
+.. toctree::
+   :maxdepth: 1
+
+   traces
+   snowflake

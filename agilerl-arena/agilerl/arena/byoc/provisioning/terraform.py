@@ -26,6 +26,21 @@ from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 MISSING_STATE_MARKER = "no state file was found"
 
 
+def configured_backend_type(work_dir: Path) -> str | None:
+    """Return the backend type Terraform last initialized, if any."""
+    path = work_dir / ".terraform" / "terraform.tfstate"
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    backend = payload.get("backend") if isinstance(payload, dict) else None
+    if not isinstance(backend, dict):
+        return None
+    backend_type = backend.get("type")
+    if not isinstance(backend_type, str) or not backend_type:
+        return None
+    return backend_type
+
+
 def absolute_path(path: Path) -> Path:
     """Return ``path`` as an absolute path."""
     # getcwd() fails when the process directory has been removed. PWD is still set.
@@ -96,6 +111,9 @@ class ClusterOutputs:
     inference_tls_secret_name: str | None = None
     service_account_key: str | None = None
     service_account_profile: str | None = None
+    catalog_access_key_id: str | None = None
+    catalog_secret_access_key: str | None = None
+    catalog_group_id: str | None = None
 
 
 class TerraformRunner:

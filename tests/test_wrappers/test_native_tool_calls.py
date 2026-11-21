@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import re
+import warnings
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,14 +17,24 @@ import pytest
 import torch
 
 from agilerl.llm_envs import RolloutHarness
-from agilerl.llm_envs.harness import TOOL_CALL_ERROR_INFO_KEY, TOOL_CALLS_INFO_KEY
-from agilerl.llm_envs.openenv import InProcessEnvClient, RemoteEnvClient
-from agilerl.llm_envs.openenv_server import OpenEnvServer, TextObservation
-from agilerl.llm_envs.tool_parsers import (
+from agilerl.llm_envs.chat_formats import (
     ParsedToolCall,
     ToolCallParseStatus,
-    ToolCallTagParser,
+    ToolCallTagFormat,
 )
+from agilerl.llm_envs.harness import (
+    EPISODE_TOOLS_INFO_KEY,
+    TOOL_CALL_ERROR_INFO_KEY,
+    TOOL_CALLS_INFO_KEY,
+)
+from agilerl.llm_envs.openenv import (
+    TURN_TOOL_CALL_INDEX_KEY,
+    TURN_TOOL_CALLS_KEY,
+    InProcessEnvClient,
+    RemoteEnvClient,
+)
+from agilerl.llm_envs.openenv_server import OpenEnvServer, TextObservation
+from agilerl.llm_envs.rubrics import TurnAction, TurnObservation
 
 pytest.importorskip("fastmcp")
 
@@ -29,6 +42,7 @@ from fastmcp import FastMCP
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.mcp_types import CallToolAction
 from openenv.core.env_server.types import Observation, State
+from openenv.core.rubrics.base import Rubric
 
 TC, TC_END, THINK_END = 9000, 9001, 9002
 MSTART, MEND, MRESP_START, MRESP_END = 9200, 9201, 9202, 9203
@@ -127,6 +141,61 @@ class GemmaTemplateTokenizer(TagTokenizer):
         )
         if add_generation_prompt:
             rendered += "<model>"
+        if tokenize:
+            return self.encode(rendered)
+        return rendered
+
+
+HARMONY_TAGS = {
+    "<|start|>": 9300,
+    "<|message|>": 9301,
+    "<|call|>": 9302,
+    "<|end|>": 9303,
+    "<|return|>": 9304,
+    "<|channel|>": 9305,
+}
+HARMONY_TAG_RE = re.compile("|".join(re.escape(tag) for tag in HARMONY_TAGS))
+
+
+class HarmonyTemplateTokenizer(TagTokenizer):
+    """gpt-oss tags as special IDs plus a template that rejects a bare tool message, like the real one."""
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return list(HARMONY_TAGS.values())
+
+    def convert_tokens_to_ids(self, token: str) -> int | None:
+        return HARMONY_TAGS.get(token)
+
+    def encode(self, text: str, **_: Any) -> list[int]:
+        ids: list[int] = []
+        position = 0
+        for match in HARMONY_TAG_RE.finditer(text):
+            ids += [ord(c) for c in text[position : match.start()]]
+            ids.append(HARMONY_TAGS[match.group()])
+            position = match.end()
+        return ids + [ord(c) for c in text[position:]]
+
+    def decode(self, ids: list[int], **_: Any) -> str:
+        reverse = {value: key for key, value in HARMONY_TAGS.items()}
+        return "".join(reverse.get(i, chr(i)) for i in ids)
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = False,
+        tokenize: bool = False,
+        **_: Any,
+    ) -> str | list[int]:
+        if any(message["role"] == "tool" for message in messages):
+            msg = "Message has tool role, but there was no previous assistant message with a tool call!"
+            raise ValueError(msg)
+        rendered = "".join(
+            f"<|start|>{message['role']}<|message|>{message['content']}<|end|>"
+            for message in messages
+        )
+        if add_generation_prompt:
+            rendered += "<|start|>assistant"
         if tokenize:
             return self.encode(rendered)
         return rendered
@@ -246,6 +315,19 @@ class TextEnv:
         return "feedback", 0.0, False, False, {}
 
 
+class RecordingRubric(Rubric):
+    """Rubric double recording each turn it scores."""
+
+    def __init__(self, score: float) -> None:
+        super().__init__()
+        self.score = score
+        self.calls: list[tuple[TurnAction, TurnObservation]] = []
+
+    def forward(self, action: TurnAction, observation: TurnObservation) -> float:
+        self.calls.append((action, observation))
+        return self.score
+
+
 class RecordingClient:
     """Env client double recording the actions it receives.
 
@@ -261,8 +343,10 @@ class RecordingClient:
         reward: float = 0.0,
         terminate_on: str | None = None,
         answer_tool: str | None = None,
+        reset_info: dict[str, Any] | None = None,
     ) -> None:
         self.actions: list[Any] = []
+        self._reset_info = dict(reset_info or {})
         self._takes_tool_calls = takes_tool_calls
         self._tools = list(tools or [])
         self._reward = reward
@@ -273,7 +357,7 @@ class RecordingClient:
         self, seed: int | None = None, *, row_index: int | None = None
     ) -> tuple[str, dict[str, Any]]:
         del seed, row_index
-        return "prompt", {}
+        return "prompt", dict(self._reset_info)
 
     def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
         self.actions.append(action)
@@ -316,6 +400,40 @@ class RecordingClient:
         yield
 
 
+LOOKUP_TOOLS = [{"type": "function", "function": {"name": "lookup"}}]
+ADD_TOOLS = [{"type": "function", "function": {"name": "add"}}]
+
+
+class SequencedResetClient(RecordingClient):
+    """Recording client whose resets send each of ``reset_infos`` in turn."""
+
+    def __init__(self, reset_infos: list[dict[str, Any]], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._reset_infos = iter(reset_infos)
+
+    def reset(
+        self, seed: int | None = None, row_index: int | None = None
+    ) -> tuple[str, dict[str, Any]]:
+        return "prompt", dict(next(self._reset_infos))
+
+
+class ToolsRecordingTokenizer(GroupingTemplateTokenizer):
+    """Grouping template recording the ``tools`` each render receives."""
+
+    def __init__(self) -> None:
+        self.rendered_tools: list[Any] = []
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = False,
+        tokenize: bool = False,
+        **kwargs: Any,
+    ) -> str | list[int]:
+        self.rendered_tools.append(kwargs.get("tools"))
+        return super().apply_chat_template(messages, add_generation_prompt, tokenize)
+
+
 def _step_with_ids(
     harness: RolloutHarness, gen_ids: list[int]
 ) -> tuple[float, bool, dict[str, Any]]:
@@ -333,12 +451,12 @@ def _transcript_text(harness: RolloutHarness) -> str:
 
 
 class TestHarnessToolDetection:
-    def test_detects_parser_from_tokenizer(self) -> None:
+    def test_detects_the_chat_format_from_the_tokenizer(self) -> None:
         harness = RolloutHarness(
             RecordingClient(), TagTokenizer(), max_turns=1, apply_chat_template=False
         )
         try:
-            assert harness._tool_parser is not None
+            assert harness._chat_format is not None
         finally:
             harness.close()
 
@@ -352,49 +470,49 @@ class TestHarnessToolDetection:
         try:
             harness.reset()
 
-            assert harness._tool_parser is None
+            assert harness._chat_format is None
         finally:
             harness.close()
 
-    def test_tool_env_without_parser_fails_at_reset(self) -> None:
+    def test_tool_env_without_a_chat_format_fails_at_reset(self) -> None:
         harness = RolloutHarness(
             RecordingClient(), PlainTokenizer(), max_turns=1, apply_chat_template=False
         )
         try:
-            with pytest.raises(ValueError, match=r"no parser .* matches"):
+            with pytest.raises(ValueError, match=r"no chat format .* matches"):
                 harness.reset()
         finally:
             harness.close()
 
-    def test_named_parser_is_used(self) -> None:
+    def test_named_chat_format_is_used(self) -> None:
         harness = RolloutHarness(
             RecordingClient(),
             TagTokenizer(),
             max_turns=1,
             apply_chat_template=False,
-            tool_call_parser="tool_call",
+            chat_format="tool_call",
         )
         try:
-            assert isinstance(harness._tool_parser, ToolCallTagParser)
+            assert isinstance(harness._chat_format, ToolCallTagFormat)
         finally:
             harness.close()
 
-    def test_unknown_parser_name_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown tool_parser 'llama'"):
+    def test_unknown_chat_format_name_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown chat_format 'llama'"):
             RolloutHarness(
                 RecordingClient(),
                 TagTokenizer(),
                 apply_chat_template=False,
-                tool_call_parser="llama",
+                chat_format="llama",
             )
 
-    def test_named_parser_needs_its_tokens_in_the_vocab(self) -> None:
+    def test_named_chat_format_needs_its_tokens_in_the_vocab(self) -> None:
         with pytest.raises(ValueError, match="tokenizer vocab"):
             RolloutHarness(
                 RecordingClient(),
                 PlainTokenizer(),
                 apply_chat_template=False,
-                tool_call_parser="tool_call",
+                chat_format="tool_call",
             )
 
 
@@ -472,6 +590,80 @@ class TestHarnessToolSteps:
         finally:
             harness.close()
 
+    def test_rubric_scores_a_rejected_turn_without_the_env(self) -> None:
+        # Arrange
+        client = RecordingClient()
+        rubric = RecordingRubric(score=0.5)
+        harness = RolloutHarness(
+            client,
+            TagTokenizer(),
+            max_turns=2,
+            apply_chat_template=False,
+            min_reward=-1.0,
+            rubric=rubric,
+        )
+        bad = [TC] + [ord(c) for c in "{bad}"] + [TC_END]
+
+        try:
+            # Act
+            reward, _, _ = _step_with_ids(harness, bad)
+
+            # Assert
+            assert client.actions == []
+            (action, observation) = rubric.calls[0]
+            assert observation.env_ran is False
+            assert observation.env_reward == -1.0
+            assert action.tool_calls == []
+            assert reward == 0.5
+        finally:
+            harness.close()
+
+    def test_rubric_sees_the_parsed_tool_calls(self) -> None:
+        client = RecordingClient(reward=1.0)
+        rubric = RecordingRubric(score=0.5)
+        harness = RolloutHarness(
+            client,
+            TagTokenizer(),
+            max_turns=2,
+            apply_chat_template=False,
+            rubric=rubric,
+        )
+
+        try:
+            _step_with_ids(harness, call_ids("add", {"a": 2}))
+
+            (action, observation) = rubric.calls[0]
+            assert [(c.name, c.arguments) for c in action.tool_calls] == [
+                ("add", {"a": 2})
+            ]
+            assert observation.env_ran is True
+            assert observation.env_reward == 1.0
+        finally:
+            harness.close()
+
+    def test_rubric_message_skips_action_processor_on_a_tool_call_turn(self) -> None:
+        client = RecordingClient(reward=1.0)
+        rubric = RecordingRubric(score=0.5)
+        harness = RolloutHarness(
+            client,
+            TagTokenizer(),
+            max_turns=2,
+            apply_chat_template=False,
+            rubric=rubric,
+            action_processor=lambda text: f"quoted({text})",
+        )
+
+        try:
+            _step_with_ids(harness, call_ids("add", {"a": 2}))
+
+            (action, _) = rubric.calls[0]
+            assert "quoted(" not in action.message
+            assert [(c.name, c.arguments) for c in action.tool_calls] == [
+                ("add", {"a": 2})
+            ]
+        finally:
+            harness.close()
+
     def test_malformed_tags_flow_as_text_to_text_envs(self) -> None:
         client = RecordingClient(takes_tool_calls=False)
         harness = RolloutHarness(
@@ -541,6 +733,27 @@ class TestHarnessToolSteps:
         finally:
             harness.close()
 
+    def test_each_call_carries_its_whole_turn(self) -> None:
+        client = RecordingClient()
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            both = call_ids("a", {"x": 1}) + call_ids("b", {"y": 2})
+
+            # Act
+            _step_with_ids(harness, both)
+
+            # Assert
+            for index, call in enumerate(client.actions):
+                assert call.turn_index == index
+                assert [(c.name, c.arguments) for c in call.turn] == [
+                    ("a", {"x": 1}),
+                    ("b", {"y": 2}),
+                ]
+        finally:
+            harness.close()
+
     def test_stops_running_calls_once_the_episode_ends(self) -> None:
         client = RecordingClient(reward=1.0, terminate_on="a")
         harness = RolloutHarness(
@@ -572,6 +785,137 @@ class TestHarnessToolSteps:
             # Assert
             assert client.actions == []
             assert "No calls ran" in _transcript_text(harness)
+        finally:
+            harness.close()
+
+
+class TestHarnessEpisodeTools:
+    def test_reset_info_tools_replace_the_env_tools_for_the_episode(self) -> None:
+        episode_tools = [{"type": "function", "function": {"name": "lookup"}}]
+        client = RecordingClient(
+            tools=[{"type": "function", "function": {"name": "stale"}}],
+            reset_info={EPISODE_TOOLS_INFO_KEY: episode_tools},
+        )
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            # Act
+            _, info = harness.reset()
+
+            # Assert
+            assert harness.tools == episode_tools
+            assert EPISODE_TOOLS_INFO_KEY not in info
+        finally:
+            harness.close()
+
+    def test_env_tools_stay_without_episode_tools(self) -> None:
+        tools = [{"type": "function", "function": {"name": "add"}}]
+        client = RecordingClient(tools=tools)
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            harness.reset()
+
+            assert harness.tools == tools
+        finally:
+            harness.close()
+
+    def test_each_reset_serves_its_own_episode_tools(self) -> None:
+        # Arrange
+        client = SequencedResetClient(
+            [
+                {EPISODE_TOOLS_INFO_KEY: LOOKUP_TOOLS},
+                {EPISODE_TOOLS_INFO_KEY: ADD_TOOLS},
+            ]
+        )
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            # Act
+            harness.reset()
+            first = harness.tools
+            harness.reset()
+
+            # Assert
+            assert first == LOOKUP_TOOLS
+            assert harness.tools == ADD_TOOLS
+        finally:
+            harness.close()
+
+    @pytest.mark.parametrize("first_episode_tools", [LOOKUP_TOOLS, []])
+    def test_reset_without_episode_tools_restores_the_env_tools(
+        self, first_episode_tools: list[dict[str, Any]]
+    ) -> None:
+        # Arrange
+        client = SequencedResetClient(
+            [{EPISODE_TOOLS_INFO_KEY: first_episode_tools}, {}], tools=ADD_TOOLS
+        )
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            # Act
+            harness.reset()
+            first = harness.tools
+            harness.reset()
+
+            # Assert
+            assert first == (first_episode_tools or None)
+            assert harness.tools == ADD_TOOLS
+        finally:
+            harness.close()
+
+    def test_feedback_frame_renders_with_the_episodes_tools(self) -> None:
+        # Arrange
+        tokenizer = ToolsRecordingTokenizer()
+        client = SequencedResetClient(
+            [
+                {EPISODE_TOOLS_INFO_KEY: LOOKUP_TOOLS},
+                {EPISODE_TOOLS_INFO_KEY: ADD_TOOLS},
+            ]
+        )
+        harness = RolloutHarness(client, tokenizer, max_turns=2)
+        try:
+            _step_with_ids(harness, call_ids("lookup", {}))
+            prompt, _ = harness.reset()
+            tokenizer.rendered_tools.clear()
+            generation = torch.tensor([call_ids("add", {"a": 2})])
+
+            # Act
+            harness.step(torch.cat([prompt["input_ids"], generation], dim=1))
+
+            # Assert
+            assert tokenizer.rendered_tools
+            assert all(tools == ADD_TOOLS for tools in tokenizer.rendered_tools)
+        finally:
+            harness.close()
+
+    def test_warns_once_when_the_template_skips_episode_tools(self) -> None:
+        # Arrange
+        tokenizer = GroupingTemplateTokenizer()
+        tokenizer.chat_template = "{{ messages }}"
+        client = SequencedResetClient(
+            [
+                {EPISODE_TOOLS_INFO_KEY: LOOKUP_TOOLS},
+                {EPISODE_TOOLS_INFO_KEY: ADD_TOOLS},
+            ]
+        )
+        harness = RolloutHarness(client, tokenizer, max_turns=2)
+        try:
+            # Act
+            with warnings.catch_warnings(record=True) as record:
+                warnings.simplefilter("always")
+                harness.reset()
+                harness.reset()
+
+            # Assert
+            skipped = [
+                w for w in record if "never references 'tools'" in str(w.message)
+            ]
+            assert len(skipped) == 1
         finally:
             harness.close()
 
@@ -665,6 +1009,66 @@ class TestGemmaToolResponses:
             harness.close()
 
 
+class TestHarmonyToolResponses:
+    def test_tool_result_follows_the_call_without_a_template_frame(self) -> None:
+        # Arrange
+        client = RecordingClient()
+        tokenizer = HarmonyTemplateTokenizer()
+        harness = RolloutHarness(client, tokenizer, max_turns=2)
+        try:
+            prompt, _ = harness.reset()
+            gen = tokenizer.encode(
+                "<|channel|>analysis<|message|>Add them.<|end|>"
+                "<|start|>assistant to=functions.add<|channel|>commentary json"
+                '<|message|>{"a": 1}<|call|>'
+            )
+
+            # Act
+            harness.step(torch.cat([prompt["input_ids"], torch.tensor([gen])], dim=1))
+
+            # Assert
+            assert [action.name for action in client.actions] == ["add"]
+            assert _transcript_text(harness).endswith(
+                '{"a": 1}<|call|>'
+                "<|start|>functions.add to=assistant<|channel|>commentary"
+                '<|message|>"result 1"<|end|><|start|>assistant'
+            )
+        finally:
+            harness.close()
+
+
+class TestHarmonyFeedbackTerminator:
+    def test_user_feedback_after_a_return_drops_the_frame_end(self) -> None:
+        tokenizer = HarmonyTemplateTokenizer()
+        harness = RolloutHarness(RecordingClient(takes_tool_calls=False), tokenizer)
+        try:
+            # Act
+            ids = harness._text_feedback_ids(
+                [{"role": "user", "content": "again"}], HARMONY_TAGS["<|return|>"]
+            )
+
+            # Assert
+            assert tokenizer.decode(ids[0].tolist()) == (
+                "<|start|>user<|message|>again<|end|><|start|>assistant"
+            )
+        finally:
+            harness.close()
+
+    def test_truncated_turn_keeps_the_frame_end(self) -> None:
+        tokenizer = HarmonyTemplateTokenizer()
+        harness = RolloutHarness(RecordingClient(takes_tool_calls=False), tokenizer)
+        try:
+            # Act
+            ids = harness._text_feedback_ids(
+                [{"role": "user", "content": "again"}], ord("x")
+            )
+
+            # Assert
+            assert tokenizer.decode(ids[0].tolist()).startswith("<|end|><|start|>user")
+        finally:
+            harness.close()
+
+
 class TestRemoteToolSteps:
     def test_sends_parsed_call_as_call_tool_action(self) -> None:
         client, session = _stub_remote()
@@ -676,6 +1080,21 @@ class TestRemoteToolSteps:
             "tool_name": "add",
             "arguments": {"a": 2, "b": 3},
             "metadata": {},
+        }
+
+    def test_parsed_call_sends_its_turn_on_the_metadata(self) -> None:
+        client, session = _stub_remote()
+        first, second = ok_call("add", {"a": 1}), ok_call("add", {"a": 2})
+        call = replace(second, turn=(first, second), turn_index=1)
+
+        client.step(call)
+
+        assert session.step_calls[-1]["metadata"] == {
+            TURN_TOOL_CALLS_KEY: [
+                {"name": "add", "arguments": {"a": 1}},
+                {"name": "add", "arguments": {"a": 2}},
+            ],
+            TURN_TOOL_CALL_INDEX_KEY: 1,
         }
 
     def test_labels_tool_results_with_tool_role(self) -> None:
@@ -767,6 +1186,11 @@ class TestRemoteEnvClientTakesToolCallsProperty:
         assert client.takes_tool_calls is True
         assert client.answer_tool == "answer"
 
+    def test_true_for_an_env_that_lists_no_tools_before_reset(self) -> None:
+        client, _session = _stub_remote(state={}, tools=[])
+
+        assert client.takes_tool_calls is True
+
     def test_false_when_the_server_rejects_the_listing(self) -> None:
         client, _session = _stub_remote(state={}, reject_list_tools=True)
 
@@ -845,7 +1269,7 @@ class TestInProcessToolBackend:
 
 
 class TestNativeToolsEndToEnd:
-    def test_mcp_env_without_parser_fails_at_reset(self) -> None:
+    def test_mcp_env_without_a_chat_format_fails_at_reset(self) -> None:
         harness = RolloutHarness.local(
             CalculatorMCPEnv(),
             PlainTokenizer(),

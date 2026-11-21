@@ -13,7 +13,6 @@ import sys
 from contextlib import nullcontext
 from functools import partial
 from typing import Any
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -28,10 +27,10 @@ from peft import LoraConfig
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.rank_launch import run_ranks
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps
 from tests.test_algorithms.test_llms.segment_helpers import (
     balanced_learn_worker,
     pad_to_eight_rows,
-    use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_COUNTS,
@@ -83,10 +82,7 @@ def make_vision_ppo(**overrides: Any) -> LLMPPO:
         ),
         **overrides,
     }
-    # The seeded multi-rank KL sits near fp32 overflow; LoRA keeps the
-    # lm_head as on a host without liger-kernel.
-    with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
-        return LLMPPO(**kwargs)
+    return LLMPPO(**kwargs)
 
 
 class TestPPOFusedForwardNoGradVision:
@@ -117,17 +113,11 @@ class TestPPOFusedForwardNoGradVision:
 
 class TestPPOLearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        segmented: bool,
-        liger: bool,
+        self, segmented: bool
     ) -> None:
         # Arrange
         agent = make_vision_ppo(importance_sampling_level="token")
-        if liger:
-            use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         model = vision_model(agent)
         expected = expected_vision_rows(segmented)
 
@@ -172,10 +162,9 @@ class TestPPOLearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
     def test_images_change_log_probs_and_values(self, segmented: bool) -> None:
         # Arrange: ``entropy`` averages the actor's negative log-probs and
-        # ``vf_loss`` scores the critic's values. The model scores each token
-        # alone, so mean turn values include the image placeholder positions.
-        agent = make_vision_ppo(turn_value_reduction="mean")
-        other = make_vision_ppo(turn_value_reduction="mean")
+        # ``vf_loss`` scores the critic's values.
+        agent = make_vision_ppo()
+        other = make_vision_ppo()
 
         # Act
         metrics = learn_on_vision_episodes(agent, segmented=segmented)
@@ -223,6 +212,7 @@ class TestPPOLearnVision:
             agent.learn(
                 (token_ids, action_masks, rewards),
                 turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
                 episode_segments=SEGMENTS,
                 pixel_values=pixel_values,
                 pixel_image_counts=IMAGE_COUNTS,

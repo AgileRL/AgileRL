@@ -202,13 +202,14 @@ def _preference_batch():
     ids = torch.ones(1, 4, dtype=torch.long)
     return {
         "prompt": ["prompt"],
-        "prompt_lengths": [4],
         "chosen": ["chosen"],
         "rejected": ["rejected"],
         "chosen_input_ids": ids,
         "chosen_attention_mask": ids,
+        "chosen_loss_mask": ids.bool(),
         "rejected_input_ids": ids,
         "rejected_attention_mask": ids,
+        "rejected_loss_mask": ids.bool(),
     }
 
 
@@ -216,11 +217,9 @@ def _sft_batch():
     """Minimal collated SFT batch that satisfies is_sft_prompts."""
     ids = torch.ones(1, 4, dtype=torch.long)
     return {
-        "prompt": ["prompt"],
-        "prompt_lengths": [4],
-        "response": ["response"],
         "input_ids": ids,
         "attention_mask": ids,
+        "loss_mask": ids.bool(),
     }
 
 
@@ -2116,6 +2115,10 @@ class TestTrainLlmRolloutCompletionLogging:
             "completion_tokens": 3,
             "prompt": "a",
             "completion": "aaa",
+            "reference": None,
+            "rejected": None,
+            "base_model": False,
+            "notes": {},
         }
 
     def test_dumps_recent_completions_when_training_raises(self, caplog):

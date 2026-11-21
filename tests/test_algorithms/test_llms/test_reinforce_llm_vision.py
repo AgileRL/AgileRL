@@ -26,10 +26,10 @@ from peft import LoraConfig
 
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from tests.rank_launch import run_ranks
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps
 from tests.test_algorithms.test_llms.segment_helpers import (
     balanced_learn_worker,
     pad_to_eight_rows,
-    use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_COUNTS,
@@ -78,23 +78,16 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
         ),
         **overrides,
     }
-    agent = REINFORCE(**kwargs)
-    agent.liger_loss = False
-    return agent
+    return REINFORCE(**kwargs)
 
 
 class TestREINFORCELearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
-        self, monkeypatch: pytest.MonkeyPatch, segmented: bool, liger: bool
+        self, segmented: bool
     ) -> None:
         # Arrange
         agent = make_vision_reinforce()
-        if liger:
-            use_fake_liger_policy_loss(
-                agent, monkeypatch, "agilerl.algorithms.reinforce_llm"
-            )
         model = vision_model(agent)
         expected = expected_vision_rows(segmented)
 
@@ -176,6 +169,7 @@ class TestREINFORCELearnVision:
             agent.learn(
                 (token_ids, action_masks, rewards),
                 turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
                 episode_segments=SEGMENTS,
                 pixel_values=pixel_values,
                 pixel_image_counts=IMAGE_COUNTS,

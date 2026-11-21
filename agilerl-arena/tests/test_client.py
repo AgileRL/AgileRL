@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +19,11 @@ import pytest
 
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import EXTERNAL_USER_ID_HEADER, ArenaClient, _TokenStore
+from agilerl.arena.client_version import (
+    CLIENT_UPDATE_HEADER,
+    CLIENT_VERSION_HEADER,
+    announce_update,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -26,7 +33,12 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.models.model_info import STATUS_PREVIEW, SUPPORTED_MODEL_INFO
+from agilerl.arena.models import __version__
+from agilerl.arena.models.model_info import (
+    STATUS_PREVIEW,
+    SUPPORTED_MODEL_INFO,
+    ModelInfo,
+)
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream
 
@@ -63,7 +75,7 @@ def _grpo_manifest(hub_id: str) -> dict:
         },
         "network": {
             "pretrained_model_name_or_path": hub_id,
-            "max_context_length": 512,
+            "max_context_length": 1024,
         },
         "training": {"max_steps": 100},
         "replay_buffer": {"kind": "llm"},
@@ -1246,6 +1258,12 @@ class TestCliV1EndpointPaths:
             timeout=api_key_client._upload_timeout,
         )
 
+    def test_profile_environment_sends_multi_agent(self, api_key_client):
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.profile_environment(name="MyEnv", multi_agent=True)
+        assert api_key_client._open_stream.call_args[1]["json"]["multi_agent"] is True
+
     @patch("builtins.input", return_value="y")
     def test_delete_environment_uses_cli_v1_path(self, mock_input, api_key_client):
         api_key_client.list_environments = MagicMock(
@@ -1541,6 +1559,7 @@ class TestExperimentMethods:
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
         assert call_kwargs["json"]["project"] == "proj"
+        assert call_kwargs["json"]["resource_id"] == "2"
         assert "files" not in call_kwargs
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
@@ -1557,6 +1576,46 @@ class TestExperimentMethods:
 
         payload = api_key_client._open_stream.call_args[1]["json"]
         assert payload == {"manifest": {"algorithm": "PPO"}, "project": "proj"}
+        assert api_key_client._open_stream.call_args[1]["headers"] == {}
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_sends_gpu_request(self, mock_validated, api_key_client):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=8,
+            gpu_type="h100-80",
+            project="proj",
+        )
+
+        payload = api_key_client._open_stream.call_args[1]["json"]
+        assert payload == {
+            "manifest": {"algorithm": "GRPO"},
+            "project": "proj",
+            "num_gpus": 8,
+            "gpu_type": "h100-80",
+        }
+
+    @pytest.mark.parametrize(
+        "extra",
+        [{"resource_id": "arena-medium"}, {"num_nodes": 2}, {"num_gpus": 0}],
+    )
+    def test_submit_experiment_rejects_a_bad_gpu_request(self, api_key_client, extra):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ArenaValidationError, match="num_gpus"):
+            api_key_client.submit_experiment(
+                manifest={"algorithm": "GRPO"},
+                gpu_type="h100-80",
+                project="proj",
+                **extra,
+            )
+
+        api_key_client._open_stream.assert_not_called()
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_requires_project(self, mock_validated, api_key_client):
@@ -1605,9 +1664,70 @@ class TestExperimentMethods:
         assert files["project"] == (None, "proj")
         assert files["resource_id"] == (None, "arena-medium")
         assert files["num_nodes"] == (None, "2")
+        assert "num_gpus" not in files
+        assert "gpu_type" not in files
         assert files["experiment_name"] == (None, "exp-reasoning")
         assert files["completion"] == (None, "wrong answer")
         assert files["reward_file"][0] == "reward.py"
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_with_reward_file_sends_gpu_request(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=4,
+            gpu_type="b200",
+            project="proj",
+            reward_file=b"def reward(q, a, c):\n    return 1.0\n",
+        )
+
+        files = api_key_client._open_stream.call_args[1]["files"]
+        assert files["num_gpus"] == (None, "4")
+        assert files["gpu_type"] == (None, "b200")
+        assert "resource_id" not in files
+        assert "num_nodes" not in files
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_sends_idempotency_key(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "PPO"},
+            project="proj",
+            idempotency_key=" user-1:run ",
+        )
+
+        assert api_key_client._open_stream.call_args[1]["headers"] == {
+            "Idempotency-Key": "user-1:run"
+        }
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_omits_a_blank_idempotency_key(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "PPO"},
+            project="proj",
+            idempotency_key="  ",
+        )
+
+        assert api_key_client._open_stream.call_args[1]["headers"] == {}
 
     @pytest.mark.parametrize(
         ("hub_id", "warned"),
@@ -1670,6 +1790,93 @@ class TestExperimentMethods:
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("hub_id", "context_length"),
+        [
+            ("Qwen/Qwen3.5-0.8B", 1024),
+            ("Qwen/Qwen3.5-0.8B", 262144),
+            ("Qwen/Qwen3-4B", 32768),
+            ("Qwen/Qwen3-4B", 40960),
+            ("org/untracked-model", 512),
+        ],
+    )
+    def test_submit_experiment_accepts_an_arena_context_length(
+        self, api_key_client, hub_id, context_length
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        manifest = _grpo_manifest(hub_id)
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 5}
+
+    @pytest.mark.parametrize(
+        ("hub_id", "context_length", "message"),
+        [
+            (
+                "Qwen/Qwen3.5-0.8B",
+                512,
+                (
+                    "network.max_context_length must be a power of 2 between 1024 "
+                    "and 262144. Allowed: 1024, 2048, 4096, 8192, 16384, 32768, "
+                    "65536, 131072, 262144"
+                ),
+            ),
+            (
+                "Qwen/Qwen3.5-0.8B",
+                3000,
+                (
+                    "network.max_context_length must be a power of 2 between 1024 "
+                    "and 262144. Allowed: 1024,"
+                ),
+            ),
+            (
+                "Qwen/Qwen3-4B",
+                65536,
+                (
+                    "network.max_context_length must be a power of 2 between 1024 "
+                    "and 40960, or 40960. Allowed: 1024, 2048, 4096, 8192, 16384, "
+                    "32768, 40960"
+                ),
+            ),
+        ],
+    )
+    def test_submit_experiment_rejects_a_context_length_arena_does_not_offer(
+        self, api_key_client, hub_id, context_length, message
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest(hub_id)
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=re.escape(message)):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_requires_the_window_when_it_is_below_1024(
+        self, api_key_client, monkeypatch
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        monkeypatch.setattr(ModelInfo, "max_context_length", 512)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = 256
+
+        # Act / Assert
+        with pytest.raises(
+            ArenaValidationError,
+            match=re.escape("network.max_context_length must be 512. Allowed: 512"),
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
     def test_submit_experiment_rejects_pinned_cpu_offload(self, api_key_client):
         # Arrange
         api_key_client._open_stream = MagicMock()
@@ -1692,6 +1899,27 @@ class TestExperimentMethods:
             json={"experiment_name": "exp1", "max_steps": 1000},
         )
         assert result == {"resumed": True}
+
+    def test_resume_experiment_sends_optional_fields(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"resumed": True})
+        api_key_client.resume_experiment(
+            "exp1",
+            max_steps=1000,
+            checkpoint="500",
+            new_name="exp1-again",
+            project="proj",
+        )
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume",
+            json={
+                "experiment_name": "exp1",
+                "max_steps": 1000,
+                "checkpoint": "500",
+                "new_name": "exp1-again",
+                "project": "proj",
+            },
+        )
 
     def test_list_checkpoints(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"step": 100}])
@@ -1937,6 +2165,99 @@ class TestInferenceDeployments:
         api_key_client._request = MagicMock(return_value={"deployed": True})
         api_key_client.deploy_agent("exp1")
         assert "memoryScope" not in api_key_client._request.call_args[1]["json"]
+
+    def test_update_inference_deployment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-2"})
+        result = api_key_client.update_inference_deployment(
+            "agent-1",
+            new_name="agent-2",
+            enabled=False,
+            experiment_name="exp1",
+        )
+        assert result == {"name": "agent-2"}
+        api_key_client._request.assert_called_once_with(
+            "PATCH",
+            "/api/cli/v1/inference/deployments",
+            json={
+                "name": "agent-1",
+                "experimentName": "exp1",
+                "new_name": "agent-2",
+                "enabled": False,
+            },
+        )
+
+    def test_update_inference_deployment_sends_description(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-1"})
+
+        result = api_key_client.update_inference_deployment(
+            "agent-1", description="serving"
+        )
+
+        assert result == {"name": "agent-1"}
+        assert api_key_client._request.call_args.kwargs["json"]["description"] == (
+            "serving"
+        )
+
+    def test_update_inference_deployment_requires_a_name(self, api_key_client):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client.update_inference_deployment("  ", new_name="agent-2")
+
+        api_key_client._request.assert_not_called()
+
+    def test_delete_inference_deployment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"success": True})
+        result = api_key_client.delete_inference_deployment(
+            "agent-1", project_name="proj"
+        )
+        assert result == {"success": True}
+        api_key_client._request.assert_called_once_with(
+            "DELETE",
+            "/api/cli/v1/inference/deployments",
+            params={"name": "agent-1", "projectName": "proj"},
+        )
+
+    def test_delete_inference_deployment_requires_a_name(self, api_key_client):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client.delete_inference_deployment("  ")
+
+        api_key_client._request.assert_not_called()
+
+    def test_deploy_agent_sends_gpu_request(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1", num_gpus=4, gpu_type="h100-80")
+
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/inference/deploy",
+            json={
+                "experiment_name": "exp1",
+                "checkpoint": None,
+                "numGpus": 4,
+                "gpuType": "h100-80",
+            },
+        )
+
+    def test_deploy_agent_omits_unset_gpu_request(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1")
+
+        payload = api_key_client._request.call_args[1]["json"]
+        assert "numGpus" not in payload
+        assert "gpuType" not in payload
+
+    def test_deploy_agent_rejects_zero_gpus(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        with pytest.raises(ArenaValidationError, match="num_gpus must be at least 1"):
+            api_key_client.deploy_agent("exp1", num_gpus=0)
+
+        api_key_client._request.assert_not_called()
 
     def test_deploy_agent_rejects_unknown_memory_scope(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"deployed": True})
@@ -2577,4 +2898,108 @@ class TestGetDefaultRunSpec:
                 "field": "algorithm",
                 "pretrainedModelNameOrPath": "ibm-granite/granite-3.3-2b-instruct",
             },
+        )
+
+
+class TestArenaClientVersionSignals:
+    @pytest.fixture(autouse=True)
+    def fresh_process(self) -> None:
+        announce_update.cache_clear()
+
+    @staticmethod
+    def _client(
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response],
+    ) -> ArenaClient:
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            "agilerl.arena.client.httpx.Client",
+            lambda **kwargs: real_client(
+                transport=httpx.MockTransport(handler), **kwargs
+            ),
+        )
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            return ArenaClient(api_key="test-key")
+
+    def test_every_request_sends_the_client_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True, "data": []})
+
+        client = self._client(monkeypatch, handler)
+
+        # Act
+        client.list_models()
+
+        # Assert
+        assert seen[0].headers[CLIENT_VERSION_HEADER] == __version__
+        assert seen[0].headers["Authorization"] == "Bearer test-key"
+
+    UPGRADE_DESCRIPTION = (
+        "agilerl-arena 0.9.0 is no longer supported; the minimum is 1.0.0. "
+        "Run: pip install -U agilerl-arena"
+    )
+
+    def _upgrade_required(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            426,
+            json={
+                "error": "client_upgrade_required",
+                "description": self.UPGRADE_DESCRIPTION,
+            },
+        )
+
+    def test_upgrade_required_shows_the_server_description_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        client = self._client(monkeypatch, self._upgrade_required)
+
+        # Act
+        with pytest.raises(ArenaAPIError) as raised:
+            client.list_models()
+
+        # Assert
+        assert raised.value.status_code == 426
+        assert raised.value.detail == self.UPGRADE_DESCRIPTION
+        assert raised.value.extras == {}
+        assert str(raised.value).count("pip install") == 1
+
+    def test_upgrade_required_on_the_capabilities_fetch_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(monkeypatch, self._upgrade_required)
+
+        with pytest.raises(ArenaAPIError) as raised:
+            client._get_cli_capabilities(force_refresh=True)
+
+        assert raised.value.status_code == 426
+        assert str(raised.value) == f"API error (426): {self.UPGRADE_DESCRIPTION}"
+
+    def test_an_update_header_prints_one_notice(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Arrange
+        client = self._client(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200,
+                json={"ok": True, "data": []},
+                headers={CLIENT_UPDATE_HEADER: "9.9.9"},
+            ),
+        )
+
+        # Act
+        client.list_models()
+        client.list_models()
+
+        # Assert
+        assert capsys.readouterr().err == (
+            f"agilerl-arena 9.9.9 is available (you have {__version__}). "
+            "Run: pip install -U agilerl-arena\n"
         )

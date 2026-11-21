@@ -23,6 +23,7 @@ from agilerl.arena.auth import (
     oauth_access_token_expires_at,
     validate_partner_credentials,
 )
+from agilerl.arena.client_version import CLIENT_VERSION_HEADER, print_update_notice
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -41,12 +42,17 @@ from agilerl.arena.memory.manifest import (
     explicit_colocated_rollout,
     validated_run_manifest,
 )
-from agilerl.arena.models import LLMAlgorithmSpec, TrainingManifest
+from agilerl.arena.models import (
+    FinetuningNetworkSpec,
+    LLMAlgorithmSpec,
+    TrainingManifest,
+    __version__,
+)
 from agilerl.arena.models.model_info import (
-    STATUS_DEPRECATED,
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
 )
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
@@ -62,10 +68,11 @@ from agilerl.arena.utils import (
 logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset(
-    {"sft", "preference", "reasoning", "tabular", "non-tabular"}
+    {"sft", "preference", "reasoning", "tabular", "non-tabular", TRACES_DATASET_FORMAT}
 )
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
+JSONL_CONTENT_TYPE = "application/x-ndjson"
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -130,6 +137,16 @@ def _pause_for_rate_limit(response: httpx.Response) -> None:
         wait = 60
     logger.warning("Arena rate limit reached; retrying in %s seconds.", wait)
     time.sleep(wait)
+
+
+def _idempotency_headers(key: str | None) -> dict[str, str]:
+    """Return the submit idempotency header, or an empty dict when unset."""
+    if key is None:
+        return {}
+    stripped = key.strip()
+    if not stripped:
+        return {}
+    return {"Idempotency-Key": stripped}
 
 
 def _check_writable_target(path: Path) -> None:
@@ -251,6 +268,8 @@ class ArenaClient:
             base_url=self._base_url,
             timeout=self._request_timeout,
             follow_redirects=True,
+            headers={CLIENT_VERSION_HEADER: __version__},
+            event_hooks={"response": [print_update_notice]},
         )
 
         self._try_restore_session()
@@ -593,6 +612,7 @@ class ArenaClient:
         *,
         name: str,
         version: str | None = None,
+        multi_agent: bool | None = None,
     ) -> dict[str, Any]:
         """Profile a validated environment version.
 
@@ -600,11 +620,16 @@ class ArenaClient:
         :type name: str
         :param version: Environment version. Defaults to None, which resolves to the latest version.
         :type version: str | None
+        :param multi_agent: Override the stored multi-agent flag. Omit it and the
+            server uses the value saved on the environment.
+        :type multi_agent: bool | None
         """
         payload: dict[str, Any] = {
             "name": name,
             "version": version,
         }
+        if multi_agent is not None:
+            payload["multi_agent"] = multi_agent
         return self._open_stream(
             "POST",
             "/api/cli/v1/environments/profile",
@@ -753,7 +778,7 @@ class ArenaClient:
         *,
         name: str,
         category: str,
-        column_mapping: str | dict[str, Any],
+        column_mapping: str | dict[str, Any] | None = None,
         description: str | None = None,
         file: str | os.PathLike[str] | bytes | None = None,
         config: str | None = None,
@@ -765,19 +790,21 @@ class ArenaClient:
 
         Upload a local CSV, a parquet file, a Hugging Face parquet folder,
         import from HuggingFace, or create metadata only. Validation is
-        performed by the Arena API.
+        performed by the Arena API; a local ``traces`` file is also checked
+        against the traces spec before upload.
 
         :param name: Dataset name.
         :type name: str
         :param category: Dataset category (``reasoning``, ``preference``,
-            ``sft``, ``tabular``, or ``non-tabular``).
+            ``sft``, ``traces``, ``tabular``, or ``non-tabular``).
         :type category: str
         :param column_mapping: Column mapping as a JSON string or dict.
-        :type column_mapping: str | dict[str, Any]
+            Required except for ``traces``, whose column names are the spec.
+        :type column_mapping: str | dict[str, Any] | None
         :param description: Optional description.
         :type description: str | None
-        :param file: Local CSV or parquet path, a directory of parquet shards,
-            or raw CSV bytes (bytes are uploaded as ``dataset.csv``).
+        :param file: Local CSV, JSONL or parquet path, a directory of parquet
+            shards, or raw CSV bytes (bytes are uploaded as ``dataset.csv``).
         :type file: str | os.PathLike[str] | bytes | None
         :param config: Parquet config name when *file* is a folder with more
             than one config (e.g. gsm8k ``main`` vs ``socratic``).
@@ -790,6 +817,7 @@ class ArenaClient:
         :type hf_split: str | None
         :returns: Created dataset metadata from Arena.
         :rtype: dict[str, Any]
+        :raises ArenaValidationError: If a ``traces`` file breaks the spec.
         """
         data, upload_files = self._build_create_dataset_multipart(
             name=name,
@@ -872,7 +900,7 @@ class ArenaClient:
         *,
         name: str,
         category: str,
-        column_mapping: str | dict[str, Any],
+        column_mapping: str | dict[str, Any] | None,
         description: str | None = None,
         file: str | os.PathLike[str] | bytes | None = None,
         config: str | None = None,
@@ -882,6 +910,12 @@ class ArenaClient:
     ) -> tuple[dict[str, str | None], list[tuple[str, tuple[str, Any, str]]]]:
         """Build multipart form fields for dataset creation."""
         category = ArenaClient._validate_dataset_category(category)
+        if category == TRACES_DATASET_FORMAT:
+            ArenaClient._validate_traces_upload(file, column_mapping)
+            column_mapping = {}
+        elif column_mapping is None:
+            msg = f"A {category!r} dataset needs a column mapping."
+            raise ArenaValidationError(msg)
         column_mapping_str = (
             json.dumps(column_mapping)
             if isinstance(column_mapping, dict)
@@ -902,9 +936,38 @@ class ArenaClient:
         return data, ArenaClient._dataset_upload_parts(file, config=config)
 
     @staticmethod
+    def _validate_traces_upload(
+        file: str | os.PathLike[str] | bytes | None,
+        column_mapping: str | dict[str, Any] | None,
+    ) -> None:
+        """Check a traces upload against the spec; its columns take no mapping."""
+        if isinstance(column_mapping, str):
+            column_mapping = column_mapping.strip()
+        if column_mapping not in (None, {}, "", "{}"):
+            msg = (
+                "A traces dataset takes no column mapping: its column names "
+                "(prompt, completion, tools, ...) are the spec."
+            )
+            raise ArenaValidationError(msg)
+        if isinstance(file, bytes):
+            msg = "Pass a traces dataset as a JSONL or parquet path, not bytes."
+            raise ArenaValidationError(msg)
+        if file is None:
+            return
+        try:
+            rows = validate_traces_file(Path(os.fspath(file)).expanduser())
+        except ValueError as error:
+            raise ArenaValidationError(str(error)) from error
+        logger.info("Traces file %s: %d valid rows.", os.fspath(file), rows)
+
+    @staticmethod
     def _content_type_for_upload_path(path: Path) -> str:
-        if path.suffix.lower() == ".parquet":
+        suffix = path.suffix.lower()
+        if suffix == ".parquet":
             return PARQUET_CONTENT_TYPE
+        # The traces validator reads a .json upload as JSONL.
+        if suffix in (".jsonl", ".ndjson", ".json"):
+            return JSONL_CONTENT_TYPE
         return CSV_CONTENT_TYPE
 
     @staticmethod
@@ -1129,10 +1192,13 @@ class ArenaClient:
         *,
         resource_id: str | int | None = None,
         num_nodes: int | None = None,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
         project: str | None = None,
         experiment_name: str | None = None,
         reward_file: str | os.PathLike[str] | bytes | None = None,
         completion: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Submit an experiment (a training job).
 
@@ -1143,20 +1209,33 @@ class ArenaClient:
         :type resource_id: str | int | None
         :param num_nodes: The number of nodes to use for training.
         :type num_nodes: int | None
+        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes.
+            Cannot be combined with ``resource_id`` or ``num_nodes``.
+        :type num_gpus: int | None
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
+            Cannot be combined with ``resource_id`` or ``num_nodes``.
+        :type gpu_type: str | None
         :param project: The project to submit the experiment to.
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
         :type experiment_name: str | None
-        :param reward_file: Python reward module for reasoning dataset jobs.
+        :param reward_file: Python rubric or reward module scoring a rollout job.
             When set, the request is sent as ``multipart/form-data``.
         :type reward_file: str | os.PathLike[str] | bytes | None
         :param completion: Optional model completion for reward validation.
             When omitted, the server uses the reference answer from the first
             dataset row.
         :type completion: str | None
+        :param idempotency_key: Reuse this key to replay the same submit instead
+            of starting another job. The key is org-wide.
+        :type idempotency_key: str | None
+        :raises ArenaValidationError: When GPU fields are combined with a node
+            choice, or ``num_gpus`` is below 1.
         """
+        self._check_resource_request(resource_id, num_nodes, num_gpus, gpu_type)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
+        self._check_context_length(training_manifest)
         self._check_rollout_mode(training_manifest)
         validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
@@ -1168,12 +1247,18 @@ class ArenaClient:
                 cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
             )
 
+        if isinstance(resource_id, int):
+            resource_id = str(resource_id)
+        headers = _idempotency_headers(idempotency_key)
+
         if reward_file is not None:
             files = self._build_submit_experiment_multipart(
                 manifest=validated,
                 project=resolved_project,
                 resource_id=resource_id,
                 num_nodes=num_nodes,
+                num_gpus=num_gpus,
+                gpu_type=gpu_type,
                 experiment_name=experiment_name,
                 reward_file=reward_file,
                 completion=completion,
@@ -1183,14 +1268,15 @@ class ArenaClient:
                     "POST",
                     "/api/cli/v1/experiments/jobs/submit",
                     files=files,
+                    headers=headers,
                     timeout=self._upload_timeout,
                 ).collect()
             finally:
                 self._close_upload_files(files)
 
         # The server rejects explicit nulls: project and resource_id are
-        # non-nullable, and the num_nodes default only applies when the key is
-        # absent.
+        # non-nullable, and the resource defaults (num_nodes, num_gpus,
+        # gpu_type) only apply when the key is absent.
         payload: dict[str, Any] = {"manifest": validated, "project": resolved_project}
         payload.update(
             {
@@ -1198,6 +1284,8 @@ class ArenaClient:
                 for key, value in (
                     ("resource_id", resource_id),
                     ("num_nodes", num_nodes),
+                    ("num_gpus", num_gpus),
+                    ("gpu_type", gpu_type),
                     ("experiment_name", experiment_name),
                 )
                 if value is not None
@@ -1207,8 +1295,29 @@ class ArenaClient:
             "POST",
             "/api/cli/v1/experiments/jobs/submit",
             json=payload,
+            headers=headers,
             timeout=self._upload_timeout,
         ).collect()
+
+    @staticmethod
+    def _check_resource_request(
+        resource_id: str | int | None,
+        num_nodes: int | None,
+        num_gpus: int | None,
+        gpu_type: str | None,
+    ) -> None:
+        """Reject a GPU request below 1 GPU or combined with a node choice."""
+        if num_gpus is not None and num_gpus < 1:
+            msg = "num_gpus must be at least 1."
+            raise ArenaValidationError(msg)
+        if (num_gpus is not None or gpu_type is not None) and (
+            resource_id is not None or num_nodes is not None
+        ):
+            msg = (
+                "num_gpus and gpu_type cannot be combined with "
+                "resource_id or num_nodes."
+            )
+            raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_model_status(manifest: TrainingManifest) -> None:
@@ -1218,13 +1327,44 @@ class ArenaClient:
             return
         hub_id = algorithm.pretrained_model_name_or_path
         entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
-        if entry is None:
+        notice = entry.status_notice if entry else None
+        if entry is None or notice is None:
             return
         if entry.status == STATUS_PREVIEW:
-            msg = f"Model {hub_id} is in preview and cannot be submitted yet."
-            raise ArenaValidationError(msg)
-        if entry.status == STATUS_DEPRECATED:
-            logger.warning("Model %s is deprecated and will be removed.", hub_id)
+            raise ArenaValidationError(notice)
+        logger.warning(notice)
+
+    @staticmethod
+    def _check_context_length(manifest: TrainingManifest) -> None:
+        """Reject an LLM ``max_context_length`` outside Arena's catalog options.
+
+        Arena allows powers of 2 from 1024 up to the model's context window,
+        plus the window itself; a window below 1024 is the only option.
+        """
+        network = manifest.network
+        if not isinstance(manifest.algorithm, LLMAlgorithmSpec) or not isinstance(
+            network, FinetuningNetworkSpec
+        ):
+            return
+        entry = SUPPORTED_MODEL_INFO.get(network.pretrained_model_name_or_path)
+        if entry is None:
+            return
+        catalog_max = entry.max_context_length
+        floor = 1024
+        if catalog_max < floor:
+            options = [catalog_max]
+            requirement = f"must be {catalog_max}"
+        else:
+            options = [floor << n for n in range((catalog_max // floor).bit_length())]
+            requirement = f"must be a power of 2 between {floor} and {catalog_max}"
+            if options[-1] != catalog_max:
+                options.append(catalog_max)
+                requirement += f", or {catalog_max}"
+        if network.max_context_length in options:
+            return
+        allowed = ", ".join(str(option) for option in options)
+        msg = f"network.max_context_length {requirement}. Allowed: {allowed}"
+        raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_rollout_mode(manifest: TrainingManifest) -> None:
@@ -1244,6 +1384,8 @@ class ArenaClient:
         project: str | None,
         resource_id: str | int | None,
         num_nodes: int | None,
+        num_gpus: int | None,
+        gpu_type: str | None,
         experiment_name: str | None,
         reward_file: str | os.PathLike[str] | bytes | None,
         completion: str | None,
@@ -1254,6 +1396,8 @@ class ArenaClient:
             "project": project,
             "resource_id": str(resource_id) if resource_id is not None else None,
             "num_nodes": str(num_nodes) if num_nodes is not None else None,
+            "num_gpus": str(num_gpus) if num_gpus is not None else None,
+            "gpu_type": gpu_type,
             "experiment_name": experiment_name,
             "completion": completion,
         }
@@ -1289,20 +1433,46 @@ class ArenaClient:
             "GET", "/api/cli/v1/experiments/list", params={"project": resolved}
         )
 
-    def resume_experiment(self, experiment_name: str, max_steps: int) -> dict[str, Any]:
+    def resume_experiment(
+        self,
+        experiment_name: str,
+        max_steps: int | None = None,
+        checkpoint: str | None = None,
+        new_name: str | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
         """Resume an experiment (a training job).
 
         :param experiment_name: The name of the experiment to resume.
         :type experiment_name: str
-        :param max_steps: The maximum number of steps to train for.
-        :type max_steps: int
+        :param max_steps: Training steps for the resumed run. Omit to keep the stored length.
+        :type max_steps: int | None
+        :param checkpoint: Checkpoint to resume from. Omit to use the best checkpoint.
+        :type checkpoint: str | None
+        :param new_name: Name for the resumed experiment.
+        :type new_name: str | None
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
         :returns: A dictionary containing the resume result.
         :rtype: dict[str, Any]
         """
+        payload: dict[str, Any] = {"experiment_name": experiment_name}
+        payload.update(
+            {
+                key: value
+                for key, value in (
+                    ("max_steps", max_steps),
+                    ("checkpoint", checkpoint),
+                    ("new_name", new_name),
+                    ("project", project),
+                )
+                if value is not None
+            }
+        )
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/resume",
-            json={"experiment_name": experiment_name, "max_steps": max_steps},
+            json=payload,
         )
 
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
@@ -1518,6 +1688,52 @@ class ArenaClient:
         return resp
 
     # -------------------------------------------------------------------------
+    ### Secrets ###
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _secret_metadata(row: dict[str, Any]) -> dict[str, Any]:
+        """Keep a secret row's name, timestamps and last editor, dropping any hint of its value."""
+        return {
+            key: row.get(key)
+            for key in ("name", "created_at", "updated_at", "updated_by")
+        }
+
+    def list_secrets(self) -> list[dict[str, Any]]:
+        """List your organization's secrets without their values.
+
+        :returns: One row per secret with ``name``, ``created_at``, ``updated_at`` and ``updated_by``.
+        :rtype: list[dict[str, Any]]
+        """
+        rows = self._request("GET", "/api/cli/v1/secrets")
+        return [self._secret_metadata(row) for row in rows]
+
+    def set_secret(self, name: str, value: str) -> dict[str, Any]:
+        """Create or replace an organization secret.
+
+        :param name: Secret name, such as ``ANTHROPIC_API_KEY``.
+        :type name: str
+        :param value: Secret value. Sent once and never returned.
+        :type value: str
+        :returns: The stored row's ``name``, ``created_at``, ``updated_at`` and ``updated_by``.
+        :rtype: dict[str, Any]
+        """
+        row = self._request(
+            "PUT", "/api/cli/v1/secrets", json={"name": name, "value": value}
+        )
+        return self._secret_metadata(row)
+
+    def delete_secret(self, name: str) -> dict[str, Any]:
+        """Delete an organization secret.
+
+        :param name: Secret name.
+        :type name: str
+        :returns: ``{"deleted": True, "name": name}``.
+        :rtype: dict[str, Any]
+        """
+        return self._request("DELETE", "/api/cli/v1/secrets", json={"name": name})
+
+    # -------------------------------------------------------------------------
     ### Inference ###
     # -------------------------------------------------------------------------
 
@@ -1556,8 +1772,16 @@ class ArenaClient:
         experiment_name: str,
         checkpoint: str | None = None,
         memory_scope: MemoryScope | None = None,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
     ) -> dict[str, Any]:
         """Create an inference deployment from an experiment checkpoint.
+
+        Without ``num_gpus`` or ``gpu_type``, a redeploy keeps the agent's
+        resources. A new deployment runs on the cluster the agent was trained on
+        if that is your own cluster, else on the cheapest node type that can serve
+        the model. If Arena can't size the model, it uses its default node type
+        and rejects ``num_gpus`` and ``gpu_type``.
 
         :param experiment_name: The name of the experiment to deploy.
         :type experiment_name: str
@@ -1569,15 +1793,27 @@ class ArenaClient:
             with ``None`` keeps the scope already stored, it does not reset it, and the
             scope cannot be changed after the deployment exists.
         :type memory_scope: MemoryScope | None
+        :param num_gpus: GPUs on an LLM agent's node.
+        :type num_gpus: int | None
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``,
+            for LLM agents.
+        :type gpu_type: str | None
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
+        :raises ArenaValidationError: When ``num_gpus`` is below 1 or
+            ``memory_scope`` is unknown.
         """
+        self._check_resource_request(None, None, num_gpus, gpu_type)
         body: dict[str, Any] = {
             "experiment_name": experiment_name,
             "checkpoint": checkpoint,
         }
         if memory_scope is not None:
             body["memoryScope"] = self._validated_memory_scope(memory_scope)
+        if num_gpus is not None:
+            body["numGpus"] = num_gpus
+        if gpu_type is not None:
+            body["gpuType"] = gpu_type
         result = self._request(
             "POST",
             "/api/cli/v1/inference/deploy",
@@ -1593,6 +1829,83 @@ class ArenaClient:
             checkpoint_suffix,
         )
         return result
+
+    def update_inference_deployment(
+        self,
+        name: str,
+        new_name: str | None = None,
+        description: str | None = None,
+        enabled: bool | None = None,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename, describe, or enable a deployment.
+
+        :param name: Current deployment name.
+        :type name: str
+        :param new_name: Replacement display name.
+        :type new_name: str | None
+        :param description: Replacement description.
+        :type description: str | None
+        :param enabled: ``True`` enables the deployment, ``False`` disables it.
+        :type enabled: bool | None
+        :param experiment_name: Experiment name when several deployments share ``name``.
+        :type experiment_name: str | None
+        :param project_name: Project name when several deployments share ``name``.
+        :type project_name: str | None
+        :returns: The updated deployment.
+        :rtype: dict[str, Any]
+        """
+        body = self._deployment_lookup_params(
+            name=name,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        if "name" not in body:
+            msg = "deployment name is required."
+            raise ArenaAPIError(msg)
+        if new_name is not None:
+            body["new_name"] = new_name
+        if description is not None:
+            body["description"] = description
+        if enabled is not None:
+            body["enabled"] = enabled
+        return self._request(
+            "PATCH",
+            "/api/cli/v1/inference/deployments",
+            json=body,
+        )
+
+    def delete_inference_deployment(
+        self,
+        name: str,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Archive a deployment.
+
+        :param name: Deployment name.
+        :type name: str
+        :param experiment_name: Experiment name when several deployments share ``name``.
+        :type experiment_name: str | None
+        :param project_name: Project name when several deployments share ``name``.
+        :type project_name: str | None
+        :returns: ``{"success": true}`` when the deployment is archived.
+        :rtype: dict[str, Any]
+        """
+        params = self._deployment_lookup_params(
+            name=name,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        if "name" not in params:
+            msg = "deployment name is required."
+            raise ArenaAPIError(msg)
+        return self._request(
+            "DELETE",
+            "/api/cli/v1/inference/deployments",
+            params=params,
+        )
 
     def list_inference_deployments(
         self,

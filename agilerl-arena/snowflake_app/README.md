@@ -1,0 +1,209 @@
+# Arena Snowflake Native App
+
+Application package files for the Arena Snowflake Native App. The
+`arena snowflake setup` CLI (`agilerl/arena/snowflake/`) stays; this app is the
+Marketplace path to the same training, publish and serve behaviour. These files
+are not part of the `agilerl-arena` wheel or sdist.
+
+Check the manifest without a Snowflake account. Run this from the repository root:
+
+```bash
+just snowflake-app-validate
+```
+
+## Build
+
+```bash
+just snowflake-app-build CONNECTION TAG   # TAG like 38.0.4-py313-cu130
+```
+
+`CONNECTION` is a Snowflake CLI connection to the provider account. The
+recipe runs the Snowflake CLI with `uvx --from snowflake-cli` and needs
+[`crane`](https://github.com/google/go-containerregistry/tree/main/cmd/crane) on
+`PATH`; no Docker. It:
+
+1. Copies this directory to `dist/snowflake-app/` and replaces the
+   `0.0.0-py313-cu130` placeholder in `manifest.yml` and `app_code/*.py` with `TAG`.
+2. Builds the `agilerl-arena` wheel (stamped with the bundle version) and, with
+   `bundle.py`, stores it as `agilerl_arena.zip` together with `python-keycloak`
+   at its `uv.lock` version, the one dependency the Snowflake Anaconda channel
+   lacks. Directory entries are added so `zipimport` finds the `agilerl`
+   namespace package. The procedures import `agilerl.arena.snowflake` from it
+   instead of copying code.
+3. Creates `arena_provider.images.repo` if missing and runs `crane copy` from
+   `public.ecr.aws/x7s7d0o8/containers/snowflake-job:TAG` to that repository.
+   The registry password is the whole JSON output of
+   `snow spcs image-registry token --format JSON`.
+4. Runs `snow app version create v<TAG with _ for punctuation>` for the
+   `arena_app_pkg` package in `snowflake.yml`.
+
+`snow app bundle --project dist/snowflake-app` checks steps 1 and 2
+without a connection.
+
+## Install
+
+The consumer installs from the listing with `ACCOUNTADMIN`, or with a role that
+holds `IMPORT SHARE`, `CREATE APPLICATION` and, because the listing is paid,
+`PURCHASE DATA EXCHANGE LISTING` on the account. Without the last one the
+install is refused.
+
+## Procedures
+
+Python 3.13 stored procedures in `app_code/arena_app.py`, owner's rights, with
+the other `agilerl-arena` dependencies they import (`aiofiles`, `click`,
+`cryptography`, `deprecation`, `httpx`, `jwcrypto`, `lazy_loader`, `numpy`,
+`pydantic`, `pyyaml`, `requests`, `requests-toolbelt`, `rich`) and
+`snowflake-snowpark-python` from the Snowflake Anaconda channel.
+
+Every account-level object the app creates is prefixed `agilerl_app_`, so it
+never collides with objects the CLI created in the same account.
+
+| Procedure | Role | Does |
+|---|---|---|
+| `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `agilerl_app_arena_eai` and requires `features.snowflakeTraining`; then sets the three secrets. Secret values are never logged, returned or quoted in errors. |
+| `app_code.set_pools(gpu_families, max_gpus, broker_family, head_family)` | `app_admin` | Creates or resizes `agilerl_app_broker_pool`, `agilerl_app_head_pool` and one `agilerl_app_gpu_<FAMILY>` per listed family (CLI defaults); drops `AGILERL_APP_GPU_*` pools of families no longer listed; refuses to shrink or drop under a running service; writes `setup.json`. |
+| `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`. |
+| `app_code.submit(manifest, gpus, source_reference, source_alias, gpu_family, reward_file, checkpoint_steps, resume_from)` | `app_admin` | `arena snowflake submit` on the app pools: the same broker, head and worker job services in `app_state`, with the head reading the `app_state` secrets through `agilerl_app_arena_eai`. `manifest` and `reward_file` are file contents. The job reads `SELECT * FROM reference('<source_reference>', '<source_alias>')`. Returns the run id, the service names and any manifest warnings. |
+| `app_code.status(run_id)` | `app_user` | `arena snowflake status`. Refuses run ids with no `job.json` on `@app_state.runs`. |
+| `app_code.logs(run_id, role, instance)` | `app_user` | `arena snowflake logs`. |
+| `app_code.cancel(run_id)` | `app_admin` | `arena snowflake cancel`. |
+| `app_code.reconcile_usage()` | none | Bills usage; see Billing. Only the hourly task calls it, so two calls never overlap. |
+| `app_code.version_init()` | none | Version initializer: resumes the billing task after install, upgrade, or a failed upgrade. |
+| `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
+| `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
+| `app_code.unpublish(model, version_name, drop_version)` | `app_admin` | `arena snowflake unpublish` for a model in `app_state`, then closes the service's Arena deployment. |
+
+`app_user` gets the read-only procedures. Starting, cancelling, publishing and
+unpublishing spend GPU credits or drop work, so they need `app_admin`.
+
+## Billing
+
+App runs set `ARENA_SNOWFLAKE_CHANNEL=native_app` in the head spec, so the head
+opens the Arena run with `"channel": "native_app"` and Arena bills it through
+Snowflake. CLI runs never set it. `submit` adds each run to
+`app_state.usage_items` before it starts any job service.
+
+A served model is billed as an Arena deployment. `publish` with `serve`
+records the service's model, version, run, GPU family and GPU count in
+`app_state.served_models` before it waits for the job. Once the service
+exists, it adds `<SERVICE>-<yyyymmddThhmmssZ>` to `usage_items` with the
+service name and calls `POST /api/cli/v1/snowflake/deployments`. If Arena
+refuses, the service is dropped, so no model serves unbilled. `unpublish`
+closes the deployment after dropping the service.
+
+Billing starts when a served model is running and stops when it suspends or
+is unpublished. Each hourly run first meters deployments: it heartbeats every
+open deployment whose service is running, and closes one whose service is
+suspended, gone or ended; a resumed service gets a new deployment. Because
+the check is hourly, each suspend can bill up to an hour of idle time, and
+each resume can serve up to an hour before billing starts. When Snowflake
+training is turned off, the app drops the service and closes the deployment.
+The usage row is marked closed only after that close returns, so a failed
+close is tried again on the next hour. When Arena has already closed a
+deployment (no heartbeat for 2 hours), the item is marked closed and settles
+from the usage read, and the live service gets a new deployment. Any live
+service in `served_models` with no open deployment, such as one a publish
+started after its wait ended, gets one too. A deployment Arena has never
+answered for does not count, so a lost open is tried again. A refused open
+drops the service. Arena's reason
+is logged and stored in `usage_items.last_error` and `last_error_at`.
+
+`app_admin` can `SELECT` from `app_state.usage_items`,
+`app_state.billed_hours` and `app_state.served_models` to audit billing,
+including why a serve was dropped. A failed usage read or billing call is
+logged and its reason stored in the item's `last_error` and `last_error_at`.
+`app_user`, which `app_admin` holds, can read `app_state.arena_metrics`.
+
+The serverless task `app_state.reconcile_usage_task` runs every 60 minutes
+(XSMALL initial size, never suspended after failures) and calls
+`app_code.reconcile_usage()`. That procedure reads the three Arena secrets
+through `agilerl_app_arena_eai` and, for each unsettled item, calls
+`GET /api/cli/v1/snowflake/runs/<run_id>/usage` or
+`GET /api/cli/v1/snowflake/deployments/<deployment_id>/usage`. For each charged hour it has not
+billed yet, it emits one event with `SYSTEM$CREATE_BILLING_EVENTS`
+([billable events](https://docs.snowflake.com/en/developer-guide/native-apps/adding-custom-event-billing)):
+class `ARENA_USAGE`, subclass `run` or `deployment`, `start_timestamp` = the hour start,
+`timestamp` = the hour end or now for a partial hour, `base_charge` = cents ×
+0.01 USD, `objects` = the run or deployment id. Billing lags usage by up to about an hour.
+The listing's pricing plan carries the event's `billing_quantity` and unit.
+
+`app_state.billed_hours` holds one row per charged hour. A MERGE claims hours
+for one call, and `attempted_at` is set just before the billing call, so an
+hour is never emitted twice. If Snowflake refuses a batch with one of its
+documented messages, the hours are deleted and the next run bills them. An
+app not installed from a listing (error 090898) is refused this way on every
+run, so it never bills and never counts hours as `unconfirmed`. Any
+other failure leaves them attempted with no `emitted_at`; they are never sent
+again, and the summary counts those older than an hour as `unconfirmed`, to be
+checked against `SNOWFLAKE.DATA_SHARING_USAGE.MARKETPLACE_PAID_USAGE_DAILY`
+and logged as a warning. A MERGE that leaves two rows for one hour stops that
+item before anything is emitted.
+
+Items are read least recently checked first (`last_checked_at`). The first
+failed read other than a 404 (transport error, exhausted retries, rejected
+credentials) stops reading for that run. An item settles once Arena reports it
+closed and every charged hour has been attempted. A 404 never settles an item
+Arena has answered for before (`first_seen_at`) or that has billed hours; it
+is logged and kept. An item that has only ever had 404s is read at most daily,
+logged on each 404, and settles unbilled 30 days after its first 404
+(`first_404_at`). Items Arena has kept open for over 7 days are logged.
+Procedure logs, these included, go to the consumer's active event table at the
+manifest's `log_level` (`INFO`).
+
+## Manifest
+
+- `manifest_version: 2`, so Snowflake grants the requested privileges at
+  install ([automated granting](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-auto-privs)).
+  External access through app specifications requires version 2
+  ([request external access](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-app-specs-eai)).
+- Privileges: `CREATE COMPUTE POOL`, `CREATE WAREHOUSE`, `BIND SERVICE ENDPOINT`,
+  `CREATE EXTERNAL ACCESS INTEGRATION`, `EXECUTE TASK`, `EXECUTE MANAGED TASK`.
+  All six are on the auto-grant list, so the setup script can resume the
+  billing task. A version 2 manifest cannot change this list in a patch.
+- `lifecycle_callbacks.version_initializer` is `app_code.version_init`
+  ([version initializer](https://docs.snowflake.com/en/developer-guide/native-apps/update-app-develop)).
+  The setup script suspends the billing task before redefining it; when an
+  upgrade fails, Snowflake calls the previous version's initializer, which
+  resumes the task.
+- Image: `/arena_provider/images/repo/snowflake-job:<tag>`, the one trainer
+  image the broker, head and workers all run. The repository `arena_provider.images.repo`
+  sits in the provider account outside the application package, as
+  [Snowflake recommends](https://docs.snowflake.com/en/developer-guide/native-apps/container-containers)
+  (a repository inside the package is replicated by Cross-Cloud Auto-Fulfillment).
+  The manifest cannot template the tag; `0.0.0-py313-cu130` is a placeholder the
+  `snowflake-app-build` recipe replaces with the release tag at build.
+- References `source_table` (TABLE) and `source_view` (VIEW), SELECT only. A
+  reference has one object type, so table-or-view is two references. Both are
+  multi-valued so a consumer can bind several datasets and pick one per run.
+  Their `register_callback` is `app_code.register_reference`, written with the
+  other procedures.
+- Application roles and external hosts are not manifest keys. The setup script
+  creates them ([application roles](https://docs.snowflake.com/en/developer-guide/native-apps/creating-setup-script#about-application-roles),
+  [app specifications](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-app-specs-eai)):
+  `app_admin` and `app_user` (granted to `app_admin`); network rules, EAIs and
+  one app specification each for Hugging Face (the 10 hosts in
+  `setup_sql.HF_HOSTS`) and `arena.agilerl.com:443`. Hosts in a rule and its
+  specification must match exactly.
+
+## Current objects and their app equivalents
+
+| Current object or step | In the app |
+|---|---|
+| Role `arena_trainer` + grants | Application roles `app_admin` (configure, pools, submit, cancel, publish, unpublish) and `app_user` (status, logs, endpoint). The consumer grants them to account roles; `invite USER` becomes granting `app_admin` to a user who trains, or `app_user` to one who only watches. |
+| Service user `arena_job_user` and its key pair | Dropped. Services run as the app, so no user or key exists. |
+| Database/schema `arena.training`, stage `runs`, table `arena_metrics`, file format | Inside the app: procedures in the versioned schema `app_code`; stage `runs` (SNOWFLAKE_SSE), table `arena_metrics` and file format `arena_json` in the stateful schema `app_state`, with the CLI's definitions. |
+| Image push into `arena.training.images` | Dropped for the consumer. The image is in the provider repository `arena_provider.images.repo` and is listed under `artifacts.container_services.images`. |
+| Warehouse `arena_wh` | `CREATE WAREHOUSE` privilege; the setup script creates `agilerl_app_wh` (XSMALL, auto-suspend 60 s, initially suspended). |
+| Resource monitor `arena_monitor` | Dropped. Only `ACCOUNTADMIN` can create a resource monitor ([resource monitors](https://docs.snowflake.com/en/user-guide/resource-monitors)) and `CREATE RESOURCE MONITOR` is not on the app auto-grant list. The consumer may assign their own monitor to the app's warehouse. |
+| Budget `arena_gpu_budget` | Dropped from the app; consumer-side step. Creating a custom budget needs `SNOWFLAKE.BUDGET_CREATOR`, which an app cannot be auto-granted. The consumer can add the app to their own budget, which tracks every warehouse and compute pool the app owns; app-owned objects cannot be added one by one ([custom budgets](https://docs.snowflake.com/en/user-guide/budgets/custom-budget)). |
+| Compute pools and `pools set` | `CREATE COMPUTE POOL` privilege. No pool exists after install, since an idle pool bills; `app_code.set_pools` creates and resizes them. No budget link (budgets are dropped). `uses_gpu: true` is set because worker pools use GPU families. |
+| `BIND SERVICE ENDPOINT ON ACCOUNT` | `BIND SERVICE ENDPOINT` privilege. |
+| Network rules + EAIs `arena_hf_eai`, `arena_api_eai` | `CREATE EXTERNAL ACCESS INTEGRATION` privilege; the setup script creates the rules `app_state.hf_egress` and `app_state.arena_api_egress`, the integrations `agilerl_app_hf_eai` and `agilerl_app_arena_eai`, and the `hf_access` and `arena_access` app specifications the consumer approves. Setup fails if either integration name is already in the account and the app does not own it; on upgrade the app keeps the ones it owns. |
+| `grant --host` → `arena_env_eai` | Not built yet; follow-up. Planned: an `app_admin` procedure creates a rule, EAI and app specification for each extra host; the consumer approves each specification. |
+| `grant --table` (SELECT + USAGE) | References `source_table` / `source_view`, SELECT only. No `--source-query`: custom SQL goes in a view the consumer binds. |
+| Secrets `arena_org_key`, `arena_external_user_id`, `arena_base_url` | Same three secrets in `app_state`, created empty by the setup script and set by `app_code.configure` after a `GET /api/cli/v1/capabilities` check. `agilerl_app_arena_eai` allows them, so `reconcile_usage` can read them. |
+| `setup.json` runtime profile | Same document shape at `@app_state.runs/_arena/setup.json`, written by `app_code.set_pools`. No key material. |
+| Trial-account probe EAI (error 509009) | The setup script creates the EAIs in a block that turns error 509009 into a trial-account message. |
+| Event table warning for `logs` | Container logs reach the consumer's active event table; consumers may share them with the provider ([event sharing](https://docs.snowflake.com/en/developer-guide/native-apps/event-about)). Containerized apps support only the `SNOWFLAKE$ALL` event definition, and container log levels are set in the service spec, not the manifest ([event definitions](https://docs.snowflake.com/en/developer-guide/native-apps/event-definition)). `logs` reads the consumer event table where the caller can see it. |
+| `submit` / `status` / `logs` / `cancel` / `publish` / `endpoint` / `unpublish` | Procedures of the same names (see Procedures). |
+| `teardown` | Dropped. Uninstalling the app drops its objects, including models and checkpoints inside it. Copy them out first. |

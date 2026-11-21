@@ -510,7 +510,7 @@ class TestCheckModule:
             + "\n",
             encoding="utf-8",
         )
-        with pytest.raises(click.ClickException, match="digest is"):
+        with pytest.raises(click.ClickException, match="If you edited the module"):
             check_module(tmp_path, slim)
 
 

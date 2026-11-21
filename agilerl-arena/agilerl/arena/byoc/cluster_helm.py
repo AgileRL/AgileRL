@@ -29,6 +29,12 @@ AGENT_NAMESPACE = "arena"
 STORAGE_CHART = "arena-byoc-storage"
 AGENT_CHART = "arena-byoc-agent"
 DEFAULT_HELM_WAIT_TIMEOUT = "10m"
+CLUSTER_TOKEN_SECRET_NAME = "cluster-token"
+CLUSTER_TOKEN_SECRET_KEY = "cluster-token"
+WIREGUARD_SECRET_NAME = "arena-byoc-agent-wireguard"
+ROLES_ANYWHERE_SECRET_NAME = "byoc-arena-s3"
+NEBIUS_SECRET_NAME = "arena-byoc-provisioner-nebius"
+CATALOG_SECRET_NAME = "arena-byoc-catalog-credentials"
 
 
 def normalize_agent_release(release: str | None) -> str:
@@ -769,6 +775,191 @@ def helm_upgrade_install(
         )
 
 
+def _helm_value(values: dict[str, Any], keys: tuple[str, ...], default: str) -> str:
+    current: Any = values
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+    if isinstance(current, str):
+        stripped = current.strip()
+        if stripped:
+            return stripped
+    return default
+
+
+def _package_secret_file(package_root: Path, relative: str) -> Path | None:
+    path = package_root / relative
+    if path.is_file():
+        return path
+    return None
+
+
+def _cluster_token_secret(
+    package_root: Path, agent_values: dict[str, Any]
+) -> tuple[str, list[tuple[str, Path]]] | None:
+    token = _package_secret_file(package_root, "secrets/cluster-token")
+    if token is None:
+        return None
+    return (
+        _helm_value(
+            agent_values,
+            ("clusterTokenSecret", "name"),
+            CLUSTER_TOKEN_SECRET_NAME,
+        ),
+        [
+            (
+                _helm_value(
+                    agent_values,
+                    ("clusterTokenSecret", "key"),
+                    CLUSTER_TOKEN_SECRET_KEY,
+                ),
+                token,
+            )
+        ],
+    )
+
+
+def _secret_if_files_present(
+    package_root: Path,
+    agent_values: dict[str, Any],
+    entries: tuple[tuple[str, str], ...],
+    name_keys: tuple[str, ...],
+    default_name: str,
+) -> tuple[str, list[tuple[str, Path]]] | None:
+    files: list[tuple[str, Path]] = []
+    for key, relative in entries:
+        path = _package_secret_file(package_root, relative)
+        if path is None:
+            return None
+        files.append((key, path))
+    return (_helm_value(agent_values, name_keys, default_name), files)
+
+
+def _credential_secrets(
+    package_root: Path, agent_values: dict[str, Any]
+) -> list[tuple[str, list[tuple[str, Path]]]]:
+    secrets: list[tuple[str, list[tuple[str, Path]]]] = []
+    token_secret = _cluster_token_secret(package_root, agent_values)
+    if token_secret is not None:
+        secrets.append(token_secret)
+    agw = _package_secret_file(package_root, "secrets/agw.conf")
+    if agw is not None:
+        files = [("agw.conf", agw)]
+        jobs = _package_secret_file(package_root, "secrets/jobs.conf")
+        if jobs is not None:
+            files.append(("jobs.conf", jobs))
+        secrets.append(
+            (
+                _helm_value(
+                    agent_values,
+                    ("wireguard", "existingWireguardSecret"),
+                    WIREGUARD_SECRET_NAME,
+                ),
+                files,
+            )
+        )
+    roles = _secret_if_files_present(
+        package_root,
+        agent_values,
+        (
+            ("certificate", "secrets/roles-anywhere/certificate"),
+            ("private_key", "secrets/roles-anywhere/private_key"),
+        ),
+        ("rolesAnywhere", "secretName"),
+        ROLES_ANYWHERE_SECRET_NAME,
+    )
+    nebius = _secret_if_files_present(
+        package_root,
+        agent_values,
+        (
+            ("credentials.json", "secrets/nebius/credentials.json"),
+            ("config.yaml", "secrets/nebius/config.yaml"),
+        ),
+        ("provisioner", "nebius", "existingSecret"),
+        NEBIUS_SECRET_NAME,
+    )
+    catalog = _secret_if_files_present(
+        package_root,
+        agent_values,
+        (
+            ("write.env", "secrets/catalog/write.env"),
+            ("transfer.env", "secrets/catalog/transfer.env"),
+        ),
+        ("provisioner", "catalogCredentials", "existingSecret"),
+        CATALOG_SECRET_NAME,
+    )
+    if roles is not None:
+        secrets.append(roles)
+    if nebius is not None:
+        secrets.append(nebius)
+    if catalog is not None:
+        secrets.append(catalog)
+    return secrets
+
+
+def _apply_generic_secret(
+    name: str, namespace: str, files: list[tuple[str, Path]]
+) -> None:
+    command = [
+        "kubectl",
+        "create",
+        "secret",
+        "generic",
+        name,
+        "-n",
+        namespace,
+    ]
+    for key, path in files:
+        command.append(f"--from-file={key}={path}")
+    command.extend(["--dry-run=client", "-o", "yaml"])
+    rendered = subprocess.run(
+        command,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if rendered.returncode != 0:
+        msg = (
+            f"Failed to apply Secret {name!r} in namespace {namespace!r}: "
+            f"{rendered.stderr.strip()}"
+        )
+        raise click.ClickException(msg)
+    # The dry-run manifest holds secret data. Pass it to apply and do not log it.
+    applied = subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=rendered.stdout,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if applied.returncode != 0:
+        msg = (
+            f"Failed to apply Secret {name!r} in namespace {namespace!r}: "
+            f"{applied.stderr.strip()}"
+        )
+        raise click.ClickException(msg)
+    click.echo(f"Applied secret {name!r} in namespace {namespace}.")
+
+
+def _apply_install_package_secrets(
+    package_root: Path,
+    agent_values: dict[str, Any],
+    namespace: str,
+) -> None:
+    """Apply credential Secrets from the install package into *namespace*.
+
+    Absent files are skipped. Roles Anywhere and Nebius need both files.
+    An existing Secret is updated.
+    """
+    secrets = _credential_secrets(package_root, agent_values)
+    if not secrets:
+        return
+    _ensure_k8s_namespace(namespace)
+    for name, files in secrets:
+        _apply_generic_secret(name, namespace, files)
+
+
 def install_from_install_package_root(
     package_root: Path,
     wait: bool = True,
@@ -777,6 +968,9 @@ def install_from_install_package_root(
     install_agent: bool = True,
 ) -> None:
     """Install storage (when values exist) then optionally the agent chart.
+
+    When the agent chart is installed, credential Secrets whose files are in
+    the package are applied into the agent namespace before Helm.
 
     :param package_root: Extracted install package root directory.
     :type package_root: Path
@@ -809,6 +1003,7 @@ def install_from_install_package_root(
         raise click.ClickException(msg)
 
     agent_values_dict = _load_agent_values_yaml(agent_values)
+    _apply_install_package_secrets(package_root, agent_values_dict, agent_namespace)
     ensure_agent_storage_secret(agent_values_dict, agent_namespace=agent_namespace)
     endpoint_updated = sync_storage_secret_endpoint(
         agent_values_dict, agent_namespace=agent_namespace

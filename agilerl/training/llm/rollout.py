@@ -19,6 +19,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
 from agilerl.distributed import (
     aggregate_metrics_across_gpus,
+    aggregate_metrics_dict,
     all_ranks,
     allreduce_minmax_int,
     any_rank,
@@ -56,6 +57,8 @@ from agilerl.utils.utils import (
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import RolloutCollector, RolloutHarness
+    from agilerl.llm_envs.judge import drain_judge_stats
+    from agilerl.llm_envs.rubrics import GroupRubric
     from agilerl.rollouts.on_policy import collate_llm_rollouts, collect_rollouts_llm
 
 if TYPE_CHECKING:
@@ -125,6 +128,7 @@ def train_llm_rollout(
     max_wall_seconds: float | None = None,
     io_timeout_s: float | None = 600.0,
     completion_logging: CompletionLoggingConfig | None = None,
+    group_rubric: "GroupRubric | None" = None,
 ) -> "tuple[list[SupportedRollout], Any]":
     """Train a population of LLM agents over rollout (generate-and-score) environments.
 
@@ -199,6 +203,9 @@ def train_llm_rollout(
         One write per interval step includes every population member. The latest
         samples are logged at error level if training raises. ``None`` disables it.
     :type completion_logging: CompletionLoggingConfig | None
+    :param group_rubric: Scores each finished group together, adding to each
+        episode's final-turn reward. Forwarded to :class:`RolloutCollector`.
+    :type group_rubric: GroupRubric | None
     :return: The finetuned population and its last recorded fitnesses.
     :rtype: tuple[list[SupportedRollout], Any]
     """
@@ -275,6 +282,7 @@ def train_llm_rollout(
     # Rank-offset seed for procedural env reset(seed=...) uniqueness only. Dataset
     # rows are split by the TaskAssigner's contiguous per-rank shard instead.
     group_seed = int(pop[0].seed) + dp_rank * (1 << 31)
+    # This loop records no group outcomes, so rows keep the per-epoch shuffle.
     rollout_collector = RolloutCollector(
         env_factory,
         batch_size,
@@ -282,6 +290,8 @@ def train_llm_rollout(
         io_timeout_s=io_timeout_s,
         rank=dp_rank,
         world_size=data_increment,
+        adaptive_task_sampling=False,
+        group_rubric=group_rubric,
     )
     test_env: RolloutHarness | None = None
     completion_logger = (
@@ -308,10 +318,7 @@ def train_llm_rollout(
             iteration_steps = 0
             step_records: list[CompletionRecord] = []
             for agent_index, agent in enumerate(population.agents):
-                # Refresh the KL reference once per completed pass over the dataset
-                # rows; a non-dataset env keeps ``num_epochs == 0``, leaving the
-                # anchor at the initial policy.
-                agent.set_reference_policy(rollout_collector.num_epochs)
+                agent.set_reference_policy()
                 agent.init_training_step()
                 (
                     token_ids_list,
@@ -340,6 +347,7 @@ def train_llm_rollout(
                             action_masks=action_masks_list,
                             rewards=all_rewards,
                             group_size=group_size,
+                            notes=rollout_collector.rubric_notes(),
                         )
                     )
 
@@ -425,16 +433,14 @@ def train_llm_rollout(
                         if is_main_process():
                             agent.metrics.log("accuracy", agg_accuracy)
 
-                    for (
-                        name,
-                        mean_value,
-                    ) in rollout_collector.get_rubric_score_means().items():
-                        metric = f"reward_{name}"
+                    rollout_metrics = {
+                        f"reward_{name}": mean_value
+                        for name, mean_value in rollout_collector.get_rubric_score_means().items()
+                    }
+                    rollout_metrics.update(drain_judge_stats())
+                    for metric, agg in aggregate_metrics_dict(rollout_metrics).items():
                         if metric not in agent.metrics.additional_metrics:
                             agent.metrics.register(metric)
-                        agg = aggregate_metrics_across_gpus(
-                            mean_score.new_tensor(mean_value)
-                        )
                         if is_main_process():
                             agent.metrics.log(metric, agg)
 

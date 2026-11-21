@@ -174,12 +174,11 @@ any model available on Hugging Face or locally.
 
    network:
      pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
-     max_context_length: 512
+     max_context_length: 1024
      lora_config:
        lora_r: 16
        lora_alpha: 64
        target_modules: [q_proj, k_proj, v_proj, o_proj]
-       lora_dropout: 0.05
        task_type: CAUSAL_LM
 
 1. ``mutation``

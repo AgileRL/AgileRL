@@ -329,7 +329,7 @@ def _aws_gateway_values(gateway: object) -> dict[str, object]:
 def spec_from_stored_row(row: dict[str, object]) -> ClusterSpec:
     """Build an AWS cluster spec from an Arena byoc cluster record."""
     # Cycle: provisioning.spec imports AwsSpec from this module.
-    from agilerl.arena.byoc.provisioning.spec import ClusterSpec, placement_values
+    from agilerl.arena.byoc.provisioning.spec import ClusterSpec, stored_cluster_values
 
     name = row.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -378,7 +378,7 @@ def spec_from_stored_row(row: dict[str, object]) -> ClusterSpec:
     }
     if module_version is not None:
         payload["module_version"] = module_version
-    stored_placement = placement_values(row)
-    if stored_placement is not None:
-        payload["values"] = stored_placement
+    stored_values = stored_cluster_values(row)
+    if stored_values is not None:
+        payload["values"] = stored_values
     return ClusterSpec.model_validate(payload)

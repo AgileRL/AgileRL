@@ -160,7 +160,6 @@ def main(init_hp, mut_p):
             r=16,
             lora_alpha=64,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
             bias="none",
         ),
         vllm_config=VLLMConfig(sleep_mode=False, max_num_seqs=4),

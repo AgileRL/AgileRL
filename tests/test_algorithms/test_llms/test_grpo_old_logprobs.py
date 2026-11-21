@@ -3,9 +3,9 @@
 
 """Unit tests for GRPO old log-probs and action-position scoring.
 
-Covers where ``learn`` takes its old log-probs from (``old_logprobs_source``),
-which rows the no-grad forward still scores, and log-probs computed only at
-action positions. Pure CPU on a tiny real model in fp32.
+Covers the rollout engine's sampling log-probs as old log-probs, which rows
+the no-grad forward still scores, and log-probs computed only at action
+positions. Pure CPU on a tiny real model in fp32.
 """
 
 from __future__ import annotations
@@ -26,10 +26,10 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.sequence_layout import PaddedSequence
 from agilerl.algorithms.grpo import GRPO
-from agilerl.utils.algo_utils import VLLMConfig
 from tests.rank_launch import run_ranks
-from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.llm_helpers import create_module, use_packed
 
 PAD_TOKEN_ID = 63
 VOCAB = 64
@@ -39,21 +39,41 @@ NUM_ROWS = 4
 GRAD_ATOL = 1e-6
 
 
-def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip in-process vLLM while still attaching LoRA adapters."""
+def _capture_sampling_logps(agent: GRPO, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Start colocated vLLM inside ``get_action`` and return the capture flag."""
+    captured: dict[str, bool] = {}
 
-    def setup_without_vllm(self: GRPO, actor_network: Any, clone: bool = False) -> None:
-        self._initialize_actors(actor_network, add_adapters=not clone)
+    def start_colocated() -> None:
+        agent.colocated = True
 
-    monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
+    def fake_generate(
+        prompts: Any,
+        group_size: int,
+        temperature: float | None,
+        capture_sampling_logps: bool = False,
+        capture_sampling_supports: bool = False,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], None, None]:
+        del temperature, capture_sampling_supports
+        captured["capture"] = capture_sampling_logps
+        n = len(prompts) * group_size
+        token_ids = [torch.ones(1, 4, dtype=torch.long) for _ in range(n)]
+        masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
+        return token_ids, masks, None, None
+
+    agent.records_sampling_supports = False
+    monkeypatch.setattr(agent, "_ensure_vllm_for_generation", start_colocated)
+    monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
+    monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
+    agent.get_action(
+        [{"input_ids": torch.ones(1, 2, dtype=torch.long)}],
+        training=True,
+        repeat_prompts=False,
+    )
+    return captured["capture"]
 
 
-def _make_grpo(liger_loss: bool | None = False, **overrides: Any) -> GRPO:
-    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows.
-
-    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
-        value resolved at init.
-    """
+def _make_grpo(algo_class: type[GRPO] = GRPO, **overrides: Any) -> GRPO:
+    """Tiny fp32 GRPO-family agent on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
     torch.manual_seed(0)
     kwargs: dict[str, Any] = {
         "actor_network": create_module(
@@ -83,10 +103,7 @@ def _make_grpo(liger_loss: bool | None = False, **overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    agent = GRPO(**kwargs)
-    if liger_loss is not None:
-        agent.liger_loss = liger_loss
-    return agent
+    return algo_class(**kwargs)
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:
@@ -177,73 +194,16 @@ def _assert_same_gradients(
             assert torch.allclose(actual_step[name], grad, atol=GRAD_ATOL), name
 
 
-class TestGRPOOldLogprobsSourceConfig:
-    def test_rollout_is_the_default_without_colocated_vllm(self) -> None:
-        assert _make_grpo().old_logprobs_source == "rollout"
-
-    def test_colocated_vllm_defaults_to_the_trainer(
+class TestGRPOShouldCaptureSamplingLogps:
+    def test_training_rollouts_capture_once_colocated_vllm_starts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_colocated_setup(monkeypatch)
+        agent = _make_grpo()
 
-        agent = _make_grpo(vllm_config=VLLMConfig())
-
-        assert agent.colocated
-        assert agent.old_logprobs_source == "trainer"
-
-    def test_colocated_vllm_can_take_rollout_old_logprobs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _stub_colocated_setup(monkeypatch)
-
-        agent = _make_grpo(vllm_config=VLLMConfig(), old_logprobs_source="rollout")
+        captured = _capture_sampling_logps(agent, monkeypatch)
 
         assert agent.colocated
-        assert agent.old_logprobs_source == "rollout"
-
-    def test_unknown_source_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="Invalid old_logprobs_source 'vllm'"):
-            _make_grpo(old_logprobs_source="vllm")
-
-    @pytest.mark.parametrize(
-        ("source", "captures"), [("rollout", True), ("trainer", False)]
-    )
-    def test_colocated_capture_follows_the_old_logprobs_source_not_the_masks(
-        self, monkeypatch: pytest.MonkeyPatch, source: str, captures: bool
-    ) -> None:
-        agent = _make_grpo(
-            old_logprobs_source=source,
-            vllm_importance_sampling_correction=False,
-            off_policy_token_mask_bounds=(0.5, 5.0),
-            off_policy_sequence_mask_threshold=0.03,
-        )
-        agent.colocated = True
-        agent.records_sampling_supports = False
-        captured: dict[str, bool] = {}
-
-        def fake_generate(
-            prompts: Any,
-            group_size: int,
-            temperature: float | None,
-            capture_sampling_logps: bool = False,
-            capture_sampling_supports: bool = False,
-        ) -> tuple[list[torch.Tensor], list[torch.Tensor], None, None]:
-            captured["capture"] = capture_sampling_logps
-            n = len(prompts) * group_size
-            token_ids = [torch.ones(1, 4, dtype=torch.long) for _ in range(n)]
-            masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
-            return token_ids, masks, None, None
-
-        monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
-        monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
-
-        agent.get_action(
-            [{"input_ids": torch.ones(1, 2, dtype=torch.long)}],
-            training=True,
-            repeat_prompts=False,
-        )
-
-        assert captured["capture"] is captures
+        assert captured is True
 
 
 class TestGRPOGetActionSamplingSupports:
@@ -275,6 +235,7 @@ class TestGRPOGetActionSamplingSupports:
                 supports if capture_sampling_supports else None,
             )
 
+        monkeypatch.setattr(agent, "_ensure_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
         return agent
@@ -297,136 +258,6 @@ class TestGRPOGetActionSamplingSupports:
         assert result.sampling_supports is None
 
 
-class TestGRPOLearnTrainerOldLogProbs:
-    """``old_logprobs_source="trainer"``: old log-probs are the learn-start policy's."""
-
-    def test_a_single_step_batch_runs_no_no_grad_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: 4 rows, 2 micro-batches, one optimizer step.
-        agent = _make_grpo(old_logprobs_source="trainer")
-        calls = _record_no_grad_forwards(agent, monkeypatch)
-
-        # Act
-        agent.learn(_experiences())
-
-        # Assert
-        assert calls == []
-
-    @pytest.mark.parametrize(
-        ("mini_batch_size", "update_epochs"),
-        [(4, 1), (2, 1), (4, 2), (2, 2)],
-    )
-    def test_gradients_match_an_explicit_old_forward(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mini_batch_size: int,
-        update_epochs: int,
-    ) -> None:
-        # Arrange: the explicit agent scores every row up front.
-        self_scored = _make_grpo(
-            old_logprobs_source="trainer",
-            mini_batch_size=mini_batch_size,
-            update_epochs=update_epochs,
-        )
-        explicit = _make_grpo(
-            old_logprobs_source="trainer",
-            mini_batch_size=mini_batch_size,
-            update_epochs=update_epochs,
-        )
-        monkeypatch.setattr(explicit, "_self_scored_micro_batches", lambda *_: 0)
-        explicit_calls = _record_no_grad_forwards(explicit, monkeypatch)
-        self_scored_steps = _record_step_gradients(self_scored, monkeypatch)
-        explicit_steps = _record_step_gradients(explicit, monkeypatch)
-
-        # Act
-        self_scored_metrics = self_scored.learn(_experiences())
-        explicit_metrics = explicit.learn(_experiences())
-
-        # Assert
-        assert explicit_calls == [(NUM_ROWS, False, True)]
-        _assert_same_gradients(self_scored_steps, explicit_steps)
-        assert self_scored_metrics["kl_old"] == pytest.approx(
-            explicit_metrics["kl_old"], abs=1e-6
-        )
-
-    def test_rows_after_the_first_step_get_the_no_grad_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: 2 micro-batches, one optimizer step each.
-        agent = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
-        calls = _record_no_grad_forwards(agent, monkeypatch)
-
-        # Act
-        agent.learn(_experiences())
-
-        # Assert
-        assert calls == [(2, False, True)]
-
-    def test_a_kl_penalty_runs_a_reference_only_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent = _make_grpo(old_logprobs_source="trainer", beta=0.04)
-        calls = _record_no_grad_forwards(agent, monkeypatch)
-
-        # Act
-        agent.learn(_experiences())
-
-        # Assert
-        assert calls == [(NUM_ROWS, True, False)]
-
-    def test_a_row_without_sampling_logprobs_gets_the_no_grad_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: its unit-ratio fallback needs old log-probs before the update.
-        agent = _make_grpo(old_logprobs_source="trainer")
-        sampling_logps: list[torch.Tensor | None] = list(_sampling_logps(agent))
-        sampling_logps[0] = None
-        forwarded_ids: list[torch.Tensor] = []
-        calls = _record_no_grad_forwards(agent, monkeypatch, forwarded_ids)
-        ids, _ = _batch()
-
-        # Act
-        with pytest.warns(UserWarning, match="token-count mismatch"):
-            agent.learn(_experiences(), sampling_logps=sampling_logps)
-
-        # Assert
-        assert len(calls) == 1
-        assert any(torch.equal(row, ids[0]) for row in forwarded_ids[0])
-
-    def test_rows_without_sampling_logprobs_keep_the_full_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent = _make_grpo(old_logprobs_source="trainer")
-        calls = _record_no_grad_forwards(agent, monkeypatch)
-
-        # Act
-        with pytest.warns(UserWarning, match="token-count mismatch"):
-            agent.learn(_experiences(), sampling_logps=[None] * NUM_ROWS)
-
-        # Assert
-        assert calls == [(NUM_ROWS, False, True)]
-
-    def test_sampling_mismatch_metrics_compare_learn_start_log_probs(self) -> None:
-        # Arrange: sampling log-probs sit 0.5 below the learn-start policy.
-        agent = _make_grpo(old_logprobs_source="trainer")
-        sampling_logps = _sampling_logps(agent, offset=-0.5)
-
-        # Act
-        metrics = agent.learn(_experiences(), sampling_logps=sampling_logps)
-
-        # Assert
-        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.5, abs=1e-5)
-        assert metrics["vllm_is_ratio_mean"] == pytest.approx(
-            torch.exp(torch.tensor(0.5)).item(), abs=1e-5
-        )
-        assert metrics["vllm_mismatch_kl"] == pytest.approx(
-            math.exp(0.5) - 1.5, abs=1e-5
-        )
-
-
 def _partly_covered_sampling_logps(
     agent: GRPO, offset: float = 0.0
 ) -> list[torch.Tensor | None]:
@@ -444,17 +275,17 @@ def _uncovered_counts_on_other_ranks(
 ) -> None:
     """Make the cross-rank all-reduce report ``most_uncovered`` on another rank."""
     monkeypatch.setattr(
-        "agilerl.algorithms.grpo.allreduce_minmax_int",
+        "agilerl.algorithms.core.base.allreduce_minmax_int",
         lambda value: (min(value, most_uncovered), max(value, most_uncovered)),
     )
 
 
-class TestGRPOLearnRolloutOldLogProbs:
-    """``old_logprobs_source="rollout"``: old log-probs are the sampling log-probs."""
+class TestGRPOLearnOldLogProbs:
+    """Old log-probs are the sampling log-probs where a row has them."""
 
     def test_no_policy_forward_runs(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Arrange: 2 optimizer steps, so the trainer source would score 2 rows.
-        agent = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
+        # Arrange: 2 optimizer steps.
+        agent = _make_grpo(mini_batch_size=2)
         sampling_logps = _sampling_logps(agent)
         calls = _record_no_grad_forwards(agent, monkeypatch)
 
@@ -466,11 +297,25 @@ class TestGRPOLearnRolloutOldLogProbs:
         assert metrics["old_logprobs_trainer_rows"] == 0.0
         assert "vllm_is_delta_mean" in metrics
 
+    def test_a_kl_penalty_runs_a_reference_only_forward(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = _make_grpo(beta=0.04)
+        sampling_logps = _sampling_logps(agent)
+        calls = _record_no_grad_forwards(agent, monkeypatch)
+
+        # Act
+        agent.learn(_experiences(), sampling_logps=sampling_logps)
+
+        # Assert
+        assert calls == [(NUM_ROWS, True, False)]
+
     def test_only_uncovered_rows_get_the_policy_forward(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _partly_covered_sampling_logps(agent)
         forwarded_ids: list[torch.Tensor] = []
         calls = _record_no_grad_forwards(agent, monkeypatch, forwarded_ids)
@@ -488,7 +333,7 @@ class TestGRPOLearnRolloutOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         calls = _record_no_grad_forwards(agent, monkeypatch)
 
         # Act
@@ -499,36 +344,36 @@ class TestGRPOLearnRolloutOldLogProbs:
         assert metrics["old_logprobs_trainer_rows"] == float(NUM_ROWS)
         assert math.isfinite(metrics["loss"])
 
-    def test_uncovered_rows_train_like_the_trainer_source(
+    def test_uncovered_rows_train_like_covered_rows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange: covered rows carry the learn-start policy's own log-probs, so
-        # both sources see the same old log-probs only if uncovered rows get
-        # the learn-start policy's too.
-        rollout = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
-        trainer = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
-        sampling_logps = _partly_covered_sampling_logps(trainer)
-        rollout_steps = _record_step_gradients(rollout, monkeypatch)
-        trainer_steps = _record_step_gradients(trainer, monkeypatch)
+        # Arrange: sampling log-probs are the learn-start policy's own, so
+        # uncovered rows match only if they get the learn-start policy's too.
+        partly_covered = _make_grpo(mini_batch_size=2)
+        covered = _make_grpo(mini_batch_size=2)
+        partly_covered_steps = _record_step_gradients(partly_covered, monkeypatch)
+        covered_steps = _record_step_gradients(covered, monkeypatch)
 
         # Act
-        rollout_metrics = rollout.learn(_experiences(), sampling_logps=sampling_logps)
-        with pytest.warns(UserWarning, match="token-count mismatch"):
-            trainer_metrics = trainer.learn(
-                _experiences(), sampling_logps=sampling_logps
-            )
+        partly_covered_metrics = partly_covered.learn(
+            _experiences(),
+            sampling_logps=_partly_covered_sampling_logps(partly_covered),
+        )
+        covered_metrics = covered.learn(
+            _experiences(), sampling_logps=_sampling_logps(covered)
+        )
 
         # Assert
-        _assert_same_gradients(rollout_steps, trainer_steps)
-        assert math.isfinite(rollout_metrics["kl_old"])
-        assert rollout_metrics["kl_old"] == pytest.approx(
-            trainer_metrics["kl_old"], abs=1e-6
+        _assert_same_gradients(partly_covered_steps, covered_steps)
+        assert math.isfinite(partly_covered_metrics["kl_old"])
+        assert partly_covered_metrics["kl_old"] == pytest.approx(
+            covered_metrics["kl_old"], abs=1e-6
         )
 
     def test_sampling_mismatch_metrics_skip_uncovered_rows(self) -> None:
         # Arrange: covered rows sit 0.5 below the policy; one optimizer step,
         # so the update log-probs are the learn-start policy's.
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _partly_covered_sampling_logps(agent, offset=-0.5)
 
         # Act
@@ -542,7 +387,7 @@ class TestGRPOLearnRolloutOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: this rank is fully covered; another rank lacks 2 rows.
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _sampling_logps(agent, offset=-0.5)
         _uncovered_counts_on_other_ranks(monkeypatch, most_uncovered=2)
         calls = _record_no_grad_forwards(agent, monkeypatch)
@@ -555,28 +400,11 @@ class TestGRPOLearnRolloutOldLogProbs:
         assert metrics["old_logprobs_trainer_rows"] == 0.0
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.5, abs=1e-5)
 
-    def test_gradients_match_the_trainer_source_on_exact_sampling_logprobs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: two steps, so both sources reuse the old log-probs.
-        rollout = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
-        trainer = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
-        sampling_logps = _sampling_logps(trainer)
-        rollout_steps = _record_step_gradients(rollout, monkeypatch)
-        trainer_steps = _record_step_gradients(trainer, monkeypatch)
-
-        # Act
-        rollout.learn(_experiences(), sampling_logps=sampling_logps)
-        trainer.learn(_experiences(), sampling_logps=sampling_logps)
-
-        # Assert
-        _assert_same_gradients(rollout_steps, trainer_steps)
-
     def test_a_large_sampling_gap_logs_the_divergence_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         # Arrange: sampling log-probs sit 0.5 below the policy, above the 0.1 gap limit.
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _sampling_logps(agent, offset=-0.5)
 
         # Act
@@ -594,7 +422,7 @@ class TestGRPOLearnRolloutOldLogProbs:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         # Arrange
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _sampling_logps(agent)
 
         # Act
@@ -647,9 +475,9 @@ def _supported_sampling(
 class TestGRPOLearnSamplingSupports:
     """Log-probs normalized over the support vLLM sampled each token from."""
 
-    def test_rollout_old_logprobs_match_the_policy_over_the_support(self) -> None:
+    def test_old_logprobs_match_the_policy_over_the_support(self) -> None:
         # Arrange: one optimizer step, so the update policy is the learn-start one.
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         supports, sampling_logps = _supported_sampling(agent)
 
         # Act
@@ -662,12 +490,12 @@ class TestGRPOLearnSamplingSupports:
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.0, abs=1e-5)
         assert metrics["vllm_is_delta_max"] == pytest.approx(0.0, abs=1e-5)
 
-    def test_penalised_rollout_logprobs_give_the_exact_importance_ratio(
+    def test_penalised_rollout_logprobs_give_the_exact_mismatch(
         self,
     ) -> None:
         # Arrange: vLLM applies the penalty before top-k, then reports the
         # token's log-prob under that penalised distribution.
-        agent = _make_grpo(old_logprobs_source="trainer")
+        agent = _make_grpo()
         ids, mask = _batch()
         log_probs = _actor_log_softmax(agent)
         penalty, width = 0.7, 3
@@ -711,41 +539,21 @@ class TestGRPOLearnSamplingSupports:
         )
 
     def test_full_vocabulary_scoring_diverges_from_support_logprobs(self) -> None:
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         _supports, sampling_logps = _supported_sampling(agent)
 
         metrics = agent.learn(_experiences(), sampling_logps=sampling_logps)
 
         assert metrics["vllm_is_delta_mean"] > 1.0
 
-    def test_gradients_match_the_trainer_source_over_the_support(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: two steps, so both sources reuse their old log-probs.
-        rollout = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
-        trainer = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
-        supports, sampling_logps = _supported_sampling(trainer)
-        rollout_steps = _record_step_gradients(rollout, monkeypatch)
-        trainer_steps = _record_step_gradients(trainer, monkeypatch)
-
-        # Act
-        rollout.learn(
-            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
-        )
-        trainer.learn(
-            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
-        )
-
-        # Assert
-        _assert_same_gradients(rollout_steps, trainer_steps)
-
-    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
+    @pytest.mark.parametrize("packed", [False, True])
     def test_scored_logprobs_are_normalized_over_the_support(
-        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
+        self, packed: bool
     ) -> None:
         # Arrange
         agent = _make_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
+        if packed:
+            use_packed(agent, False)
         ids, mask = _batch()
         supports, expected = _supported_sampling(agent)
         support_ids = GRPO._align_sampling_supports(supports, ids, mask)
@@ -809,201 +617,13 @@ class TestLLMAlgorithmAlignSamplingSupports:
         assert frame.tolist() == [[[2, 7], [3, -1]], [[-1, -1], [-1, -1]]]
 
 
-UNWEIGHTED_TOKENS: dict[str, Any] = {
-    "vllm_importance_sampling_correction": False,
-    "off_policy_token_mask_bounds": None,
-    "off_policy_sequence_mask_threshold": None,
-}
-TRAJECTORY_OBJECTIVES = [
-    pytest.param({"loss_type": "gspo"}, id="gspo"),
-    pytest.param({"importance_sampling_level": "trajectory"}, id="grpo-trajectory"),
-]
-
-
-class TestGRPOObjectiveLoss:
-    """Which loss path a minibatch runs, with and without sampling supports."""
-
-    @staticmethod
-    def _liger_agent(
-        monkeypatch: pytest.MonkeyPatch, **overrides: Any
-    ) -> tuple[GRPO, tuple, list[int]]:
-        # liger-kernel is a CUDA extra; only the routing is under test.
-        agent = _make_grpo(
-            liger_loss=True,
-            **{"vllm_importance_sampling_correction": False, **overrides},
-        )
-        liger_result = tuple(torch.tensor(float(i)) for i in range(4))
-        liger_calls: list[int] = []
-
-        def liger_loss(*_args: Any, **_kwargs: Any) -> tuple:
-            liger_calls.append(1)
-            return liger_result
-
-        monkeypatch.setattr(agent, "_liger_loss", liger_loss)
-        return agent, liger_result, liger_calls
-
-    def test_a_batch_without_supports_runs_the_liger_kernel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent, liger_result, _calls = self._liger_agent(monkeypatch)
-        ids, mask = _batch()
-        zeros = torch.zeros(mask.shape)
-
-        # Act
-        result = agent._objective_loss(
-            ids, mask, torch.zeros(NUM_ROWS, 1), zeros, zeros, None, None
-        )
-
-        # Assert
-        assert result is liger_result
-
-    def test_a_batch_with_supports_runs_the_standard_loss(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: a non-colocated engine reports supports per batch.
-        agent, _result, liger_calls = self._liger_agent(monkeypatch)
-        supports, sampling_logps = _supported_sampling(agent)
-
-        # Act
-        metrics = agent.learn(
-            _experiences(),
-            sampling_logps=sampling_logps,
-            sampling_supports=supports,
-        )
-
-        # Assert
-        assert not agent.colocated
-        assert liger_calls == []
-        assert math.isfinite(metrics["loss"])
-
-    @pytest.mark.parametrize("objective", TRAJECTORY_OBJECTIVES)
-    def test_a_trajectory_batch_runs_the_liger_kernel(
-        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, Any]
-    ) -> None:
-        # Arrange
-        agent, liger_result, _calls = self._liger_agent(
-            monkeypatch, **objective, **UNWEIGHTED_TOKENS
-        )
-        ids, mask = _batch()
-        zeros = torch.zeros(mask.shape)
-
-        # Act
-        result = agent._objective_loss(
-            ids, mask, torch.zeros(NUM_ROWS, 1), zeros, zeros, None, None
-        )
-
-        # Assert
-        assert agent.importance_sampling_level == "trajectory"
-        assert result is liger_result
-
-    @pytest.mark.parametrize("objective", TRAJECTORY_OBJECTIVES)
-    def test_a_trajectory_batch_with_sampling_log_probs_runs_the_standard_loss(
-        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, Any]
-    ) -> None:
-        # Arrange
-        agent, _result, liger_calls = self._liger_agent(
-            monkeypatch, loss_norm="micro_batch", **objective, **UNWEIGHTED_TOKENS
-        )
-        ids, mask = _batch()
-        zeros = torch.zeros(mask.shape)
-
-        # Act
-        loss, _kl, _clipfrac, _log_probs = agent._objective_loss(
-            ids, mask, torch.ones(NUM_ROWS, 1), zeros, zeros, None, zeros - 1.0
-        )
-
-        # Assert
-        assert liger_calls == []
-        assert torch.isfinite(loss)
-        assert loss.requires_grad
-
-
-class TestGRPOLigerLossProperty:
-    """``liger_loss`` resolves at init from liger-kernel and the configured objective."""
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            pytest.param({}, id="token-default-sampling"),
-            pytest.param({"loss_type": "gspo", **UNWEIGHTED_TOKENS}, id="gspo"),
-            pytest.param(
-                {"importance_sampling_level": "trajectory", **UNWEIGHTED_TOKENS},
-                id="grpo-trajectory",
-            ),
-        ],
-    )
-    def test_objective_with_a_kernel_runs_liger(
-        self, liger_kernel_installed: None, overrides: dict[str, Any]
-    ) -> None:
-        # Act
-        with pytest.warns(UserWarning, match="Liger Loss used with LoRA"):
-            agent = _make_grpo(liger_loss=None, **overrides)
-
-        # Assert
-        assert agent.liger_loss is True
-        assert agent.lora_config.exclude_modules == ["lm_head"]
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            pytest.param({"use_kl_advantage_shaping": True}, id="kl-shaping"),
-            pytest.param({"loss_type": "gspo"}, id="gspo-reweighted-tokens"),
-            pytest.param(
-                {
-                    "loss_type": "cispo",
-                    "importance_sampling_level": "trajectory",
-                    **UNWEIGHTED_TOKENS,
-                },
-                id="cispo-trajectory",
-            ),
-            pytest.param(
-                {"importance_sampling_level": "turn", **UNWEIGHTED_TOKENS},
-                id="grpo-turn",
-            ),
-            pytest.param(
-                {
-                    "importance_sampling_level": "trajectory",
-                    "advantage_granularity": "turn",
-                    **UNWEIGHTED_TOKENS,
-                },
-                id="grpo-trajectory-turn-advantages",
-            ),
-        ],
-    )
-    def test_objective_without_a_kernel_runs_the_standard_loss(
-        self, liger_kernel_installed: None, overrides: dict[str, Any]
-    ) -> None:
-        # Act
-        agent = _make_grpo(liger_loss=None, **overrides)
-
-        # Assert
-        assert agent.liger_loss is False
-
-    def test_liger_stays_off_without_liger_kernel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-
-        # Act
-        agent = _make_grpo(liger_loss=None)
-
-        # Assert
-        assert agent.liger_loss is False
-
-
 class TestGRPOLearnMetricKeys:
     """Every rank reports the same learn keys, whatever its sampling coverage."""
 
-    @pytest.mark.filterwarnings("ignore:.*token-count mismatch:UserWarning")
-    @pytest.mark.parametrize("source", ["trainer", "rollout"])
-    def test_an_uncovered_batch_reports_the_covered_batchs_keys(
-        self, source: str
-    ) -> None:
+    def test_an_uncovered_batch_reports_the_covered_batchs_keys(self) -> None:
         # Arrange
-        covered_agent = _make_grpo(old_logprobs_source=source)
-        uncovered_agent = _make_grpo(old_logprobs_source=source)
+        covered_agent = _make_grpo()
+        uncovered_agent = _make_grpo()
         sampling_logps = _sampling_logps(covered_agent)
 
         # Act
@@ -1018,11 +638,11 @@ class TestGRPOLearnMetricKeys:
 
     @pytest.mark.multi_rank
     def test_a_rank_without_sampling_logprobs_reports_every_ranks_keys(self) -> None:
-        run_ranks(_one_rank_captured_trainer_source_worker)
+        run_ranks(_one_rank_captured_worker)
 
 
 class TestGRPORolloutActorRows:
-    """Rollout-source rows that need the learn-start policy forward."""
+    """Rows that need the learn-start policy forward."""
 
     def test_uncovered_rows_alone_when_no_rank_has_more(self) -> None:
         # Arrange
@@ -1056,13 +676,16 @@ class TestGRPORolloutActorRows:
 class TestScoredLogProbs:
     """Log-probs scored only at ``score_mask`` match full scoring there."""
 
-    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
-    def test_training_forward_matches_full_scoring(
-        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
-    ) -> None:
+    @pytest.mark.parametrize("packed", [False, True])
+    def test_training_forward_matches_full_scoring(self, packed: bool) -> None:
         # Arrange
         agent = _make_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
+        if not packed:
+            agent.sequence_layout = PaddedSequence(
+                calc_position_embeddings=agent.calc_position_embeddings,
+            )
+        else:
+            use_packed(agent, False)
         ids, mask = _batch()
 
         # Act
@@ -1154,6 +777,35 @@ def _trained_checkpoint(path: Path, **overrides: Any) -> GRPO:
     return agent
 
 
+class TestGRPOLearnSequencePacking:
+    """A packed gradient forward trains exactly as the padded one."""
+
+    @pytest.mark.parametrize("loss_norm", ["accumulation_window", "micro_batch"])
+    def test_packed_learn_matches_padded(
+        self, monkeypatch: pytest.MonkeyPatch, loss_norm: str
+    ) -> None:
+        # Arrange: two micro-batches per step, odd rows padded.
+        padded = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
+        packed = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
+        use_packed(packed, True)
+        padded_steps = _record_step_gradients(padded, monkeypatch)
+        packed_steps = _record_step_gradients(packed, monkeypatch)
+
+        # Act
+        padded_metrics = padded.learn(
+            _experiences(), sampling_logps=_sampling_logps(padded)
+        )
+        packed_metrics = packed.learn(
+            _experiences(), sampling_logps=_sampling_logps(packed)
+        )
+
+        # Assert
+        assert padded_metrics["padding_frac_after_packing"] > 0.0
+        assert packed_metrics["padding_frac_after_packing"] == 0.0
+        assert packed_metrics["loss"] == pytest.approx(padded_metrics["loss"], abs=1e-6)
+        _assert_same_gradients(packed_steps, padded_steps)
+
+
 class TestGRPOLoadCheckpoint:
     """What ``load_checkpoint`` takes from the checkpoint vs the loading agent."""
 
@@ -1175,27 +827,27 @@ class TestGRPOLoadCheckpoint:
 
     def test_restores_checkpoint_settings_by_default(self, tmp_path) -> None:
         # Arrange
-        _trained_checkpoint(tmp_path, old_logprobs_source="trainer")
-        agent = _make_grpo(old_logprobs_source="rollout")
+        _trained_checkpoint(tmp_path, temperature=0.5)
+        agent = _make_grpo(temperature=0.9)
 
         # Act
         agent.load_checkpoint(str(tmp_path))
 
         # Assert
-        assert agent.old_logprobs_source == "trainer"
+        assert agent.temperature == 0.5
 
     def test_resume_keeps_current_settings_and_restores_training_state(
         self, tmp_path
     ) -> None:
         # Arrange
-        saved = _trained_checkpoint(tmp_path, old_logprobs_source="trainer")
-        agent = _make_grpo(old_logprobs_source="rollout", lr=5e-3)
+        saved = _trained_checkpoint(tmp_path, temperature=0.5)
+        agent = _make_grpo(temperature=0.9, lr=5e-3)
 
         # Act
         agent.load_checkpoint(str(tmp_path), restore_config=False)
 
         # Assert
-        assert agent.old_logprobs_source == "rollout"
+        assert agent.temperature == 0.9
         assert agent.lr == 5e-3
         assert agent.steps == 7
         assert agent.reference_update_tracker == 3
@@ -1236,9 +888,9 @@ class TestGRPOLoadCheckpoint:
         assert agent.steps == 7
 
 
-def _one_rank_captured_trainer_source_worker(rank: int, world_size: int) -> None:
+def _one_rank_captured_worker(rank: int, world_size: int) -> None:
     # Arrange: four rows per rank; only rank 0 captured sampling log-probs.
-    agent = _make_grpo(old_logprobs_source="trainer", batch_size=2 * world_size)
+    agent = _make_grpo(batch_size=2 * world_size)
     sampling_logps = _sampling_logps(agent, offset=-0.5) if rank == 0 else None
 
     # Act
@@ -1250,4 +902,4 @@ def _one_rank_captured_trainer_source_worker(rank: int, world_size: int) -> None
     assert every_rank_keys[0] == every_rank_keys[1]
     assert "vllm_is_delta_mean" in every_rank_keys[0]
     if rank == 1:
-        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert metrics["old_logprobs_trainer_rows"] == float(NUM_ROWS)

@@ -1,8 +1,201 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Rollout engines per agent picked from the allocation."""
+"""Rollout engine count and engine defaults picked from the allocation."""
 
-from agilerl.arena.memory.resolve.engine import resolve_rollout_engines_per_agent
+import copy
+
+from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
+from agilerl.arena.memory.estimator import estimate_generation
+from agilerl.arena.memory.generation import KV_MARGIN_BYTES
+from agilerl.arena.memory.manifest import (
+    MANIFEST_WEIGHT_VARIANTS,
+    generation_settings_from_manifest,
+    lookup_gpu,
+    validated_run_manifest,
+)
+from agilerl.arena.memory.resolve.engine import (
+    _engine_model,
+    queue_warning,
+    resolve_engine_fast_path,
+    resolve_engine_tensor_parallel,
+    resolve_rollout_engines_per_agent,
+    sequences_held,
+    servable_engine_widths,
+)
+from agilerl.arena.memory.specs import ModelArch, ModelSpec
+from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
+GEMMA_4_E4B = "google/gemma-4-E4B-it"
+# Gemma 4 E4B's text tower leaves a 0.95 L4 engine under 1 GiB for the
+# fast-path defaults and the KV cache.
+GEMMA_ENGINE = {
+    "algorithm": {
+        "name": "GRPO",
+        "group_size": 4,
+        "batch_size": 8,
+        "vllm_config": {
+            "max_num_seqs": 16,
+            "gpu_memory_utilization": 0.95,
+            "tensor_parallel_size": 1,
+        },
+    },
+    "environment": {
+        "env_type": "rollout",
+        "env_url": "http://env",
+        "modality": "text",
+        "max_turns": 2,
+    },
+    "network": {
+        "pretrained_model_name_or_path": GEMMA_4_E4B,
+        "max_context_length": 2048,
+        "lora_config": {
+            "lora_r": 16,
+            "lora_alpha": 32,
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+        },
+    },
+    "training": {
+        "max_steps": 10,
+        "rollout_mode": "async",
+        "rollout_engines_per_agent": 1,
+        "rollout_batch_size": 4,
+    },
+    "replay_buffer": {"kind": "llm"},
+}
+
+
+def gemma_engine(**algorithm: object) -> TrainingManifest:
+    doc = copy.deepcopy(GEMMA_ENGINE)
+    doc["algorithm"].update(algorithm)
+    return validated_run_manifest(TrainingManifest.model_validate(doc))
+
+
+def gemma_model() -> ModelSpec:
+    info = SUPPORTED_MODEL_INFO[GEMMA_4_E4B]
+    return ModelSpec(
+        model_id=GEMMA_4_E4B,
+        arch=ModelArch.from_hf_config(info.config),
+        n_params=info.inspected["num_params"],
+        variants=MANIFEST_WEIGHT_VARIANTS,
+    )
+
+
+class TestEngineModel:
+    def test_matches_a_model_built_from_the_bundled_config(self):
+        # Act
+        served = _engine_model(GEMMA_4_E4B)
+
+        # Assert
+        assert served == gemma_model()
+        assert _engine_model(GEMMA_4_E4B) == served
+
+
+class TestResolveEngineFastPath:
+    def test_engine_without_kv_room_pins_the_defaults_off(self) -> None:
+        # Arrange
+        manifest = gemma_engine()
+        l4 = lookup_gpu("L4").device_spec()
+
+        # Act
+        spec = resolve_engine_fast_path(manifest, l4)
+
+        # Assert
+        assert spec is manifest.algorithm
+        assert spec.vllm_engine_args == {
+            "speculative_config": None,
+            "lora_dual_stream": False,
+        }
+        assert spec.vllm_config.max_num_batched_tokens == 2048
+        kv = next(
+            c
+            for c in estimate_generation(
+                gemma_model(), l4, generation_settings_from_manifest(manifest)
+            ).components
+            if c.key == "kv_cache"
+        )
+        assert (
+            kv.detail["startup_pool"]
+            >= kv.detail["full_sequence_bytes"] + KV_MARGIN_BYTES
+        )
+
+    def test_engine_with_kv_room_keeps_the_defaults(self) -> None:
+        # Arrange
+        manifest = gemma_engine()
+
+        # Act
+        spec = resolve_engine_fast_path(manifest, lookup_gpu("A100-80").device_spec())
+
+        # Assert
+        assert spec is None
+        assert manifest.algorithm.vllm_engine_args == {}
+        assert manifest.algorithm.vllm_config.max_num_batched_tokens is None
+
+    def test_pinned_engine_settings_are_kept(self) -> None:
+        # Arrange
+        manifest = gemma_engine(
+            vllm_engine_args={"speculative_config": None},
+            vllm_config={
+                **GEMMA_ENGINE["algorithm"]["vllm_config"],
+                "max_num_batched_tokens": 4096,
+            },
+        )
+
+        # Act
+        spec = resolve_engine_fast_path(manifest, lookup_gpu("L4").device_spec())
+
+        # Assert
+        assert spec.vllm_engine_args == {
+            "speculative_config": None,
+            "lora_dual_stream": False,
+        }
+        assert spec.vllm_config.max_num_batched_tokens == 4096
+
+    def test_step_without_chunked_prefill_holds_a_full_prompt(self) -> None:
+        # Arrange
+        doc = copy.deepcopy(GEMMA_ENGINE)
+        doc["algorithm"]["vllm_engine_args"] = {"enable_chunked_prefill": False}
+        doc["network"]["max_context_length"] = 4096
+        manifest = validated_run_manifest(TrainingManifest.model_validate(doc))
+
+        # Act
+        spec = resolve_engine_fast_path(manifest, lookup_gpu("L4").device_spec())
+
+        # Assert
+        assert spec.vllm_config.max_num_batched_tokens == 4096
+
+    def test_algorithm_without_rollouts_is_left_unchanged(self) -> None:
+        # Arrange
+        manifest = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "SFT", "batch_size": 8},
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        # Act
+        spec = resolve_engine_fast_path(manifest, lookup_gpu("L4").device_spec())
+
+        # Assert
+        assert spec is None
+
+    def test_unset_engine_width_is_left_unchanged(self) -> None:
+        # Arrange
+        manifest = gemma_engine(
+            vllm_config={"max_num_seqs": 16, "gpu_memory_utilization": 0.95}
+        )
+
+        # Act
+        spec = resolve_engine_fast_path(manifest, lookup_gpu("L4").device_spec())
+
+        # Assert
+        assert spec is None
+        assert manifest.algorithm.vllm_engine_args == {}
 
 
 class TestResolveRolloutEnginesPerAgent:
@@ -57,3 +250,189 @@ class TestResolveRolloutEnginesPerAgent:
 
         # Assert
         assert engines == 0
+
+
+def rollout_manifest(hub_id: str, context: int) -> TrainingManifest:
+    """Async CISPO rollout manifest on ``hub_id`` with the engine width omitted."""
+    return validated_run_manifest(
+        TrainingManifest.model_validate(
+            {
+                "algorithm": {
+                    "name": "CISPO",
+                    "batch_size": 64,
+                    "group_size": 16,
+                    "max_output_tokens": 2048,
+                },
+                "environment": {
+                    "env_type": "rollout",
+                    "env_image": "env:latest",
+                    "modality": "text",
+                    "max_turns": 20,
+                },
+                "network": {
+                    "pretrained_model_name_or_path": hub_id,
+                    "max_context_length": context,
+                },
+                "training": {"rollout_mode": "async", "pop_size": 1},
+                "replay_buffer": {"kind": "llm"},
+            }
+        )
+    )
+
+
+def qwen35_9b_kept_trainers() -> TrainingManifest:
+    """Two-turn CISPO on Qwen3.5-9B with two trainers, auto engines and the width omitted."""
+    return validated_run_manifest(
+        TrainingManifest.model_validate(
+            {
+                "algorithm": {
+                    "name": "CISPO",
+                    "batch_size": 4,
+                    "group_size": 4,
+                    "max_output_tokens": 256,
+                    "vllm_config": {"gpu_memory_utilization": 0.9},
+                },
+                "environment": {
+                    "env_type": "rollout",
+                    "env_image": "env:latest",
+                    "modality": "text",
+                    "max_turns": 2,
+                },
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+                    "max_context_length": 2048,
+                    "lora_config": {"lora_r": 16, "lora_alpha": 32},
+                },
+                "training": {
+                    "max_steps": 10,
+                    "rollout_mode": "async",
+                    "pop_size": 1,
+                    "training_gpus_per_agent": 2,
+                    "rollout_batch_size": 4,
+                },
+                "replay_buffer": {"kind": "llm"},
+            }
+        )
+    )
+
+
+class TestResolveEngineTensorParallel:
+    def test_merged_sync_keeps_one_gpu_engines(self) -> None:
+        # Arrange: two trainers leave four L4s for engines.
+        manifest = qwen35_9b_kept_trainers()
+        l4 = lookup_gpu("L4").device_spec()
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 6, l4, 6)
+
+        # Assert
+        assert width == 1
+        assert manifest.algorithm.vllm_config.tensor_parallel_size == 1
+
+    def test_adapter_sync_prices_the_engine_lora_slot(self) -> None:
+        # Arrange: the LoRA slot leaves four TP1 engines fewer resident
+        # sequences than two TP2 engines.
+        manifest = qwen35_9b_kept_trainers()
+        l4 = lookup_gpu("L4").device_spec()
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 6, l4, 6, adapter_sync=True)
+
+        # Assert
+        assert width == 2
+        assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
+
+
+class TestServableEngineWidths:
+    def test_moe_model_skips_widths_without_room_or_an_even_head_split(self) -> None:
+        # Arrange: Qwen3.6-35B-A3B's weights fill one 48 GB L40S, and its
+        # attention and linear-attention heads do not split 3, 5, 6 or 7 ways.
+        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
+        l40s = lookup_gpu("L40S").device_spec()
+
+        # Act
+        widths = servable_engine_widths(manifest, l40s, 7)
+
+        # Assert
+        assert widths == [2, 4]
+
+    def test_dense_model_widths_split_its_heads_evenly(self) -> None:
+        # Arrange: Qwen3-4B has 32 attention heads and 8 KV heads.
+        manifest = rollout_manifest("Qwen/Qwen3-4B", 16384)
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        widths = servable_engine_widths(manifest, h100, 7)
+
+        # Assert
+        assert widths == [1, 2, 4]
+
+    def test_widths_stop_at_the_widest_asked_for(self) -> None:
+        # Arrange
+        manifest = rollout_manifest("Qwen/Qwen3-4B", 16384)
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        widths = servable_engine_widths(manifest, h100, 1)
+
+        # Assert
+        assert widths == [1]
+
+    def test_records_each_width_it_checks_in_the_cache(self) -> None:
+        # Arrange
+        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
+        l40s = lookup_gpu("L40S").device_spec()
+        cache: dict = {}
+
+        # Act
+        widths = servable_engine_widths(manifest, l40s, 4, cache)
+
+        # Assert
+        assert widths == [2, 4]
+        key = (l40s.name, l40s.total_bytes)
+        assert cache == {(*key, 1): False, (*key, 2): True, (*key, 4): True}
+
+    def test_reads_a_width_from_the_cache(self) -> None:
+        # Arrange: width 2 serves on L40S; the cache says it does not.
+        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
+        l40s = lookup_gpu("L40S").device_spec()
+        cache = {(l40s.name, l40s.total_bytes, 2): False}
+
+        # Act
+        widths = servable_engine_widths(manifest, l40s, 4, cache)
+
+        # Assert
+        assert widths == [4]
+
+
+def kv_bar(pool: int, demand: int) -> PhaseBreakdown:
+    """A generation bar whose KV pool holds ``pool`` bytes against ``demand``."""
+    return PhaseBreakdown(
+        phase="generation",
+        components=(
+            MemoryComponent(
+                key="kv_cache",
+                label="KV cache pool",
+                n_bytes=pool,
+                detail={"pool": pool, "worst_case_demand": demand},
+            ),
+        ),
+        device_total_bytes=pool * 4,
+        device_usable_bytes=pool * 4,
+    )
+
+
+class TestQueueWarning:
+    def test_names_how_many_sequences_fit(self):
+        bar = kv_bar(5 * KV_MARGIN_BYTES, 16 * KV_MARGIN_BYTES)
+
+        assert sequences_held(bar, 8) == 2
+        assert queue_warning(bar, 8, 4) == (
+            "tensor_parallel_size=4 holds 2 of 8 sequences; generation may queue"
+        )
+
+    def test_is_silent_when_every_sequence_fits(self):
+        bar = kv_bar(5 * KV_MARGIN_BYTES, 4 * KV_MARGIN_BYTES)
+
+        assert sequences_held(bar, 8) == 8
+        assert queue_warning(bar, 8, 1) is None

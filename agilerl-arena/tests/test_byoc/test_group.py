@@ -101,6 +101,20 @@ class TestResolveByocRootAccess:
         client_mock._get_cli_capabilities.assert_not_called()
         client_mock.close.assert_called_once()
 
+    def test_platform_admin_key_allows_without_capabilities(
+        self, command_config: CommandConfig
+    ) -> None:
+        command_config.api_key = "arena_adm_test"
+        client_mock = MagicMock(spec=ArenaClient)
+        client_mock.is_authenticated = True
+
+        with patch("agilerl.arena.byoc.group.build_client", return_value=client_mock):
+            result = resolve_byoc_root_access(command_config)
+
+        assert result is ByocRootAccess.ALLOWED
+        client_mock._get_cli_capabilities.assert_not_called()
+        client_mock.close.assert_called_once()
+
 
 class TestRegisterByocManifestGroup:
     def test_registers_only_cluster(self) -> None:

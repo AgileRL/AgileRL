@@ -181,6 +181,20 @@ class TestModelInfoConfig:
         assert entry.max_context_length > 0
         assert entry.num_hidden_layers > 0
 
+    def test_each_access_returns_an_equal_independent_copy(self) -> None:
+        # Arrange
+        entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        bundled = json.loads(supported_path(entry.hub_id).read_text(encoding="utf-8"))
+
+        # Act
+        first = entry.config
+        second = entry.config
+
+        # Assert
+        assert first == second == bundled["config"]
+        assert first is not second
+        assert first["vision_config"] is not second["vision_config"]
+
     def test_multimodal_ids_read_text_config(self) -> None:
         gemma = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
         super_vl = SUPPORTED_MODEL_INFO[
@@ -202,6 +216,17 @@ class TestModelInfoConfig:
         assert dumped["model_type"] == "qwen3"
         assert dumped["max_context_length"] == 40960
         assert "config" not in dumped
+
+    def test_mutating_a_returned_config_leaves_the_bundled_config(self) -> None:
+        # Arrange
+        entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        config = entry.config
+
+        # Act
+        config["vision_config"]["model_type"] = "qwen3_5_moe_vision"
+
+        # Assert
+        assert entry.config["vision_config"]["model_type"] == "qwen3_5_moe"
 
 
 class TestModelInfoInspected:
@@ -257,6 +282,27 @@ class TestModelInfoInspected:
             }
         ]
 
+    def test_deepseek_v4_targets_are_path_scoped_and_skip_the_compressor(
+        self,
+    ) -> None:
+        entry = SUPPORTED_MODEL_INFO["deepseek-ai/DeepSeek-V4-Flash-0731"]
+
+        assert entry.modules == frozenset(
+            {
+                "self_attn.q_a_proj",
+                "self_attn.kv_proj",
+                "self_attn.q_b_proj",
+                "self_attn.o_b_proj",
+                "mlp.shared_experts.gate_proj",
+                "mlp.shared_experts.up_proj",
+                "mlp.shared_experts.down_proj",
+            }
+        )
+        assert entry.parameters == frozenset(
+            {"mlp.experts.gate_up_proj", "mlp.experts.down_proj"}
+        )
+        assert entry.default_lora_modules == entry.modules
+
     def test_entry_without_dims_has_no_ranks(self, no_dims_entry: ModelInfo) -> None:
         assert no_dims_entry.lora_ranks is None
         assert no_dims_entry.num_params is None
@@ -289,8 +335,7 @@ MODELS_WITHOUT_PACKED_EXPERTS = (
 
 class TestModelInfoSupportsExpertParallelProperty:
     @pytest.mark.parametrize(
-        "hub_id",
-        [hub_id for hub_id, _count in PACKED_EXPERT_COUNTS],
+        "hub_id", [hub_id for hub_id, _count in PACKED_EXPERT_COUNTS]
     )
     def test_packed_expert_models(self, hub_id: str) -> None:
         entry = SUPPORTED_MODEL_INFO[hub_id]
@@ -304,7 +349,7 @@ class TestModelInfoSupportsExpertParallelProperty:
         assert entry.supports_expert_parallel is False
 
     def test_serializes_in_model_dump(self) -> None:
-        dumped = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].model_dump(mode="json")
+        dumped = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].model_dump(mode="json")
 
         assert dumped["supports_expert_parallel"] is True
 
@@ -315,7 +360,6 @@ class TestModelInfoNumRoutedExpertsProperty:
         entry = SUPPORTED_MODEL_INFO[hub_id]
 
         assert entry.num_routed_experts == expert_count
-        assert entry.supports_expert_parallel is True
 
     @pytest.mark.parametrize("hub_id", MODELS_WITHOUT_PACKED_EXPERTS)
     def test_models_without_packed_experts(self, hub_id: str) -> None:
@@ -426,10 +470,14 @@ class TestModelInfoModalitiesProperty:
         assert ModelInfo(hub_id="org/x").modalities == ("text",)
 
     def test_entries_with_a_vision_tower_handle_vision(self) -> None:
+        # MiMo-V2 trains on the native text-only class, which drops its towers.
+        text_only_trainers = {"XiaomiMiMo/MiMo-V2.6-Flash-RL"}
+
         for hub_id, entry in SUPPORTED_MODEL_INFO.items():
-            expected = (
-                ("text", "vision") if "vision_config" in entry.config else ("text",)
+            has_vision = (
+                "vision_config" in entry.config and hub_id not in text_only_trainers
             )
+            expected = ("text", "vision") if has_vision else ("text",)
 
             assert entry.modalities == expected, hub_id
 
@@ -477,6 +525,25 @@ class TestModelInfoModalitiesProperty:
     def test_rejects_vision_only(self) -> None:
         with pytest.raises(ValidationError, match="modalities"):
             ModelInfo.model_validate({"hub_id": "org/x", "modalities": ["vision"]})
+
+
+class TestModelInfoBiasesImageTokenProperty:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen3.5-0.8B",
+            "google/gemma-4-E4B-it",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        ],
+    )
+    def test_vision_entries_bias_the_image_token(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].biases_image_token is True
+
+    @pytest.mark.parametrize(
+        "hub_id", ["Qwen/Qwen3-4B", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
+    )
+    def test_text_entries_do_not(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].biases_image_token is False
 
 
 class TestFinetuningNetworkSpecLoraTargets:
@@ -629,7 +696,7 @@ class TestFinetuningNetworkSpecExpertDefault:
 
         assert spec.lora_config is not None
         assert spec.lora_config.target_parameters == []
-        assert spec.lora_config.lora_dropout == 0.05
+        assert spec.lora_config.lora_dropout == 0.0
 
     def test_explicit_dropout_is_zeroed_when_experts_auto_filled(self) -> None:
         spec = FinetuningNetworkSpec.model_validate(
@@ -674,13 +741,14 @@ VL_HUB_IDS = (
     "google/gemma-4-E4B-it",
     "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
 )
+GLM5_NEXT_HUB_ID = "zai-org/GLM-5.3-Flash"
 
 
 class TestModelInfoDefaultLoraModulesProperty:
     def test_vl_entries_are_exactly_the_checkpoints_with_towers(self) -> None:
         vl = {h for h, e in SUPPORTED_MODEL_INFO.items() if e.language_model_prefix}
 
-        assert vl == set(VL_HUB_IDS)
+        assert vl == {*VL_HUB_IDS, GLM5_NEXT_HUB_ID}
 
     @pytest.mark.parametrize("hub_id", VL_HUB_IDS)
     def test_vl_default_is_every_module_scoped_under_the_language_model(
@@ -721,6 +789,34 @@ class TestModelInfoDefaultLoraModulesProperty:
         assert entry.tower_lora_modules == {"qkv", "linear_fc1", "linear_fc2"}
         assert "in_proj_qkv" in entry.default_lora_modules
 
+    def test_glm5_next_default_skips_the_indexer_tp_replicated_slices_and_vision(
+        self,
+    ) -> None:
+        entry = SUPPORTED_MODEL_INFO[GLM5_NEXT_HUB_ID]
+        indexer = {"wk", "wq_b", "weights_proj"}
+        replicated = {"f_a_proj", "g_a_proj"}
+
+        assert entry.default_lora_modules == entry.modules - {"qkv"}
+        assert entry.tower_lora_modules == {"qkv", "gate_proj", "up_proj", "down_proj"}
+        assert entry.modules.isdisjoint(indexer | replicated)
+        assert {"f_b_proj", "g_b_proj", "kv_a_proj_with_mqa"} <= (
+            entry.default_lora_modules
+        )
+
+    def test_glm5_next_rank_cap_skips_the_excluded_indexer(self) -> None:
+        entry = SUPPORTED_MODEL_INFO[GLM5_NEXT_HUB_ID]
+        (weights_proj,) = entry.inspected["lora_info"]["weights_proj"]
+
+        # The indexer's weights_proj (out 32) is excluded; b_proj (out 64) caps it.
+        assert weights_proj["out_features"] == 32
+        assert entry.lora_ranks == (1, 8, 16, 32, 64)
+
+    def test_mimo_v2_modules_skip_qkv(self) -> None:
+        entry = SUPPORTED_MODEL_INFO["XiaomiMiMo/MiMo-V2.6-Flash-RL"]
+
+        assert entry.modules == {"o_proj", "gate_proj", "up_proj", "down_proj"}
+        assert entry.default_lora_modules == entry.modules
+
     def test_serializes_default_modules_sorted(self) -> None:
         dumped = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"].model_dump()
 
@@ -740,6 +836,24 @@ class TestModelInfoVlFieldsValidation:
                 language_model_prefix="model.language_model",
                 text_lora_modules=frozenset({"q_proj", "nope"}),
             )
+
+
+class TestModelInfoRolloutGpuMemoryUtilizationValidation:
+    def test_share_of_the_card_is_kept(self) -> None:
+        info = ModelInfo(hub_id="Qwen/Qwen3-4B", rollout_gpu_memory_utilization=1.0)
+
+        assert info.rollout_gpu_memory_utilization == 1.0
+
+    def test_unset_is_none(self) -> None:
+        assert ModelInfo(hub_id="Qwen/Qwen3-4B").rollout_gpu_memory_utilization is None
+
+    def test_zero_raises(self) -> None:
+        with pytest.raises(ValidationError, match="greater than 0"):
+            ModelInfo(hub_id="Qwen/Qwen3-4B", rollout_gpu_memory_utilization=0.0)
+
+    def test_above_one_raises(self) -> None:
+        with pytest.raises(ValidationError, match="less than or equal to 1"):
+            ModelInfo(hub_id="Qwen/Qwen3-4B", rollout_gpu_memory_utilization=1.1)
 
 
 class TestResolveLoraDefaults:
@@ -765,12 +879,12 @@ class TestResolveLoraDefaults:
     def test_leaves_explicit_dense_and_untracked_configs(
         self, hub_id: str, target_parameters: list[str] | None
     ) -> None:
-        lora = LoraConfigDict(target_parameters=target_parameters)
+        lora = LoraConfigDict(target_parameters=target_parameters, lora_dropout=0.1)
 
         resolve_lora_defaults(lora, hub_id)
 
         assert lora.target_parameters == target_parameters
-        assert lora.lora_dropout == 0.05
+        assert lora.lora_dropout == 0.1
 
     def test_explicit_expert_paths_with_unset_dropout_take_zero(self) -> None:
         lora = LoraConfigDict(target_parameters=["mlp.experts.down_proj"])
@@ -802,6 +916,9 @@ class TestResolveReasoningParser:
             "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron_v3",
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16": "nemotron_v3",
             "openai/gpt-oss-20b": "openai_gptoss",
+            "zai-org/GLM-5.3-Flash": "glm47",
+            "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek_v4",
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL": "mimo",
         }
 
         resolved = {

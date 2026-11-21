@@ -7,11 +7,12 @@ from typing import Any
 import pytest
 
 from agilerl.arena.memory.resolve.training import (
+    liger_kernel_arch,
     lora_target_scope,
     packed_moe_dispatch,
     sampling_support_width,
-    support_scored_loss,
 )
+from agilerl.arena.memory.specs import ModelArch
 
 
 class TestLoraTargetScope:
@@ -54,18 +55,32 @@ class TestSamplingSupportWidth:
         assert sampling_support_width(records, top_k) == width
 
 
-class TestSupportScoredLoss:
-    @pytest.mark.parametrize(
-        ("algorithm", "liger_loss", "scored"),
-        [
-            ("grpo", True, True),
-            ("ppo", False, True),
-            ("ppo", True, False),
-            ("reinforce", True, False),
-            ("reinforce", False, True),
-        ],
-    )
-    def test_liger_ppo_and_reinforce_score_the_full_vocabulary(
-        self, algorithm: Any, liger_loss: bool, scored: bool
-    ) -> None:
-        assert support_scored_loss(algorithm, liger_loss) is scored
+class TestLigerKernelArch:
+    def test_liger_layers_keep_the_checkpoint_geometry(self) -> None:
+        arch = ModelArch(
+            n_layers=2,
+            hidden_size=64,
+            intermediate_size=128,
+            n_heads=4,
+            n_kv_heads=4,
+            head_dim=16,
+            vocab_size=1000,
+        )
+
+        assert liger_kernel_arch(arch, True) is arch
+
+    def test_stock_layers_keep_fp32_norm_inputs_and_the_activated_gate(self) -> None:
+        arch = ModelArch(
+            n_layers=2,
+            hidden_size=64,
+            intermediate_size=128,
+            n_heads=4,
+            n_kv_heads=4,
+            head_dim=16,
+            vocab_size=1000,
+        )
+
+        stock = liger_kernel_arch(arch, False)
+
+        assert stock.fp32_norm_inputs is True
+        assert stock.stock_gated_mlp is True

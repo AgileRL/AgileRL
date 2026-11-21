@@ -93,22 +93,24 @@ class RolloutPrompt(TypedDict):
 
 
 class PreferencePrompts(TypedDict):
-    prompt: list[str]
-    prompt_lengths: list[int]
-    chosen: list[str]
-    rejected: list[str]
+    # Each row's field as given: a string, or chat messages.
+    prompt: list[str | list[dict[str, Any]]]
+    chosen: list[str | list[dict[str, Any]]]
+    rejected: list[str | list[dict[str, Any]]]
     chosen_input_ids: torch.Tensor
     chosen_attention_mask: torch.Tensor
+    # True at the tokens the loss trains on.
+    chosen_loss_mask: torch.Tensor
     rejected_input_ids: torch.Tensor
     rejected_attention_mask: torch.Tensor
+    rejected_loss_mask: torch.Tensor
 
 
 class SFTPrompts(TypedDict):
-    prompt: list[str]
-    prompt_lengths: list[int]
-    response: list[str]
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
+    # True at the tokens the loss trains on.
+    loss_mask: torch.Tensor
 
 
 class CheckpointInfo(TypedDict):

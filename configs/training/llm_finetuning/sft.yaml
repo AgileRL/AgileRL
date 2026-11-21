@@ -14,7 +14,6 @@ environment:
     response_column: chosen
 
 training:
-    max_steps: 100000
     evo_steps: 10
     pop_size: 4
     eval_loop: 1
@@ -51,5 +50,4 @@ network:
             - k_proj
             - v_proj
             - o_proj
-        lora_dropout: 0.05
         task_type: CAUSAL_LM

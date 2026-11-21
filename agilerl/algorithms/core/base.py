@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import copy
+import gc
 import inspect
 import io
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -22,10 +24,10 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from functools import partial
 from importlib.metadata import version
-from itertools import accumulate, chain, groupby, pairwise
+from itertools import chain
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -42,7 +44,6 @@ import dill
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch.nn.functional as F
 from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
@@ -54,10 +55,11 @@ from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers import _apply_liger_kernel_to_instance
+
+    from agilerl.architectures.liger_rope import pin_triton_rope
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
-    scored_position_index,
 )
 from agilerl.algorithms.core.optimizer_wrapper import (
     REPLICATED_GROUP_SUFFIX,
@@ -71,38 +73,44 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
     OptimizerFactory,
 )
+from agilerl.algorithms.core.sequence_layout import (
+    ContextParallelSequence,
+    HostMasks,
+    PackedContextParallelSequence,
+    PackedSequence,
+    PaddedSequence,
+    SequenceLayout,
+)
 from agilerl.architectures import (
     FAMILY_RUNTIME_CONFIGS,
     ModelRuntimeConfig,
     install_family_patches,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
-from agilerl.architectures.vllm_language import unbuilt_tower_modules
-from agilerl.arena.memory.estimator import (
-    estimate_training,
-    training_breakdown,
+from agilerl.architectures.vllm_language import (
+    nested_language_config,
+    unbuilt_tower_modules,
 )
 from agilerl.arena.memory.manifest import ALGORITHM_NAMES
-from agilerl.arena.memory.resolve.batch import resolve_mini_batch_size
-from agilerl.arena.memory.resolve.checkpointing import resolve_gradient_checkpointing
+from agilerl.arena.memory.resolve.batch import ROW_FILL, resolve_mini_batch_size
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
-from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
-from agilerl.arena.memory.resolve.liger import (
-    liger_head_grad,
-    liger_kernel_arch,
-    liger_loss_blocker,
-    liger_whole_sequence_loss,
+from agilerl.arena.memory.resolve.fsdp import (
+    MemoryPins,
+    TrainingMemoryPlan,
+    TrainingMemoryUnfitError,
+    resolve_training_memory,
 )
 from agilerl.arena.memory.resolve.packing import sequence_packing_blocker
 from agilerl.arena.memory.resolve.training import (
+    liger_kernel_arch,
     lora_target_scope,
     packed_moe_dispatch,
     sampling_support_width,
-    support_scored_loss,
 )
 from agilerl.arena.memory.specs import (
     Algorithm,
     DeviceSpec,
+    MiB,
     ModelArch,
     ModelSpec,
     TrainingSettings,
@@ -110,6 +118,7 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
+from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
@@ -118,6 +127,7 @@ from agilerl.distributed import (
     DPRuntime,
     FSDPConfig,
     FSDPRuntime,
+    allreduce_max_ints,
     allreduce_minmax_int,
     allreduce_sum_ints,
     any_rank,
@@ -134,6 +144,8 @@ from agilerl.distributed import (
     resolve_device,
     set_seed,
 )
+from agilerl.distributed.context_parallel.gdn import wraps_gdn_context_parallel
+from agilerl.distributed.context_parallel.sequence import CP_SCAN_CHUNK
 from agilerl.distributed.runtime import OptimizerStep
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
@@ -206,16 +218,18 @@ from agilerl.utils.evolvable_networks import (
 )
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_packing import (
-    PackedBatch,
+    is_recurrent_mixer,
     mixers_without_boundary_reset,
-    pack_next_token_frame,
-    pack_padded_batch,
-    unpack_hidden_states,
-    unpack_logprobs,
+    packed_length_classes,
 )
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.utils.phase_timer import PhaseTimer
 from agilerl.utils.sampling_supports import extract_vllm_sampling_supports
+from agilerl.utils.token_micro_batches import (
+    balance_windows,
+    fill_micro_batches,
+    pack_rows_evenly,
+)
 from agilerl.utils.torch_utils import release_device_memory
 from agilerl.utils.vision_rows import (
     PinnedStaging,
@@ -262,6 +276,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.lora.moe import (
         install_packed_expert_grouped_gemm,
         materializes_expert_lora,
+        set_routed_experts_chunk_bytes,
         set_routed_experts_recompute,
         upgrade_moe_param_wrappers,
     )
@@ -283,8 +298,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         generation_tokens_for_turn,
         get_lora_params,
         get_model_name_or_path,
-        hf_completion_lengths,
-        hf_turn_generation_config,
+        has_vision_tower,
         is_rollout_prompt,
         language_model_attn_implementation,
         log_cuda_memory_snapshot,
@@ -294,7 +308,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         move_params_to_gpu,
         needs_cross_rank_seq_padding,
         offload_colocated_trainer_from_gpu,
-        prepare_prompt_hf_generate,
         save_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
         snapshot_lora_adapters,
@@ -327,6 +340,34 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _normalizer_world_size() -> int:
+    """Ranks the token-count normalizer is divided by.
+
+    :return: Default process-group size, ``1`` when distributed is inactive.
+    :rtype: int
+    """
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return int(torch.distributed.get_world_size())
+    return 1
+
+
+def _global_sum(values: torch.Tensor) -> torch.Tensor:
+    """Sum of ``values`` over the default process group.
+
+    Every rank must make the same calls, including ranks whose sum is zero.
+
+    :param values: This rank's values, e.g. an action-token mask.
+    :type values: torch.Tensor
+    :return: 0-d fp32 global sum on ``values``' device (the local sum when
+        distributed is inactive).
+    :rtype: torch.Tensor
+    """
+    total = values.sum(dtype=torch.float32)
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+    return total
 
 
 def _is_readonly_property(obj: object, name: str) -> bool:
@@ -1317,8 +1358,12 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         on_device: list[TorchObsType] = []
         for exp in experiences:
             moved: TorchObsType
-            # Check the Tensor leaf before the container arms so narrowing is exact.
-            if isinstance(exp, torch.Tensor):
+            # Check the Tensor / TensorDict leaf before the container arms so
+            # narrowing is exact. TensorDict.to() moves every leaf in one call.
+            if isinstance(exp, TensorDict):
+                target = torch.device(device)
+                moved = exp if exp.device == target else exp.to(target)
+            elif isinstance(exp, torch.Tensor):
                 moved = exp.to(device)
             elif isinstance(exp, dict):
                 moved = {key: val.to(device) for key, val in exp.items()}
@@ -2812,65 +2857,6 @@ def training_device_spec(
     )
 
 
-def broadcast_fsdp_memory_pick(
-    model: ModelSpec,
-    device: DeviceSpec,
-    settings: TrainingSettings,
-    picked: FSDPConfig,
-) -> FSDPConfig:
-    """Broadcast rank 0's FSDP memory pick and log the peak it implies.
-
-    :param model: Training model.
-    :param device: Training GPU.
-    :param settings: Training settings. ``fsdp`` is replaced with the pick.
-    :param picked: Resolve result. Set fields are already kept.
-    :return: Config every rank wraps with.
-    """
-    reshard, chunk_mib, optim_cpu_offload, activation_offload, cpu_offload = (
-        broadcast_object_list(
-            [
-                picked.reshard_after_forward,
-                picked.routed_expert_chunk_mib,
-                picked.optim_cpu_offload,
-                picked.activation_offload,
-                picked.cpu_offload,
-            ]
-        )
-    )
-    resolved = replace(
-        picked,
-        reshard_after_forward=reshard,
-        routed_expert_chunk_mib=chunk_mib,
-        optim_cpu_offload=optim_cpu_offload,
-        activation_offload=activation_offload,
-        cpu_offload=cpu_offload,
-    )
-    estimate = estimate_training(
-        model,
-        device,
-        settings.model_copy(
-            update={"fsdp": resolved, "activation_offload": activation_offload}
-        ),
-        orchestrated=True,
-    )
-    gib = 1024**3
-    logger.log(
-        logging.INFO if estimate.fits else logging.WARNING,
-        "FSDP memory: reshard_after_forward=%s, routed_expert_chunk_mib=%d, "
-        "optim_cpu_offload=%s, activation_offload=%s, cpu_offload=%s; "
-        "estimated peak %.2f GiB, budget %.2f GiB%s",
-        resolved.reshard_after_forward,
-        resolved.routed_expert_chunk_mib,
-        resolved.optim_cpu_offload,
-        resolved.activation_offload,
-        resolved.cpu_offload,
-        estimate.total_bytes / gib,
-        estimate.device_usable_bytes / gib,
-        "" if estimate.fits else " (over budget)",
-    )
-    return resolved
-
-
 def has_liger_layer_kernels(model: torch.nn.Module) -> bool:
     """Whether Liger's layer kernels serve any module of ``model``.
 
@@ -2924,6 +2910,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         disabled; since base weights are immutable, that reference stays the
         initial policy for the whole run.
     :type use_separate_reference_adapter: bool
+    :param reference_update_interval: Optimizer steps between copies of the
+        actor adapter onto ``reference``. ``None`` (default) keeps the
+        reference fixed.
+    :type reference_update_interval: int | None
     :param lr_critic: Critic/value-head learning rate. If ``None``, ``lr_actor`` is used.
     :type lr_critic: float | None, optional
     :param use_value_head: Whether to use a separate value head.
@@ -2941,8 +2931,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param mini_batch_size: Per-rank samples covered by one optimizer step.
         ``None`` uses ``(batch_size / world_size) * group_size``.
     :type mini_batch_size: int | None, optional
-    :param gradient_checkpointing: Recompute each transformer block in
-        backward. ``None`` picks it from the memory estimate.
+    :param gradient_checkpointing: Recompute block activations in the backward
+        pass. ``None`` lets the training-memory search pick it on CUDA for a
+        catalog model; elsewhere it is on.
     :type gradient_checkpointing: bool | None, optional
     :param group_size: Completions per prompt group. ``1`` when each
         ``batch_size`` item is already a sample (SFT, DPO, PPO, REINFORCE).
@@ -2978,15 +2969,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         it leaves unbuilt. Builders derive it from the environment's modality.
         Defaults to False.
     :type rollout_strip_multimodal_towers: bool, optional
-    :param vllm_importance_sampling_correction: When ``True`` (default) and
-        colocated, correct the rollout/trainer log-prob mismatch by
-        weighting each training token by ``clamp(exp(trainer - sampling),
-        max=vllm_importance_sampling_cap)``. Active only for training rollouts;
-        inert on the HuggingFace path and at eval.
-    :type vllm_importance_sampling_correction: bool, optional
-    :param vllm_importance_sampling_cap: Upper clamp on the vLLM
-        importance-sampling ratio (default ``2.0``), bounding the correction
-        weight to limit variance from outlier tokens. Must be > 0.
+    :param vllm_importance_sampling_cap: Trainer/vLLM ratio at which the
+        sampling-mismatch metrics count a token as clipped (default ``2.0``).
+        Must be > 0.
     :type vllm_importance_sampling_cap: float, optional
     :param vllm_max_logprob_gap: Log a warning when a learn step's mean
         ``|trainer - vLLM|`` per-token log-prob gap exceeds this, in nats
@@ -3008,6 +2993,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         log-probs add the same offsets, so they score the distribution
         rollouts sample from. ``None`` adds none.
     :type logit_bias: dict[int, float] | None, optional
+    :param routed_expert_chunk_mib: MiB of the widest activation of one
+        routed-expert row chunk under DDP; FSDP reads
+        ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
+        training-memory search pick it when it runs, else keeps 64.
+    :type routed_expert_chunk_mib: int | None, optional
     """
 
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
@@ -3016,8 +3006,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     beta: float = 0.0
     # Times the gradient forward stacks the batch along rows, one per routed adapter.
     gradient_row_copies: int = LLMAlgorithmSpec.gradient_row_copies
-    # The gradient forward packs its sequences when :func:`sequence_packing_blocker`
-    # passes; the no-grad reference and old-logprob passes stay padded.
+    # The gradient and no-grad forwards pack their sequences when
+    # :func:`sequence_packing_blocker` passes.
     supports_sequence_packing: bool = LLMAlgorithmSpec.supports_sequence_packing
     actor: Any
     optimizer: Any
@@ -3025,22 +3015,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     tp_group: Any
     lr: float
     colocated: bool
-    # The update runs the fused Liger loss: liger-kernel is installed and
-    # :func:`liger_loss_blocker` passes the config.
-    liger_loss: bool
     temperature: float
     repetition_penalty: float
     top_p: float
-    top_k: int | None
+    # SFT and DPO generate nothing, so sample with no top-k.
+    top_k: int | None = None
     min_p: float | None
     # Colocated engine reports the token ids each rollout token was drawn from.
     records_sampling_supports: bool
     max_model_len: int
     # Longest training row the memory estimate sizes for; None uses max_model_len.
     max_row_tokens: int | None = None
+    # Tokens per packed micro-batch on one rank; None uses micro rows x row budget.
+    micro_batch_tokens_per_gpu: int | None = None
     max_output_tokens: int | None
     min_output_tokens: int | None
-    hf_generate_chunk_size: int
     generation_config: GenerationConfig
 
     def __init__(
@@ -3056,6 +3045,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pad_token: str,
         lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool = False,
+        reference_update_interval: int | None = None,
         lr_critic: float | None = None,
         use_value_head: bool = False,
         vllm_config: VLLMConfig | None = None,
@@ -3076,12 +3066,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         quantization_config: BitsAndBytesConfig | None = None,
         lora_tower_target_modules: list[str] | None = None,
         rollout_strip_multimodal_towers: bool = False,
-        vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
         vllm_max_clip_fraction: float = 0.02,
         profiling_config: ProfilingConfig | None = None,
         logit_bias: dict[int, float] | None = None,
+        routed_expert_chunk_mib: int | None = None,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -3097,7 +3087,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             warnings.warn(
                 "No LoRA config provided. AgileRL can only be used to finetune adapters at present. "
                 "Using default LoRA configuration for RL finetuning: "
-                "r=16, lora_alpha=32, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.05."
+                "r=16, lora_alpha=32, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.0."
                 "To use a different LoRA configuration, please pass lora_config to the constructor.",
                 stacklevel=2,
             )
@@ -3106,7 +3096,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 lora_alpha=32,
                 target_modules="all-linear",
                 task_type="CAUSAL_LM",
-                lora_dropout=0.05,
+                lora_dropout=0.0,
             )
 
         # ``offload_trainer_during_rollout`` offloads the trainer's own base to CPU
@@ -3160,9 +3150,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._pixel_staging = PinnedStaging()
         self._vision_language_module: PreTrainedModel | None = None
         self.final_logit_softcap: float | None = None
-        self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
+        # optimizer_steps // reference_update_interval at the last reference copy.
+        self.reference_update_tracker = 0
+        self.optimizer_steps = 0
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
+        self.sequence_layout: SequenceLayout = PaddedSequence(
+            calc_position_embeddings=calc_position_embeddings,
+        )
         self.pad_token = pad_token
         self.pretrained_model_name_or_path = (
             model_name
@@ -3174,11 +3169,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         install_family_patches(
             getattr(getattr(actor_network, "config", None), "model_type", None),
             model=actor_network,
+            use_sequence_packing=self._packed_wraps_apply(),
         )
         if quantization_config is not None:
-            # Both the (always-on) fused-linear-logprob path and the Liger path
-            # run the lm_head matmul outside the model's quantized forward, so
-            # the lm_head weight must stay unquantized to keep that matmul exact.
+            # The fused log-prob head runs the lm_head matmul outside the
+            # model's quantized forward, so lm_head must stay unquantized.
             skip = list(
                 getattr(quantization_config, "llm_int8_skip_modules", None) or []
             )
@@ -3189,6 +3184,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Picked with the FSDP memory fields when the models are wrapped.
         self.activation_offload = False
         self.gradient_checkpointing = gradient_checkpointing
+        self.routed_expert_chunk_mib = routed_expert_chunk_mib
         self.lora_tower_target_modules = lora_tower_target_modules
         self.rollout_strip_multimodal_towers = rollout_strip_multimodal_towers
         if isinstance(model_config, dict):
@@ -3209,7 +3205,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # YAML / config loaders may supply LR as a string (e.g. "5e-5"); PyTorch optimizers require float.
         self.lr = float(lr)
         self.lr_critic = lr_critic
-        self._micro_batch_count = 0
         if self.distributed:
             if get_world_size() > 1:
                 seed = broadcast_object_list([seed])[0]
@@ -3225,19 +3220,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
         self.offload_trainer_during_rollout = offload_trainer_during_rollout
-        self.trainer_offload_context = (
-            self._offload_trainer_for_rollout
-            if offload_trainer_during_rollout
-            else nullcontext
-        )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
+        if reference_update_interval is not None and reference_update_interval < 1:
+            msg = f"reference_update_interval must be >= 1 or None, got {reference_update_interval}."
+            raise ValueError(msg)
+        self.reference_update_interval = reference_update_interval
         if vllm_importance_sampling_cap <= 0:
             msg = "vllm_importance_sampling_cap must be > 0."
             raise ValueError(msg)
-        self.vllm_importance_sampling_correction = bool(
-            vllm_importance_sampling_correction
-        )
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
         self.vllm_max_logprob_gap = float(vllm_max_logprob_gap)
         self.vllm_max_clip_fraction = float(vllm_max_clip_fraction)
@@ -3258,6 +3249,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_awake = self.colocated and not (
             self.vllm_config is not None and self.vllm_config.sleep_mode
         )
+        self.llm = None
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
@@ -3468,6 +3460,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
         checkpoint_dict.pop("shard_runtime", None)
+        checkpoint_dict.pop("sequence_layout", None)
         checkpoint_dict["network_info"]["optimizers"].pop("optimizer_state_dict", None)
         # Round trip through the checkpoint serializer so no live attribute
         # (scores, fitness, rng, ...) is shared with the snapshot.
@@ -3545,7 +3538,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type overwrite_critic_adapter: bool
         :param restore_config: If ``False``, keep this instance's algorithm
             settings and restore only training state: step count, scores,
-            fitness, ``reference_update_tracker``, ``rng`` and, with
+            fitness, ``reference_update_tracker``, ``optimizer_steps``, ``rng`` and, with
             ``restore_hyperparameters``, the registry's mutable
             hyperparameters.
         :type restore_config: bool
@@ -3764,8 +3757,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ) -> None:
         """Restore algorithm attributes from payload.
 
-        ``lora_config`` and ``selected_adapters`` are intentionally skipped \u2014 the current
-        algorithm's values are authoritative, and any LoRA-shape reconciliation is done
+        ``lora_config``, ``selected_adapters`` and ``use_separate_reference_adapter``
+        are intentionally skipped \u2014 the current algorithm's values match its
+        built adapters, and any LoRA-shape reconciliation is done
         inside :meth:`_load_model_checkpoint`. Checkpoint metadata (``network_info``,
         ``registry``) is handled in :meth:`load_checkpoint` and never written
         onto the instance.
@@ -3777,12 +3771,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param restore_hyperparameters: See :meth:`load_checkpoint`.
         :type restore_hyperparameters: bool
         """
+        # A checkpoint without optimizer_steps counts reference copies in dataset
+        # epochs, which the optimizer-step schedule cannot compare against.
+        if "optimizer_steps" not in checkpoint:
+            checkpoint = {**checkpoint, "reference_update_tracker": 0}
         if not restore_config:
             training_state = {
                 "steps",
                 "scores",
                 "fitness",
                 "reference_update_tracker",
+                "optimizer_steps",
                 "rng",
                 *self.hp_config.names(),
             }
@@ -3797,11 +3796,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "lr_scheduler",
             "lora_config",
             "selected_adapters",
+            "use_separate_reference_adapter",
             "network_info",
             "registry",
             "device",
             # Holds this process's DeviceMesh; a saved one names rank 0's groups.
             "shard_runtime",
+            "sequence_layout",
         }
         for attr, value in checkpoint.items():
             if attr in skip_attrs:
@@ -3839,27 +3840,39 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         Places the actor (dense ``.to(device)`` or FSDP2 shard) then builds
         the optimizer and LR scheduler on those parameters. FSDP2 wraps each
-        transformer block with activation checkpointing before ``fully_shard``.
-        Data-parallel ``prepare_actor`` uses HuggingFace
-        ``gradient_checkpointing_enable``.
+        transformer block with activation checkpointing before ``fully_shard``
+        when ``gradient_checkpointing`` is on. Data-parallel ``prepare_actor``
+        uses HuggingFace ``gradient_checkpointing_enable``, and the routed
+        experts run at ``routed_expert_chunk_mib`` when it is set.
         """
         assert self.actor is not None, (
             "Actor is set to None, please check that the actor is defined."
         )
-        fsdp_config = None
+        self._check_cp_strips_vision_towers()
+        if self.gradient_checkpointing is None and (
+            torch.device(self.device).type != "cuda"
+            or self.pretrained_model_name_or_path not in SUPPORTED_MODEL_INFO
+        ):
+            # The training-memory search sizes catalog models on a CUDA device.
+            self.gradient_checkpointing = True
         if self.fsdp_config is None:
             self.shard_runtime = DPRuntime()
+            if self.gradient_checkpointing is None:
+                self.gradient_checkpointing, _, self.routed_expert_chunk_mib = (
+                    self._search_training_memory(None)
+                )
         else:
             fsdp_config = self._resolve_fsdp_config(self.fsdp_config)
-            self.activation_offload = bool(fsdp_config.activation_offload)
-            self.shard_runtime = FSDPRuntime(fsdp_config)
-        if self.gradient_checkpointing is None:
-            self.gradient_checkpointing = self._resolve_gradient_checkpointing(
-                fsdp_config
-            )
-        # Activation offload runs inside the block checkpoint wrapper.
-        self.gradient_checkpointing = (
-            self.gradient_checkpointing or self.activation_offload
+            if fsdp_config is None:
+                self.fsdp_config = None
+                self.shard_runtime = DPRuntime()
+            else:
+                self.activation_offload = bool(fsdp_config.activation_offload)
+                self.shard_runtime = FSDPRuntime(fsdp_config)
+        logger.info(
+            "Trainer runs %s on %d ranks",
+            "FSDP" if self.shard_runtime.is_sharded else "DDP",
+            get_world_size(),
         )
         if (
             self.fsdp_config is not None
@@ -3869,10 +3882,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ):
             msg = "ep > 1 cannot be combined with tensor_parallel_size > 1."
             raise ValueError(msg)
+        assert self.gradient_checkpointing is not None
         result = self.shard_runtime.prepare_actor(
             self.actor,
             device=self.device,
-            colocated=self.colocated,
             cosine_lr_schedule_config=self.cosine_lr_schedule_config,
             lr=self.lr,
             lr_critic=self.lr_critic,
@@ -3884,6 +3897,72 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.lr_scheduler = result.lr_scheduler
         # Checkpointed blocks exist only after prepare_actor.
         set_routed_experts_recompute(self.actor)
+        # FSDP sets the chunk from its config while sharding.
+        if (
+            not self.shard_runtime.is_sharded
+            and self.routed_expert_chunk_mib is not None
+        ):
+            set_routed_experts_chunk_bytes(
+                self.actor, self.routed_expert_chunk_mib * MiB
+            )
+        self.sequence_layout = self._build_sequence_layout()
+
+    def _check_cp_strips_vision_towers(self) -> None:
+        """Raise when context parallel runs a vision-language actor whose engine keeps its towers."""
+        if (
+            self.fsdp_config is not None
+            and self.fsdp_config.cp > 1
+            and has_vision_tower(self.actor)
+            and not self.rollout_strip_multimodal_towers
+        ):
+            msg = (
+                f"cp={self.fsdp_config.cp} on a vision-language model needs a "
+                "text-only environment and no tower LoRA, so the engine strips "
+                "its towers"
+            )
+            raise ValueError(msg)
+
+    def _sequence_layout_type(self) -> type[SequenceLayout]:
+        """Padded, packed, or (packed) context-parallel layout class for this run."""
+        if self.fsdp_config is not None and self.fsdp_config.cp > 1:
+            if self.sequence_packing:
+                return PackedContextParallelSequence
+            return ContextParallelSequence
+        if self.sequence_packing:
+            return PackedSequence
+        return PaddedSequence
+
+    def _build_sequence_layout(self) -> SequenceLayout:
+        """Build the :meth:`_sequence_layout_type` layout; needs ``prepare_actor``'s CP group."""
+        layout_type = self._sequence_layout_type()
+        if issubclass(layout_type, ContextParallelSequence):
+            # A cp > 1 config always runs on FSDPRuntime.
+            group = cast("FSDPRuntime", self.shard_runtime).cp_group
+            return layout_type(
+                pad_token_id=self.pad_token_id,
+                cp=cast("FSDPConfig", self.fsdp_config).cp,
+                group=group,
+                rank=torch.distributed.get_rank(group),
+                round_to=self._context_parallel_round_to(),
+            )
+        if layout_type is PackedSequence:
+            return PackedSequence(
+                varlen=language_model_attn_implementation(self.actor)
+                == "flash_attention_2",
+            )
+        return PaddedSequence(calc_position_embeddings=self.calc_position_embeddings)
+
+    def _context_parallel_round_to(self) -> int:
+        """Multiple the context-parallel action frame pads to.
+
+        Gated DeltaNet scans need whole chunks on every rank. FlexAttention
+        widths round to whole 128-token blocks so few distinct block masks build.
+        """
+        cp = cast("FSDPConfig", self.fsdp_config).cp
+        round_to = cp * CP_SCAN_CHUNK if wraps_gdn_context_parallel(self.actor) else cp
+        if language_model_attn_implementation(self.actor) == "flex_attention":
+            round_to = math.lcm(round_to, 128)
+        return round_to
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
@@ -3897,8 +3976,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             None,
         )
         barrier()
-        if hasattr(self, "llm") and self.llm is not None:
-            del self.llm
+        self.llm = None
         staging_dir = getattr(self, "_vllm_lora_staging_dir", None)
         if (
             staging_dir is not None
@@ -4085,7 +4163,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             and self.vllm_config is not None
             and self.vllm_config.sleep_mode
         )
-        exclude = ("actor", "shard_runtime", "optimizer", "lr_scheduler")
+        exclude = (
+            "actor",
+            "shard_runtime",
+            "sequence_layout",
+            "optimizer",
+            "lr_scheduler",
+        )
         original_llm = None
         if self.colocated:
             original_llm = self.llm
@@ -4278,20 +4362,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-    def _liger_head_gather(
-        self,
-    ) -> AbstractContextManager[tuple[torch.Tensor, torch.Tensor | None]]:
-        """Yield dense ``(weight, bias)`` for one Liger fused-loss call.
+    def set_reference_policy(self) -> None:
+        """Copy the actor adapter onto ``reference`` every ``reference_update_interval`` optimizer steps.
 
-        Liger kernels call ``aten.mm`` and reject a DTensor ``lm_head`` weight
-        mixed with dense hidden states. Callers must use the yielded tensors,
-        not a pre-captured ``lm_head.weight``. Wrap ``apply`` only, never
-        ``actor.forward``.
-        """
-        return self.shard_runtime.gather_layer(self._get_lm_head(), device=self.device)
-
-    def set_reference_policy(self, reference_update_tracker: int) -> None:
-        """Update the reference policy when the tracker advances past the stored value.
+        Does nothing when ``reference_update_interval`` is ``None``.
 
         Base weights are immutable in AgileRL's LoRA-only training: with
         ``use_separate_reference_adapter=True`` the actor adapter is copied onto
@@ -4299,12 +4373,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model with adapters disabled) cannot move, so the update request is
         acknowledged with a one-time warning and the KL anchor stays the initial
         policy.
-
-        :param reference_update_tracker: The reference policy update tracker
-        :type reference_update_tracker: int
         """
-        assert reference_update_tracker >= self.reference_update_tracker, (
-            "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        if self.reference_update_interval is None:
+            return
+        reference_update_tracker = (
+            self.optimizer_steps // self.reference_update_interval
         )
         if reference_update_tracker > self.reference_update_tracker:
             if self.use_separate_reference_adapter:
@@ -4323,7 +4396,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     category=UserWarning,
                 )
                 self._frozen_reference_warned = True
-            self.reference_update_tracker += 1
+            self.reference_update_tracker = reference_update_tracker
 
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
@@ -4363,22 +4436,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             yield
         finally:
             self.use_adapter("actor")
-
-    @staticmethod
-    def _position_ids_from_mask(mask: torch.Tensor) -> torch.Tensor:
-        """Left-padding-safe ``position_ids`` from an attention mask.
-
-        Cumulative real-token count minus one, with padded positions pinned to
-        ``1`` so the rotary embedding sees a valid (ignored) index.
-
-        :param mask: ``(B, T)`` attention mask (1 = real token, 0 = pad).
-        :type mask: torch.Tensor
-        :return: ``(B, T)`` position ids in ``long``.
-        :rtype: torch.Tensor
-        """
-        position_ids = mask.long().cumsum(dim=-1) - 1
-        position_ids.masked_fill_(mask=(mask == 0), value=1)
-        return position_ids
 
     def _fused_logprob_fn_and_head(
         self,
@@ -4458,19 +4515,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return None, 0
         out = old_log_probs.clone()
         mask_bool = action_masks.to(torch.bool)
-        n_rows = out.shape[0]
-        n_skipped = 0
-        for b in range(n_rows):
-            flat = sampling_logps[b] if b < len(sampling_logps) else None
-            if flat is None:
-                n_skipped += 1
-                continue
-            pos = mask_bool[b].nonzero(as_tuple=True)[0]
-            if pos.numel() != flat.numel():
-                n_skipped += 1
-                continue
-            out[b, pos] = flat.to(device=out.device, dtype=out.dtype)
-        return out, n_skipped
+        counts = mask_bool.sum(dim=1).tolist()
+        flats = [
+            sampling_logps[b] if b < len(sampling_logps) else None
+            for b in range(len(counts))
+        ]
+        keep = [
+            flat is not None and flat.numel() == count
+            for flat, count in zip(flats, counts, strict=True)
+        ]
+        kept = [
+            flat for flat, k in zip(flats, keep, strict=True) if flat is not None and k
+        ]
+        if kept:
+            # Boolean indexing fills True positions row-major, matching the
+            # row-by-row concatenation order of ``kept``.
+            row_keep = torch.tensor(keep, device=mask_bool.device).unsqueeze(1)
+            out[mask_bool & row_keep] = torch.cat(kept).to(
+                device=out.device, dtype=out.dtype
+            )
+        return out, keep.count(False)
 
     @staticmethod
     def _align_sampling_supports(
@@ -4607,64 +4671,252 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.vllm_importance_sampling_cap,
         )
 
-    def _aligned_sampling_logprobs_and_metrics(
+    def _rollout_mismatch_metrics(
+        self,
+        policy_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        action_masks: torch.Tensor,
+        compared_rows: torch.Tensor,
+    ) -> tuple[dict[str, float], tuple[str, ...]]:
+        """Trainer-vs-rollout log-prob mismatch over the rows trained on rollout log-probs.
+
+        Empty when no rank has such a row. A rank with none reports the same
+        keys, excluded from their cross-rank means. Every row trains on
+        rollout log-probs, so ``vllm_is_rows_skipped`` is ``0.0``.
+
+        :param policy_log_probs: ``(B, T-1)`` policy log-probs from the update.
+        :type policy_log_probs: torch.Tensor
+        :param old_log_probs: ``(B, T-1)`` old-policy log-probs, the rollout's
+            on ``compared_rows``.
+        :type old_log_probs: torch.Tensor
+        :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :param compared_rows: ``(B,)`` rows the update scored whose old policy
+            is the rollout's.
+        :type compared_rows: torch.Tensor
+        :return: ``(metrics, excluded)``, where ``excluded`` names the metrics
+            to leave out of the cross-rank mean
+            (:func:`~agilerl.distributed.process.aggregate_metrics_dict`).
+        :rtype: tuple[dict[str, float], tuple[str, ...]]
+        """
+        compared = bool(compared_rows.any())
+        if not any_rank(compared):
+            return {}, ()
+        metrics = self._sampling_mismatch_metrics(
+            policy_log_probs[compared_rows],
+            old_log_probs[compared_rows],
+            action_masks[compared_rows],
+        )
+        excluded = () if compared else tuple(metrics)
+        if compared:
+            self._warn_on_sampling_mismatch(metrics)
+        metrics["vllm_is_rows_skipped"] = 0.0
+        return metrics, excluded
+
+    def _require_sampling_logprobs(
         self,
         sampling_logps: list[torch.Tensor | None] | None,
         action_masks: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, dict[str, float], tuple[str, ...]]:
-        """Align captured vLLM sampling logprobs and summarise the mismatch.
+    ) -> None:
+        """Check every row on every rank has a sampling log-prob on each action token.
 
-        Aligns the per-row logprobs captured at rollout onto the ``(B, T-1)``
-        action frame (:meth:`_align_sampling_logprobs`), computes the
-        vLLM-vs-trainer mismatch metrics whenever logprobs were captured —
-        independently of whether the correction is applied to the loss — and
-        warns when rows were skipped for a token-count mismatch. Shared by the
-        GRPO/PPO/REINFORCE ``learn`` implementations. When any rank captured
-        logprobs, a rank that captured none aligns every row to
-        ``old_log_probs`` and returns the same metrics, with no skipped rows and
-        its mismatch metrics excluded from their cross-rank means.
-
-        :param sampling_logps: Per-row vLLM sampling logprobs from rollout, or
-            ``None`` when none were captured.
+        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
         :type sampling_logps: list[torch.Tensor | None] | None
-        :param action_masks: ``(B, T-1)`` action-token mask.
+        :param action_masks: ``(B, seq_len-1)`` action-token mask.
         :type action_masks: torch.Tensor
-        :param old_log_probs: ``(B, T-1)`` frozen-policy logprobs.
-        :type old_log_probs: torch.Tensor
-        :return: ``(aligned_logprobs_or_None, metrics, excluded)``, where
-            ``excluded`` names the metrics to leave out of the cross-rank mean
-            (:func:`~agilerl.distributed.process.aggregate_metrics_dict`).
-        :rtype: tuple[torch.Tensor | None, dict[str, float], tuple[str, ...]]
+        :raises ValueError: On every rank when any rank has a row whose sampling
+            log-probs are missing or do not match its action tokens.
         """
-        captured = bool(sampling_logps)
-        if any_rank(captured) and not captured:
-            sampling_logps = [None] * int(action_masks.shape[0])
-        is_metrics: dict[str, float] = {}
-        sampling_log_probs, n_skipped = self._align_sampling_logprobs(
-            sampling_logps, action_masks, old_log_probs
-        )
-        if sampling_log_probs is None:
-            return None, is_metrics, ()
-        is_metrics = self._sampling_mismatch_metrics(
-            old_log_probs, sampling_log_probs, action_masks
-        )
-        if not captured:
-            excluded = tuple(is_metrics)
-            is_metrics["vllm_is_rows_skipped"] = 0.0
-            return sampling_log_probs, is_metrics, excluded
-        self._warn_on_sampling_mismatch(is_metrics)
-        is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
-        if n_skipped:
-            warnings.warn(
-                f"{n_skipped}/{action_masks.shape[0]} rows had a token-count "
-                "mismatch between captured vLLM logprobs and the action "
-                "mask; their importance ratio defaults to 1 (no "
-                "correction). Check rollout/trainer tokenisation if this "
-                "is large.",
-                stacklevel=2,
+        covered = self._rows_with_full_sampling_logprobs(sampling_logps, action_masks)
+        if not any_rank(not covered.all()):
+            return
+        if covered.all():
+            msg = (
+                f"{type(self).__name__} needs sampling_logps on every action token; "
+                "another rank has a row without them."
             )
-        return sampling_log_probs, is_metrics, ()
+            raise ValueError(msg)
+        row = int(np.flatnonzero(~covered)[0])
+        logps = sampling_logps or []
+        row_logps = logps[row] if row < len(logps) else None
+        got = "none" if row_logps is None else str(row_logps.numel())
+        expected = int(action_masks[row].to(torch.bool).sum())
+        msg = (
+            f"{type(self).__name__} needs sampling_logps on every action token; "
+            f"row {row} has {got}, expected {expected}."
+        )
+        raise ValueError(msg)
+
+    @staticmethod
+    def _rows_with_full_sampling_logprobs(
+        sampling_logps: list[torch.Tensor | None] | None,
+        action_masks: torch.Tensor,
+    ) -> npt.NDArray[np.bool_]:
+        """Rows whose sampling log-probs cover every action token.
+
+        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
+        :type sampling_logps: list[torch.Tensor | None] | None
+        :param action_masks: ``(B, seq_len-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :return: ``(B,)`` boolean array.
+        :rtype: npt.NDArray[np.bool_]
+        """
+        logps = sampling_logps or []
+        counts = action_masks.to(torch.bool).sum(dim=-1).tolist()
+        return np.array(
+            [
+                row < len(logps)
+                and (row_logps := logps[row]) is not None
+                and row_logps.numel() == count
+                for row, count in enumerate(counts)
+            ],
+            dtype=bool,
+        )
+
+    @staticmethod
+    def _rollout_actor_rows(
+        covered_rows: npt.NDArray[np.bool_],
+    ) -> npt.NDArray[np.intp]:
+        """Rows that get learn-start policy log-probs.
+
+        These are the uncovered rows, topped up with covered rows to the
+        largest such count on any rank, so every rank runs the same no-grad
+        forward chunks. Empty when every rank is fully covered.
+
+        :param covered_rows: ``(B,)`` rows that need no learn-start log-probs:
+            full sampling log-probs, or no micro-batch to train in.
+        :type covered_rows: npt.NDArray[np.bool_]
+        :return: Sorted row indices.
+        :rtype: npt.NDArray[np.intp]
+        """
+        uncovered = np.flatnonzero(~covered_rows)
+        _, most_uncovered = allreduce_minmax_int(len(uncovered))
+        padding = np.flatnonzero(covered_rows)[: most_uncovered - len(uncovered)]
+        return np.sort(np.concatenate([uncovered, padding]))
+
+    def _learn_start_forward(
+        self,
+        token_ids: torch.Tensor,
+        batch_size: int,
+        actor_rows: npt.NDArray[np.intp],
+        score_mask: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_image_counts: Sequence[int] | None = None,
+        image_keys: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
+        token_budget: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Reference log-probs and critic values of every row, and learn-start policy log-probs of ``actor_rows``.
+
+        Policy log-probs of rows outside ``actor_rows`` are NaN, and so are the
+        reference log-probs when ``beta == 0``. The no-grad forward runs only
+        for the log-probs and values it fills in.
+
+        :param token_ids: ``(B, seq_len)`` token ids.
+        :type token_ids: torch.Tensor
+        :param batch_size: Rows per no-grad forward chunk.
+        :type batch_size: int
+        :param actor_rows: Sorted rows that need learn-start policy log-probs.
+        :type actor_rows: npt.NDArray[np.intp]
+        :param score_mask: ``(B, seq_len-1)`` positions whose log-probs are
+            needed, or ``None`` to score every position.
+        :type score_mask: torch.Tensor | None
+        :param pixel_values: Optional vision tensor for the batch.
+        :type pixel_values: torch.Tensor | None
+        :param pixel_image_counts: Optional images per sample row.
+        :type pixel_image_counts: Sequence[int] | None
+        :param image_keys: ``(N,)`` vision feature cache key of each vision
+            row, or ``None`` to run the tower uncached.
+        :type image_keys: torch.Tensor | None
+        :param support_ids: ``(B, seq_len-1, K)`` sampling supports, or ``None``.
+        :type support_ids: torch.Tensor | None
+        :param token_budget: Most tokens per packed no-grad forward, or ``None``
+            for ``batch_size`` rows.
+        :type token_budget: int | None
+        :return: ``(reference_log_probs, old_log_probs, critic_values)``, each
+            ``(B, seq_len-1)``; values are ``None`` without a value head.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        """
+        num_rows = token_ids.shape[0]
+        include_reference = self.beta != 0.0
+        if len(actor_rows) == num_rows:
+            return self._fused_forward_no_grad(
+                token_ids,
+                batch_size,
+                pixel_values=pixel_values,
+                include_reference=include_reference,
+                pixel_image_counts=pixel_image_counts,
+                score_mask=score_mask,
+                image_keys=image_keys,
+                support_ids=support_ids,
+                token_budget=token_budget,
+            )
+        old_log_probs = torch.full(
+            (num_rows, token_ids.shape[1] - 1), float("nan"), device=token_ids.device
+        )
+        reference_log_probs = old_log_probs.clone()
+        values = None
+        if include_reference or self.use_value_head:
+            reference_log_probs, _, values = self._fused_forward_no_grad(
+                token_ids,
+                batch_size,
+                pixel_values=pixel_values,
+                include_reference=include_reference,
+                pixel_image_counts=pixel_image_counts,
+                include_actor=False,
+                score_mask=score_mask,
+                image_keys=image_keys,
+                support_ids=support_ids,
+                token_budget=token_budget,
+            )
+        if len(actor_rows) > 0:
+            rows = torch.as_tensor(actor_rows, device=token_ids.device)
+            actor_row_mask = np.zeros(num_rows, dtype=bool)
+            actor_row_mask[actor_rows] = True
+            _, actor_log_probs, _ = self._fused_forward_no_grad(
+                token_ids[rows],
+                batch_size,
+                pixel_values=pixel_values,
+                include_reference=False,
+                pixel_image_counts=pixel_image_counts,
+                score_mask=None if score_mask is None else score_mask[rows],
+                image_keys=image_keys,
+                pixel_row_mask=actor_row_mask,
+                support_ids=(
+                    None
+                    if support_ids is None
+                    else support_ids[torch.as_tensor(actor_rows)]
+                ),
+                token_budget=token_budget,
+                include_critic=False,
+            )
+            old_log_probs[rows] = actor_log_probs.to(old_log_probs.dtype)
+        return reference_log_probs, old_log_probs, values
+
+    def _rollout_old_log_probs(
+        self,
+        sampling_logps: list[torch.Tensor | None] | None,
+        action_masks: torch.Tensor,
+        trainer_log_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Rollout-engine sampling log-probs, or trainer log-probs for rows lacking them.
+
+        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
+        :type sampling_logps: list[torch.Tensor | None] | None
+        :param action_masks: ``(B, seq_len-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :param trainer_log_probs: ``(B, seq_len-1)`` learn-start policy
+            log-probs, NaN on rows the trainer did not score.
+        :type trainer_log_probs: torch.Tensor
+        :return: ``(B, seq_len-1)`` log-probs, ``trainer_log_probs`` with NaN
+            as zero outside the action mask.
+        :rtype: torch.Tensor
+        """
+        fallback = torch.nan_to_num(trainer_log_probs, nan=0.0)
+        old_log_probs, _ = self._align_sampling_logprobs(
+            sampling_logps, action_masks, fallback
+        )
+        return fallback if old_log_probs is None else old_log_probs
 
     def _setup_actors(
         self,
@@ -4901,15 +5153,18 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     "Liger Kernel instance-level patches applied to %s.",
                     type(inner_model).__name__,
                 )
+            # A loader that applied Liger by model type leaves the RoPE
+            # dispatcher in place too.
+            pin_triton_rope(inner_model)
 
-        # FSDP2 requires uniform original dtypes in each shard group.
-        keep_adapter_base_dtype = self.shard_runtime.is_sharded and not quantized_base
+        # Adapters train in fp32: bf16 weights drop small Adam updates. FSDP's
+        # mixed-precision policy and the expert kernels run them in bf16.
         with full_shape_views(peft_target, expert_params):
             peft_target = get_peft_model(
                 peft_target,
                 lora_config,
                 adapter_name="actor",
-                autocast_adapter_dtype=not keep_adapter_base_dtype,
+                autocast_adapter_dtype=True,
             )
 
         for name in self.selected_adapters:
@@ -4919,7 +5174,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 peft_target.add_adapter(
                     adapter_name=name,
                     peft_config=self.lora_config,
-                    autocast_adapter_dtype=not keep_adapter_base_dtype,
+                    autocast_adapter_dtype=True,
                 )
 
         for stray in list(peft_target.peft_config.keys()):
@@ -4931,20 +5186,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     stacklevel=2,
                 )
                 peft_target.delete_adapter(stray)
-
-        if keep_adapter_base_dtype:
-            base_dtype = next(
-                (
-                    param.dtype
-                    for name, param in peft_target.named_parameters()
-                    if "lora" not in name
-                ),
-                None,
-            )
-            if base_dtype is not None:
-                for name, param in peft_target.named_parameters():
-                    if "lora" in name and param.dtype != base_dtype:
-                        param.data = param.data.to(base_dtype)
 
         if expert_target_parameters:
             with full_shape_views(peft_target, expert_params):
@@ -4975,94 +5216,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             # Colocated generation constrains no answer grammar.
             None,
         )
-
-    def _config_liger_loss_blocker(self) -> str | None:
-        """Why the configured objective cannot run the fused Liger loss.
-
-        :return: :func:`liger_loss_blocker` of the config, or ``None``.
-        :rtype: str | None
-        """
-        return liger_loss_blocker(
-            self._estimator_algorithm(),
-            None,
-            False,
-            False,
-            self.final_logit_softcap,
-            False,
-            None,
-        )
-
-    def _estimator_algorithm(self) -> Algorithm:
-        """Objective the memory estimator and Liger rules key this run on.
-
-        :return: Estimator name of :attr:`algo`.
-        :rtype: Algorithm
-        """
-        return ALGORITHM_NAMES[self.algo]
-
-    def _config_reweights_tokens(self) -> bool:
-        """Whether every update batch weights tokens by vLLM sampling log-probs.
-
-        Only colocated vLLM always captures them. Other rollouts report them
-        per batch.
-
-        :return: Colocated with the vLLM correction on.
-        :rtype: bool
-        """
-        return self.colocated and self.vllm_importance_sampling_correction
-
-    def _liger_loss_layout(self) -> tuple[bool, bool]:
-        """Whether the batches the memory estimate sizes run the fused Liger loss, and on whole sequences.
-
-        :return: ``(liger_loss, whole_sequence)``: the config level is the
-            batch level, and :func:`liger_whole_sequence_loss` of it.
-        :rtype: tuple[bool, bool]
-        """
-        return self.liger_loss, self.liger_loss and liger_whole_sequence_loss(
-            self._estimator_algorithm(), None
-        )
-
-    def _resolve_liger_loss(self, model_config: PretrainedConfig) -> None:
-        """Read the final-logit softcap and decide whether the update runs the fused Liger loss.
-
-        :param model_config: Config of the base model.
-        :type model_config: PretrainedConfig
-        """
-        self.final_logit_softcap = getattr(
-            model_config.get_text_config(), "final_logit_softcapping", None
-        )
-        self.liger_loss = HAS_LIGER_KERNEL and self._config_liger_loss_blocker() is None
-        if self.liger_loss:
-            warnings.warn(
-                "Liger Loss used with LoRA, deactivating LoRA for the lm_head by setting exclude_modules to ['lm_head']",
-                stacklevel=2,
-            )
-            self.lora_config.exclude_modules = ["lm_head"]
-
-    @staticmethod
-    def _liger_serves_batch(
-        batch_blocker: str | None, config_blocker: str | None
-    ) -> bool:
-        """Whether the fused Liger loss serves a batch of a run that runs it.
-
-        A batch whose ``auto`` settings resolve past the kernel, or that
-        carries sampling log-probs the config does not read, runs the
-        standard path.
-
-        :param batch_blocker: Blocker at the batch's resolved settings.
-        :type batch_blocker: str | None
-        :param config_blocker: Blocker of the same batch at the config's settings.
-        :type config_blocker: str | None
-        :return: ``True`` when the fused loss serves the batch.
-        :rtype: bool
-        :raises ValueError: If the batch blocks the fused loss at the config's settings.
-        """
-        if batch_blocker is None:
-            return True
-        if config_blocker is None:
-            return False
-        msg = f"The fused Liger loss cannot serve this batch: {config_blocker}"
-        raise ValueError(msg)
 
     def _initialize_actors(
         self,
@@ -5100,7 +5253,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 model_config.setdefault("device_map", "cpu")
                 if (
                     self.colocated
-                    and getattr(self, "llm", None) is not None
+                    and self.llm is not None
                     and torch.cuda.is_available()
                 ):
                     torch.cuda.empty_cache()
@@ -5115,23 +5268,39 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     model_config=model_config,
                     add_value_head=self.use_value_head,
                     use_distributed=self.distributed,
+                    use_sequence_packing=self._packed_wraps_apply(),
                 )
 
-            self._resolve_liger_loss(cast("PretrainedConfig", base_model.config))
+            cp = 1 if self.fsdp_config is None else self.fsdp_config.cp
+            # CP mixers carry recurrent state across ranks, not documents.
+            recurrent_state_leaks = bool(mixers_without_boundary_reset(base_model)) or (
+                cp > 1 and any(map(is_recurrent_mixer, base_model.modules()))
+            )
+            packing_blocker = sequence_packing_blocker(
+                self.supports_sequence_packing,
+                language_model_attn_implementation(base_model),
+                self.gradient_row_copies,
+                recurrent_state_leaks,
+                has_vision_tower(base_model),
+                cast("PretrainedConfig", base_model.config).model_type,
+            )
+            if packing_blocker is not None:
+                logger.info("Sequence packing off: %s", packing_blocker)
+            # Ulysses attends within published document offsets on FlashAttention-2 only.
+            self.sequence_packing = packing_blocker is None and (
+                cp == 1
+                or language_model_attn_implementation(base_model) == "flash_attention_2"
+            )
+            self.final_logit_softcap = getattr(
+                nested_language_config(base_model.config),
+                "final_logit_softcapping",
+                None,
+            )
             actor = (
                 self._attach_lora_adapters(base_model) if add_adapters else base_model
             )
 
         self.actor = actor
-        self.sequence_packing = (
-            sequence_packing_blocker(
-                self.supports_sequence_packing,
-                language_model_attn_implementation(actor),
-                self.gradient_row_copies,
-                bool(mixers_without_boundary_reset(actor)),
-            )
-            is None
-        )
         self.use_adapter("actor")
         patch_lora_for_fused_forward(actor)
         install_packed_expert_grouped_gemm(actor)
@@ -5209,22 +5378,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         else:
             yield
 
-    def _fused_chunk_hidden_and_value(
-        self,
-        chunk_ids: torch.Tensor,
-        chunk_mask: torch.Tensor | None,
-        chunk_pos: torch.Tensor | None,
-        chunk_pixel_values: torch.Tensor | None = None,
+    def _forward_hidden_and_value(
+        self, model_kwargs: dict[str, Any]
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward one fused chunk; return last hidden state and optional values."""
-        model_kwargs: dict = {"input_ids": chunk_ids, "use_cache": False}
-        # Prefer position_ids over mask when precomputed.
-        if chunk_pos is not None:
-            model_kwargs["position_ids"] = chunk_pos
-        elif chunk_mask is not None:
-            model_kwargs["attention_mask"] = chunk_mask
-        if chunk_pixel_values is not None:
-            model_kwargs["pixel_values"] = chunk_pixel_values
+        """Forward the actor with an identity head; return last hidden state and optional values."""
         with (
             self._patch_lm_head_to_identity(),
             self._amp_ctx(),
@@ -5240,107 +5397,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         del output
         return hidden, value
 
-    def _gradient_forward_inputs(
-        self,
-        batch_ids: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-        copies: int = 1,
-    ) -> tuple[dict[str, Any], PackedBatch | None]:
-        """Model kwargs of a gradient forward, packed on a varlen / block-sparse backend.
-
-        :param batch_ids: ``(B, T)`` right-padded token ids on ``self.device``.
-        :type batch_ids: torch.Tensor
-        :param pixel_values: Vision rows of the batch for a VL forward, or ``None``.
-        :type pixel_values: torch.Tensor | None
-        :param copies: Times the batch is stacked along rows, one per routed adapter.
-        :type copies: int
-        :return: ``(model_kwargs, packed)``; ``packed`` is ``None`` for a padded forward.
-        :rtype: tuple[dict[str, Any], PackedBatch | None]
-        """
-        attention_mask = attention_mask_from_padded_ids(
-            batch_ids, self.pad_token_id
-        ).long()
-        packed = None
-        model_kwargs: dict[str, Any]
-        if self._packing_mode() is not None:
-            packed = pack_padded_batch(batch_ids, attention_mask)
-            # Per-sequence position_ids (no mask): transformers detects the
-            # packed format and keeps sequences attention-isolated per layer.
-            model_kwargs = {
-                "input_ids": packed.input_ids.repeat(copies, 1),
-                "position_ids": packed.position_ids.repeat(copies, 1),
-                "use_cache": False,
-            }
-        else:
-            attention_mask = attention_mask.repeat(copies, 1)
-            model_kwargs = {
-                "input_ids": batch_ids.repeat(copies, 1),
-                "attention_mask": attention_mask,
-                "use_cache": False,
-            }
-            if self.calc_position_embeddings:
-                model_kwargs["position_ids"] = self._position_ids_from_mask(
-                    attention_mask
-                )
-        if pixel_values is not None:
-            rows = batch_ids.shape[0]
-            model_kwargs["pixel_values"] = self._repeat_pixel_values_for_fused_rows(
-                pixel_values, copies * rows, rows
-            )
-        return model_kwargs, packed
-
-    def _actor_hidden_states(
-        self,
-        batch_ids: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Gradient-bearing actor forward that returns last hidden states, not logits.
-
-        On a varlen / block-sparse backend (:meth:`_packing_mode`) the forward
-        runs on one padding-free packed row and the hidden states are scattered
-        back onto the padded frame, with pad positions zeroed.
-
-        :param batch_ids: ``(B, T)`` right-padded token ids on ``self.device``.
-        :type batch_ids: torch.Tensor
-        :param pixel_values: Vision rows of the batch for a VL forward, or ``None``.
-        :type pixel_values: torch.Tensor | None
-        :return: ``(B, T, H)`` actor hidden states.
-        :rtype: torch.Tensor
-        """
-        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
-        with (
-            self._patch_lm_head_to_identity(),
-            self.select_adapter("actor"),
-            self._amp_ctx(),
-        ):
-            self.actor.train()
-            output = self.actor(**model_kwargs)
-        hidden = output[0] if isinstance(output, tuple) else output.logits
-        if packed is not None:
-            hidden = unpack_hidden_states(hidden, packed)
-        return hidden
-
-    def _fused_chunk_logprobs(
-        self,
-        hidden: torch.Tensor,
-        target_ids: torch.Tensor,
-        fused_fn: Callable,
-        head_w: torch.Tensor,
-        head_b: torch.Tensor | None,
-        score_mask: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Score shifted hidden states to ``(B, S-1)`` logprobs."""
-        return self._score_hidden(
-            fused_fn,
-            hidden[:, :-1],
-            head_w,
-            head_b,
-            target_ids[:, 1:],
-            score_mask,
-            support_ids,
-        )
-
     def _score_hidden(
         self,
         fused_fn: Callable,
@@ -5350,8 +5406,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         target_ids: torch.Tensor,
         score_mask: torch.Tensor | None,
         support_ids: torch.Tensor | None = None,
+        n_scored: int | None = None,
     ) -> torch.Tensor:
         """Per-token log-probs of ``target_ids``, with the lm_head run only where ``score_mask`` is set.
+
+        Scored positions run as one flat ``(1, N, H)`` row, so the head sees
+        exactly the ``N`` scored tokens whatever the row lengths or packing.
+        Gathering them syncs with the device unless ``n_scored`` is given.
 
         :param fused_fn: Fused log-prob function from :meth:`_fused_logprob_fn_and_head`.
         :type fused_fn: Callable
@@ -5370,6 +5431,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             (:func:`~agilerl.algorithms.core.llm_ops.fused_logprobs.support_scores`),
             or ``None`` to normalize every position over the full vocabulary.
         :type support_ids: torch.Tensor | None
+        :param n_scored: Host count of ``score_mask``, or ``None`` to read it
+            from the device.
+        :type n_scored: int | None
         :return: ``(B, T)`` log-probs, zero outside ``score_mask`` when it is given.
         :rtype: torch.Tensor
         """
@@ -5380,61 +5444,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return fused_fn(
                 hidden, head_w, head_b, target_ids, support_ids=support_ids, **kwargs
             )
-        keep = score_mask.to(device=hidden.device, dtype=torch.bool)
-        index = scored_position_index(keep)
-        picked_keep = keep.gather(1, index)
-        picked_hidden = hidden.gather(
-            1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1])
-        )
-        picked_targets = target_ids.gather(1, index)
-        picked_support = None
-        if support_ids is not None:
-            picked_support = support_ids.gather(
-                1, index.unsqueeze(-1).expand(-1, -1, support_ids.shape[-1])
-            )
-            # Padding columns are discarded; a one-id support keeps them off
-            # the full-vocab path.
-            picked_support[..., 0] = torch.where(
-                picked_keep, picked_support[..., 0], picked_targets
-            )
+        score_mask = score_mask.to(device=hidden.device, dtype=torch.bool)
+        if n_scored is None:
+            rows, cols = score_mask.nonzero(as_tuple=True)
+        else:
+            rows, cols = score_mask.nonzero_static(size=n_scored).unbind(1)
         picked = fused_fn(
-            picked_hidden,
+            hidden[rows, cols].unsqueeze(0),
             head_w,
             head_b,
-            picked_targets,
-            support_ids=picked_support,
+            target_ids[rows, cols].unsqueeze(0),
+            support_ids=(
+                None if support_ids is None else support_ids[rows, cols].unsqueeze(0)
+            ),
             **kwargs,
         )
-        picked = fill_outside_mask(picked, picked_keep)
-        return picked.new_zeros(target_ids.shape).scatter(1, index, picked)
-
-    def _repeat_pixel_values_for_fused_rows(
-        self,
-        pixel_values: torch.Tensor | None,
-        fused_rows: int,
-        sample_rows: int,
-    ) -> torch.Tensor | None:
-        """Repeat per-sample vision tensors across fused adapter rows."""
-        if pixel_values is None:
-            return None
-        if fused_rows == sample_rows:
-            return pixel_values
-        if fused_rows % sample_rows != 0:
-            msg = (
-                f"pixel_values batch {sample_rows} cannot align to "
-                f"{fused_rows} fused rows"
-            )
-            raise ValueError(msg)
-        repeat = fused_rows // sample_rows
-        if not any(pixel_values.stride()):
-            # Every element aliases one value, so a view repeats it without a copy.
-            return pixel_values[:1].expand(
-                repeat * pixel_values.shape[0], *pixel_values.shape[1:]
-            )
-        return pixel_values.repeat(
-            repeat,
-            *([1] * (pixel_values.ndim - 1)),
-        )
+        return picked.new_zeros(target_ids.shape).index_put((rows, cols), picked[0])
 
     def _pixel_values_for_fused_slice(
         self,
@@ -5479,60 +5504,50 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self,
         chunk_ids: torch.Tensor,
         chunk_mask: torch.Tensor,
-        chunk_pos: torch.Tensor | None,
         routing: list[str],
         fused_fn: Callable,
         head_w: torch.Tensor,
         head_b: torch.Tensor | None,
+        chunk_host_masks: HostMasks,
         chunk_pixel_values: torch.Tensor | None = None,
         chunk_score_mask: torch.Tensor | None = None,
         chunk_support_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Route, forward, and score one fused micro-batch.
+        """Route, forward, and score one fused micro-batch on the layout's frame.
 
-        Without grad, columns that are padding in every row are cut before the
-        forward and scored as zero; causal attention keeps earlier positions
-        exact.
+        :return: ``(log_probs, values)``, each ``(B, T - 1)``; values ``None``
+            without a value head.
         """
-        set_fused_adapter_routing(self.actor, routing)
-        orig_seq_len = int(chunk_ids.shape[1])
-        if not torch.is_grad_enabled():
-            seq_len = int(chunk_mask.any(dim=0).nonzero().max()) + 1
-            chunk_ids = chunk_ids[:, :seq_len]
-            chunk_mask = chunk_mask[:, :seq_len]
-            if chunk_pos is not None:
-                chunk_pos = chunk_pos[:, :seq_len]
-            if chunk_score_mask is not None:
-                chunk_score_mask = chunk_score_mask[:, : seq_len - 1]
-            if chunk_support_ids is not None:
-                chunk_support_ids = chunk_support_ids[:, : seq_len - 1]
-        trailing_pad = orig_seq_len - int(chunk_ids.shape[1])
-        hidden, value = self._fused_chunk_hidden_and_value(
+        with self.sequence_layout.prepare_forward(
             chunk_ids,
             chunk_mask,
-            chunk_pos,
-            chunk_pixel_values,
-        )
-        chunk_lp = self._fused_chunk_logprobs(
-            hidden,
-            chunk_ids,
-            fused_fn,
-            head_w,
-            head_b,
             chunk_score_mask,
             chunk_support_ids,
-        )
-        del hidden
-        chunk_v = (
-            value[:, : chunk_ids.shape[1] - 1]
-            if (self.use_value_head and value is not None)
-            else None
-        )
-        if trailing_pad:
-            chunk_lp = F.pad(chunk_lp, (0, trailing_pad))
-            if chunk_v is not None:
-                chunk_v = F.pad(chunk_v, (0, trailing_pad))
-        return chunk_lp, chunk_v
+            chunk_pixel_values,
+            host_masks=chunk_host_masks,
+        ) as fwd:
+            # A packed span is one adapter run on one row.
+            set_fused_adapter_routing(
+                self.actor, routing[: fwd.kwargs["input_ids"].shape[0]]
+            )
+            hidden, value = self._forward_hidden_and_value(fwd.kwargs)
+            chunk_lp = self._score_hidden(
+                fused_fn,
+                fwd.scoring_hidden(hidden),
+                head_w,
+                head_b,
+                fwd.targets,
+                fwd.score_mask,
+                fwd.support_ids,
+                fwd.n_scored,
+            )
+            del hidden
+            chunk_v = (
+                fwd.restore(value, "values")
+                if (self.use_value_head and value is not None)
+                else None
+            )
+            return fwd.restore(chunk_lp, "logprobs"), chunk_v
 
     def _assemble_fused_chunks(
         self,
@@ -5565,34 +5580,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 del chunk_v
         assert logprobs_out is not None
         return logprobs_out, values_out
-
-    @staticmethod
-    def _fused_chunks(
-        total: int, routing: list[str], batch_size: int | None, split_adapter_runs: bool
-    ) -> list[tuple[int, int]]:
-        """Fused rows of each :meth:`_fused_model_pass` forward, in run order.
-
-        :param total: Fused rows.
-        :param routing: Adapter of each fused row.
-        :param batch_size: Rows per forward, or ``None`` for one forward.
-        :param split_adapter_runs: Whether each forward stays within one adapter run.
-        :return: ``(start, end)`` of each forward.
-        """
-        if batch_size is None:
-            return [(0, total)]
-        # Vision-tower LoRA layers see image rows, which a chunk can only
-        # route correctly when all its rows share one adapter.
-        runs = (
-            [len(list(run)) for _, run in groupby(routing)]
-            if split_adapter_runs
-            else [total]
-        )
-        run_starts = [0, *accumulate(runs)]
-        return [
-            (start, min(start + batch_size, run_end))
-            for run_start, run_end in pairwise(run_starts)
-            for start in range(run_start, run_end, batch_size)
-        ]
 
     def _fused_vision_slice(
         self,
@@ -5688,14 +5675,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         image_keys: torch.Tensor | None = None,
         pixel_row_mask: npt.NDArray[np.bool_] | None = None,
         support_ids: torch.Tensor | None = None,
+        token_budget: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
-        When *batch_size* is ``None`` the full batch is one forward (needed
-        for gradient-checkpoint recomputation). Otherwise micro-batch under
-        ``no_grad``. Fused LoRA routes adapters per row, so a micro-batch may
-        mix adapters; with *pixel_values* each micro-batch stays within one
-        adapter run.
+        When *batch_size* is ``None`` the batch runs as one forward per adapter
+        run the layout keeps apart, else in micro-batches under ``no_grad``.
+        Fused LoRA routes adapters per row, so a micro-batch may mix adapters
+        unless :meth:`SequenceLayout.micro_batch_spans` keeps it to one
+        adapter run (vision rows, packed rows). Gradient checkpointing
+        recomputes under the routing set last, so a checkpointed gradient
+        pass split into micro-batches raises unless it routes one adapter.
 
         :param score_mask: ``(B, seq_len - 1)`` positions whose log-probs are
             needed, or ``None`` to score every position.
@@ -5713,6 +5703,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
             position (:meth:`_score_hidden`), or ``None``.
         :type support_ids: torch.Tensor | None
+        :param token_budget: Most tokens per packed forward, in place of
+            *batch_size* rows; every rank runs the same number of forwards.
+            Ignored when the layout does not pack.
+        :type token_budget: int | None
         :return: ``(log_probs, values)``; log_probs is ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
@@ -5720,13 +5714,23 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # lm_head gemm then full_tensor()s a stale buffer.
         reshard_fsdp_modules(self.actor)
         total = fused_ids.shape[0]
-        seq_len_out = fused_ids.shape[1] - 1
-        position_ids = None
-        if self.calc_position_embeddings:
-            position_ids = self._position_ids_from_mask(fused_mask)
-        chunks = self._fused_chunks(
-            total, routing, batch_size, split_adapter_runs=pixel_values is not None
+        # One device sync sizes every micro-batch of the pass.
+        host_masks = HostMasks.read(fused_mask, score_mask)
+        chunks = self.sequence_layout.micro_batch_spans(
+            fused_mask, routing, batch_size, token_budget, pixel_values is not None
         )
+        if (
+            torch.is_grad_enabled()
+            and self.gradient_checkpointing
+            and len(chunks) > 1
+            and len(set(routing)) > 1
+        ):
+            msg = (
+                "A checkpointed gradient pass over several micro-batches must "
+                f"route one adapter, got {sorted(set(routing))}: backward "
+                "recomputes every micro-batch under the last one's routing"
+            )
+            raise RuntimeError(msg)
         vision_slice = partial(
             self._fused_vision_slice,
             total=total,
@@ -5775,11 +5779,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     return self._run_fused_chunk(
                         fused_ids[start:end],
                         fused_mask[start:end],
-                        position_ids[start:end] if position_ids is not None else None,
                         routing[start:end],
                         fused_fn,
                         head_w,
                         head_b,
+                        host_masks.rows(start, end),
                         None if device_pixels is None else next(device_pixels),
                         score_mask[start:end] if score_mask is not None else None,
                         support_ids[start:end] if support_ids is not None else None,
@@ -5787,122 +5791,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
             if len(chunks) == 1:
                 return _run_chunk(0, total)
-            return self._assemble_fused_chunks(chunks, total, seq_len_out, _run_chunk)
-
-    def _fused_forward(
-        self,
-        ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        pixel_values: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Gradient-bearing actor log-probs, every row routed to the actor adapter.
-
-        .. note::
-
-           The routing is **not** cleared here — it must remain active until
-           after ``backward()`` completes (for gradient checkpoint
-           recomputation).  Callers must call
-           ``unset_fused_adapter_routing`` after the backward pass.
-
-           Callers are responsible for ensuring the model is in training
-           mode and adapter trainability is restored before entering the
-           minibatch loop (see ``learn()`` in ``ppo_llm.py``).
-
-        :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
-        :param attention_mask: Optional attention mask matching *ids*.
-        :type attention_mask: torch.Tensor | None, optional
-        :param pixel_values: Vision rows of *ids*, or ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
-            position (:meth:`_score_hidden`), or ``None``.
-        :type support_ids: torch.Tensor | None
-        :return: Actor log-probs ``(B, seq_len - 1)``.
-        :rtype: torch.Tensor
-        """
-        if attention_mask is None:
-            attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
-
-        # Packed path for the gradient forward only; no-grad passes stay padded.
-        if torch.is_grad_enabled() and self._packing_mode() is not None:
-            return self._fused_packed_forward(
-                ids, attention_mask, pixel_values, support_ids
+            return self._assemble_fused_chunks(
+                chunks, total, fused_ids.shape[1] - 1, _run_chunk
             )
-
-        log_probs, _ = self._fused_model_pass(
-            ids,
-            attention_mask,
-            ["actor"] * ids.shape[0],
-            pixel_values=pixel_values,
-            support_ids=support_ids,
-        )
-        return log_probs
-
-    def _fused_packed_forward(
-        self,
-        ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Padding-free packed variant of the gradient :meth:`_fused_forward`.
-
-        The ``(B, T)`` batch is packed into one padding-free row with
-        per-segment ``position_ids`` (``attention_mask=None``), so transformers
-        builds a block-diagonal varlen / blockmask forward — no cross-sequence
-        attention, sliding windows preserved (see :meth:`_packing_mode`). The
-        actor routing is *not* cleared here — see the :meth:`_fused_forward`
-        note.
-
-        :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
-        :param attention_mask: Mask matching *ids* (non-zero marks real tokens).
-        :type attention_mask: torch.Tensor
-        :param pixel_values: Vision rows of *ids*, or ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
-            position (:meth:`_score_hidden`), or ``None``.
-        :type support_ids: torch.Tensor | None
-        :return: Actor log-probs ``(B, seq_len - 1)``.
-        :rtype: torch.Tensor
-        """
-        packed = pack_padded_batch(ids, attention_mask)
-        set_fused_adapter_routing(self.actor, ["actor"])
-
-        fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
-        forward_kwargs: dict[str, Any] = {
-            "input_ids": packed.input_ids,
-            "position_ids": packed.position_ids,
-            "use_cache": False,
-        }
-        if pixel_values is not None:
-            forward_kwargs["pixel_values"] = pixel_values
-        with (
-            self._patch_lm_head_to_identity(),
-            self._amp_ctx(),
-            self._activation_offload_ctx(),
-        ):
-            # FSDP2 all-gather hooks run on ``Module.__call__``.
-            output = self.actor(**forward_kwargs)
-        hidden = output[0] if isinstance(output, tuple) else output.logits
-
-        # The fused matmul consumes the (1, N, H) hidden + (1, N-1) next-token
-        # targets exactly as the padded path does; unpack scatters back to the
-        # (B, T-1) frame and drops the cross-segment boundary prediction.
-        packed_lp = fused_fn(
-            hidden[:, :-1],
-            head_w,
-            head_b,
-            packed.input_ids[:, 1:],
-            temperature=self.temperature,
-            support_ids=(
-                None
-                if support_ids is None
-                else pack_next_token_frame(support_ids, attention_mask, -1)
-            ),
-        )
-        return unpack_logprobs(packed_lp, packed)
 
     def _fused_forward_no_grad(
         self,
@@ -5917,6 +5808,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         image_keys: torch.Tensor | None = None,
         pixel_row_mask: npt.NDArray[np.bool_] | None = None,
         support_ids: torch.Tensor | None = None,
+        token_budget: int | None = None,
+        include_critic: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
@@ -5927,7 +5820,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         PEFT's reserved ``"__base__"`` name, which applies no LoRA delta (the
         frozen base is the reference policy). ``include_reference=False`` skips
         that base forward and returns NaN reference log-probs;
-        ``include_actor=False`` does the same for the actor rows.
+        ``include_actor=False`` does the same for the actor rows, and
+        ``include_critic=False`` skips the critic rows and returns no values.
 
         Packed-expert LoRA cannot mix adapters in one forward, so this pass
         still splits on adapter runs. Within a run, ``batch_size`` caps how
@@ -5962,6 +5856,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             position (:meth:`_score_hidden`), applied to the reference and
             actor rows alike, or ``None``.
         :type support_ids: torch.Tensor | None
+        :param token_budget: Most tokens per packed forward
+            (:meth:`_micro_batch_token_budget`), or ``None`` for ``batch_size`` rows.
+        :type token_budget: int | None
+        :param include_critic: Run the critic rows of a value-head model.
+        :type include_critic: bool
         :return: ``(reference_log_probs, actor_log_probs, critic_values)``
             each of shape ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
@@ -5981,7 +5880,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 adapters.append(reference_adapter)
             if include_actor:
                 adapters.append("actor")
-            if self.use_value_head:
+            include_critic = include_critic and self.use_value_head
+            if include_critic:
                 adapters.append("critic")
 
             N = len(adapters)
@@ -6010,6 +5910,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     np.ones(B, dtype=bool) if pixel_row_mask is None else pixel_row_mask
                 ),
                 support_ids=fused_support_ids,
+                token_budget=token_budget,
             )
             unset_fused_adapter_routing(self.actor)
             missing = torch.full_like(log_probs[:B], float("nan"))
@@ -6022,39 +5923,24 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if include_actor:
                 actor_logprobs = log_probs[offset : offset + B]
                 offset += B
-            if self.use_value_head:
+            critic_values = None
+            if include_critic:
                 assert values is not None  # value-head models return values
                 critic_values = values[offset:]
-            else:
-                critic_values = None
 
         return ref_logprobs, actor_logprobs, critic_values
 
-    def _packing_mode(self) -> str | None:
-        """Resolve how (if at all) to pack the forward, given the backend.
+    def _packed_wraps_apply(self) -> bool:
+        """Whether family mixers take their packed-row wraps before the model loads.
 
-        Packing passes the model only per-sequence ``position_ids`` (no mask);
-        transformers detects the packed format and AND-composes a block-diagonal
-        constraint onto each layer's native (causal / sliding-window) mask. We
-        only gate on backends where that composed mask stays sparse:
+        The wraps mark each mixer as resetting at document boundaries, which
+        :func:`sequence_packing_blocker` reads after load. Context-parallel
+        shards never pack and would read their ``position_ids`` as packed rows.
 
-        * ``"varlen"`` — FlashAttention-2 turns the packed ``position_ids`` into
-          ``cu_seqlens`` (+ per-layer ``window_size``); no mask is materialized.
-          Memory/throughput-optimal and handles dynamic shapes with no recompile.
-        * ``"blockmask"`` — FlexAttention builds a sparse block-diagonal
-          ``BlockMask`` (active tiles + compiled ``mask_mod``, windowed on
-          sliding layers). Needs no ``flash_attn`` build, but recompiles per
-          packed length.
-
-        Both preserve sliding-window attention per layer, so packing is correct
-        for SWA models (e.g. gemma), not just full-attention ones. Init packs
-        only when :func:`sequence_packing_blocker` passes. Returns ``None``
-        when packing is off.
+        :return: ``True`` unless ``cp > 1``.
+        :rtype: bool
         """
-        if not self.sequence_packing:
-            return None
-        impl = language_model_attn_implementation(self.actor)
-        return "varlen" if impl == "flash_attention_2" else "blockmask"
+        return self.fsdp_config is None or self.fsdp_config.cp == 1
 
     def _get_logprobs(
         self,
@@ -6088,7 +5974,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        grad_enabled = torch.is_grad_enabled()
         with self.select_adapter("reference" if use_reference else "actor"):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
@@ -6096,23 +5981,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 # Preference batches already carry an attention mask; generation
                 # rollouts should supply one too.
                 attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
-
-            if self.calc_position_embeddings:
-                position_ids = self._position_ids_from_mask(attention_mask)
-
-            fused_fn, _head_w, _head_b = self._fused_logprob_fn_and_head()
-            # Pack only the gradient forward (the per-epoch hot path). The
-            # no-grad old/reference passes stay padded so they are mutually
-            # consistent; the packed-vs-padded gap for the current policy is the
-            # tiny varlen/dense-vs-padded numerical difference.
-            packing_mode = self._packing_mode() if grad_enabled else None
-
-            # Split the sample into batches
+            fused_fn, _, _ = self._fused_logprob_fn_and_head()
+            host_masks = HostMasks.read(attention_mask, score_mask)
             log_probs = []
             for batch in range(0, num_samples, batch_size):
                 end_idx = min((batch + batch_size), num_samples)
-                batch_ids = ids[batch:end_idx, :]
-                batch_attention_mask = attention_mask[batch:end_idx, :]
                 # A chunk spanning the whole batch keeps every image tile.
                 batch_pixel_values = (
                     pixel_values
@@ -6121,105 +5994,30 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         pixel_values, batch, end_idx, num_samples
                     )
                 )
-
-                packed = None
-                if packing_mode is not None:
-                    packed = pack_padded_batch(batch_ids, batch_attention_mask)
-
-                if packed is not None:
-                    # Per-sequence position_ids (no mask): transformers detects
-                    # the packed format and keeps sequences attention-isolated
-                    # per layer (sliding-window safe).
-                    batch_model_kwargs = {
-                        "input_ids": packed.input_ids,
-                        "position_ids": packed.position_ids,
-                        "use_cache": False,
-                    }
-                    if batch_pixel_values is not None:
-                        batch_model_kwargs["pixel_values"] = batch_pixel_values
-                else:
-                    batch_model_kwargs = {
-                        "input_ids": batch_ids,
-                        "attention_mask": batch_attention_mask,
-                        "use_cache": False,
-                    }
-                    if self.calc_position_embeddings:
-                        batch_model_kwargs["position_ids"] = position_ids[
-                            batch:end_idx, :
-                        ]
-                    if batch_pixel_values is not None:
-                        batch_model_kwargs["pixel_values"] = batch_pixel_values
-
-                with (
-                    self._patch_lm_head_to_identity(),
-                    self._amp_ctx(),
-                    self._activation_offload_ctx(),
-                ):
-                    # FSDP2 all-gather hooks run on ``Module.__call__``.
-                    output = self.actor(**batch_model_kwargs)
-                first = output[0] if isinstance(output, tuple) else output.logits
-
-                batch_score_mask = (
-                    score_mask[batch:end_idx] if score_mask is not None else None
-                )
-                batch_support_ids = (
-                    support_ids[batch:end_idx] if support_ids is not None else None
-                )
-                if packed is not None:
-                    packed_score_mask = None
-                    if batch_score_mask is not None:
-                        # Packed position i predicts packed token i + 1, so the
-                        # padded-frame mask packs with a trailing unscored column.
-                        packed_score_mask = pack_padded_batch(
-                            torch.cat(
-                                [
-                                    batch_score_mask.long(),
-                                    batch_score_mask.new_zeros(
-                                        (batch_score_mask.shape[0], 1),
-                                        dtype=torch.long,
-                                    ),
-                                ],
-                                dim=1,
-                            ),
-                            batch_attention_mask,
-                        ).input_ids[:, :-1]
+                with self.sequence_layout.prepare_forward(
+                    ids[batch:end_idx],
+                    attention_mask[batch:end_idx],
+                    score_mask[batch:end_idx] if score_mask is not None else None,
+                    support_ids[batch:end_idx] if support_ids is not None else None,
+                    batch_pixel_values,
+                    host_masks=host_masks.rows(batch, end_idx),
+                ) as fwd:
+                    hidden, _ = self._forward_hidden_and_value(fwd.kwargs)
                     with self.shard_runtime.gather_layer(
-                        self._get_lm_head(), device=first.device
-                    ) as (head_w, head_b):
-                        packed_lp = self._score_hidden(
-                            fused_fn,
-                            first[:, :-1],
-                            head_w,
-                            head_b,
-                            packed.input_ids[:, 1:],
-                            packed_score_mask,
-                            None
-                            if batch_support_ids is None
-                            else pack_next_token_frame(
-                                batch_support_ids, batch_attention_mask, -1
-                            ),
-                        )
-                    # Map back to the dense (mb, T-1) frame so the loss path is
-                    # unchanged; cross-segment boundary predictions are dropped.
-                    # unpack_logprobs reshapes the packed logprobs internally.
-                    log_prob = unpack_logprobs(packed_lp, packed)
-                else:
-                    with self.shard_runtime.gather_layer(
-                        self._get_lm_head(), device=first.device
+                        self._get_lm_head(), device=hidden.device
                     ) as (head_w, head_b):
                         log_prob = self._score_hidden(
                             fused_fn,
-                            first[:, :-1],
+                            fwd.scoring_hidden(hidden),
                             head_w,
                             head_b,
-                            batch_ids[:, 1:],
-                            batch_score_mask,
-                            batch_support_ids,
+                            fwd.targets,
+                            fwd.score_mask,
+                            fwd.support_ids,
+                            fwd.n_scored,
                         )
-
-                first = None
-                batch_model_kwargs = None
-                log_probs.append(log_prob)
+                    del hidden
+                    log_probs.append(fwd.restore(log_prob, "logprobs"))
             return torch.cat(log_probs, dim=0)
 
     def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
@@ -6307,6 +6105,316 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             orders = broadcast_object_list(orders)
         return [batch_idxs[order] for order in orders]
 
+    def _row_token_budget(self) -> int:
+        """Longest training row: ``max_row_tokens``, else ``max_model_len``.
+
+        :return: Tokens of the longest row.
+        :rtype: int
+        """
+        return (
+            self.max_model_len if self.max_row_tokens is None else self.max_row_tokens
+        )
+
+    def _validate_micro_batch_tokens(self) -> None:
+        """Check that ``micro_batch_tokens_per_gpu`` fits the longest training row.
+
+        :raises ValueError: If the budget is below :meth:`_row_token_budget`.
+        """
+        budget = self.micro_batch_tokens_per_gpu
+        if budget is not None and budget < self._row_token_budget():
+            msg = (
+                f"micro_batch_tokens_per_gpu ({budget}) is below the longest "
+                f"training row ({self._row_token_budget()} tokens, max_row_tokens "
+                "or max_model_len). Raise it to at least that row length."
+            )
+            raise ValueError(msg)
+
+    def _micro_batch_token_budget(self) -> int | None:
+        """Tokens per learn micro-batch on one rank, or ``None`` when micro-batches count rows.
+
+        A layout with a token budget (:meth:`SequenceLayout.micro_batch_token_budget`)
+        sizes micro-batches by ``micro_batch_tokens_per_gpu``, else by
+        ``micro_batch_size_per_gpu`` rows of :meth:`_row_token_budget` tokens.
+
+        :return: Token budget, or ``None``.
+        :rtype: int | None
+        """
+        budget = self._sequence_layout_type().micro_batch_token_budget(
+            self.micro_batch_size_per_gpu, self._row_token_budget()
+        )
+        if budget is None or self.micro_batch_tokens_per_gpu is None:
+            return budget
+        return self.micro_batch_tokens_per_gpu
+
+    def packed_warmup_lengths(self) -> list[int]:
+        """Packed lengths that reach every length-specialized kernel a learn can hit.
+
+        :return: :func:`packed_length_classes` of the actor at the
+            micro-batch token budget, nearest first to the planner's expected
+            micro-batch: :data:`ROW_FILL` of a mini-batch of full rows, split
+            evenly over the micro-batches the budget needs. Empty off CUDA,
+            without packing, or without recurrent mixers or flex attention.
+        :rtype: list[int]
+        """
+        token_budget = self._micro_batch_token_budget()
+        device = torch.device(self.device)
+        if token_budget is None or device.type != "cuda":
+            return []
+        mini_batch_tokens = ROW_FILL * self.mini_batch_size * self._row_token_budget()
+        passes = math.ceil(mini_batch_tokens / token_budget)
+        return packed_length_classes(
+            self.actor,
+            token_budget,
+            math.ceil(mini_batch_tokens / passes),
+            torch.cuda.get_device_properties(device).multi_processor_count,
+            language_model_attn_implementation(self.actor) == "flex_attention",
+        )
+
+    def warm_packed_kernels(
+        self, lengths: list[int], stop: Callable[[], bool] | None = None
+    ) -> int:
+        """Compile the learn kernels at each packed length in order, leaving no trace.
+
+        Before each length rank 0 evaluates *stop* and broadcasts the answer,
+        so every rank runs the same forwards and collectives line up. A learn
+        compiles the lengths left on first use.
+
+        :param lengths: :meth:`packed_warmup_lengths` or a slice of them.
+        :type lengths: list[int]
+        :param stop: Ends the warmup early when it returns True; None warms
+            every length.
+        :type stop: Callable[[], bool] | None
+        :return: Lengths warmed.
+        :rtype: int
+        """
+        token_budget = self._micro_batch_token_budget()
+        device = torch.device(self.device)
+        generator = torch.Generator().manual_seed(0)
+        with (
+            torch.random.fork_rng(devices=[device] if device.type == "cuda" else []),
+            self.trainer_offload_context(),
+        ):
+            for index, length in enumerate(lengths):
+                if stop is not None and broadcast_object_list([stop()])[0]:
+                    return index
+                self._run_packed_warmup(length, token_budget, generator)
+        return len(lengths)
+
+    def _run_packed_warmup(
+        self, length: int, token_budget: int | None, generator: torch.Generator
+    ) -> None:
+        """Run the learn forwards on random packed rows totalling *length* tokens.
+
+        One learn-start no-grad forward and one gradient forward and backward,
+        then the gradients are dropped. The rows hold at least two documents,
+        so the packed layout carries a document index as a learn's does.
+
+        :param length: Packed tokens, at least 4.
+        :type length: int
+        :param token_budget: :meth:`_micro_batch_token_budget`.
+        :type token_budget: int | None
+        :param generator: CPU generator for the random token ids.
+        :type generator: torch.Generator
+        """
+        device = torch.device(self.device)
+        width = min(self._row_token_budget(), math.ceil(length / 2))
+        rows = math.ceil(length / width)
+        row_lengths = torch.full((rows, 1), width)
+        row_lengths[-1] = length - width * (rows - 1)
+        attention_mask = (torch.arange(width) < row_lengths).long().to(device)
+        vocab_size = self._get_lm_head().out_features
+        ids = torch.randint(vocab_size, (rows, width), generator=generator).to(device)
+        score_mask = attention_mask[:, 1:].bool()
+        self._fused_forward_no_grad(
+            ids,
+            rows,
+            attention_mask=attention_mask,
+            include_reference=False,
+            score_mask=score_mask,
+            token_budget=token_budget,
+        )
+        log_probs = self._get_logprobs(
+            ids, rows, attention_mask=attention_mask, score_mask=score_mask
+        )
+        with self._amp_ctx():
+            log_probs.masked_fill(~score_mask, 0.0).sum().backward()
+        self.optimizer.zero_grad()
+
+    def _micro_batch_windows(
+        self,
+        epoch_orders: list[npt.NDArray[np.intp]],
+        window_rows: int,
+        micro_batch_rows: int,
+        token_ids: torch.Tensor,
+        token_budget: int | None,
+        skip_rows: npt.NDArray[np.bool_] | None = None,
+    ) -> list[list[list[npt.NDArray[np.intp]]]]:
+        """Micro-batches of each optimizer window of each epoch, in run order.
+
+        Each epoch order splits into windows of ``window_rows`` rows. Without a
+        token budget a window splits into ``micro_batch_rows`` rows per
+        micro-batch. With one, an epoch's trained rows are dealt over its
+        windows by tokens, then each window's rows over the fewest
+        micro-batches of at most ``token_budget`` real tokens, and every rank
+        re-deals its rows until each window has as many micro-batches on every
+        rank, at least one. Ranks wait on each other every micro-batch, so even
+        tokens keep the fastest from idling. Packing leaves out ``skip_rows``
+        unless a rank needs some of them, shortest first, to fill that many
+        micro-batches.
+
+        :param epoch_orders: Row order of each update epoch.
+        :type epoch_orders: list[npt.NDArray[np.intp]]
+        :param window_rows: Rows per window.
+        :type window_rows: int
+        :param micro_batch_rows: Rows per micro-batch without a token budget.
+        :type micro_batch_rows: int
+        :param token_ids: ``(R, W)`` right-padded training rows.
+        :type token_ids: torch.Tensor
+        :param token_budget: :meth:`_micro_batch_token_budget`.
+        :type token_budget: int | None
+        :param skip_rows: ``(R,)`` rows the packed micro-batches may leave out,
+            or ``None`` to run every row. Read only with a token budget.
+        :type skip_rows: npt.NDArray[np.bool_] | None
+        :return: ``windows[epoch][window]`` lists of micro-batch row indices.
+        :rtype: list[list[list[npt.NDArray[np.intp]]]]
+        """
+        windows = [
+            [
+                order[start : start + window_rows]
+                for start in range(0, len(order), window_rows)
+            ]
+            for order in epoch_orders
+        ]
+        if token_budget is None:
+            return [
+                [
+                    [
+                        window[start : start + micro_batch_rows]
+                        for start in range(0, len(window), micro_batch_rows)
+                    ]
+                    for window in epoch_windows
+                ]
+                for epoch_windows in windows
+            ]
+        row_tokens = (
+            attention_mask_from_padded_ids(token_ids, self.pad_token_id)
+            .sum(-1)
+            .cpu()
+            .numpy()
+        )
+        skip = np.zeros(len(row_tokens), dtype=bool) if skip_rows is None else skip_rows
+        windows = [
+            balance_windows(epoch_windows, ~skip, row_tokens)
+            for epoch_windows in windows
+        ]
+        packed = [
+            [
+                pack_rows_evenly(window[~skip[window]], row_tokens, token_budget)
+                for window in epoch_windows
+            ]
+            for epoch_windows in windows
+        ]
+        counts = iter(
+            allreduce_max_ints(
+                [
+                    max(len(micro_batches), 1)
+                    for epoch_packed in packed
+                    for micro_batches in epoch_packed
+                ]
+            )
+        )
+        return [
+            [
+                fill_micro_batches(
+                    micro_batches,
+                    window[skip[window]],
+                    row_tokens,
+                    next(counts),
+                    token_budget,
+                )
+                for window, micro_batches in zip(
+                    epoch_windows, epoch_packed, strict=True
+                )
+            ]
+            for epoch_windows, epoch_packed in zip(windows, packed, strict=True)
+        ]
+
+    @staticmethod
+    def _micro_batches_per_step(
+        windows: list[list[list[npt.NDArray[np.intp]]]], window_steps: int | None
+    ) -> float:
+        """Mean micro-batches per optimizer step on this rank.
+
+        :param windows: :meth:`_micro_batch_windows` of this learn.
+        :type windows: list[list[list[npt.NDArray[np.intp]]]]
+        :param window_steps: Micro-batches per optimizer step, or ``None``
+            when each window is one step.
+        :type window_steps: int | None
+        :return: ``window_steps``, else the mean micro-batches per window.
+        :rtype: float
+        """
+        if window_steps is not None:
+            return float(window_steps)
+        sizes = [len(window) for epoch_windows in windows for window in epoch_windows]
+        return sum(sizes) / len(sizes)
+
+    @staticmethod
+    def _loss_units_per_row(
+        mask: torch.Tensor, turn_ids: torch.Tensor | None, level: str
+    ) -> torch.Tensor:
+        """Units a unit-mean loss averages over, per row.
+
+        :param mask: ``(R, T)`` mask of the positions the loss covers.
+        :type mask: torch.Tensor
+        :param turn_ids: ``(R, T)`` turn index per position, ``-1`` outside a
+            turn; read at the ``"turn"`` level.
+        :type turn_ids: torch.Tensor | None
+        :param level: ``"token"`` counts masked positions, ``"turn"`` turns
+            with a masked position, ``"trajectory"`` rows with one.
+        :type level: str
+        :return: ``(R,)`` fp32 unit counts.
+        :rtype: torch.Tensor
+        """
+        mask = mask.bool()
+        if level == "token":
+            return mask.sum(-1, dtype=torch.float32)
+        if level == "trajectory":
+            return mask.any(-1).to(torch.float32)
+        assert turn_ids is not None
+        turns = torch.where(mask & (turn_ids >= 0), turn_ids + 1, 0).long()
+        hits = torch.zeros(
+            mask.shape[0], mask.shape[1] + 1, dtype=torch.float32, device=mask.device
+        )
+        hits.scatter_(1, turns, 1.0)
+        return hits[:, 1:].sum(-1)
+
+    def _window_loss_scales(
+        self, row_units: torch.Tensor, window: list[npt.NDArray[np.intp]]
+    ) -> torch.Tensor:
+        """Scale per micro-batch that turns unit-mean losses into the window's unit mean.
+
+        The backward divides each loss by ``len(window)`` and gradients are
+        averaged over ranks, so a micro-batch loss averaged over its own
+        units, scaled by ``len(window) * units / (global_units / world_size)``,
+        adds its share of the unit mean of the window on every rank. Every
+        rank must call this once per window.
+
+        :param row_units: ``(R,)`` units per row (:meth:`_loss_units_per_row`).
+        :type row_units: torch.Tensor
+        :param window: Micro-batch row indices of the window.
+        :type window: list[npt.NDArray[np.intp]]
+        :return: ``(len(window),)`` scales on ``row_units``' device.
+        :rtype: torch.Tensor
+        """
+        units = torch.stack(
+            [
+                row_units[self._device_index(rows, row_units.device)].sum()
+                for rows in window
+            ]
+        )
+        window_units = _global_sum(units) / _normalizer_world_size()
+        return len(window) * units / window_units.clamp(min=1.0)
+
     @staticmethod
     def _device_index(
         idxs: npt.NDArray[np.intp], device: torch.device | str
@@ -6354,7 +6462,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: OptimizerStep | None
         """
         with self._amp_ctx():
-            return self.shard_runtime.backward(
+            step = self.shard_runtime.backward(
                 loss,
                 self.optimizer,
                 (
@@ -6366,6 +6474,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 self.max_grad_norm,
                 clip_groups=clip_groups,
             )
+        if step is not None:
+            self.optimizer_steps += 1
+        return step
 
     def _stack_rollout_batch(
         self, experiences: LLMRolloutExperiences, turn_ids: torch.Tensor | None
@@ -6400,98 +6511,114 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             rewards = rewards.unsqueeze(-1)
         return token_ids, action_masks, turn_ids.to(self.device), rewards
 
-    def _resolve_fsdp_config(self, config: FSDPConfig) -> FSDPConfig:
-        """``config`` with unset memory fields set to the fastest pick that fits.
+    def _resolve_fsdp_config(self, config: FSDPConfig) -> FSDPConfig | None:
+        """``config`` with unset memory fields and stride set to the fastest pick that fits.
 
-        Set values are kept. Off CUDA there is no device budget, so the
-        lightest choices are taken and activations stay on the GPU. On CUDA
-        every rank takes rank 0's pick, so ranks on different devices still
-        run the same EP collectives. An algorithm with no ``max_model_len``
-        must already have every memory field set.
+        Set values are kept. Fields are unset only when the algorithm is built
+        without a launcher that resolves them. An unset
+        ``gradient_checkpointing`` is searched with them, and the search
+        trains DDP when the model fits one GPU with a plan no slower than FSDP's.
 
         :param config: The run's FSDP config.
         :type config: FSDPConfig
-        :return: FSDP config with every memory field set.
-        :rtype: FSDPConfig
-        :raises ValueError: On CUDA when a memory field is unset and this
-            algorithm has no ``max_model_len``.
+        :return: FSDP config with every memory field set, and the stride when
+            checkpointing; ``None`` when the run trains DDP.
+        :rtype: FSDPConfig | None
+        :raises ValueError: When a field is unset off CUDA.
+        :raises TrainingMemoryUnfitError: When nothing fits one GPU.
         """
-        # FSDP2 CPUOffloadPolicy needs colocated vLLM generation.
-        if not self.colocated and config.cpu_offload is None:
-            config = replace(config, cpu_offload=False)
-        if None not in (
-            config.reshard_after_forward,
-            config.routed_expert_chunk_mib,
-            config.optim_cpu_offload,
-            config.activation_offload,
-            config.cpu_offload,
-        ):
+        unset = [
+            f"fsdp.{name}"
+            for name in FSDP_MEMORY_FIELDS
+            if getattr(config, name) is None
+        ]
+        if self.gradient_checkpointing is None:
+            unset.append("gradient_checkpointing")
+        elif self.gradient_checkpointing and config.checkpoint_every_n_blocks is None:
+            unset.append("fsdp.checkpoint_every_n_blocks")
+        if not unset:
             return config
         if torch.device(self.device).type != "cuda":
-            return resolve_fsdp_memory(
-                None,
-                None,
-                TrainingSettings(fsdp=config),
-                training_breakdown,
-                orchestrated=True,
-            )
-        if self.max_row_tokens is None and not hasattr(self, "max_model_len"):
             msg = (
-                f"{type(self).__name__} has unset FSDP memory settings and no "
-                "max_model_len to estimate them from."
+                f"{', '.join(unset)} unset; the training-memory search sizes "
+                f"them on a CUDA device. Set them to train on {self.device}."
             )
             raise ValueError(msg)
+        self.gradient_checkpointing, resolved, self.routed_expert_chunk_mib = (
+            self._search_training_memory(config)
+        )
+        return resolved
+
+    def _search_training_memory(
+        self, config: FSDPConfig | None
+    ) -> tuple[bool, FSDPConfig | None, int | None]:
+        """Rank 0's training-memory pick for this run, taken by every rank.
+
+        Ranks on different devices still run the same collectives.
+
+        :param config: The run's FSDP config, or ``None`` for data parallel.
+        :type config: FSDPConfig | None
+        :return: ``gradient_checkpointing``, the FSDP config of the plan, and
+            its DDP routed-expert chunk.
+        :rtype: tuple[bool, FSDPConfig | None, int | None]
+        :raises TrainingMemoryUnfitError: When nothing fits one GPU.
+        """
+        picked = None
+        unfit = None
+        if get_rank() == 0:
+            try:
+                plan = self._plan_training_memory(config)
+                picked = (
+                    plan.gradient_checkpointing,
+                    plan.fsdp,
+                    plan.routed_expert_chunk_mib,
+                )
+            except TrainingMemoryUnfitError as error:
+                unfit = error
+        # Other ranks wait in the broadcast, so rank 0 sends its failure too.
+        picked, reason = broadcast_object_list(
+            [picked, None if unfit is None else str(unfit)]
+        )
+        if unfit is not None:
+            raise unfit
+        if reason is not None:
+            raise ValueError(reason)
+        return picked
+
+    def _plan_training_memory(self, config: FSDPConfig | None) -> TrainingMemoryPlan:
+        """Run the training-memory search for this run's unset fields on this device.
+
+        :param config: The run's FSDP config, or ``None`` for data parallel.
+        :type config: FSDPConfig | None
+        :return: The fastest plan that fits.
+        :rtype: TrainingMemoryPlan
+        :raises TrainingMemoryUnfitError: When nothing fits one GPU.
+        """
         model, settings = self._training_estimate_inputs(
-            self._estimator_algorithm(),
+            ALGORITHM_NAMES[self.algo],
             self.beta,
         )
-        settings = settings.model_copy(update={"fsdp": config})
         device = self._training_device_spec()
-        picked = resolve_fsdp_memory(
+        plan = resolve_training_memory(
             model,
             device,
-            settings,
-            training_breakdown,
-            orchestrated=True,
-            micro_batch_floor=self.micro_batch_size_per_gpu,
+            settings.model_copy(update={"fsdp": config}),
+            MemoryPins(
+                gradient_checkpointing=self.gradient_checkpointing,
+                micro_batch_size_per_gpu=self.micro_batch_size_per_gpu,
+                micro_batch_tokens_per_gpu=self._micro_batch_token_budget(),
+            ),
+            self.mini_batch_size,
         )
-        return broadcast_fsdp_memory_pick(model, device, settings, picked)
-
-    def _resolve_gradient_checkpointing(self, fsdp_config: FSDPConfig | None) -> bool:
-        """Whether to checkpoint activations when the caller left it unset.
-
-        Off only when the memory estimate shows the step fits without it. Off
-        CUDA, for a model outside :data:`SUPPORTED_MODEL_INFO` (the estimate
-        is calibrated on catalog families), with no ``max_model_len`` to size
-        rows from, or with a vision tower (image rows are not known before the
-        first batch), it stays on. Every rank takes rank 0's pick.
-
-        :param fsdp_config: Resolved FSDP config, or ``None`` for data parallel.
-        :type fsdp_config: FSDPConfig | None
-        :return: Whether the trainer checkpoints activations.
-        :rtype: bool
-        """
-        if (
-            torch.device(self.device).type != "cuda"
-            or self.pretrained_model_name_or_path not in SUPPORTED_MODEL_INFO
-            or (self.max_row_tokens is None and not hasattr(self, "max_model_len"))
-        ):
-            return True
-        model, settings = self._training_estimate_inputs(
-            self._estimator_algorithm(),
-            self.beta,
+        estimate = plan.breakdown
+        logger.info(
+            "Training memory on %s: %s; estimated peak %.2f of %.2f GiB",
+            device.name,
+            plan.describe(),
+            estimate.total_bytes / 1024**3,
+            estimate.device_usable_bytes / 1024**3,
         )
-        if model.arch.vision_n_layers:
-            return True
-        settings = settings.model_copy(update={"fsdp": fsdp_config})
-        picked = resolve_gradient_checkpointing(
-            model,
-            self._training_device_spec(),
-            settings,
-            training_breakdown,
-            orchestrated=True,
-        )
-        return broadcast_object_list([picked])[0]
+        return plan
 
     def _training_estimate_inputs(
         self, algorithm: Algorithm, beta: float
@@ -6514,22 +6641,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Anchored VL regex still names the original language-model modules.
         if isinstance(target_modules, str) and target_modules != "all-linear":
             target_modules = lora_target_module_names(target_modules)
-        n_training_gpus = self.shard_runtime.data_parallel_world(get_world_size())
+        world_size = get_world_size()
+        n_training_gpus = world_size
+        dp_size = self.shard_runtime.data_parallel_world(world_size)
         records_supports = self._config_records_sampling_supports()
-        liger_loss, whole_sequence_loss = self._liger_loss_layout()
         # Images, segments, checkpoint snapshots and async rollout are not
         # known before the first batch; they size as absent.
         target_parameters = self.lora_config.target_parameters
         settings = TrainingSettings(
             algorithm=algorithm,
             group_size=self.group_size,
-            trajectories_per_update=self.batch_size_per_process * n_training_gpus,
-            max_model_len=(
-                self.max_model_len
-                if self.max_row_tokens is None
-                else self.max_row_tokens
-            ),
+            trajectories_per_update=self.batch_size_per_process * dp_size,
+            max_model_len=self._row_token_budget(),
             micro_batch_size=self.micro_batch_size_per_gpu,
+            micro_batch_tokens=self._micro_batch_token_budget(),
+            gradient_checkpointing=self.gradient_checkpointing,
             lora_rank=self.lora_config.r,
             lora_target_scope=lora_target_scope(target_modules),
             lora_dropout=self.lora_config.lora_dropout,
@@ -6541,23 +6667,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             use_separate_reference_adapter=self.use_separate_reference_adapter,
             weight_dtype=weight_dtypes[self._get_lm_head().weight.dtype],
             activation_offload=self.activation_offload,
-            # Still unset while the FSDP fields resolve; they are priced with it on.
-            gradient_checkpointing=self.gradient_checkpointing is not False,
             sampling_support_width=sampling_support_width(
                 records_supports, self.top_k or 0
             ),
-            support_scored_loss=support_scored_loss(algorithm, liger_loss),
-            whole_sequence_loss=whole_sequence_loss,
-            liger_weight_grad=liger_head_grad(
-                algorithm, liger_loss, whole_sequence_loss
-            ),
             n_training_gpus=n_training_gpus,
             fsdp=self.fsdp_config,
+            routed_expert_chunk_mib=self.routed_expert_chunk_mib,
             sequence_packing=self.sequence_packing,
             images_per_row=0,
             image_width=0,
             image_height=0,
-            vision_tower_lora=bool(self.lora_tower_target_modules),
+            tower_lora_targets=frozenset(self.lora_tower_target_modules or ()),
             segmented_rows=False,
             checkpoint_optimizer=False,
             async_rollout=False,
@@ -6823,7 +6943,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """Deal split rows out so each rank in a lockstep group trains about the same rows.
 
         See :func:`~agilerl.utils.segment_balance.balance_rows_across_ranks`;
-        on one process, or with fewer training rows than ranks, the rows stay put.
+        on one process, or with fewer training rows than data-parallel ranks,
+        the rows stay put.
 
         :param rows: Split rows, before filler rows.
         :type rows: SegmentRows
@@ -6835,12 +6956,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: The rows this rank trains, which of them train, and their values.
         :rtype: tuple[SegmentRows, npt.NDArray[np.intp], list[torch.Tensor]]
         """
+        # Ranks in one tp * cp replica share a batch, so they keep one assignment.
+        fsdp = self.fsdp_config
         balanced = balance_rows_across_ranks(
             rows,
             train_rows,
             row_values,
             self.pad_token_id,
-            None if self.fsdp_config is None else self.fsdp_config.shard_group_size,
+            None if fsdp is None else fsdp.shard_group_size,
+            1 if fsdp is None else fsdp.tp * fsdp.cp,
         )
         if balanced is None:
             return rows, train_rows, [value for value, _ in row_values]
@@ -7053,8 +7177,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             token_ids[real_rows], self.pad_token_id
         )
         padding_frac = 1.0 - float(real_tokens.float().mean().item())
-        # The gradient forward on a packed row runs real tokens only.
-        packed = self._packing_mode() is not None
+        packed = self.sequence_layout.skips_padding
         return {
             "padding_frac_before_packing": padding_frac,
             "padding_frac_after_packing": 0.0 if packed else padding_frac,
@@ -7202,54 +7325,39 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
 
-    def _generate_with_hf(
-        self, prompts: Sequence[RolloutPrompt], group_size: int = 1
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Generate ``group_size`` completions per prompt with HuggingFace ``generate``.
-
-        Runs under the caller's adapter and eval mode, in chunks of
-        ``hf_generate_chunk_size`` prompts.
-
-        :param prompts: Prompt mappings for this rank.
-        :type prompts: Sequence[RolloutPrompt]
-        :param group_size: Completions per prompt.
-        :type group_size: int
-        :return: Per-prompt completion token tensors and matching action masks.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
-        """
-        actor_device = self.shard_runtime.actor_compute_device(
-            self.actor, torch.device(self.device)
-        )
-        token_ids_list = []
-        completion_masks = []
-        with torch.no_grad(), self._amp_ctx():
-            for start in range(0, len(prompts), self.hf_generate_chunk_size):
-                for prompt in prompts[start : start + self.hf_generate_chunk_size]:
-                    hf_inputs = prepare_prompt_hf_generate(
-                        prompt, actor_device, group_size=group_size
-                    )
-                    prompt_len = int(hf_inputs["input_ids"].shape[-1])
-                    token_ids = self.actor.generate(
-                        **hf_inputs,
-                        generation_config=hf_turn_generation_config(
-                            self.generation_config,
-                            max_model_len=self.max_model_len,
-                            prompt_length=prompt_len,
-                            max_output_tokens=self.max_output_tokens,
-                        ),
-                    )
-                    token_ids_list.append(token_ids)
-                    completion_masks.append(
-                        build_completion_mask(
-                            token_ids,
-                            prompt_len,
-                            self.pad_token_id,
-                            completion_len=hf_completion_lengths(
-                                token_ids, prompt_len, self.pad_token_id
-                            ),
-                        )
-                    )
-        return token_ids_list, completion_masks
+    def _ensure_vllm_for_generation(self) -> None:
+        """Start colocated vLLM; offload a live trainer before ``LLM()``."""
+        if self.vllm_config is None:
+            warnings.warn(
+                "vllm_config was not set; using VLLMConfig() defaults for "
+                "colocated generation.",
+                stacklevel=2,
+            )
+            self.vllm_config = VLLMConfig()
+        if not self.colocated:
+            if self.vllm_config.tensor_parallel_size not in (None, 1):
+                msg = (
+                    "Colocated vLLM requires tensor_parallel_size==1 (the "
+                    "in-process external_launcher engine is single-GPU), got "
+                    f"{self.vllm_config.tensor_parallel_size}."
+                )
+                raise ValueError(msg)
+            self.colocated = True
+            if not self.shard_runtime.is_sharded:
+                self.offload_trainer_during_rollout = True
+            self._vllm_awake = not self.vllm_config.sleep_mode
+        if self.llm is None:
+            if self.shard_runtime.is_sharded:
+                warnings.warn(
+                    "Trainer offload during rollout is not compatible with FSDP2-sharded "
+                    "parameters; it is disabled for this run.",
+                    stacklevel=2,
+                )
+            else:
+                self._offload_trainer_to_cpu_for_colocated_vllm()
+            # vLLM's NCCL comm must use the same cuMem allocator as any earlier one.
+            os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
+            self._configure_vllm()
 
     def _generate_with_vllm_colocate(
         self,
@@ -7536,8 +7644,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``head_w`` from this fn. The gradient-aware counterpart is
         :meth:`_logprobs_from_hidden_fused_grad`.
 
-        Numerical contract: equivalent to ``log_softmax`` over
-        ``(hidden @ Wᵀ + b) / T`` in fp32, cast back to the input dtype.
+        Numerical contract: ``log_softmax`` over ``(hidden @ Wᵀ + b) / T``.
+        On CUDA a bf16 or fp16 head takes half-precision operands with fp32
+        accumulation and fp32 logits; elsewhere the GEMM runs in fp32.
 
         :param hidden: ``(B, T, H)`` last-hidden-state.
         :type hidden: torch.Tensor
@@ -7558,7 +7667,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type support_ids: torch.Tensor | None, optional
         :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
         :type logit_bias: torch.Tensor | None, optional
-        :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+        :return: ``(B, T)`` fp32 per-token logprobs.
         :rtype: torch.Tensor
         """
         return fused_linear_logprobs_chunked(
@@ -7612,7 +7721,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type support_ids: torch.Tensor | None, optional
         :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
         :type logit_bias: torch.Tensor | None, optional
-        :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+        :return: ``(B, T)`` fp32 per-token logprobs.
         :rtype: torch.Tensor
         """
         return FusedLinearLogProbsFunction.apply(
@@ -8116,6 +8225,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if softcap is not None:
                 text_config.final_logit_softcapping = softcap
 
+    def trainer_offload_context(self) -> AbstractContextManager[None]:
+        """Context manager that holds the trainer on GPU only for the training step."""
+        if self.offload_trainer_during_rollout:
+            return self._offload_trainer_for_rollout()
+        return nullcontext()
+
     @contextmanager
     def _offload_trainer_for_rollout(
         self,
@@ -8165,6 +8280,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
         if self.vllm_config.sleep_mode and not self._vllm_awake:
+            # Tensors held by reference cycles keep their blocks out of empty_cache.
+            gc.collect()
             torch.cuda.empty_cache()
             device_index = get_local_rank()
             try:

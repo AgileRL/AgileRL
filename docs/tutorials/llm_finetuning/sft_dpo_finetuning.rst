@@ -89,7 +89,6 @@ The next block of code configures the LoRA adapter and instantiates the SFT agen
         r=16,
         lora_alpha=32,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
         bias="none",
     )
 

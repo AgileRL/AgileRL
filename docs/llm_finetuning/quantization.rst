@@ -155,7 +155,6 @@ training) and attaches the trainable LoRA adapters on top (i.e. QLoRA).
         lora_alpha=32,
         target_modules="all-linear",
         task_type="CAUSAL_LM",
-        lora_dropout=0.05,
     )
 
     agent = GRPO(
@@ -296,7 +295,7 @@ A typical memory-constrained QLoRA + colocated-vLLM setup on A100:
     )
     lora_config = LoraConfig(
         r=16, lora_alpha=32, target_modules="all-linear",
-        task_type="CAUSAL_LM", lora_dropout=0.05,
+        task_type="CAUSAL_LM",
     )
 
     # Rollout: unquantized vLLM engine, adapters synced each step.

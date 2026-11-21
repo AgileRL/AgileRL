@@ -8,9 +8,12 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
+
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 
 
 def reject_legacy_llm_env_spelling(
@@ -45,6 +48,7 @@ ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 ENV_POD_DEFAULT_CPUS = 0.01
 # A multi-GB env image cold-pulls in minutes.
 ENV_POD_READY_TIMEOUT_S = 600.0
+DEFAULT_ADAPTIVE_TASK_SAMPLING = True
 
 
 class EnvContainerSpec(BaseModel):
@@ -188,6 +192,78 @@ class EnvHostVolume(BaseModel):
                 f"Host volume {self.name!r}: mount_path {self.mount_path!r} is in "
                 "/dev/shm, the containers' shared-memory mount; pick another path."
             )
+            raise ValueError(msg)
+        return self
+
+
+class JudgeSpec(BaseModel):
+    """The LLM a rubric's judge calls: provider, model, endpoint and limits."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: Literal["openai", "anthropic"] = Field(
+        default="openai",
+        description=(
+            "API the judge speaks. openai covers any OpenAI-compatible endpoint: "
+            "OpenRouter, Together, Groq or self-hosted vLLM, through base_url."
+        ),
+    )
+    model: str = Field(min_length=1, description="Judge model id.")
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "http(s) endpoint. A URL with a path is the API root, used as given "
+            "(https://openrouter.ai/api/v1); a bare host gets the client's default "
+            "path. Unset uses the provider's hosted API, which needs api_key_env."
+        ),
+    )
+    api_key_env: str | None = Field(
+        default=None,
+        pattern=ENV_VAR_NAME_PATTERN,
+        description=(
+            "Name of the environment variable holding the API key; never the key "
+            "itself. Unset sends no key (a local endpoint)."
+        ),
+    )
+    max_concurrency: int = Field(
+        default=16, ge=1, description="Judge requests in flight per process."
+    )
+    timeout_s: float = Field(
+        default=120.0,
+        gt=0.0,
+        description="Seconds one request attempt may take; the provider SDK retries it.",
+    )
+    temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Judge sampling temperature. Anthropic judges take none: leave it unset.",
+    )
+    max_tokens: int = Field(
+        default=4096,
+        ge=1,
+        description=(
+            "Verdict token budget. A thinking judge spends it on its thinking "
+            "too, so a low budget cuts the verdict off."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_endpoint(self) -> Self:
+        if self.base_url is None:
+            if self.api_key_env is None:
+                msg = f"The hosted {self.provider} API needs api_key_env."
+                raise ValueError(msg)
+        else:
+            url = urlsplit(self.base_url)
+            if url.scheme not in ("http", "https") or not url.hostname:
+                msg = f"judge base_url must be an http(s) URL, got {self.base_url!r}."
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_temperature(self) -> Self:
+        if self.provider == "anthropic" and self.temperature != 0.0:
+            msg = "Anthropic judges take no temperature; leave it unset."
             raise ValueError(msg)
         return self
 
@@ -574,7 +650,18 @@ class LLMEnvSpec(EnvSpecBase):
 
     dataset: str | None = Field(
         default=None,
-        description="HuggingFace dataset id, or a Parquet path, for the dataset sources.",
+        description="HuggingFace dataset id, or a Parquet or JSONL path, for the dataset sources.",
+    )
+    dataset_format: Literal["traces"] | None = Field(
+        default=None,
+        description=(
+            "traces: rows are recorded model calls, OpenAI chat messages in "
+            "prompt / completion (or messages) columns with optional tools. A "
+            "rollout renders each row's prompt as the single-turn prompt and "
+            "needs no prompt_template; with no rubric_file_path it scores 0, "
+            "which OPD trains on as pure distillation. objective sft trains "
+            "the completion. Takes no columns mapping."
+        ),
     )
     dataset_path: str | None = Field(
         default=None, description="Object-store path to a user-supplied dataset."
@@ -587,7 +674,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description=(
             "Maps your dataset's column names onto the ones the run expects "
-            "(question, answer). Unset assumes they already match."
+            "(question, answer; prompt, target, or multi-turn messages and "
+            "tools for SFT). Unset assumes they already match."
         ),
     )
     response_column: str | None = Field(
@@ -599,7 +687,7 @@ class LLMEnvSpec(EnvSpecBase):
         description=(
             "Conversation template, keyed 'role_index' (system_0, user_1, ...) "
             "so ordering is explicit. Values may interpolate dataset columns. "
-            "Required for a rollout over dataset rows."
+            "Required for a rollout over dataset rows, except traces."
         ),
     )
     rubric_file_path: str | None = Field(
@@ -607,7 +695,10 @@ class LLMEnvSpec(EnvSpecBase):
         validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
         description=(
             "Path to the Python module holding the rubric (or reward function) "
-            "that scores a rollout over dataset rows."
+            "that scores every turn. Required for a rollout over dataset rows, "
+            "except under OPD, where unset scores every turn 0; on an env, its "
+            "score replaces the env's reward, which it can "
+            "read as an input."
         ),
     )
     rubric_name: str | None = Field(
@@ -615,6 +706,23 @@ class LLMEnvSpec(EnvSpecBase):
         min_length=1,
         validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
         description="Name of the rubric (or reward callable) to import from that module.",
+    )
+    group_rubric_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Name of a GroupRubric in the rubric_file_path module. It scores each "
+            "finished group of completions together, and each score is added to "
+            "that completion's final-turn reward. Leave rubric_name unset to keep "
+            "the env's own turn reward. Group replay is off with a group rubric."
+        ),
+    )
+    judge: JudgeSpec | None = Field(
+        default=None,
+        description=(
+            "LLM judge handed to the rubric: a Rubric class whose __init__ takes "
+            "judge is built with it. Needs rubric_file_path."
+        ),
     )
     max_reward: float | None = Field(
         default=None,
@@ -633,7 +741,8 @@ class LLMEnvSpec(EnvSpecBase):
             "Send the env or reward function each turn's reasoning with its "
             "markers, not only the text after the reasoning ends. Unset sends "
             "it to a reward file over dataset rows and not to an env that "
-            "runs the action."
+            "runs the action. A Rubric class reads the whole turn from "
+            "TurnAction.completion either way."
         ),
     )
     train_test_split: float | None = Field(
@@ -842,12 +951,12 @@ class LLMEnvSpec(EnvSpecBase):
         ),
     )
     adaptive_task_sampling: bool = Field(
-        default=False,
+        default=DEFAULT_ADAPTIVE_TASK_SAMPLING,
         description=(
             "Draw each group's task row in proportion to how often that row's "
             "recent groups had differing rewards, so tasks that keep giving tied "
-            "groups are drawn less (Ray async rollouts only). Unset keeps the "
-            "per-epoch shuffle."
+            "groups are drawn less (Ray async rollouts over task rows only). "
+            "false keeps the per-epoch shuffle."
         ),
     )
     task_family_field: str | None = Field(
@@ -1139,21 +1248,16 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if dataset is not None:
-            if self.rubric_file_path is None:
-                msg = "rubric_file_path is required for dataset-backed rollout environments"
-                raise ValueError(msg)
-            if self.prompt_template is None:
+            if (
+                self.prompt_template is None
+                and self.dataset_format != TRACES_DATASET_FORMAT
+            ):
                 msg = "Prompt template is required for dataset-backed rollout environments"
                 raise ValueError(msg)
             if self.max_turns not in (None, 1):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
             self.max_turns = 1
-        elif self.rubric_file_path is not None:
-            msg = (
-                "rubric_file_path is not supported for env-backed rollout environments."
-            )
-            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -1238,6 +1342,40 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
+    def _check_traces_format(self) -> Self:
+        if self.dataset_format != TRACES_DATASET_FORMAT:
+            return self
+        if self._named_dataset() is None:
+            msg = "dataset_format traces describes dataset rows; name the dataset too."
+            raise ValueError(msg)
+        expected = "sft" if self.env_type == "dataset" else None
+        if self.objective != expected:
+            msg = (
+                "A traces dataset trains SFT (env_type dataset, objective sft) or a "
+                f"rollout (env_type rollout, no objective); objective {self.objective!r} "
+                f"on env_type {self.env_type!r} is not supported."
+            )
+            raise ValueError(msg)
+        mapped = [
+            field
+            for field, value in (
+                ("columns", self.columns),
+                ("prompt_template", self.prompt_template),
+            )
+            if value is not None
+        ]
+        if mapped:
+            msg = (
+                f"A traces dataset's column names are the spec; drop {', '.join(mapped)}. "
+                "Each row's prompt messages are the rollout prompt."
+            )
+            raise ValueError(msg)
+        if self.response_column not in (None, "completion"):
+            msg = "A traces dataset trains its completion column; drop response_column."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _resolve_env_image_host_defaults(self) -> Self:
         if self.env_image is not None:
             if self.env_port is None:
@@ -1251,14 +1389,42 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
+    def _check_judge(self) -> Self:
+        if self.judge is not None and self.rubric_file_path is None:
+            msg = "judge is handed to a rubric; set rubric_file_path to a Rubric that takes it."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_group_rubric(self) -> Self:
+        if self.group_rubric_name is not None and self.rubric_file_path is None:
+            msg = "group_rubric_name names a symbol in rubric_file_path; set it too."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_rubric_name(self) -> Self:
+        if self.rubric_name is not None and self.rubric_file_path is None:
+            msg = "rubric_name names a symbol in rubric_file_path; set it too."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _apply_conditional_defaults(self) -> Self:
-        if self._dataset_identity_backed():
-            if self.train_test_split is None:
-                self.train_test_split = 0.9
-            if self.env_type == "rollout" and self.rubric_name is None:
-                self.rubric_name = "reward_fn"
+        if self._dataset_identity_backed() and self.train_test_split is None:
+            self.train_test_split = 0.9
+        if (
+            self.rubric_file_path is not None
+            and self.rubric_name is None
+            and self.group_rubric_name is None
+        ):
+            self.rubric_name = "reward_fn"
         if self.env_type == "dataset" and self.response_column is None:
-            self.response_column = "response"
+            self.response_column = (
+                "completion"
+                if self.dataset_format == TRACES_DATASET_FORMAT
+                else "response"
+            )
         if self.env_type == "rollout":
             if self.num_envs is None:
                 self.num_envs = 1

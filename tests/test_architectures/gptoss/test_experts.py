@@ -5,11 +5,7 @@ import pytest
 import torch
 from torch import nn
 
-from agilerl.architectures.gptoss import experts as experts_mod
-from agilerl.architectures.gptoss.experts import (
-    expert_matmul_loop,
-    is_gpt_oss_experts_module,
-)
+from agilerl.architectures.gptoss.experts import is_gpt_oss_experts_module
 
 NUM_EXPERTS = 2
 HIDDEN = 4
@@ -71,25 +67,3 @@ class TestIsGptOssExpertsModule:
         _break_layout(module, kind)
 
         assert is_gpt_oss_experts_module(module) is False
-
-
-class TestExpertMatmulLoop:
-    def test_reads_dtensor_local_shard(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        weight = torch.randn(2, 4, 3)
-        bias = torch.randn(2, 3)
-        rows = torch.randn(4, 4)
-        counts = [2, 2]
-
-        class Shard:
-            def __init__(self, local: torch.Tensor) -> None:
-                self.local = local
-
-            def to_local(self) -> torch.Tensor:
-                return self.local
-
-        monkeypatch.setattr(experts_mod, "DTensor", Shard)
-
-        sharded = expert_matmul_loop(rows, Shard(weight), counts, Shard(bias))
-        dense = expert_matmul_loop(rows, weight, counts, bias)
-
-        assert torch.allclose(sharded, dense)

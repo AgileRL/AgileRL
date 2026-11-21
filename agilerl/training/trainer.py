@@ -21,14 +21,13 @@ from agilerl.algorithms.core.base import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
-from agilerl.architectures.catalog import pretrained_model_type
+from agilerl.architectures import family_chat_template
 from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
 from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
 from agilerl.arena.models import LLMEnvSpec as ArenaLLMEnvSpec
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.model_info import resolve_reasoning_parser
 from agilerl.builders import select_builder
 from agilerl.distributed import get_rank, get_world_size
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
@@ -55,6 +54,7 @@ from agilerl.models.env import (
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
+    group_rubric_from_spec,
     make_bandit_env,
     make_gym_env,
     make_llm_env,
@@ -605,10 +605,6 @@ class LocalTrainer(Trainer):
         if self.tokenizer is None:
             msg = "Rollout LLM training requires a tokenizer."
             raise TypeError(msg)
-        model_name_or_path = self.algorithm_spec.pretrained_model_name_or_path
-        if model_name_or_path is None:
-            msg = "Rollout LLM training requires pretrained_model_name_or_path."
-            raise TypeError(msg)
         max_output_tokens = (
             self.algorithm_spec.max_output_tokens
             if isinstance(self.algorithm_spec, RolloutLLMSpec)
@@ -620,11 +616,24 @@ class LocalTrainer(Trainer):
             max_model_len=self.algorithm_spec.max_model_len,
             max_output_tokens=max_output_tokens,
             seed=self.algorithm_spec.seed,
-            reasoning_parser=resolve_reasoning_parser(
-                self.algorithm_spec.vllm_engine_args,
-                pretrained_model_type(model_name_or_path),
-            ),
         )
+
+    def _rollout_train_kwargs(self, spec: LLMEnvSpec) -> dict[str, Any]:
+        """Arguments only the rollout training loop takes.
+
+        :param spec: The rollout env spec.
+        :type spec: LLMEnvSpec
+        :return: Its env factory, group rubric, turn budget and wall-time limit.
+        :rtype: dict[str, Any]
+        """
+        kwargs: dict[str, Any] = {
+            "env_factory": self.env_factory,
+            "group_rubric": group_rubric_from_spec(spec),
+            "max_turns": self.rollout_max_turns,
+        }
+        if self.training_spec.max_wall_seconds is not None:
+            kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
+        return kwargs
 
     @property
     def _rollout(self) -> bool:
@@ -825,6 +834,7 @@ class LocalTrainer(Trainer):
         :returns: The tokenizer.
         :rtype: PreTrainedTokenizerBase
         :raises ImportError: If the LLM dependencies are not installed.
+        :raises ValueError: If the spec names no pretrained model.
         """
         if AutoTokenizer is None:
             msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
@@ -833,19 +843,21 @@ class LocalTrainer(Trainer):
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
             msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
             raise TypeError(msg)
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.algorithm_spec.pretrained_model_name_or_path
-        )
+        model_path = self.algorithm_spec.pretrained_model_name_or_path
+        if model_path is None:
+            msg = f"{type(self.algorithm_spec).__name__} has no pretrained_model_name_or_path."
+            raise ValueError(msg)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
         if tokenizer is None:
             msg = "AutoTokenizer.from_pretrained returned None."
             raise TypeError(msg)
 
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+            tokenizer.chat_template = (
+                family_chat_template(model_path) or DEFAULT_CHAT_TEMPLATE
+            )
 
-        model_config, generation_config = load_pad_token_configs(
-            self.algorithm_spec.pretrained_model_name_or_path
-        )
+        model_config, generation_config = load_pad_token_configs(model_path)
         pad_token_id, pad_source = resolve_pad_token_id(
             tokenizer,
             model_config=model_config,
@@ -1022,11 +1034,8 @@ class LocalTrainer(Trainer):
         }
 
         if self._rollout_env_spec is not None:
-            kwargs["env_factory"] = self.env_factory
-            kwargs["max_turns"] = self.rollout_max_turns
+            kwargs.update(self._rollout_train_kwargs(self._rollout_env_spec))
             manifest["env_name"] = self._rollout_env_spec.label
-            if self.training_spec.max_wall_seconds is not None:
-                kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
         else:
             kwargs["env"] = self.env
             if self.training_spec.max_wall_seconds is not None:

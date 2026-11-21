@@ -181,6 +181,22 @@ class ClusterValuesSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     placement: Literal["in-cluster", "ephemeral"] = "in-cluster"
+    byoc_scope: Literal["customer", "platform"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_platform_placement(cls, data: object) -> object:
+        """Use ephemeral placement when a platform cluster omits it."""
+        if not isinstance(data, dict):
+            return data
+        raw_scope = data.get("byoc_scope")
+        scope = raw_scope.strip() if isinstance(raw_scope, str) else raw_scope
+        if scope == "":
+            scope = None
+        updated = data if scope == raw_scope else {**data, "byoc_scope": scope}
+        if scope == "platform" and "placement" not in data:
+            return {**updated, "placement": "ephemeral"}
+        return updated
 
 
 class ArenaSpec(BaseModel):
@@ -233,7 +249,7 @@ class ClusterSpec(BaseModel):
             )
             raise ValueError(msg)
         values = data.get("values")
-        if isinstance(values, dict) and set(values) - {"placement"}:
+        if isinstance(values, dict) and set(values) - {"placement", "byoc_scope"}:
             msg = (
                 "Use arena and a nebius or aws block. "
                 "values and registration are not accepted."
@@ -312,6 +328,7 @@ class ClusterSpecOverrides(TypedDict, total=False):
     hostname_template: str | None
     tls_secret_name: str | None
     placement: str | None
+    byoc_scope: str | None
 
 
 def _present_fields(values: dict[str, object]) -> dict[str, object]:
@@ -379,13 +396,29 @@ def apply_cluster_spec_overrides(
     """Return a copy of a cluster spec with explicit CLI values applied."""
     name = overrides.get("name")
     placement = overrides.get("placement")
-    values = spec.values
-    if placement is not None:
-        try:
-            values = ClusterValuesSpec.model_validate({"placement": placement})
-        except ValidationError as exc:
+    byoc_scope = overrides.get("byoc_scope")
+    resolved_scope = spec.values.byoc_scope if byoc_scope is None else byoc_scope
+    resolved_placement = spec.values.placement if placement is None else placement
+    platform_default = (
+        placement is None
+        and resolved_scope == "platform"
+        and spec.values.byoc_scope != "platform"
+        and spec.values.placement == "in-cluster"
+    )
+    values_payload: dict[str, object] = {}
+    if resolved_scope is not None:
+        values_payload["byoc_scope"] = resolved_scope
+    if not platform_default:
+        values_payload["placement"] = resolved_placement
+    try:
+        values = ClusterValuesSpec.model_validate(values_payload)
+    except ValidationError as exc:
+        locations = {error["loc"][0] for error in exc.errors() if error["loc"]}
+        if "byoc_scope" in locations:
+            msg = "byoc_scope must be customer or platform."
+        else:
             msg = "placement must be in-cluster or ephemeral."
-            raise ValueError(msg) from exc
+        raise ValueError(msg) from exc
     return spec.model_copy(
         update={
             "name": name.strip() if name else spec.name,
@@ -394,6 +427,8 @@ def apply_cluster_spec_overrides(
         }
     )
 
+
+BYOC_SCOPES = frozenset({"customer", "platform"})
 
 SPEC_PLACEMENT_TO_API = {
     "in-cluster": "byoc_in_cluster",
@@ -430,6 +465,33 @@ def placement_values(row: dict[str, object]) -> dict[str, str] | None:
     if not placement:
         return None
     return {"placement": API_PLACEMENT_TO_SPEC.get(placement, placement)}
+
+
+def api_byoc_scope(scope: str) -> str:
+    """Return the Arena byoc scope for a cluster spec value.
+
+    :param scope: ``customer`` or ``platform``.
+    :return: The stripped scope.
+    """
+    cleaned = scope.strip()
+    if cleaned not in BYOC_SCOPES:
+        msg = "byoc_scope must be customer or platform."
+        raise ValueError(msg)
+    return cleaned
+
+
+def stored_cluster_values(row: dict[str, object]) -> dict[str, str] | None:
+    """Map a stored cluster's placement and scope onto spec values."""
+    values: dict[str, str] = {}
+    placement = placement_values(row)
+    if placement is not None:
+        values.update(placement)
+    raw_scope = row.get("byoc_scope")
+    if not isinstance(raw_scope, str):
+        raw_scope = row.get("byocScope")
+    if isinstance(raw_scope, str) and raw_scope.strip():
+        values["byoc_scope"] = api_byoc_scope(raw_scope)
+    return values or None
 
 
 CLUSTER_NAME_PLACEHOLDER = "__CLUSTER_NAME__"

@@ -111,6 +111,44 @@ def gemma4_router_forward(
     return router_probabilities, top_k_weights, top_k_index
 
 
+def noaux_tc_router_forward(
+    self: nn.Module, hidden_states: torch.Tensor
+) -> RouterOutputs:
+    """DeepSeek-V3-style sigmoid router with group-limited ``noaux_tc`` selection (MiMo-V2-Flash).
+
+    :param hidden_states: Router input, flattened to ``(tokens, hidden)``.
+    :type hidden_states: torch.Tensor
+    :return: fp32 router logits, scaled top-k weights, top-k expert indices.
+    :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    """
+    router: Any = self
+    hidden_states = hidden_states.view(-1, router.hidden_dim)
+    router_logits = F.linear(hidden_states.float(), router.weight.float())
+    scores = router_logits.sigmoid()
+    scores_for_choice = scores + router.e_score_correction_bias
+    experts_per_group = router.num_experts // router.num_group
+    group_scores = (
+        scores_for_choice.view(-1, router.num_group, experts_per_group)
+        .topk(2, dim=-1)[0]
+        .sum(dim=-1)
+    )
+    group_idx = torch.topk(group_scores, k=router.topk_group, dim=-1, sorted=False)[1]
+    group_mask = torch.zeros_like(group_scores).scatter(1, group_idx, 1)
+    score_mask = (
+        group_mask.unsqueeze(-1)
+        .expand(-1, router.num_group, experts_per_group)
+        .reshape(-1, router.num_experts)
+    )
+    scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+    topk_indices = torch.topk(scores_for_choice, k=router.top_k, dim=-1, sorted=False)[
+        1
+    ]
+    topk_weights = scores.gather(1, topk_indices)
+    if router.norm_topk_prob:
+        topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
+    return router_logits, topk_weights * router.routed_scaling_factor, topk_indices
+
+
 # Keyed by ``module.QualName`` so only classes a model holds are touched.
 ROUTER_FORWARDS: Mapping[str, Callable[[nn.Module, torch.Tensor], RouterOutputs]] = {
     "transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeTopKRouter": (
@@ -155,6 +193,9 @@ ROUTER_FORWARDS: Mapping[str, Callable[[nn.Module, torch.Tensor], RouterOutputs]
     ),
     "transformers.models.gemma4.modeling_gemma4.Gemma4TextRouter": (
         gemma4_router_forward
+    ),
+    "transformers.models.mimo_v2_flash.modeling_mimo_v2_flash.MiMoV2FlashTopkRouter": (
+        noaux_tc_router_forward
     ),
 }
 

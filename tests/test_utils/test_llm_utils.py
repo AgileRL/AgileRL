@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -43,20 +44,29 @@ from transformers import (
     NemotronHForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
     SiglipVisionConfig,
     SiglipVisionModel,
 )
+from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from agilerl.architectures import trainer_model_class
+from agilerl.architectures import install_family_patches, trainer_model_class
 from agilerl.architectures.catalog import nemotron_h_omni_vllm_hf_override
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
+from agilerl.architectures.mimo_v2.config import MiMoV2Config
+from agilerl.architectures.runtime import TrainerRuntimeConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
+from agilerl.distributed.context_parallel import substitute_hf_ulysses_attn
 from agilerl.llm_envs import DatasetEnv
+from agilerl.lora.moe import device_expert_backend
+from agilerl.lora.moe import grouped_gemm as moe_gemm
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
@@ -71,13 +81,14 @@ from agilerl.utils.llm_utils import (
     attention_mask_from_padded_ids,
     baseline_free_turn_cells,
     batch_is_single_turn,
+    broadcast_log_ratio_by_level,
     build_bnb_quantization_config,
     build_completion_mask,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     calculate_k3_kl,
     check_vllm_lora_export_complete,
-    clipped_is_surrogate,
+    clipped_token_surrogate,
     collect_trainable_param_stats,
     compare_responses,
     create_model_from_name_or_path,
@@ -89,7 +100,8 @@ from agilerl.utils.llm_utils import (
     gather_to_host,
     get_lora_params,
     get_model_name_or_path,
-    hf_completion_lengths,
+    global_masked_whiten,
+    has_vision_tower,
     k3_kl_penalty_reference,
     language_model_attn_implementation,
     language_model_prefix,
@@ -111,7 +123,6 @@ from agilerl.utils.llm_utils import (
     peft_target_key_matches,
     pool_by_turns,
     pool_log_ratio_by_level,
-    prepare_prompt_hf_generate,
     remap_peft_lora_key_for_vllm,
     render_chat_template,
     report_model_kernels,
@@ -125,12 +136,23 @@ from agilerl.utils.llm_utils import (
     set_sub_model_attn_implementation,
     snapshot_lora_adapters,
     trainer_attn_implementation,
+    turn_state_values,
     validate_importance_sampling_level,
     value_fit,
     write_lora_adapters,
     write_safetensors,
 )
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helper_functions import skip_torch_compile_on_windows_cpu
+from tests.rank_launch import run_ranks
+from tests.test_distributed.quantized_checkpoints import (
+    INPUT_IDS,
+    QuantizedCheckpoint,
+    reference_model,
+    tiny_dsv4_config,
+    write_dsv4_checkpoint,
+    write_glm_checkpoint,
+)
 
 DUMMY_CONVERSATION_TEMPLATE = [
     {
@@ -595,6 +617,108 @@ class TestSampleEvalPrompts:
         assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
         assert all(r[2] is None for r in rows)
 
+    def test_sample_eval_prompts_preference_env_with_default_response_column(self):
+        """A preference ``DatasetEnv`` carries the default ``response_column`` too."""
+        from types import SimpleNamespace
+
+        ds = Datasets.from_dict(
+            {"prompt": ["p0"], "chosen": ["c0"], "rejected": ["x0"]},
+        )
+        env = SimpleNamespace(
+            response_column="response",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "c0", "x0")]
+
+    def test_sample_eval_prompts_response_column_wins_when_chosen_remains(self):
+        """An SFT split that still has chosen and rejected uses the target column."""
+        ds = Datasets.from_dict(
+            {
+                "prompt": ["p0"],
+                "target": ["answer"],
+                "chosen": ["preferred"],
+                "rejected": ["worse"],
+            },
+        )
+        env = SimpleNamespace(
+            objective="sft",
+            response_column="target",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "answer", None)]
+
+    def test_sample_eval_prompts_response_column_without_rejected(self):
+        """A leftover chosen column with no rejected does not raise."""
+        ds = Datasets.from_dict(
+            {"prompt": ["p0"], "target": ["answer"], "chosen": ["preferred"]},
+        )
+        env = SimpleNamespace(
+            objective="sft",
+            response_column="target",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "answer", None)]
+
+    def test_sample_eval_prompts_preference_ignores_response_column(self):
+        """A preference split with a ``response`` column keeps chosen and rejected."""
+        ds = Datasets.from_dict(
+            {
+                "prompt": ["p0"],
+                "response": ["unused"],
+                "chosen": ["preferred"],
+                "rejected": ["worse"],
+            },
+        )
+        env = SimpleNamespace(
+            objective="preference",
+            response_column="response",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "preferred", "worse")]
+
+    def test_sample_eval_prompts_messages_rows_without_prompt_columns(self):
+        """A ``messages`` row samples its rendered context and first assistant turn."""
+        from types import SimpleNamespace
+
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        user = {"role": "user", "content": "Hi"}
+        ds = Datasets.from_dict(
+            {"messages": [[user, {"role": "assistant", "content": "Hello"}]]}
+        )
+        env = SimpleNamespace(
+            response_column="response",
+            tokenizer=tokenizer,
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        # Act
+        rows = sample_eval_prompts(env, n=1, seed=0)
+
+        # Assert
+        assert rows == [
+            (
+                tokenizer.apply_chat_template(
+                    [user], tokenize=False, add_generation_prompt=True
+                ),
+                "Hello",
+                None,
+            )
+        ]
+
+    def test_sample_eval_prompts_messages_rows_need_a_tokenizer(self):
+        from types import SimpleNamespace
+
+        ds = Datasets.from_dict({"messages": [[{"role": "user", "content": "Hi"}]]})
+        env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+
+        with pytest.raises(TypeError, match=r"env\.tokenizer is required"):
+            sample_eval_prompts(env, n=1, seed=0)
+
     def test_sample_eval_prompts_preference_style_chosen_rejected(self):
         """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
         from types import SimpleNamespace
@@ -872,74 +996,6 @@ class TestValidateLlmContextLengths:
             validate_llm_context_lengths(64, 256)
 
 
-class TestHfTurnGenerationConfig:
-    def test_copies_config_and_sets_per_turn_max_new_tokens(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(
-            max_new_tokens=64, min_new_tokens=None, temperature=0.9
-        )
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config is not original
-        assert turn_config.max_new_tokens == 5
-        assert original.max_new_tokens == 64
-        assert turn_config.temperature == 0.9
-
-    def test_unset_cap_uses_remaining_context(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=None, min_new_tokens=None)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=32,
-            prompt_length=10,
-            max_output_tokens=None,
-        )
-
-        assert turn_config.max_new_tokens == 22
-        assert original.max_new_tokens is None
-
-    def test_clamps_min_new_tokens_to_per_turn_budget(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=16)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 5
-        assert original.min_new_tokens == 16
-
-    def test_leaves_min_new_tokens_when_it_fits(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=4)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 4
-        assert original.min_new_tokens == 4
-
-
 def test_move_params_helpers_call_model_move_and_cuda_sync():
     model_gpu = MagicMock()
     gpu_param = MagicMock()
@@ -1005,7 +1061,7 @@ def test_get_model_name_or_path_helpers():
 
 
 def test_k3_helper_matches_torch() -> None:
-    """K3 estimator helper is the same formula Liger ships."""
+    """K3 estimator helper matches the closed-form K3 formula."""
     torch.manual_seed(5)
     ref = torch.randn(3, 4) * 0.1
     policy = torch.randn(3, 4) * 0.1
@@ -1014,7 +1070,7 @@ def test_k3_helper_matches_torch() -> None:
     assert torch.allclose(calculate_k3_kl(ref, policy), expected)
 
 
-def test_k3_helper_matches_liger_direction() -> None:
+def test_k3_helper_uses_reference_first_order() -> None:
     """Reference-first order estimates KL(policy || reference), not the reverse."""
     ref = torch.tensor([-1.0, -1.0])
     policy = torch.tensor([-1.0, -2.0])
@@ -1178,6 +1234,11 @@ class TestMicroBatchMetrics:
         assert metrics.read() == []
         assert metrics.means() == {"loss": 0.0, "kl": 0.0}
 
+    def test_read_is_empty_before_any_micro_batch(self) -> None:
+        metrics = MicroBatchMetrics(("loss",))
+
+        assert metrics.read() == []
+
     def test_detaches_tensors_that_carry_gradients(self) -> None:
         weight = torch.tensor(2.0, requires_grad=True)
         metrics = MicroBatchMetrics(("loss",))
@@ -1235,6 +1296,49 @@ class TestMaskedWhiten:
         whitened_shift = masked_whiten(values, mask, shift_mean=True)
         diff = whitened_no_shift - whitened_shift
         assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
+
+
+GLOBAL_WHITEN_VALUES = (
+    torch.tensor([[1.0, 2.0, 3.0]]),
+    torch.tensor([[10.0, 20.0, 30.0]]),
+)
+
+
+def _global_whiten_worker(rank: int, _world_size: int) -> list[float]:
+    """This rank's masked values after global whitening."""
+    values = GLOBAL_WHITEN_VALUES[rank]
+    mask = torch.ones_like(values)
+
+    return global_masked_whiten(values, mask)[mask.bool()].tolist()
+
+
+class TestGlobalMaskedWhiten:
+    def test_matches_masked_whiten_on_one_process(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0], [2.0, 9.0, 4.0]])
+        mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+
+        whitened = global_masked_whiten(values, mask)
+
+        expected = masked_whiten(values, mask)
+        assert torch.allclose(whitened[mask.bool()], expected[mask.bool()], atol=1e-6)
+
+    def test_leaves_values_unchanged_with_fewer_than_two_unmasked(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0]])
+        mask = torch.tensor([[1.0, 0.0, 0.0]])
+
+        assert torch.equal(global_masked_whiten(values, mask), values)
+
+    @pytest.mark.multi_rank
+    def test_uses_the_mean_and_variance_over_every_rank(self) -> None:
+        # Arrange
+        pooled = torch.cat(GLOBAL_WHITEN_VALUES, dim=1)
+        expected = masked_whiten(pooled, torch.ones_like(pooled)).flatten().tolist()
+
+        # Act
+        per_rank = run_ranks(_global_whiten_worker, 2)
+
+        # Assert
+        assert per_rank[0] + per_rank[1] == pytest.approx(expected, abs=1e-6)
 
 
 class TestBaselineFreeTurnCells:
@@ -1309,15 +1413,41 @@ class TestValueFit:
         assert value_fit(values, returns, mask) == (0.0, 0.0)
 
     def test_turn_ids_compare_pooled_turn_values(self) -> None:
-        values = torch.tensor([[1.0, 3.0, 5.0, 5.0, 7.0]])
+        values = torch.tensor([[2.0, 3.0, 5.0, 9.0, 7.0]])
         returns = torch.tensor([[2.0, 2.0, 5.0, 5.0, 0.0]])
         mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]])
         turn_ids = torch.tensor([[0, 0, 1, 1, -1]])
 
-        explained, correlation = value_fit(values, returns, mask, turn_ids, "mean")
+        explained, correlation = value_fit(values, returns, mask, turn_ids)
 
         assert explained == pytest.approx(1.0)
         assert correlation == pytest.approx(1.0)
+
+
+class TestTurnStateValues:
+    def test_selects_first_action_token_per_turn(self) -> None:
+        token_values = torch.tensor([[1.0, 9.0, 2.0, 8.0]])
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=2)
+
+        assert torch.equal(out, torch.tensor([[1.0, 2.0]]))
+
+    def test_missing_turn_is_zero(self) -> None:
+        token_values = torch.tensor([[4.0, 5.0]])
+        turn_ids = torch.tensor([[0, 0]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=2)
+
+        assert torch.equal(out, torch.tensor([[4.0, 0.0]]))
+
+    def test_non_action_tokens_do_not_count_as_a_turn(self) -> None:
+        token_values = torch.tensor([[9.0, 9.0]])
+        turn_ids = torch.tensor([[-1, -1]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=1)
+
+        assert torch.equal(out, torch.tensor([[0.0]]))
 
 
 class TestPoolByTurnsBadReduction:
@@ -1330,157 +1460,79 @@ class TestPoolByTurnsBadReduction:
             pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
 
 
-class TestPoolLogRatioByLevelBadReduction:
-    """``pool_log_ratio_by_level`` rejects unknown turn reductions at the turn level."""
+class TestPoolLogRatioByLevelErrors:
+    def test_turn_level_requires_turn_ids(self) -> None:
+        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
+            pool_log_ratio_by_level(torch.zeros(1, 2), torch.ones(1, 2), None, "turn")
 
-    def test_unknown_turn_reduction_raises(self) -> None:
-        token_log_ratio = torch.zeros(1, 2)
-        action_mask = torch.ones(1, 2)
-        turn_ids = torch.tensor([[0, 0]])
-        with pytest.raises(ValueError, match=r"turn_reduction must be one of"):
-            pool_log_ratio_by_level(
-                token_log_ratio,
-                action_mask,
-                turn_ids,
-                level="turn",
-                turn_reduction="unsupported",
-            )
+    def test_unknown_level_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
+            pool_log_ratio_by_level(torch.zeros(1, 2), torch.ones(1, 2), None, "bogus")
 
 
-class TestClippedIsSurrogate:
-    """The shared token/turn/sequence clipped surrogate used by the non-Liger
-    PPO and REINFORCE paths. token/turn/sequence are points on one
-    ratio-pooling axis, so the level collapses cleanly at the limits.
-    """
-
-    @staticmethod
-    def _setup():
-        torch.manual_seed(0)
-        B, T = 3, 6
-        token_log_ratio = torch.randn(B, T)
-        advantages = torch.randn(B, T)
-        mask = torch.ones(B, T)
-        mask[0, 5:] = 0  # ragged sequence
-        return token_log_ratio, advantages, mask, B, T
-
-    def test_turn_each_token_own_turn_equals_token(self):
-        tlr, adv, mask, _B, T = self._setup()
-        turn_each = torch.where(
-            mask.bool(),
-            torch.arange(T).unsqueeze(0).expand_as(mask).long(),
-            torch.full_like(mask, -1, dtype=torch.long),
-        )
-        pg_tok, cf_tok = clipped_is_surrogate(tlr, adv, mask, turn_each, "token", 0.2)
-        pg_turn, cf_turn = clipped_is_surrogate(tlr, adv, mask, turn_each, "turn", 0.2)
-        assert torch.allclose(pg_tok, pg_turn, atol=1e-5)
-        assert torch.allclose(cf_tok, cf_turn, atol=1e-5)
-
-    def test_single_turn_equals_sequence(self):
-        tlr, adv, mask, B, T = self._setup()
-        turn_one = torch.where(
-            mask.bool(),
-            torch.zeros(B, T, dtype=torch.long),
-            torch.full((B, T), -1, dtype=torch.long),
-        )
-        pg_turn, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "turn", 0.2)
-        pg_seq, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "trajectory", 0.2)
-        assert torch.allclose(pg_turn, pg_seq, atol=1e-5)
-
-    def test_sequence_pools_ratio_and_advantage(self):
-        """Trajectory level uses the length-normalized mean log-ratio and the
-        mean advantage over a completion's action tokens.
-        """
-        tlr = torch.tensor([[0.2, 0.4, 1.0, -5.0]])
-        adv = torch.tensor([[1.0, 3.0, 2.0, 99.0]])
-        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])  # last token non-action
-        pg, _ = clipped_is_surrogate(tlr, adv, mask, None, "trajectory", 0.2)
-        mean_lr = (0.2 + 0.4 + 1.0) / 3
-        mean_adv = (1.0 + 3.0 + 2.0) / 3
-        ratio = torch.exp(torch.tensor(mean_lr))
-        clipped = torch.clamp(ratio, 0.8, 1.2)
-        expected = torch.max(-mean_adv * ratio, -mean_adv * clipped)
-        assert torch.allclose(pg, expected, atol=1e-5)
-
-    def test_turn_sum_reduction_pools_ratio_by_product_but_advantage_by_mean(self):
-        """With ``turn_reduction="sum"`` the turn ratio is the product of token
-        ratios (nightly/Turn-PPO), while the (broadcast) advantage is still
-        recovered by the turn mean — i.e. it is *not* rescaled by turn length.
-        """
-        # One sample, one turn, two action tokens; advantage is the per-turn
-        # value broadcast across both tokens (as the GAE code produces).
-        tlr = torch.tensor([[0.1, 0.2]])
-        adv = torch.tensor([[2.0, 2.0]])
-        mask = torch.ones(1, 2)
-        turn_ids = torch.zeros(1, 2, dtype=torch.long)
-        # Wide clip so the ratio is never clamped, isolating the pooling logic.
-        pg, _ = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 10.0, turn_reduction="sum"
-        )
-        ratio = torch.exp(torch.tensor(0.1 + 0.2))  # product ratio
-        expected = -2.0 * ratio  # mean-pooled advantage, NOT 4.0
-        assert torch.allclose(pg, expected, atol=1e-5)
-
-    def test_turn_count_above_the_largest_turn_gives_the_same_loss(self):
-        # Arrange
-        tlr, adv, mask, _B, T = self._setup()
-        turn_ids = torch.where(
-            mask.bool(),
-            (torch.arange(T) // 3).unsqueeze(0).expand_as(mask),
-            torch.full_like(mask, -1, dtype=torch.long),
-        )
-        weight = torch.rand_like(tlr)
+class TestBroadcastLogRatioByLevel:
+    def test_turn_level_gives_every_token_its_turns_mean(self) -> None:
+        # Arrange: turn 0 owns tokens 0-1, turn 1 tokens 2-4; token 5 is not an action.
+        log_ratio = torch.tensor([[0.2, 0.4, 0.3, 0.6, 0.9, 5.0]])
+        action_mask = torch.tensor([[1, 1, 1, 1, 1, 0]], dtype=torch.bool)
+        turn_ids = torch.tensor([[0, 0, 1, 1, 1, -1]])
 
         # Act
-        inferred = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight
-        )
-        widened = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight, num_turns=5
-        )
+        out = broadcast_log_ratio_by_level(log_ratio, action_mask, turn_ids, "turn", 2)
 
         # Assert
-        assert torch.equal(widened[0], inferred[0])
-        assert torch.equal(widened[1], inferred[1])
+        expected = torch.tensor([0.3, 0.3, 0.6, 0.6, 0.6])
+        assert torch.allclose(out[0, :5], expected, atol=1e-6)
 
-    def test_turn_requires_turn_ids(self):
-        tlr, adv, mask, _B, _T = self._setup()
-        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
-            clipped_is_surrogate(tlr, adv, mask, None, "turn", 0.2)
+    def test_trajectory_level_gives_every_token_the_row_mean(self) -> None:
+        log_ratio = torch.tensor([[0.2, 0.4, 9.0], [1.0, 1.0, 1.0]])
+        action_mask = torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.bool)
 
-    def test_unknown_level_raises(self):
-        tlr, adv, mask, _B, _T = self._setup()
-        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
-            clipped_is_surrogate(tlr, adv, mask, None, "bogus", 0.2)
+        out = broadcast_log_ratio_by_level(log_ratio, action_mask, None, "trajectory")
 
-    def test_gradient_flows_to_log_ratio(self):
-        """All levels are differentiable w.r.t. the token log-ratio."""
-        for level, turn_ids in (
-            ("token", None),
-            ("trajectory", None),
-            ("turn", torch.zeros(3, 6, dtype=torch.long)),
-        ):
-            tlr, adv, mask, _B, _T = self._setup()
-            tlr = tlr.clone().requires_grad_(True)
-            pg, _ = clipped_is_surrogate(tlr, adv, mask, turn_ids, level, 0.2)
-            pg.backward()
-            assert tlr.grad is not None
-            assert torch.isfinite(tlr.grad).all()
+        assert out.shape == (2, 3)
+        assert torch.allclose(out[0, :2], torch.tensor([0.3, 0.3]), atol=1e-6)
+        assert torch.allclose(out[1], torch.ones(3), atol=1e-6)
 
-    def test_loss_weight_scales_per_unit_surrogate(self):
-        """A detached per-token loss weight reweights the surrogate; uniform
-        weights of 1 are a no-op and uniform weights of w scale pg_loss by w.
-        """
-        tlr, adv, mask, _B, _T = self._setup()
-        pg_base, cf_base = clipped_is_surrogate(tlr, adv, mask, None, "token", 0.2)
-        pg_ones, cf_ones = clipped_is_surrogate(
-            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.ones_like(tlr)
+    def test_token_level_is_the_identity(self) -> None:
+        log_ratio = torch.tensor([[0.2, -0.4]])
+
+        out = broadcast_log_ratio_by_level(
+            log_ratio, torch.ones(1, 2, dtype=torch.bool), None, "token"
         )
-        assert torch.allclose(pg_base, pg_ones, atol=1e-6)
-        assert torch.allclose(cf_base, cf_ones, atol=1e-6)
-        pg_half, _ = clipped_is_surrogate(
-            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.full_like(tlr, 0.5)
-        )
-        assert torch.allclose(pg_half, 0.5 * pg_base, atol=1e-6)
+
+        assert torch.equal(out, log_ratio)
+
+
+class TestClippedTokenSurrogate:
+    def test_clips_each_token_by_the_sign_of_its_advantage(self) -> None:
+        # Arrange: one shared ratio of e^0.5 > 1.2; only positive advantages
+        # past the upper bound lose their gradient.
+        log_w = torch.full((1, 3), 0.5, requires_grad=True)
+        advantages = torch.tensor([[1.0, -1.0, 2.0]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
+
+        # Act
+        surrogate, clipped = clipped_token_surrogate(log_w, advantages, mask, 0.8, 1.2)
+        surrogate.sum().backward()
+
+        # Assert
+        ratio = math.exp(0.5)
+        assert torch.allclose(surrogate, torch.tensor([[-1.2, ratio, -2.4]]), atol=1e-6)
+        assert clipped.tolist() == [[True, False, True]]
+        assert log_w.grad is not None
+        assert log_w.grad.tolist()[0][0] == 0.0
+        assert log_w.grad.tolist()[0][2] == 0.0
+        assert log_w.grad[0, 1].item() == pytest.approx(ratio, rel=1e-6)
+
+    def test_masked_tokens_are_never_clipped(self) -> None:
+        log_w = torch.full((1, 2), -1.0)
+        advantages = torch.tensor([[-1.0, -1.0]])
+        mask = torch.tensor([[True, False]])
+
+        _, clipped = clipped_token_surrogate(log_w, advantages, mask, 0.8, 1.2)
+
+        assert clipped.tolist() == [[True, False]]
 
 
 class TestCreateModelFromNameOrPathValueHead:
@@ -1489,7 +1541,7 @@ class TestCreateModelFromNameOrPathValueHead:
     """
 
     def test_add_value_head_calls_value_head_loader(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         from agilerl.utils import llm_utils as llm_utils_module
 
@@ -1510,11 +1562,14 @@ class TestCreateModelFromNameOrPathValueHead:
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         sentinel_model = nn.Identity()
-        with patch.object(
-            llm_utils_module.AutoModelForCausalLMWithValueHead,
-            "from_pretrained",
-            return_value=sentinel_model,
-        ) as mock_loader:
+        with (
+            patch.object(
+                llm_utils_module.AutoModelForCausalLMWithValueHead,
+                "from_pretrained",
+                return_value=sentinel_model,
+            ) as mock_loader,
+            caplog.at_level(logging.INFO, logger=llm_utils_module.__name__),
+        ):
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
                 "sdpa",
@@ -1522,6 +1577,9 @@ class TestCreateModelFromNameOrPathValueHead:
                 use_distributed=False,
             )
         assert out is sentinel_model
+        assert "Trainer attention backend: sdpa" in caplog.messages
+        # Default model_config is built when not supplied; verify the loader saw
+        # the model name plus the synthesized dtype/attn keys.
         call_kwargs = mock_loader.call_args.kwargs
         assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
         assert call_kwargs["attn_implementation"] == "sdpa"
@@ -2081,7 +2139,13 @@ class TestAdaptLoraConfigForSupportedVlModels:
     def test_covers_every_transformers_vl_family(self):
         families = {SUPPORTED_MODEL_INFO[h].model_type for h in VL_SUPPORTED_MODEL_IDS}
 
-        assert families == {"gemma4", "nemotron_h_omni", "qwen3_5", "qwen3_5_moe"}
+        assert families == {
+            "gemma4",
+            "glm5_next",
+            "nemotron_h_omni",
+            "qwen3_5",
+            "qwen3_5_moe",
+        }
 
     @pytest.mark.parametrize("target_modules", ["default", "all-linear"])
     @pytest.mark.parametrize("hub_id", VL_SUPPORTED_MODEL_IDS)
@@ -2219,6 +2283,167 @@ class TestAdaptLoraConfigForModelMamba:
         )
 
         assert adapt_lora_config_for_model(_MambaLikeModel(), cfg) is cfg
+
+
+def _meta_supported_model(hub_id: str) -> nn.Module:
+    """Full-size meta build of a ``SUPPORTED_MODEL_INFO`` entry."""
+    entry = SUPPORTED_MODEL_INFO[hub_id]
+    config_dict = json.loads(json.dumps(entry.config), object_hook=_decode_config_float)
+    if entry.model_type == "mimo_v2":
+        install_family_patches("mimo_v2")
+        config = MiMoV2Config.from_dict(config_dict)
+    else:
+        config = AutoConfig.for_model(**config_dict)
+    with torch.device("meta"):
+        return trainer_model_class(hub_id).from_config(config)
+
+
+def _adapter_module_patterns(hub_id: str, target_modules: str | list[str]) -> set[str]:
+    """Language-model module paths, layer index as ``N``, that get a LoRA adapter."""
+    model = _meta_supported_model(hub_id)
+    adapted = adapt_lora_config_for_model(
+        model, LoraConfig(r=8, target_modules=target_modules)
+    )
+    peft_model = get_peft_model(model, adapted)
+    return {
+        re.sub(r"\.\d+\.", ".N.", name.removeprefix("base_model.model.")).rsplit(
+            ".lora_A", 1
+        )[0]
+        for name, _ in peft_model.named_parameters()
+        if ".lora_A." in name and ".visual." not in name
+    }
+
+
+class TestAdaptLoraConfigForModelFamilyExclusions:
+    def test_all_linear_skips_deepseek_v4_compressor_and_grouped_output(self):
+        adapters = _adapter_module_patterns(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", "all-linear"
+        )
+
+        assert adapters == {
+            "model.layers.N.self_attn.q_a_proj",
+            "model.layers.N.self_attn.q_b_proj",
+            "model.layers.N.self_attn.kv_proj",
+            "model.layers.N.self_attn.o_b_proj",
+            "model.layers.N.mlp.shared_experts.gate_proj",
+            "model.layers.N.mlp.shared_experts.up_proj",
+            "model.layers.N.mlp.shared_experts.down_proj",
+        }
+
+    def test_all_linear_skips_glm5_next_indexer_and_replicated_gates(self):
+        adapters = _adapter_module_patterns("zai-org/GLM-5.3-Flash", "all-linear")
+
+        layer = "model.language_model.layers.N"
+        excluded = (
+            "indexer.wk",
+            "indexer.wq_b",
+            "weights_proj",
+            "f_a_proj",
+            "g_a_proj",
+        )
+        assert not any(name.endswith(excluded) for name in adapters)
+        assert {
+            f"{layer}.self_attn.q_proj",
+            f"{layer}.self_attn.b_proj",
+            f"{layer}.self_attn.g_b_proj",
+            f"{layer}.self_attn.forget_gate.f_b_proj",
+            f"{layer}.self_attn.q_a_proj",
+            f"{layer}.self_attn.kv_b_proj",
+            f"{layer}.mlp.down_proj",
+        } <= adapters
+
+    def test_all_linear_skips_mimo_v2_qkv(self):
+        adapters = _adapter_module_patterns(
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL", "all-linear"
+        )
+
+        assert adapters == {
+            "model.layers.N.self_attn.o_proj",
+            "model.layers.N.mlp.gate_proj",
+            "model.layers.N.mlp.up_proj",
+            "model.layers.N.mlp.down_proj",
+        }
+
+    @pytest.mark.parametrize(
+        ("hub_id", "target_modules", "expected"),
+        [
+            (
+                "deepseek-ai/DeepSeek-V4-Flash-0731",
+                ["kv_proj", "gate_proj", "o_a_proj"],
+                {
+                    "model.layers.N.self_attn.kv_proj",
+                    "model.layers.N.mlp.shared_experts.gate_proj",
+                },
+            ),
+            (
+                "zai-org/GLM-5.3-Flash",
+                ["f_a_proj", "f_b_proj", "wk"],
+                {"model.language_model.layers.N.self_attn.forget_gate.f_b_proj"},
+            ),
+            (
+                "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+                ["q_proj", "o_proj"],
+                {"model.layers.N.self_attn.o_proj"},
+            ),
+        ],
+    )
+    def test_named_targets_skip_excluded_modules(
+        self, hub_id: str, target_modules: list[str], expected: set[str]
+    ):
+        assert _adapter_module_patterns(hub_id, target_modules) == expected
+
+    def test_regex_targets_skip_excluded_modules(self):
+        adapters = _adapter_module_patterns(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", r".*self_attn\..*kv_proj"
+        )
+
+        assert adapters == {"model.layers.N.self_attn.kv_proj"}
+
+    def test_only_excluded_targets_raise(self):
+        model = _meta_supported_model("XiaomiMiMo/MiMo-V2.6-Flash-RL")
+        adapted = adapt_lora_config_for_model(
+            model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
+        )
+
+        with pytest.raises(ValueError, match="No modules were targeted"):
+            get_peft_model(model, adapted)
+
+    def test_user_exclusions_are_kept(self):
+        # Arrange
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(target_modules=["o_proj"], exclude_modules=["gate_proj"])
+
+        # Act
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        # Assert
+        assert adapted.exclude_modules == ["gate_proj", "k_proj", "q_proj", "v_proj"]
+        assert cfg.exclude_modules == ["gate_proj"]
+
+    def test_regex_user_exclusions_raise(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(target_modules=["o_proj"], exclude_modules=r".*gate")
+
+        with pytest.raises(ValueError, match="cannot take the mimo_v2 exclusions"):
+            adapt_lora_config_for_model(model, cfg)
+
+    def test_already_excluded_family_modules_is_identity(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(
+            target_modules=["o_proj"], exclude_modules=["q_proj", "k_proj", "v_proj"]
+        )
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+    def test_family_without_exclusions_is_unchanged(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="qwen3")
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
 
 
 class TestLoraTargetModuleNames:
@@ -2360,6 +2585,30 @@ class TestTrainerAttnImplementation:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         assert trainer_attn_implementation("google/gemma", True) == "flex_attention"
+
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            ("deepseek_v4", "flex_attention"),
+            ("glm5_next", "sdpa"),
+            ("glm5_next_text", "sdpa"),
+        ],
+    )
+    def test_pinned_backend_on_cuda_needs_no_flash_attn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_type: str,
+        expected: str,
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            attn = trainer_attn_implementation("org/model", True)
+
+        assert attn == expected
+        assert "No attention backend" not in caplog.text
 
     @pytest.mark.parametrize("model_type", ["qwen3", "nemotron_h"])
     def test_raises_on_cuda_without_flash_attn(
@@ -2546,6 +2795,18 @@ class TestLanguageModelAttnImplementation:
             language_model_attn_implementation(module)
 
 
+class TestHasVisionTower:
+    def test_vision_language_model_has_one(self):
+        assert has_vision_tower(tiny_vl_model("eager")) is True
+
+    def test_causal_lm_has_none(self):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+
+        assert has_vision_tower(model) is False
+
+
 class TestReportModelKernels:
     def test_logs_attention_per_sub_model(self, caplog):
         # Arrange
@@ -2561,6 +2822,16 @@ class TestReportModelKernels:
         assert "attention language_model (LlamaForCausalLM): eager" in caplog.text
         assert "attention vision_model (SiglipVisionModel): eager" in caplog.text
         assert "mamba fast path" not in caplog.text
+
+    def test_logs_language_model_backend_at_info(self, caplog):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+
+        assert "Trainer attention backend: eager" in caplog.messages
 
     def test_logs_mamba_fast_path(self, caplog):
         # Arrange
@@ -2587,30 +2858,55 @@ class TestReportModelKernels:
         # Assert
         assert f"mamba fast path {mixer_namespace}: {fast_path}" in caplog.text
 
-    def test_logs_grouped_mm_probe_when_cuda_present(self, monkeypatch, caplog):
+    def test_logs_expert_gemm_backend_when_cuda_present(self, monkeypatch, caplog):
+        # Arrange
+        config = Qwen3MoeConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            moe_intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
+            num_experts=4,
+            num_experts_per_tok=2,
+        )
+        model = Qwen3MoeForCausalLM._from_config(
+            config, attn_implementation="eager", dtype=torch.bfloat16
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (10, 0))
+        monkeypatch.setattr(moe_gemm, "probe_grouped_mm", lambda *_args: None)
+        device_expert_backend.cache_clear()
+
+        # Act
+        with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+        device_expert_backend.cache_clear()
+
+        # Assert
+        assert "expert GEMM backend torch.bfloat16: grouped_mm" in caplog.text
+
+    def test_omits_expert_gemm_backend_for_a_model_without_experts(
+        self, monkeypatch, caplog
+    ):
         # Arrange
         model = LlamaForCausalLM._from_config(
             tiny_llama_config(), attn_implementation="eager"
         )
-        probed = []
-
-        def probe(device_index, dtype):
-            probed.append((device_index, dtype))
-            return True
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
-        monkeypatch.setattr(llm_utils_module, "grouped_mm_supported", probe)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
 
         # Act
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
             report_model_kernels(model, "eager")
 
         # Assert
-        assert probed == [(3, torch.float32)]
-        assert "grouped_mm torch.float32: True" in caplog.text
+        assert "expert GEMM backend" not in caplog.text
 
-    def test_omits_grouped_mm_probe_without_cuda(self, monkeypatch, caplog):
+    def test_omits_expert_gemm_backend_without_cuda(self, monkeypatch, caplog):
         model = LlamaForCausalLM._from_config(
             tiny_llama_config(), attn_implementation="eager"
         )
@@ -2619,7 +2915,7 @@ class TestReportModelKernels:
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
             report_model_kernels(model, "eager")
 
-        assert "grouped_mm" not in caplog.text
+        assert "expert GEMM backend" not in caplog.text
 
     def test_raises_when_language_model_ignores_request(self, monkeypatch):
         monkeypatch.setattr(LlamaPreTrainedModel, "_supports_flex_attn", False)
@@ -2647,6 +2943,9 @@ class _RegisterOnlyRegistry:
     def __init__(self):
         self.registered = {}
 
+    def __getitem__(self, key):
+        return self.registered[key]
+
     def __setitem__(self, key, value):
         msg = "immutable registry"
         raise TypeError(msg)
@@ -2667,12 +2966,19 @@ class TestPatchFlexAttentionKernelOptions:
             calls.append(kwargs)
             return "flex-out"
 
-        if already_patched:
-            fake_flex_attention_forward._agilerl_kernel_opts_patched = True
+        def patched_flex(*_args, **_kwargs):
+            return "patched-out"
+
+        patched_flex._agilerl_kernel_opts_patched = True
+        registered = patched_flex if already_patched else fake_flex_attention_forward
+        if registry is None:
+            registry = {"flex_attention": registered}
+        else:
+            registry.register("flex_attention", registered)
         flex_mod = types.ModuleType("transformers.integrations.flex_attention")
         flex_mod.flex_attention_forward = fake_flex_attention_forward
         modeling_mod = types.ModuleType("transformers.modeling_utils")
-        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry if registry is not None else {}
+        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry
         monkeypatch.setitem(
             sys.modules, "transformers.integrations.flex_attention", flex_mod
         )
@@ -2693,8 +2999,42 @@ class TestPatchFlexAttentionKernelOptions:
 
     def test_double_patch_guard_skips_reinstall(self, monkeypatch):
         registry, _ = self._install_fake_flex(monkeypatch, already_patched=True)
+        patched = registry["flex_attention"]
         patch_flex_attention_kernel_options()
-        assert registry == {}
+        assert registry["flex_attention"] is patched
+
+    def test_second_patch_keeps_the_first_wrapper(self, monkeypatch):
+        # Arrange
+        registry, _ = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        first = registry["flex_attention"]
+
+        # Act
+        patch_flex_attention_kernel_options()
+
+        # Assert
+        assert registry["flex_attention"] is first
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_second_patch_keeps_a_ulysses_wrapper_registered_over_the_first(
+        self, monkeypatch
+    ):
+        # Arrange
+        monkeypatch.setitem(
+            ALL_ATTENTION_FUNCTIONS, "flex_attention", flex_attention_forward
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        substitute_hf_ulysses_attn(torch.distributed.group.WORLD, "flex_attention")
+        ulysses_wrapper = ALL_ATTENTION_FUNCTIONS["flex_attention"]
+
+        # Act
+        patch_flex_attention_kernel_options()
+
+        # Assert
+        assert ulysses_wrapper._agilerl_ulysses is True
+        assert ALL_ATTENTION_FUNCTIONS["flex_attention"] is ulysses_wrapper
 
     @staticmethod
     def _query(seq_len_q):
@@ -3037,6 +3377,68 @@ class TestCreateModelFromNameOrPathDefaults:
         assert captured["name"] == "nvidia/Nemotron-H-8B"
 
 
+@pytest.fixture(
+    scope="module",
+    params=[write_dsv4_checkpoint, write_glm_checkpoint],
+    ids=["deepseek_v4", "glm5_next"],
+)
+def quantized_checkpoint(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> QuantizedCheckpoint:
+    return request.param(tmp_path_factory.mktemp("quantized"))
+
+
+class TestCreateModelFromNameOrPathQuantizedCheckpoint:
+    def test_sm90_gpu_loads_dequantized_weights(
+        self, quantized_checkpoint, monkeypatch
+    ):
+        # Arrange
+        # SM 9.0 keeps FP8 weights unless the load dequantizes them.
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (9, 0))
+
+        # Act
+        model = create_model_from_name_or_path(
+            str(quantized_checkpoint.directory),
+            "eager",
+            model_config={"device_map": "cpu"},
+        )
+
+        # Assert
+        state = model.state_dict()
+        assert state.keys() == quantized_checkpoint.reference.keys()
+        for name, expected in quantized_checkpoint.reference.items():
+            assert state[name].dtype in (torch.bfloat16, torch.float32, expected.dtype)
+            assert torch.equal(state[name], expected.to(state[name].dtype)), name
+
+    @skip_torch_compile_on_windows_cpu
+    def test_bf16_logits_match_reference_model(self, quantized_checkpoint):
+        # Arrange
+        model = create_model_from_name_or_path(
+            str(quantized_checkpoint.directory), "eager"
+        ).eval()
+        expected_model = reference_model(quantized_checkpoint, model)
+
+        # Act
+        with torch.no_grad():
+            logits = model(input_ids=INPUT_IDS).logits
+            expected = expected_model(input_ids=INPUT_IDS).logits
+
+        # Assert
+        # Same bf16 weights, buffers and CPU kernels on both sides.
+        assert torch.equal(logits, expected)
+
+    def test_unsupported_quantization_raises(self, tmp_path):
+        # Arrange
+        config = tiny_dsv4_config()
+        config["quantization_config"] = {"quant_method": "awq", "bits": 4}
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Cannot train on AwqConfig checkpoints"):
+            create_model_from_name_or_path(str(tmp_path), "eager")
+
+
 class TestBatchIsSingleTurn:
     def test_missing_turn_ids_is_single_turn(self):
         assert batch_is_single_turn(None) is True
@@ -3154,17 +3556,6 @@ class TestPoolLogRatioByLevel:
         assert unit_mask.tolist() == [[1.0, 0.0]]
         assert weights[0, 1].item() == pytest.approx(0.0)
 
-    def test_turn_level_sum_reduction_matches_product_ratio_log_pooling(self):
-        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-        mask = torch.ones(1, 4)
-        turn_ids = torch.tensor([[0, 0, 1, 1]])
-        weights, unit_mask = pool_log_ratio_by_level(
-            tlr, mask, turn_ids, "turn", turn_reduction="sum"
-        )
-        assert weights.shape == (1, 2)
-        assert weights[0].tolist() == pytest.approx([3.0, 7.0])
-        assert unit_mask.tolist() == [[1.0, 1.0]]
-
     def test_trajectory_level_masks_rows_without_action_tokens(self):
         tlr = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
         mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]])
@@ -3232,26 +3623,6 @@ class TestBuildCompletionMask:
             build_completion_mask(
                 completion, prompt_len=0, pad_token_id=0, completion_len=gen_lens
             )
-
-
-class TestHfCompletionLengths:
-    def test_recovers_gen_len_including_stopping_eos_when_pad_aliases_eos(self):
-        # pad == eos == 0. Row0 stops on EOS after 3 gen tokens; row1 after 1.
-        out = torch.tensor([[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]])
-        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
-        assert lens.tolist() == [4, 2]
-
-    def test_row_that_hits_cap_has_no_pad_in_gen_region(self):
-        out = torch.tensor([[10, 11, 12, 41, 42, 43, 44], [10, 11, 12, 31, 0, 0, 0]])
-        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
-        assert lens.tolist() == [4, 2]
-
-    def test_empty_gen_region_returns_zeros(self):
-        out = torch.tensor([[10, 11, 12, 13], [10, 11, 12, 13]])
-
-        lens = hf_completion_lengths(out, prompt_len=4, pad_token_id=0)
-
-        assert lens.tolist() == [0, 0]
 
 
 class TestCudaTensorBytesInModule:
@@ -3868,9 +4239,9 @@ class TestSavePeftAdapterForVllmRollout:
         return calls
 
     def _peft_model(self):
-        return SimpleNamespace(
-            peft_config={"actor": self._FakePeftConfig()}, named_parameters=list
-        )
+        model = nn.Module()
+        model.peft_config = {"actor": self._FakePeftConfig()}
+        return model
 
     def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
         monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
@@ -3925,6 +4296,7 @@ class TestSavePeftAdapterForVllmRollout:
         model = SimpleNamespace(
             peft_config={"actor": self._FakePeftConfig()},
             named_parameters=lambda: [(key, shard)],
+            named_modules=list,
         )
 
         save_peft_adapter_for_vllm_rollout(
@@ -4131,46 +4503,23 @@ class TestCheckVllmLoraExportComplete:
             check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
 
 
-class TestCrossRankLigerAlign:
-    def test_needs_cross_rank_seq_padding_gates_on_liger_token_is(self):
+class TestCrossRankSeqPadding:
+    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(fsdp_config=object()),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(distributed=True),
+            world_size=2,
+        )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True, importance_sampling_level="token"),
+            SimpleNamespace(distributed=True),
             world_size=1,
         )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=False, importance_sampling_level="token"),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True, importance_sampling_level="trajectory"),
-            world_size=2,
-        )
-        # Missing attrs: liger_loss defaults False; IS level defaults "token".
         assert not llm_utils_module.needs_cross_rank_seq_padding(
             SimpleNamespace(),
             world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True, importance_sampling_level="token"),
-            world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True),  # default IS level is token
-            world_size=2,
-        )
-
-    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(fsdp_config=object(), liger_loss=False),
-            world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, liger_loss=False),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, liger_loss=False),
-            world_size=1,
         )
 
     def test_pad_completion_batch_to_seq_len_happy_and_noop(self):
@@ -4642,7 +4991,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=True)
+                trainer=TrainerRuntimeConfig(trust_remote_code=True)
             ),
         )
         monkeypatch.setattr(
@@ -4670,7 +5019,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=False)
+                trainer=TrainerRuntimeConfig(trust_remote_code=False)
             ),
         )
         monkeypatch.setattr(
@@ -4707,7 +5056,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda _path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=False)
+                trainer=TrainerRuntimeConfig(trust_remote_code=False)
             ),
         )
 
@@ -4715,14 +5064,47 @@ class TestResolvePadTokenId:
             msg = "config.json"
             raise OSError(msg)
 
-        monkeypatch.setattr(
-            "agilerl.utils.llm_utils.AutoConfig.from_pretrained", missing
-        )
+        monkeypatch.setattr("transformers.AutoConfig.from_pretrained", missing)
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.GenerationConfig.from_pretrained", missing
         )
 
         assert llm_utils_module.load_pad_token_configs("org/model") == (None, None)
+
+    def test_load_pad_token_configs_reads_unregistered_mimo_v2_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        raw = SUPPORTED_MODEL_INFO["XiaomiMiMo/MiMo-V2.6-Flash-RL"].config
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    **raw,
+                    "auto_map": {
+                        "AutoConfig": "configuration_mimo_v2.MiMoV2Config",
+                    },
+                }
+            )
+        )
+        # A fresh interpreter: the mimo_v2 test conftest registers the config in this one.
+        script = (
+            "import sys\n"
+            "from transformers.models.auto.configuration_auto import CONFIG_MAPPING\n"
+            "from agilerl.utils.llm_utils import load_pad_token_configs\n"
+            "model_config, _ = load_pad_token_configs(sys.argv[1])\n"
+            "print('mimo_v2' in CONFIG_MAPPING, model_config.pad_token_id)\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip().splitlines()[-1] == "False 151643"
 
 
 class TestNormalizePromptBatch:
@@ -5091,23 +5473,6 @@ class TestResolveLlmDevice:
             assert resolve_llm_device("cuda") == "cuda:1"
 
         mock_resolve.assert_called_once_with("cuda")
-
-
-class TestPreparePromptHfGenerate:
-    def test_forwards_pixel_values_onto_the_generate_device(self) -> None:
-        device = torch.device("cpu")
-        pixel_values = torch.ones(1, 3, 2, 2)
-
-        tensors = prepare_prompt_hf_generate(
-            {
-                "input_ids": torch.tensor([[1, 2]]),
-                "pixel_values": pixel_values,
-            },
-            device,
-        )
-
-        assert torch.equal(tensors["pixel_values"], pixel_values)
-        assert tensors["pixel_values"].device == device
 
 
 class TestApplyVllmCompileCacheEnv:

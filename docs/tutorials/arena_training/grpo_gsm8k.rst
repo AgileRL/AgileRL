@@ -145,7 +145,7 @@ The Reward Function
 ~~~~~~~~~~~~~~~~~~~
 
 A reasoning job needs a reward function: a Python file that scores each completion the model
-produces. Arena calls a function named ``reward`` with three arguments, ``question``, ``answer``,
+produces. Arena calls a function named ``reward_fn`` with three arguments, ``question``, ``answer``,
 and ``completion``, and expects a single ``float`` back. The higher the reward, the better the
 completion.
 

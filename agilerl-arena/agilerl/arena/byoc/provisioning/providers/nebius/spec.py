@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     field_validator,
     model_validator,
@@ -184,6 +185,17 @@ class NebiusSpec(BaseModel):
     shared_filesystem: SharedFilesystemSpec = Field(
         default_factory=SharedFilesystemSpec
     )
+    _spec_ids: dict[str, str | None] = PrivateAttr()
+
+    def model_post_init(self, context: object, /) -> None:
+        """Record the resource ids the spec set, before the CLI fills any in."""
+        # model_copy skips this, so ids filled from Arena or Terraform outputs
+        # never become module inputs and the module keeps the projects it created.
+        self._spec_ids = {
+            "project_id": self.project_id,
+            "storage_project_id": self.storage_project_id,
+            "subnet_id": self.subnet_id,
+        }
 
     @field_validator("service_account_id")
     @classmethod
@@ -241,12 +253,18 @@ class NebiusSpec(BaseModel):
         self, storage_bucket_name: str, storage_endpoint: str
     ) -> dict[str, object]:
         """Return the module variables for this Nebius cluster."""
+        # Cycle: nebius.terraform imports ClusterSpec from provisioning.spec.
+        from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
+            nebius_region_from_endpoint,
+        )
+
         return {
             "tenant_id": self.tenant_id,
             "region": self.region or "",
-            "project_id": self.project_id or "",
-            "storage_project_id": self.storage_project_id or "",
-            "subnet_id": self.subnet_id or "",
+            "storage_region": nebius_region_from_endpoint(storage_endpoint),
+            "project_id": self._spec_ids["project_id"] or "",
+            "storage_project_id": self._spec_ids["storage_project_id"] or "",
+            "subnet_id": self._spec_ids["subnet_id"] or "",
             "service_account_id": self.service_account_id or "",
             "storage_bucket_name": storage_bucket_name,
             "storage_endpoint": storage_endpoint,
@@ -386,6 +404,26 @@ def attach_service_account_credentials(
     config["service_account_key"], config["profile"] = documents
 
 
+def attach_catalog_credentials(
+    payload: dict[str, object], outputs: dict[str, object]
+) -> None:
+    """Add the catalog access key and group when Terraform created them."""
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        return
+    credentials = {
+        key: _output_text(outputs.get(key))
+        for key in (
+            "catalog_access_key_id",
+            "catalog_secret_access_key",
+            "catalog_group_id",
+        )
+    }
+    if None in credentials.values():
+        return
+    config.update(credentials)
+
+
 def needs_stored_config(spec: ClusterSpec) -> bool:
     """Return whether omitted Nebius project ids should be loaded from Arena."""
     cloud = spec.nebius_cloud()
@@ -482,7 +520,7 @@ def resource_classes(
                     "computeResource": {
                         "numCpus": num_cpus,
                         "numGpus": num_gpus,
-                        "memoryBytes": f"{memory_gb} GB",
+                        "memoryBytes": f"{memory_gb} GiB",
                         "gramPerGpu": vram_gib,
                         "machineType": worker.preset,
                         "spot": False,
@@ -577,7 +615,7 @@ def _nebius_workers_from_config(
 def spec_from_stored_row(row: dict[str, object]) -> ClusterSpec:
     """Build a Nebius cluster spec from an Arena byoc cluster record."""
     # Cycle: provisioning.spec imports NebiusSpec from this module.
-    from agilerl.arena.byoc.provisioning.spec import ClusterSpec, placement_values
+    from agilerl.arena.byoc.provisioning.spec import ClusterSpec, stored_cluster_values
 
     name = _stored_text(row.get("name"))
     if name is None:
@@ -634,9 +672,9 @@ def spec_from_stored_row(row: dict[str, object]) -> ClusterSpec:
     }
     if module_version is not None:
         payload["module_version"] = module_version
-    stored_placement = placement_values(row)
-    if stored_placement is not None:
-        payload["values"] = stored_placement
+    stored_values = stored_cluster_values(row)
+    if stored_values is not None:
+        payload["values"] = stored_values
     try:
         return ClusterSpec.model_validate(payload)
     except ValidationError as exc:

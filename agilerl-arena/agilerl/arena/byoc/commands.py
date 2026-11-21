@@ -34,6 +34,7 @@ from agilerl.arena.byoc.cluster_token import (
     resolve_cluster_kubeconfig,
     run_cluster_rotate_token,
 )
+from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
 from agilerl.arena.byoc.provisioning.inference import normalize_inference_domain
 from agilerl.arena.byoc.provisioning.module_catalog import (
     open_module_catalog,
@@ -41,6 +42,10 @@ from agilerl.arena.byoc.provisioning.module_catalog import (
     selected_module_version,
 )
 from agilerl.arena.byoc.provisioning.providers import get_provider, provider_names
+from agilerl.arena.byoc.provisioning.providers.base import (
+    CreatedProjectsQuery,
+    EnsureGateway,
+)
 from agilerl.arena.byoc.provisioning.providers.nebius.ephemeral import (
     ensure_ephemeral_regions,
 )
@@ -49,7 +54,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.platforms import (
     append_worker_blocks,
     cuda_drivers_preset,
     list_capacity_advice,
-    list_gpu_presets,
+    list_registerable_gpu_presets,
     project_id_from_outputs,
     region_capacity_for_preset,
     resolve_gpu_presets,
@@ -58,6 +63,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.platforms import (
 )
 from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
     WorkerNodeGroupSpec,
+    attach_catalog_credentials,
     attach_service_account_credentials,
     resource_classes,
 )
@@ -76,10 +82,15 @@ from agilerl.arena.byoc.provisioning.terraform import (
 )
 from agilerl.arena.cli_manifest import _parse_json_cli_value
 from agilerl.arena.config import CommandConfig, arena_client
+from agilerl.arena.exceptions import ArenaAPIError
 
 logger = logging.getLogger("agilerl.arena.byoc")
 SENSITIVE_STATUS_OUTPUTS = frozenset(
-    {"service_account_private_key", "storage_secret_access_key"}
+    {
+        "service_account_private_key",
+        "storage_secret_access_key",
+        "catalog_secret_access_key",
+    }
 )
 
 
@@ -179,6 +190,7 @@ def _register_provisioned_cluster(config: CommandConfig, **fields: object) -> No
             tls_secret_name=outputs.inference_tls_secret_name,
             inference_domain=registration["inference_domain"],
             placement=cast("str", registration["placement"]),
+            byoc_scope=cast("str | None", registration.get("byoc_scope")),
             byoc_provider=_byoc_provider_with_module(
                 cluster_spec,
                 outputs,
@@ -211,6 +223,15 @@ def _byoc_provider_with_module(
     ):
         config["service_account_key"] = outputs.service_account_key
         config["profile"] = outputs.service_account_profile
+    if (
+        isinstance(config, dict)
+        and outputs.catalog_access_key_id
+        and outputs.catalog_secret_access_key
+        and outputs.catalog_group_id
+    ):
+        config["catalog_access_key_id"] = outputs.catalog_access_key_id
+        config["catalog_secret_access_key"] = outputs.catalog_secret_access_key
+        config["catalog_group_id"] = outputs.catalog_group_id
     if state_dir is None:
         return payload
     pin = read_module_pin(state_dir)
@@ -241,6 +262,7 @@ def _registration_values_from_spec(
     hostname_template = cast("str | None", overrides.get("hostname_template"))
     tls_secret_name = cast("str | None", overrides.get("tls_secret_name"))
     placement = cast("str | None", overrides.get("placement"))
+    byoc_scope = cast("str | None", overrides.get("byoc_scope"))
     refs = gateway_api_parent_refs
     if isinstance(refs, str):
         refs = _parse_json_cli_value(refs)
@@ -263,6 +285,7 @@ def _registration_values_from_spec(
         hostname_template=hostname_template,
         tls_secret_name=tls_secret_name,
         placement=placement,
+        byoc_scope=byoc_scope,
     )
     arena = resolved.arena
     return resolved, {
@@ -281,6 +304,7 @@ def _registration_values_from_spec(
         "ray_data_storage_class_name": arena.workloads.ray_data_storage_class_name,
         "ray_data_pvc_size": arena.workloads.ray_data_pvc_size,
         "placement": resolved.values.placement,
+        "byoc_scope": resolved.values.byoc_scope,
         "byoc_provider": get_provider(resolved.provider).registration_payload(resolved),
     }
 
@@ -327,6 +351,7 @@ REGISTER_OVERRIDE_KEYS = (
     "hostname_template",
     "tls_secret_name",
     "placement",
+    "byoc_scope",
 )
 
 REGISTER_RUNTIME_KEYS = (
@@ -343,6 +368,7 @@ REGISTER_RUNTIME_KEYS = (
     "ray_data_storage_class_name",
     "ray_data_pvc_size",
     "placement",
+    "byoc_scope",
     "byoc_provider",
 )
 
@@ -683,7 +709,9 @@ def _register_runtime_fields(
     fields["inference_domain"] = inference_domain
     fields["byoc_provider"] = None
     if fields.get("placement") is None:
-        fields["placement"] = "in-cluster"
+        fields["placement"] = (
+            "ephemeral" if fields.get("byoc_scope") == "platform" else "in-cluster"
+        )
     return fields
 
 
@@ -806,6 +834,7 @@ def _register_existing_cluster(
                 storage_project_id=output_text("storage_project_id"),
             )
             attach_service_account_credentials(fields["byoc_provider"], values)
+            attach_catalog_credentials(fields["byoc_provider"], values)
     kubeconfig = _kubeconfig_for_register_install(
         config, cluster_spec, registration, options, output_dir
     )
@@ -815,9 +844,7 @@ def _register_existing_cluster(
         and cluster_spec.arena.gateway.enable
     ):
         parent_refs = get_provider(cluster_spec.provider).ensure_gateway(
-            cluster_spec,
-            kubeconfig,
-            values or {},
+            EnsureGateway(cluster_spec, kubeconfig, values or {})
         )
         if parent_refs is not None:
             fields["gateway_api_parent_refs"] = parent_refs
@@ -882,12 +909,13 @@ def build_cluster_register_command() -> click.Command:
     @_cluster_register_options
     @click.pass_obj
     def register_cmd(config: CommandConfig, **options: object) -> None:
-        """Register a customer Kubernetes cluster and write Helm install bundles.
+        """Register a Kubernetes cluster and write Helm install bundles.
 
         Re-running with the same ``--name`` updates the existing cluster (upsert).
         Object storage is optional. ``--install`` deploys the agent chart.
         ``--install-storage`` requests bundled MinIO and installs that chart.
         ``--lab`` is ``--install-storage --narrow-allowed-ips``.
+        ``--byoc-scope platform`` shares the Arena catalog and bucket.
         """
         _run_register_command(config, options)
 
@@ -1104,6 +1132,59 @@ def build_cluster_rotate_token_command() -> click.Command:
     return rotate_token_cmd
 
 
+def build_cluster_upgrade_command() -> click.Command:
+    """Build ``arena cluster upgrade``."""
+
+    @click.command("upgrade")
+    @click.option("--name", required=True, help="Registered cluster name.")
+    @click.option(
+        "--kubeconfig",
+        type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        default=None,
+        help=(
+            "Kubeconfig for the agent cluster. Defaults to "
+            "arena-cluster-NAME/kubeconfig when that file exists."
+        ),
+    )
+    @click.option(
+        "--agent-namespace",
+        default=None,
+        help=(
+            "Kubernetes namespace for the agent Helm release. "
+            "Defaults to the namespace Helm reports for this cluster."
+        ),
+    )
+    @click.option(
+        "--no-helm-wait",
+        is_flag=True,
+        default=False,
+        help="Do not wait for the agent Deployment.",
+    )
+    @click.pass_obj
+    def upgrade_cmd(
+        config: CommandConfig,
+        name: str,
+        kubeconfig: Path | None,
+        agent_namespace: str | None,
+        no_helm_wait: bool,
+    ) -> None:
+        """Upgrade the BYOC agent chart without changing cluster credentials."""
+        cluster_name = name.strip()
+        if not cluster_name:
+            msg = "--name is required."
+            raise click.ClickException(msg)
+        with arena_client(config) as client:
+            run_cluster_upgrade(
+                client,
+                name=cluster_name,
+                kubeconfig=kubeconfig,
+                agent_namespace=agent_namespace,
+                helm_wait=not no_helm_wait,
+            )
+
+    return upgrade_cmd
+
+
 def _cluster_provision_options(command: click.Command) -> click.Command:
     """Add shared cloud-provisioning options to a Click command."""
     command = click.option(
@@ -1191,7 +1272,23 @@ def _cluster_registration_options(command: click.Command) -> click.Command:
         ),
     ):
         command = click.option(declaration, **kwargs)(command)
-    return command
+    return _byoc_scope_option(command)
+
+
+def _byoc_scope_option(command: click.Command) -> click.Command:
+    """Add the customer or platform scope override."""
+    return click.option(
+        "--byoc-scope",
+        type=click.Choice(["customer", "platform"]),
+        default=None,
+        help=(
+            "customer keeps this org's bucket. "
+            "platform shares the Arena catalog and bucket "
+            "and requires a platform admin. "
+            "Choosing platform uses ephemeral placement unless "
+            "--placement is set."
+        ),
+    )(command)
 
 
 def _load_provisioning(
@@ -1237,9 +1334,12 @@ def _register_gpu_resource_classes(
     if project_id is None:
         terraform_outputs = runner.status(spec, state_dir=state_dir)
         project_id = project_id_from_outputs(terraform_outputs)
-    presets = list_gpu_presets(project_id)
+    presets = list_registerable_gpu_presets(spec, project_id)
     if not presets:
-        msg = f"No GPU presets in Nebius project {project_id!r}."
+        if spec.values.placement == "ephemeral":
+            msg = f"No GPU presets in region projects for cluster {spec.name!r}."
+        else:
+            msg = f"No GPU presets in Nebius project {project_id!r}."
         raise click.ClickException(msg)
     selected = resolve_gpu_presets(
         presets, register_all=register_all, requested=requested_presets
@@ -1274,12 +1374,30 @@ def _register_gpu_resource_classes(
     advice = list_capacity_advice(spec.nebius_cloud().tenant_id)
     api.load_classes()
     for resource_class in classes:
+        _ensure_gpu_resource_class(api, spec.name, resource_class, advice, yes)
+
+
+def _ensure_gpu_resource_class(
+    api: ByocApi,
+    cluster_name: str,
+    resource_class: ClusterResourceClass,
+    advice: list[dict[str, Any]],
+    yes: bool,
+) -> None:
+    """Register one class. Skip a platform Arena does not recognize."""
+    try:
         ensure_resource_class(
             api,
-            cluster_name=spec.name,
+            cluster_name=cluster_name,
             resource_class=_with_region_capacity(resource_class, advice),
             yes=yes,
         )
+    except ArenaAPIError as exc:
+        if exc.status_code != 400 or not exc.detail.startswith(
+            "unknown Nebius platform"
+        ):
+            raise
+        click.echo(f"Skipped resource class {resource_class.name!r}: {exc.detail}")
 
 
 def _with_region_capacity(
@@ -1831,7 +1949,9 @@ def _load_destroy_target(
         raise click.ClickException(msg)
     if spec is not None:
         cluster_spec, resolved_state = _load_provisioning(spec, state_dir)
-        created = get_provider(cluster_spec.provider).created_projects(cluster_spec)
+        created = get_provider(cluster_spec.provider).created_projects(
+            CreatedProjectsQuery(cluster_spec)
+        )
         return _recover_spec(config, cluster_spec), resolved_state, created
     with arena_client(config) as client:
         row = ByocApi(client).byoc_cluster(cluster_name)
@@ -1869,7 +1989,7 @@ def _destroy_prompt(
     if delete_all:
         region_projects = ""
         if cluster_spec.provider == "nebius":
-            region_projects = ", including its arena region projects"
+            region_projects = ", including its region projects"
         return (
             f"Destroy {cloud} cluster {cluster_spec.name!r}, its object storage, "
             f"and its IAM{region_projects}? Terraform state bucket "
@@ -2027,7 +2147,7 @@ def build_cluster_destroy_command() -> click.Command:
         is_flag=True,
         default=False,
         help=(
-            "Delete this cluster's buckets and IAM, including Nebius arena region "
+            "Delete this cluster's buckets and IAM, including its Nebius region "
             "projects. The Terraform state bucket is deleted last."
         ),
     )
