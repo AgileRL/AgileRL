@@ -5,8 +5,12 @@ Training GRPO on GSM8K in Arena
 
 This tutorial walks through the full Arena workflow for LLM reasoning: registering a dataset,
 writing a reward function, submitting a training job, monitoring progress, and deploying the
-fine-tuned model. We fine-tune ``Qwen/Qwen3.5-0.8B`` with **GRPO** on **GSM8K**, a
+fine-tuned model. We fine-tune ``Qwen/Qwen2.5-0.5B-Instruct`` with **GRPO** on **GSM8K**, a
 dataset of grade-school math word problems, as our running example.
+
+It is the language-model counterpart to :ref:`tutorial_arena_end_to_end`. Where that tutorial
+validates a custom Gymnasium environment, here we register a Hugging Face dataset and supply a
+reward function instead.
 
 Prerequisites
 -------------
@@ -191,19 +195,17 @@ Submit a Training Job
 ~~~~~~~~~~~~~~~~~~~~~
 
 We define the training configuration in a YAML manifest (``gsm8k_grpo.yaml``). The ``environment``
-section is a ``rollout`` over the dataset we registered: ``name`` and ``dataset`` both give its
-registered name, and ``prompt_template`` turns each row's ``question`` into the chat the model
-sees. The manifest leaves out ``rubric_file_path``; ``--reward-file`` fills it in on submit. The
-``network`` section names the base model and its LoRA adapter, so training only updates the
-adapter weights.
+section references the dataset by the name we registered it under. The ``network`` section names
+the base model and its LoRA adapter, so training only updates the adapter weights.
 
 .. collapse:: gsm8k_grpo.yaml
 
    .. literalinclude:: /_static/examples/gsm8k_grpo.yaml
       :language: yaml
 
-The model architecture comes entirely from ``pretrained_model_name_or_path`` and the
-``lora_config``.
+Unlike the :ref:`PPO tutorial <tutorial_arena_end_to_end>`, there is no observation space for Arena
+to infer an encoder from. The model architecture comes entirely from
+``pretrained_model_name_or_path`` and the ``lora_config``.
 
 We submit the manifest together with the reward function. Passing ``--reward-file`` tells Arena
 this is a reasoning job, and it validates the reward function against a sample completion before
@@ -236,7 +238,7 @@ the run starts.
 
 .. tip::
 
-   You can view the GPU types available to train on by running the CLI command ``arena resources list``.
+   You can view all of the available resources to train on by running the CLI command ``arena resources list``.
 
 Monitor Training
 ~~~~~~~~~~~~~~~~

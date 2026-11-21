@@ -1311,7 +1311,15 @@ def _global_whiten_worker(rank: int, _world_size: int) -> list[float]:
     values = GLOBAL_WHITEN_VALUES[rank]
     mask = torch.ones_like(values)
 
-    return global_masked_whiten(values, mask)[mask.bool()].tolist()
+    return global_masked_whiten(values, mask, 1)[mask.bool()].tolist()
+
+
+def _replicated_whiten_worker(_rank: int, _world_size: int) -> list[float]:
+    """Masked values whitened on a rank whose rows every rank also holds."""
+    values = GLOBAL_WHITEN_VALUES[0]
+    mask = torch.ones_like(values)
+
+    return global_masked_whiten(values, mask, 2)[mask.bool()].tolist()
 
 
 class TestGlobalMaskedWhiten:
@@ -1319,7 +1327,7 @@ class TestGlobalMaskedWhiten:
         values = torch.tensor([[1.0, 3.0, 5.0], [2.0, 9.0, 4.0]])
         mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
 
-        whitened = global_masked_whiten(values, mask)
+        whitened = global_masked_whiten(values, mask, 1)
 
         expected = masked_whiten(values, mask)
         assert torch.allclose(whitened[mask.bool()], expected[mask.bool()], atol=1e-6)
@@ -1328,7 +1336,7 @@ class TestGlobalMaskedWhiten:
         values = torch.tensor([[1.0, 3.0, 5.0]])
         mask = torch.tensor([[1.0, 0.0, 0.0]])
 
-        assert torch.equal(global_masked_whiten(values, mask), values)
+        assert torch.equal(global_masked_whiten(values, mask, 1), values)
 
     @pytest.mark.multi_rank
     def test_uses_the_mean_and_variance_over_every_rank(self) -> None:
@@ -1341,6 +1349,19 @@ class TestGlobalMaskedWhiten:
 
         # Assert
         assert per_rank[0] + per_rank[1] == pytest.approx(expected, abs=1e-6)
+
+    @pytest.mark.multi_rank
+    def test_counts_rows_replicated_across_ranks_once(self) -> None:
+        # Arrange
+        values = GLOBAL_WHITEN_VALUES[0]
+        expected = masked_whiten(values, torch.ones_like(values)).flatten().tolist()
+
+        # Act
+        per_rank = run_ranks(_replicated_whiten_worker, 2)
+
+        # Assert
+        assert per_rank[0] == pytest.approx(expected, abs=1e-6)
+        assert per_rank[1] == pytest.approx(expected, abs=1e-6)
 
 
 class TestBaselineFreeTurnCells:

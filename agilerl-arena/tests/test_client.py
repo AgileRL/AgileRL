@@ -258,19 +258,6 @@ class TestArenaClientConfigure:
         assert orig == ArenaClient.BASE_URL
 
 
-DEV_ISSUER = "https://arena-dev-auth.example.com/realms/arena"
-
-
-def _jwt(claims: dict) -> str:
-    import base64
-
-    def seg(obj: dict) -> str:
-        raw = json.dumps(obj, separators=(",", ":")).encode()
-        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-    return f"{seg({'alg': 'none'})}.{seg(claims)}.x"
-
-
 class TestArenaClientLogin:
     def test_login_stores_tokens(self, unauthenticated_client):
         client = unauthenticated_client
@@ -282,98 +269,54 @@ class TestArenaClientLogin:
         assert client._tokens.refresh_token == "rt"
         client._auth.device_login.assert_called_once_with(timeout=60)
 
-    def test_login_signs_in_even_when_saved_login_is_valid(
-        self, unauthenticated_client
-    ):
+    def test_login_skips_device_when_jwt_still_valid(self, unauthenticated_client):
         client = unauthenticated_client
         client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
         client._tokens.refresh_token = "rt"
-        client._auth.device_login = MagicMock(
+        client._auth.device_login = MagicMock()
+        client.login()
+        client._auth.device_login.assert_not_called()
+
+    def test_login_refreshes_when_jwt_expired(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
+        client._tokens.refresh_token = "rt"
+        client._auth.device_login = MagicMock()
+        client._auth.refresh_access_token = MagicMock(
             return_value={"access_token": "new_at", "refresh_token": "new_rt"}
         )
-
         client.login()
-
+        client._auth.device_login.assert_not_called()
+        client._auth.refresh_access_token.assert_called_once_with("rt")
         assert client._tokens.access_token == "new_at"
         assert client._tokens.refresh_token == "new_rt"
 
-    def test_login_ends_saved_session_at_its_own_keycloak(
-        self, unauthenticated_client, credentials_path
+    def test_login_falls_back_to_device_when_refresh_fails(
+        self, unauthenticated_client
     ):
-        # Arrange
         client = unauthenticated_client
-        credentials_path.write_text(
-            json.dumps(
-                {
-                    "access_token": "old_at",
-                    "refresh_token": "old_rt",
-                    "issuer": DEV_ISSUER,
-                }
-            ),
-            encoding="utf-8",
-        )
+        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
+        client._tokens.refresh_token = "rt"
+        client._auth.refresh_access_token = MagicMock(side_effect=ArenaAuthError("bad"))
         client._auth.device_login = MagicMock(
-            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+            return_value={"access_token": "dev_at", "refresh_token": "dev_rt"}
         )
-        client._auth.end_session = MagicMock()
-
-        # Act
         client.login()
+        client._auth.device_login.assert_called_once()
 
-        # Assert
-        client._auth.end_session.assert_called_once_with("old_rt", DEV_ISSUER)
-        assert client._tokens.refresh_token == "new_rt"
-
-    def test_login_reports_signed_in_user(self, unauthenticated_client, caplog):
+    def test_login_force_runs_device_even_when_valid(self, unauthenticated_client):
         client = unauthenticated_client
-        client._auth.device_login = MagicMock(
-            return_value={
-                "access_token": _jwt({"email": "a@example.com"}),
-                "refresh_token": "rt",
-            }
-        )
+        client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
+        tokens = {"access_token": "from_dev", "refresh_token": "rt2"}
+        client._auth.device_login = MagicMock(return_value=tokens)
+        client.login(force=True)
+        client._auth.device_login.assert_called_once()
 
-        with caplog.at_level(logging.INFO, logger="agilerl.arena.client"):
-            client.login()
-
-        assert "Logged in to Arena as a@example.com" in caplog.text
-
-    def test_login_with_api_key_warns_and_signs_in(self, api_key_client, caplog):
+    def test_login_noop_with_api_key(self, api_key_client):
         client = api_key_client
-        client._auth.device_login = MagicMock(
-            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
-        )
-
-        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
-            client.login()
-
-        assert client._api_key is None
-        assert client._tokens.access_token == "new_at"
-        assert "An API key is set" in caplog.text
-
-    def test_login_keeps_api_key_when_sign_in_fails(self, api_key_client):
-        client = api_key_client
-        client._saved_login_issuer = DEV_ISSUER
-        client._auth.device_login = MagicMock(side_effect=ArenaAuthError("timed out"))
-
-        with pytest.raises(ArenaAuthError, match="timed out"):
-            client.login()
-
-        assert client._api_key == "test-key"
-        assert client._saved_login_issuer == DEV_ISSUER
-        assert client._tokens.access_token is None
-
-    def test_login_clears_saved_issuer(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._saved_login_issuer = DEV_ISSUER
-        client._auth.device_login = MagicMock(
-            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
-        )
-
+        client._auth.device_login = MagicMock()
         client.login()
-
-        assert client._saved_login_issuer is None
-        assert client._tokens.access_token == "new_at"
+        client._auth.device_login.assert_not_called()
 
     def test_login_noop_with_org_key(self):
         with patch("agilerl.arena.auth.KeycloakOpenID"):
@@ -382,7 +325,7 @@ class TestArenaClientLogin:
                 external_user_id="partner-user-1",
             )
         client._auth.device_login = MagicMock()
-        client.login()
+        client.login(force=True)
         client._auth.device_login.assert_not_called()
 
     @patch("agilerl.arena.client.load_credentials")
@@ -440,136 +383,15 @@ class TestArenaClientLogin:
         client._auth.refresh_access_token.assert_not_called()
 
 
-class TestArenaClientRestoreSession:
-    def _client(self) -> ArenaClient:
-        with patch.dict(os.environ, _env_without_arena_secrets(), clear=True):
-            with patch("agilerl.arena.auth.KeycloakOpenID"):
-                return ArenaClient()
-
-    def test_loads_saved_login_for_this_keycloak(self, credentials_path):
-        issuer = ArenaOAuth2().issuer
-        credentials_path.write_text(
-            json.dumps({"access_token": "at", "refresh_token": "rt", "issuer": issuer}),
-            encoding="utf-8",
-        )
-
-        client = self._client()
-
-        assert client._tokens.refresh_token == "rt"
-
-    def test_ignores_saved_login_for_other_keycloak(self, credentials_path):
-        credentials_path.write_text(
-            json.dumps(
-                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
-            ),
-            encoding="utf-8",
-        )
-
-        client = self._client()
-
-        assert client._tokens.access_token is None
-        assert client._tokens.refresh_token is None
-
-    def test_request_names_the_other_keycloak(self, credentials_path):
-        credentials_path.write_text(
-            json.dumps(
-                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
-            ),
-            encoding="utf-8",
-        )
-        client = self._client()
-
-        with pytest.raises(
-            ArenaAuthError, match=f"saved Arena login is for {re.escape(DEV_ISSUER)}"
-        ):
-            client._send("GET", "/api/cli/v1/me")
-
-    def test_api_key_leaves_other_keycloak_login_unloaded(self, credentials_path):
-        credentials_path.write_text(
-            json.dumps(
-                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
-            ),
-            encoding="utf-8",
-        )
-
-        with patch("agilerl.arena.auth.KeycloakOpenID"):
-            client = ArenaClient(api_key="test-key")
-
-        assert client._api_key == "test-key"
-        assert client._tokens.access_token is None
-        assert client._tokens.refresh_token is None
-        assert client._saved_login_issuer == DEV_ISSUER
-
-    def test_api_key_loads_login_for_this_keycloak(self, credentials_path):
-        issuer = ArenaOAuth2().issuer
-        credentials_path.write_text(
-            json.dumps({"access_token": "at", "refresh_token": "rt", "issuer": issuer}),
-            encoding="utf-8",
-        )
-
-        with patch("agilerl.arena.auth.KeycloakOpenID"):
-            client = ArenaClient(api_key="test-key")
-
-        assert client._api_key == "test-key"
-        assert client._tokens.refresh_token == "rt"
-        assert client._saved_login_issuer is None
-
-    def test_rejected_api_key_does_not_send_other_keycloak_token(
-        self, credentials_path
-    ):
-        credentials_path.write_text(
-            json.dumps(
-                {
-                    "access_token": "dev_at",
-                    "refresh_token": "dev_rt",
-                    "issuer": DEV_ISSUER,
-                }
-            ),
-            encoding="utf-8",
-        )
-        with patch("agilerl.arena.auth.KeycloakOpenID"):
-            client = ArenaClient(api_key="test-key")
-        client._auth.refresh_access_token = MagicMock()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.is_success = False
-        mock_resp.text = "Unauthorized"
-        client._http.request = MagicMock(return_value=mock_resp)
-
-        with pytest.raises(ArenaAuthError, match="Invalid API key"):
-            client._request("GET", "/api/test")
-
-        assert client._http.request.call_count == 1
-        client._auth.refresh_access_token.assert_not_called()
-        assert client._api_key == "test-key"
-        assert client._tokens.refresh_token is None
-
-
 class TestArenaClientLogout:
     def test_logout_revokes_and_clears(self, token_client):
         client = token_client
         client._auth.revoke = MagicMock()
 
         client.logout()
-        client._auth.revoke.assert_called_once_with("tok_refresh", None)
+        client._auth.revoke.assert_called_once_with("tok_refresh")
         assert client._tokens.access_token is None
         assert client._tokens.refresh_token is None
-
-    def test_logout_revokes_saved_login_for_other_keycloak(
-        self, unauthenticated_client, credentials_path
-    ):
-        client = unauthenticated_client
-        credentials_path.write_text(
-            json.dumps(
-                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
-            ),
-            encoding="utf-8",
-        )
-        client._auth.revoke = MagicMock()
-
-        client.logout()
-
-        client._auth.revoke.assert_called_once_with("rt", DEV_ISSUER)
 
     def test_logout_without_refresh_token(self, unauthenticated_client):
         client = unauthenticated_client
@@ -579,25 +401,6 @@ class TestArenaClientLogout:
         client.logout()
         client._auth.revoke.assert_not_called()
         assert client._tokens.access_token is None
-
-    def test_logout_clears_saved_issuer(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._saved_login_issuer = DEV_ISSUER
-        client._tokens.refresh_token = "rt"
-        client._auth.revoke = MagicMock()
-
-        client.logout()
-
-        assert client._saved_login_issuer is None
-        assert client._tokens.refresh_token is None
-
-    def test_logout_clears_saved_issuer_without_a_session(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._saved_login_issuer = DEV_ISSUER
-
-        client.logout()
-
-        assert client._saved_login_issuer is None
 
 
 class TestIsAuthenticated:
@@ -1362,20 +1165,45 @@ class TestValidateEnvironmentParams:
         assert payload["version"] == "v2"
         assert payload["entrypoint"] == "my_env:make"
 
-    def test_create_sends_a_language_based_env(self, api_key_client, tmp_path):
-        # Arrange
+    def test_create_forwards_multi_agent(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
         archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
+
         mock_stream = _mock_ndjson_stream()
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
+            multi_agent=True,
+        )
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert call_kwargs["data"]["multi_agent"] == "true"
 
-        # Act
-        api_key_client.validate_environment(name="MyEnv", source=archive)
+    def test_create_forwards_language_based(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
 
-        # Assert
-        data = api_key_client._open_stream.call_args[1]["data"]
-        assert data["language_based"] == "true"
-        assert "multi_agent" not in data
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
+            language_based=True,
+        )
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert call_kwargs["data"]["language_based"] == "true"
 
     def test_create_forwards_entrypoint(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
@@ -1432,6 +1260,23 @@ class TestValidateEnvironmentParams:
 
 
 class TestCliV1EndpointPaths:
+    def test_profile_environment_uses_cli_v1_path(self, api_key_client):
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.profile_environment(name="MyEnv", version="v1")
+        api_key_client._open_stream.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/environments/profile",
+            json={"name": "MyEnv", "version": "v1"},
+            timeout=api_key_client._upload_timeout,
+        )
+
+    def test_profile_environment_sends_multi_agent(self, api_key_client):
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.profile_environment(name="MyEnv", multi_agent=True)
+        assert api_key_client._open_stream.call_args[1]["json"]["multi_agent"] is True
+
     @patch("builtins.input", return_value="y")
     def test_delete_environment_uses_cli_v1_path(self, mock_input, api_key_client):
         api_key_client.list_environments = MagicMock(
@@ -1612,6 +1457,21 @@ class TestSendStreaming:
             api_key_client._send("POST", "/api/test", stream=True)
         assert exc_info.value.status_code == 0
         assert "Network error" in exc_info.value.detail
+
+
+class TestLoginForceWithApiKey:
+    def test_force_clears_api_key_and_runs_device_login(self, api_key_client):
+        client = api_key_client
+        assert client._api_key == "test-key"
+        tokens = {"access_token": "new_at", "refresh_token": "new_rt"}
+        client._auth.device_login = MagicMock(return_value=tokens)
+
+        client.login(force=True)
+
+        assert client._api_key is None
+        client._auth.device_login.assert_called_once()
+        assert client._tokens.access_token == "new_at"
+        assert client._tokens.refresh_token == "new_rt"
 
 
 class TestDeleteEnvironmentMultiVersion:
@@ -2173,226 +2033,6 @@ class TestExperimentMethods:
         assert result == [{"step": 100}]
 
 
-def _rubric_rollout_manifest() -> dict:
-    """A GSM8K rollout naming ``RUBRIC`` but no rubric file."""
-    manifest = _grpo_manifest("org/untracked-model")
-    manifest["environment"] = {
-        "env_type": "rollout",
-        "dataset": "gsm8k",
-        "rubric_name": "RUBRIC",
-        "prompt_template": {
-            "system_0": "You are a helpful assistant.",
-            "user_1": "{question}",
-        },
-    }
-    return manifest
-
-
-class TestArenaClientSubmitExperimentRewardFile:
-    def test_fills_rubric_path_from_reward_file(self, api_key_client, tmp_path):
-        # Arrange
-        reward_path = tmp_path / "gsm8k_rubric.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest = _rubric_rollout_manifest()
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 7})
-        )
-
-        # Act
-        result = api_key_client.submit_experiment(
-            manifest=manifest, project="proj", reward_file=reward_path
-        )
-
-        # Assert
-        assert result == {"job_id": 7}
-        files = dict(api_key_client._open_stream.call_args[1]["files"])
-        environment = json.loads(files["manifest"][1])["environment"]
-        assert environment["rubric_file_path"] == "gsm8k_rubric.py"
-        assert environment["rubric_name"] == "RUBRIC"
-        assert files["reward_file"][0] == "gsm8k_rubric.py"
-        assert "rubric_file_path" not in manifest["environment"]
-
-    def test_fills_placeholder_for_reward_bytes(self, api_key_client):
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 8})
-        )
-
-        api_key_client.submit_experiment(
-            manifest=_rubric_rollout_manifest(),
-            project="proj",
-            reward_file=b"RUBRIC = None\n",
-        )
-
-        files = dict(api_key_client._open_stream.call_args[1]["files"])
-        environment = json.loads(files["manifest"][1])["environment"]
-        assert environment["rubric_file_path"] == "reward.py"
-        assert files["reward_file"][0] == "reward.py"
-
-    def test_keeps_manifest_path_for_reward_bytes(self, api_key_client):
-        manifest = _rubric_rollout_manifest()
-        manifest["environment"]["rubric_file_path"] = "rubrics/gsm8k.py"
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 9})
-        )
-
-        api_key_client.submit_experiment(
-            manifest=manifest, project="proj", reward_file=b"RUBRIC = None\n"
-        )
-
-        files = dict(api_key_client._open_stream.call_args[1]["files"])
-        environment = json.loads(files["manifest"][1])["environment"]
-        assert environment["rubric_file_path"] == "rubrics/gsm8k.py"
-
-    def test_accepts_matching_basename(self, api_key_client, tmp_path):
-        reward_path = tmp_path / "reward.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest = _rubric_rollout_manifest()
-        manifest["environment"]["reward_file_path"] = "./local/reward.py"
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 10})
-        )
-
-        result = api_key_client.submit_experiment(
-            manifest=manifest, project="proj", reward_file=reward_path
-        )
-
-        assert result == {"job_id": 10}
-
-    def test_rejects_mismatched_basename(self, api_key_client, tmp_path):
-        reward_path = tmp_path / "other.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest = _rubric_rollout_manifest()
-        manifest["environment"]["rubric_file_path"] = "reward.py"
-        api_key_client._open_stream = MagicMock()
-
-        with pytest.raises(
-            ArenaValidationError,
-            match=r"rubric_file_path names 'reward.py' but the reward file is 'other.py'",
-        ):
-            api_key_client.submit_experiment(
-                manifest=manifest, project="proj", reward_file=reward_path
-            )
-
-        api_key_client._open_stream.assert_not_called()
-
-    def test_without_reward_file_still_requires_rubric_path(self, api_key_client):
-        api_key_client._open_stream = MagicMock()
-
-        with pytest.raises(ValueError, match="rubric_name names a symbol"):
-            api_key_client.submit_experiment(
-                manifest=_rubric_rollout_manifest(), project="proj"
-            )
-
-        api_key_client._open_stream.assert_not_called()
-
-    def test_fills_rubric_path_when_grpo_omits_env_type(self, api_key_client, tmp_path):
-        # Arrange
-        reward_path = tmp_path / "gsm8k_rubric.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest = _rubric_rollout_manifest()
-        del manifest["environment"]["env_type"]
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 11})
-        )
-
-        # Act
-        result = api_key_client.submit_experiment(
-            manifest=manifest, project="proj", reward_file=reward_path
-        )
-
-        # Assert
-        assert result == {"job_id": 11}
-        files = dict(api_key_client._open_stream.call_args[1]["files"])
-        environment = json.loads(files["manifest"][1])["environment"]
-        assert environment["rubric_file_path"] == "gsm8k_rubric.py"
-        assert "env_type" not in manifest["environment"]
-
-    @pytest.mark.parametrize("env_type", [None, "dataset"])
-    def test_does_not_fill_rubric_path_for_sft(
-        self, api_key_client, tmp_path, env_type
-    ):
-        # Arrange
-        reward_path = tmp_path / "reward.py"
-        reward_path.write_text("RUBRIC = None\n")
-        environment = {"dataset": "openai/gsm8k"}
-        if env_type is not None:
-            environment["env_type"] = env_type
-            environment["objective"] = "sft"
-        manifest = {
-            "algorithm": {"name": "SFT"},
-            "environment": environment,
-            "network": {
-                "pretrained_model_name_or_path": "org/untracked-model",
-                "max_context_length": 1024,
-            },
-            "training": {"max_steps": 100},
-        }
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 12})
-        )
-
-        # Act
-        result = api_key_client.submit_experiment(
-            manifest=manifest, project="proj", reward_file=reward_path
-        )
-
-        # Assert
-        assert result == {"job_id": 12}
-        files = dict(api_key_client._open_stream.call_args[1]["files"])
-        sent = json.loads(files["manifest"][1])["environment"]
-        assert "rubric_file_path" not in sent
-
-    def test_unknown_algorithm_without_env_type_is_validation_error(
-        self, api_key_client, tmp_path
-    ):
-        reward_path = tmp_path / "reward.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest = _rubric_rollout_manifest()
-        del manifest["environment"]["env_type"]
-        manifest["algorithm"]["name"] = "NOPE"
-        api_key_client._open_stream = MagicMock()
-
-        with pytest.raises(ValueError, match="not a registered algorithm"):
-            api_key_client.submit_experiment(
-                manifest=manifest, project="proj", reward_file=reward_path
-            )
-
-        api_key_client._open_stream.assert_not_called()
-
-    def test_missing_algorithm_without_env_type_is_validation_error(
-        self, api_key_client, tmp_path
-    ):
-        reward_path = tmp_path / "reward.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest = _rubric_rollout_manifest()
-        del manifest["environment"]["env_type"]
-        del manifest["algorithm"]
-        api_key_client._open_stream = MagicMock()
-
-        with pytest.raises(ValueError, match="algorithm"):
-            api_key_client.submit_experiment(
-                manifest=manifest, project="proj", reward_file=reward_path
-            )
-
-        api_key_client._open_stream.assert_not_called()
-
-    def test_non_mapping_manifest_is_validation_error(self, api_key_client, tmp_path):
-        reward_path = tmp_path / "reward.py"
-        reward_path.write_text("RUBRIC = None\n")
-        manifest_path = tmp_path / "manifest.yaml"
-        manifest_path.write_text("- algorithm\n- environment\n")
-        api_key_client._open_stream = MagicMock()
-
-        with pytest.raises(
-            ArenaValidationError, match="The manifest must be a mapping, not list"
-        ):
-            api_key_client.submit_experiment(
-                manifest=manifest_path, project="proj", reward_file=reward_path
-            )
-
-        api_key_client._open_stream.assert_not_called()
-
-
 class TestPreviewExperimentMetricsCsv:
     def test_basic_call(self, api_key_client):
         api_key_client._request_raw = MagicMock(
@@ -2455,15 +2095,12 @@ class TestListExperimentMetricNames:
 
 class TestListResources:
     def test_calls_correct_endpoint(self, api_key_client):
-        body = {"gpuTypes": [{"gpuType": "l4", "gpusPerNode": [1], "devOnly": False}]}
-        api_key_client._request = MagicMock(return_value=body)
-
+        api_key_client._request = MagicMock(return_value={"tiers": []})
         result = api_key_client.list_resources()
-
         api_key_client._request.assert_called_once_with(
             "GET", "/api/cli/v1/resources/list"
         )
-        assert result == body
+        assert result == {"tiers": []}
 
 
 class TestDownloadExperimentMetrics:
@@ -3310,6 +2947,27 @@ class TestGetDefaultRunSpec:
             params={"algorithm": "GRPO", "datasetName": "countdown"},
         )
         assert result == spec
+
+    def test_gym_query_params(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"algorithm": {"name": "PPO"}})
+
+        api_key_client.get_default_run_spec(
+            "PPO",
+            gym_env="Space Invaders",
+            gym_env_version="v1",
+            gym_env_entrypoint="python3",
+        )
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/run-spec/default",
+            params={
+                "algorithm": "PPO",
+                "gymEnv": "Space Invaders",
+                "gymEnvVersion": "v1",
+                "gymEnvEntrypoint": "python3",
+            },
+        )
 
     def test_omits_unset_optional_params(self, api_key_client):
         api_key_client._request = MagicMock(return_value={})

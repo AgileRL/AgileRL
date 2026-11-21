@@ -416,24 +416,6 @@ CREATE OR REPLACE PROCEDURE app_code.unpublish(
 GRANT USAGE ON PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)
   TO APPLICATION ROLE app_admin;
 
--- Copies a run's model to the consumer's export_stage. No services and no usage items, so it is never billed.
-CREATE OR REPLACE PROCEDURE app_code.export_model(
-    run_id STRING,
-    step NUMBER DEFAULT NULL
-  )
-  RETURNS STRING
-  LANGUAGE PYTHON
-  RUNTIME_VERSION = '3.13'
-  PACKAGES = (
-    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
-    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
-    'requests-toolbelt', 'rich'
-  )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
-  HANDLER = 'arena_app.export_model';
-GRANT USAGE ON PROCEDURE app_code.export_model(STRING, NUMBER)
-  TO APPLICATION ROLE app_admin;
-
 -- Granted to no role: only the hourly task calls it, so two calls never overlap.
 CREATE OR REPLACE PROCEDURE app_code.reconcile_usage()
   RETURNS STRING

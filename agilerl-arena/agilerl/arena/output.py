@@ -24,12 +24,7 @@ from rich.text import Text
 from typing_extensions import Self
 
 from agilerl.arena import console, error_console
-from agilerl.arena.exceptions import (
-    ArenaAPIError,
-    ArenaClientUpgradeRequiredError,
-    ArenaError,
-    resolve_api_error_class,
-)
+from agilerl.arena.exceptions import ArenaAPIError, ArenaError, resolve_api_error_class
 from agilerl.arena.models.verdict import errors as manifest_errors
 from agilerl.arena.stream import (
     CheckEvent,
@@ -38,7 +33,6 @@ from agilerl.arena.stream import (
     StatusEvent,
     StreamEvent,
 )
-from agilerl.arena.upgrade import offer_upgrade
 
 if sys.platform == "win32":
     import msvcrt  # pragma: no cover
@@ -452,8 +446,6 @@ def handle_error(exc: Exception) -> None:
     if isinstance(exc, ValidationError):
         _print_invalid_manifest(exc)
         raise click.exceptions.Exit(1) from exc
-    if isinstance(exc, ArenaClientUpgradeRequiredError):
-        offer_upgrade(exc.detail, snowflake=False)
     if isinstance(exc, ArenaError):
         if json_output_enabled():
             error = {"error": str(exc), "type": type(exc).__name__}

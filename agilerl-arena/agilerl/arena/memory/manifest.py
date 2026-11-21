@@ -39,6 +39,7 @@ from agilerl.arena.memory.resolve.fsdp import (
     MemoryPins,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
+    cpu_offload_blocker,
     lightest_training_memory,
     resolve_training_memory,
 )
@@ -58,10 +59,13 @@ from agilerl.arena.memory.resolve.parallel import (
     trains_expert_parallel,
 )
 from agilerl.arena.memory.resolve.rollout import (
+    apply_run_rollout_mode,
+    async_rollout_algorithm,
     checkpoint_quantized,
     default_rollout_batch_size,
     drafts_with_mtp,
     merged_lora_sync_blockers,
+    run_rollout_engines,
 )
 from agilerl.arena.memory.resolve.sequences import (
     prompts_per_engine,
@@ -94,16 +98,7 @@ from agilerl.arena.models.algorithms.rollout_llm import (
     records_sampling_supports,
 )
 from agilerl.arena.models.env import LLMEnvSpec
-from agilerl.arena.models.manifest import (
-    TrainingManifest,
-    async_rollout,
-    explicit_colocated_rollout,
-    strips_multimodal_towers,
-)
-from agilerl.arena.models.manifest_rules import (
-    cpu_offload_blocker,
-    run_rollout_engines,
-)
+from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
@@ -271,8 +266,10 @@ def llm_spec(manifest: TrainingManifest) -> LLMAlgorithmSpec:
 
 
 def _lora_config(spec: LLMAlgorithmSpec) -> LoraConfigDict:
-    # Training is LoRA-only; manifest validation resolves the catalog default.
-    return spec.lora_config or LoraConfigDict()
+    # Training is LoRA-only; an omitted section trains with the LoraConfigDict defaults.
+    if spec.lora_config is not None:
+        return spec.lora_config
+    return LoraConfigDict()
 
 
 def _reject_trainer_quantization(quantization: str | dict[str, Any] | None) -> None:
@@ -474,6 +471,20 @@ def check_fp8_moe_backend_for_device(
     raise ValueError(msg)
 
 
+def async_rollout(manifest: TrainingManifest) -> bool:
+    """Whether the run generates on async rollout engines, as :func:`async_rollout_algorithm` decides."""
+    return async_rollout_algorithm(type(manifest.algorithm))
+
+
+def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
+    """Whether a rollout LLM manifest names ``rollout_mode: colocated``, which only local runs take."""
+    return (
+        async_rollout(manifest)
+        and "rollout_mode" in manifest.training.model_fields_set
+        and manifest.training.rollout_mode == "colocated"
+    )
+
+
 NCCL_RESHARD_DTYPES = frozenset({"bf16", "bfloat16", "fp16", "float16", "half"})
 """Weight dtypes an ``nccl_reshard`` refit moves."""
 
@@ -509,6 +520,21 @@ def configured_rollout_engines(manifest: TrainingManifest) -> int | Literal["aut
     return run_rollout_engines(
         async_rollout(manifest), manifest.training.rollout_engines_per_agent
     )
+
+
+def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
+    """The manifest validated as Ray runs it, from :func:`apply_run_rollout_mode`.
+
+    :param manifest: Training manifest, validated as written.
+    :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
+    :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
+    """
+    run_async = async_rollout(manifest)
+    if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
+        return manifest
+    payload = manifest.to_payload()
+    apply_run_rollout_mode(payload["training"], run_async)
+    return TrainingManifest.model_validate(payload)
 
 
 def _async_engine_prompts(

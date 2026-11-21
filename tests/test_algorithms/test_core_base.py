@@ -4039,6 +4039,23 @@ class TestLLMAlgorithmInitializeActorsSequencePacking:
         # Assert
         assert agent.sequence_packing is False
 
+    @pytest.mark.parametrize(("strip_towers", "packs"), [(False, False), (True, True)])
+    def test_context_parallel_images_stay_padded(
+        self, strip_towers: bool, packs: bool
+    ) -> None:
+        # Arrange
+        agent, actor = _packing_agent_and_actor("flash_attention_2", 1)
+        actor.config.vision_config = SiglipVisionConfig()
+        agent.fsdp_config = FSDPConfig(cp=2, optim_cpu_offload=False)
+        agent.rollout_strip_multimodal_towers = strip_towers
+
+        # Act
+        with patch.object(agent, "use_adapter"):
+            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
+
+        # Assert
+        assert agent.sequence_packing is packs
+
     def test_stays_padded_when_a_recurrent_mixer_leaks_state(self) -> None:
         # Arrange
         agent, actor = _packing_agent_and_actor("flash_attention_2", 1)
@@ -10135,19 +10152,8 @@ class TestLLMAlgorithmInitQuantizationConfig:
 
 @_LLM_DEPS_SKIP
 class TestLLMAlgorithmContextParallelGuards:
-    def test_wrap_models_rejects_vision_language_with_cp(self) -> None:
-        actor = _make_mock_peft_actor()
-        actor.get_base_model = lambda: actor
-        actor.config = SimpleNamespace(vision_config=object())
-        agent = _make_llm_agent(actor_network=actor)
-        agent.fsdp_config = FSDPConfig(cp=2, optim_cpu_offload=False)
-
-        with pytest.raises(ValueError, match="engine strips its towers"):
-            agent.wrap_models()
-
-    def test_wrap_models_passes_vision_language_cp_when_engine_strips_towers(
-        self,
-    ) -> None:
+    @staticmethod
+    def _vision_language_cp_agent() -> LLMAlgorithm:
         actor = _make_mock_peft_actor()
         actor.get_base_model = lambda: actor
         actor.get_output_embeddings = lambda: None
@@ -10164,9 +10170,30 @@ class TestLLMAlgorithmContextParallelGuards:
             cpu_offload=False,
             checkpoint_every_n_blocks=1,
         )
+        return agent
+
+    def test_wrap_models_rejects_cp_images_through_a_trainable_tower(self) -> None:
+        agent = self._vision_language_cp_agent()
+
+        with pytest.raises(ValueError, match="needs a frozen vision tower"):
+            agent.wrap_models()
+
+    def test_wrap_models_passes_cp_images_through_a_frozen_tower(self) -> None:
+        agent = self._vision_language_cp_agent()
+        agent._frozen_vision_tower = "model.visual"
+
+        # The next CP check after the vision guard reads the attention backend.
+        with pytest.raises(
+            ValueError, match="needs flash_attention_2 or flex_attention"
+        ):
+            agent.wrap_models()
+
+    def test_wrap_models_passes_vision_language_cp_when_engine_strips_towers(
+        self,
+    ) -> None:
+        agent = self._vision_language_cp_agent()
         agent.rollout_strip_multimodal_towers = True
 
-        # The next CP check after the VL guard reads the attention backend.
         with pytest.raises(
             ValueError, match="needs flash_attention_2 or flex_attention"
         ):

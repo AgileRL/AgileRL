@@ -43,8 +43,7 @@ def write_source(
     if selected is not None:
         frame = frame.select(*source_columns(frame.columns, selected))
     destination.mkdir(parents=True, exist_ok=True)
-    # Windows can still hold a shard open; a failed delete must not mask the error.
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
+    with tempfile.TemporaryDirectory() as scratch:
         batches = []
         for index, batch in enumerate(frame.to_pandas_batches()):
             path = Path(scratch) / f"shard-{index:05d}.parquet"

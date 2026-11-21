@@ -306,6 +306,9 @@ class _PPOStub:
         self.vf_coef = vf_coef
         self.whiten_advantages = whiten_advantages
 
+    def _row_replicas(self) -> int:
+        return 1
+
     _compute_token_rewards = LLMPPO._compute_token_rewards
     _compute_gae_returns = LLMPPO._compute_gae_returns
     _compute_gae_returns_token = LLMPPO._compute_gae_returns_token

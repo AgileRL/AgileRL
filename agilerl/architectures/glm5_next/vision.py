@@ -12,6 +12,7 @@ is 0), so images need no M-RoPE positions.
 from __future__ import annotations
 
 import functools
+import operator
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -90,4 +91,5 @@ def install_glm5_next_vision(
         "get_image_features",
         accept_patch_grid_rows,
         vision_filler_features,
+        operator.attrgetter("config.image_token_id"),
     )

@@ -119,9 +119,8 @@ An upload may instead hold one model call per row: ``prompt`` (a list of
 messages, or a string as one user message) and ``completion`` (one assistant
 message, a list of messages, or a string as one assistant message), with
 optional ``call_id`` and ``finish_reason``. A string cell is read as JSON
-only when it holds a message or a list of messages; any other text,
-``{"query": "x"}``, ``42`` or ``"hi"`` included, is the message's content as
-it is. A
+only when it holds a message, a list of messages, or a JSON string; any other
+text, ``{"query": "x"}`` or ``42`` included, is the message's content. A
 ``prompt`` ending with an assistant message is invalid: the completion is the
 next assistant turn. A file with both ``prompt`` and
 ``completion`` is read as pairs, and a ``messages`` column beside them (a raw

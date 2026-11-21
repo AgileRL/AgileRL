@@ -32,6 +32,11 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.arena.memory.resolve.fsdp import cpu_offload_blocker
+from agilerl.arena.memory.resolve.rollout import (
+    async_rollout_algorithm,
+    rollout_engines_blocker,
+)
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
@@ -47,12 +52,6 @@ from agilerl.arena.models.hpo import (
     TournamentSelectionSpec,
     no_op_mutation_probabilities,
     require_mutation_range_inside_field,
-)
-from agilerl.arena.models.manifest_rules import (
-    apply_run_rollout_mode,
-    async_rollout_algorithm,
-    cpu_offload_blocker,
-    rollout_engines_blocker,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import (
@@ -597,8 +596,18 @@ class TrainingManifest(BaseModel):
                 self.network.max_context_length,
                 source_set=True,
             )
-            if "lora_config" in type(self.algorithm).model_fields:
-                self._resolve_lora_config(self.network)
+            algorithm_lora = getattr(self.algorithm, "lora_config", None)
+            if algorithm_lora is not None:
+                # Network validation skips an unset lora_config.
+                check_lora_config_supported(
+                    self.network.pretrained_model_name_or_path, algorithm_lora
+                )
+            _copy_when_unset(
+                self.algorithm,
+                "lora_config",
+                self.network.lora_config,
+                source_set="lora_config" in self.network.model_fields_set,
+            )
 
         if (
             isinstance(self.algorithm, RolloutLLMSpec)
@@ -936,10 +945,16 @@ class TrainingManifest(BaseModel):
                     and "tensor_parallel_size" not in vllm_config.model_fields_set
                 ):
                     vllm_payload.pop("tensor_parallel_size", None)
+        if (
+            isinstance(self.network, FinetuningNetworkSpec)
+            and "lora_config" in self.network.model_fields_set
+            and self.network.lora_config is None
+        ):
+            payload.setdefault("network", {})["lora_config"] = None
         if isinstance(self.network, FinetuningNetworkSpec) and isinstance(
             algorithm, dict
         ):
-            self._move_model_fields_to_network(algorithm)
+            self._move_model_fields_to_network(algorithm, payload["network"])
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
@@ -948,38 +963,22 @@ class TrainingManifest(BaseModel):
                 environment.pop("goal_images_field", None)
         return payload
 
-    def _resolve_lora_config(self, network: FinetuningNetworkSpec) -> None:
-        """Give the algorithm and network one LoRA config, the catalog default when neither sets one.
-
-        A null on either section counts as unset.
-
-        :param network: The manifest's finetuning network section.
-        :type network: FinetuningNetworkSpec
-        """
-        algorithm_lora = self.algorithm.lora_config
-        if algorithm_lora is None:
-            self.algorithm.model_fields_set.discard("lora_config")
-        else:
-            check_lora_config_supported(
-                network.pretrained_model_name_or_path, algorithm_lora
-            )
-            if "lora_config" not in network.model_fields_set:
-                network.lora_config = algorithm_lora
-                return
-        _copy_when_unset(
-            self.algorithm, "lora_config", network.lora_config, source_set=True
-        )
-
-    @staticmethod
-    def _move_model_fields_to_network(algorithm: dict[str, Any]) -> None:
-        """Drop the algorithm's copies of the model, context length and LoRA; ``network`` holds them.
+    def _move_model_fields_to_network(
+        self, algorithm: dict[str, Any], network: dict[str, Any]
+    ) -> None:
+        """Keep the model, context length and LoRA only in the ``network`` section.
 
         :param algorithm: The dumped ``algorithm`` section, edited in place.
         :type algorithm: dict[str, Any]
+        :param network: The dumped ``network`` section, edited in place.
+        :type network: dict[str, Any]
         """
         algorithm.pop("pretrained_model_name_or_path", None)
         algorithm.pop("max_model_len", None)
-        algorithm.pop("lora_config", None)
+        lora = algorithm.pop("lora_config", None)
+        # A null is full finetune, which the user writes on network.lora_config.
+        if lora is not None and "lora_config" not in network:
+            network["lora_config"] = lora
 
     def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
         """Omit dumped training defaults that parsers treat as explicit choices.
@@ -1002,32 +1001,3 @@ class TrainingManifest(BaseModel):
         ):
             if field not in authored:
                 training.pop(field, None)
-
-
-def async_rollout(manifest: TrainingManifest) -> bool:
-    """Whether the run generates on async rollout engines, as :func:`async_rollout_algorithm` decides."""
-    return async_rollout_algorithm(type(manifest.algorithm))
-
-
-def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
-    """Whether a rollout LLM manifest names ``rollout_mode: colocated``, which only local runs take."""
-    return (
-        async_rollout(manifest)
-        and "rollout_mode" in manifest.training.model_fields_set
-        and manifest.training.rollout_mode == "colocated"
-    )
-
-
-def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
-    """The manifest validated as Ray runs it, from :func:`apply_run_rollout_mode`.
-
-    :param manifest: Training manifest, validated as written.
-    :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
-    :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
-    """
-    run_async = async_rollout(manifest)
-    if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
-        return manifest
-    payload = manifest.to_payload()
-    apply_run_rollout_mode(payload["training"], run_async)
-    return TrainingManifest.model_validate(payload)

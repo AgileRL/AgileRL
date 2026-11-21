@@ -28,6 +28,7 @@ from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.context_parallel import (
+    IMAGE_TOKEN_SHARD,
     ULYSSES_PARAMS,
     clear_ulysses_params,
 )
@@ -617,6 +618,38 @@ class TestContextParallelSequencePrepareForward:
         with self._layout(rank=1).prepare_forward(ids, mask, copies=2) as fwd:
             assert fwd.kwargs["input_ids"].shape == (4, 64)
 
+    def test_forward_with_images_publishes_its_full_rows(self) -> None:
+        # Arrange
+        ids = torch.tensor([[1, 9, 9, 2, 0], [3, 4, 9, 9, 5]])
+        mask = (ids != PAD_TOKEN_ID).long()
+        pixel_values = torch.zeros(2, 1, 1, 3)
+
+        # Act
+        with self._layout(rank=1, round_to=2).prepare_forward(
+            ids, mask, pixel_values=pixel_values, copies=2
+        ) as fwd:
+            published = IMAGE_TOKEN_SHARD.get()
+            sharded_ids = fwd.kwargs["input_ids"]
+            sharded_positions = fwd.kwargs["position_ids"]
+        after = IMAGE_TOKEN_SHARD.get()
+
+        # Assert
+        assert published is not None
+        assert torch.equal(published.input_ids, ids[:, :-1].repeat(2, 1))
+        assert published.position_ids.shape == (4, 4)
+        assert torch.equal(published.shard(published.input_ids), sharded_ids)
+        assert torch.equal(published.shard(published.position_ids), sharded_positions)
+        assert (published.rank, published.cp) == (1, 2)
+        assert after is None
+
+    def test_forward_without_images_publishes_no_rows(self) -> None:
+        ids = torch.tensor([[1, 2, 3, 4, 5]])
+
+        with self._layout(round_to=2).prepare_forward(ids, torch.ones_like(ids)):
+            published = IMAGE_TOKEN_SHARD.get()
+
+        assert published is None
+
     def test_labels_pad_with_the_ignore_index(self) -> None:
         ids = torch.ones(2, 6, dtype=torch.long)
         mask = torch.ones(2, 6, dtype=torch.long)
@@ -774,16 +807,13 @@ class TestPackedContextParallelSequencePrepareForward:
             assert fwd.cu_seqlens.tolist() == [0, 3, 5, 8, 11, 13, 16]
             assert fwd.host_cu_seqlens == (0, 3, 5, 8, 11, 13, 16)
 
-    def test_copies_stack_pixel_values(self) -> None:
+    def test_images_raise(self) -> None:
         ids, mask = self._batch()
-        pixel_values = torch.arange(6.0).reshape(2, 3)
 
-        with self._layout().prepare_forward(
-            ids, mask, pixel_values=pixel_values, copies=2
-        ) as fwd:
-            repeated = fwd.kwargs["pixel_values"]
-
-        assert torch.equal(repeated, torch.cat([pixel_values, pixel_values]))
+        with pytest.raises(NotImplementedError, match="run padded context parallel"):
+            self._layout().prepare_forward(
+                ids, mask, pixel_values=torch.zeros(1, 1, 1, 3)
+            )
 
     @pytest.mark.parametrize(("rank", "n_scored"), [(0, 3), (1, 1)])
     def test_each_rank_counts_its_scored_predictions(

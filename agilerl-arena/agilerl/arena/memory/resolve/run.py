@@ -9,6 +9,7 @@ from typing import Literal
 
 from agilerl.arena.memory.formulas import recommendation_fits
 from agilerl.arena.memory.manifest import (
+    async_rollout,
     can_sync_merged_lora,
     configured_rollout_engines,
     lightest_training_memory_from_manifest,
@@ -56,7 +57,7 @@ from agilerl.arena.memory.specs import DeviceSpec, ModelSpec
 from agilerl.arena.memory.training_host import fixed_host_bytes
 from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.manifest import TrainingManifest, async_rollout
+from agilerl.arena.models.manifest import TrainingManifest
 
 # Merged weight sync is kept while its predicted step is within this share of
 # the adapter's. An adapter step the model prices learn-bound still waits on

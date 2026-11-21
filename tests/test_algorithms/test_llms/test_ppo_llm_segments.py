@@ -290,12 +290,16 @@ class TestPPOLearnBalancedAcrossRanks:
         # Arrange: unwhitened returns and advantages stay on each rank's own
         # episodes, so the step averages rank 0's 4 local rows and rank 1's 2.
         # Without a KL term or a reachable clip norm the step gradient is
-        # linear in the rows.
+        # linear in the rows. Rank 1's episodes carry no segments, so each
+        # is learned alone to give its row gradient.
         make_agent = partial(
             _make_ppo, beta=0.0, max_grad_norm=1e30, whiten_advantages=False
         )
-        rank0, rank1 = rank_local_step_gradients(
-            make_agent, monkeypatch, sampling_ranks=(0, 1)
+        rank0, rank1_row0, rank1_row1 = rank_local_step_gradients(
+            make_agent,
+            monkeypatch,
+            sampling_ranks=(0, 1, 2),
+            rank_episodes=(slice(0, 2), slice(2, 3), slice(3, 4)),
         )
 
         # Act
@@ -317,7 +321,7 @@ class TestPPOLearnBalancedAcrossRanks:
                 # on critic gradients up to about 20 and unwhitened advantages.
                 torch.testing.assert_close(
                     torch.from_numpy(steps[0][name]),
-                    (4 * rank0[name] + 2 * rank1[name]) / 6,
+                    (4 * rank0[name] + rank1_row0[name] + rank1_row1[name]) / 6,
                     rtol=1e-4,
                     atol=1e-4,
                     msg=name,

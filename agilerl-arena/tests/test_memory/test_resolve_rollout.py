@@ -9,12 +9,16 @@ import pytest
 from agilerl.arena.memory.resolve.rollout import (
     MERGED_SYNC_BUCKET_BYTES,
     MULTI_TURN_SPECULATIVE_CONFIG,
+    apply_run_rollout_mode,
+    async_rollout_algorithm,
     checkpoint_quantized,
     default_rollout_batch_size,
     drafts_by_default,
     drafts_with_mtp,
     merged_lora_sync_blockers,
     merged_sync_bucket_bytes,
+    rollout_engines_blocker,
+    run_rollout_engines,
     runs_dual_stream_lora,
 )
 from agilerl.arena.memory.specs import GiB, MiB
@@ -27,12 +31,6 @@ from agilerl.arena.models.algorithms import (
     SFTSpec,
 )
 from agilerl.arena.models.algorithms.base import AlgorithmSpec
-from agilerl.arena.models.manifest_rules import (
-    apply_run_rollout_mode,
-    async_rollout_algorithm,
-    rollout_engines_blocker,
-    run_rollout_engines,
-)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 # quantization_config of openai/gpt-oss-20b on the Hub.

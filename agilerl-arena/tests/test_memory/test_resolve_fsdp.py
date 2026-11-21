@@ -28,6 +28,7 @@ from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
     buffer_room,
+    cpu_offload_blocker,
     gather_cost,
     learn_cost,
     lightest_training_memory,
@@ -46,7 +47,6 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.memory.training_host import fixed_host_bytes
 from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS, FSDPConfig
-from agilerl.arena.models.manifest_rules import cpu_offload_blocker
 from tests.test_memory.test_estimator import (
     A100_80GB_CUDA_BYTES,
     GRANITE_MOE,

@@ -14,6 +14,7 @@ from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.manifest import (
     nccl_reshard_layout_supported,
     training_memory_from_manifest,
+    validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.fsdp import (
@@ -47,7 +48,7 @@ from agilerl.arena.memory.resolve.weight_sync import (
 )
 from agilerl.arena.memory.specs import DeviceSpec, GiB, TrainingSettings
 from agilerl.arena.models import model_info
-from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
+from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import supported_path
 from tests.test_memory.test_cli import MANIFEST
 from tests.test_memory.test_resolve_split import (
@@ -1717,8 +1718,8 @@ def _quote(plan: RunMemoryPlan, merged: bool, transport: str) -> GpuSplit:
 
 class TestQwen35NineBWeightSync:
     def test_short_generation_keeps_the_adapter(self) -> None:
-        # Arrange: one short turn at batch 1. The two trainers split it at
-        # TP 2, which nccl_reshard cannot refit from, and merged NIXL sync
+        # Arrange: one short turn at batch 1. The two trainers split it over
+        # CP 2, which nccl_reshard cannot refit from, and merged NIXL sync
         # costs more than merged generation gains.
         manifest = _qwen35_9b_manifest(32, 1, 1)
         device = _device("A100-80").model_copy(update={"gpus_per_node": 4})
@@ -1732,12 +1733,12 @@ class TestQwen35NineBWeightSync:
         nixl = _quote(plan, True, "nixl")
         adapter = _quote(plan, False, "nixl")
         assert plan.training.fsdp is not None
-        assert plan.training.fsdp.tp == 2
+        assert (plan.training.fsdp.tp, plan.training.fsdp.cp) == (1, 2)
         assert {split.sync_transport for split in plan.quotes} == {"nixl"}
-        assert nixl.learn_seconds == pytest.approx(0.471, abs=0.01)
+        assert nixl.learn_seconds == pytest.approx(0.465, abs=0.01)
         assert nixl.generation_seconds == pytest.approx(0.232, abs=0.01)
         assert nixl.sync_seconds == pytest.approx(0.726, abs=0.01)
-        assert adapter.learn_seconds == pytest.approx(0.471, abs=0.01)
+        assert adapter.learn_seconds == pytest.approx(0.465, abs=0.01)
         assert adapter.generation_seconds == pytest.approx(0.470, abs=0.01)
         assert adapter.sync_seconds == pytest.approx(0.359, abs=0.005)
         assert adapter.synced_step_seconds < nixl.synced_step_seconds
@@ -1929,10 +1930,7 @@ class TestQwen35NineBWeightSync:
 
 
 def _h100_guess_the_number_manifest(hub_id: str) -> TrainingManifest:
-    """CISPO on GuessTheNumber, 4 trainers and 2 TP2 engines, the measured 8x H100 layout.
-
-    The measured runs trained no packed-expert LoRA (``target_parameters: []``).
-    """
+    """CISPO on GuessTheNumber, 4 trainers and 2 TP2 engines, the measured 8x H100 layout."""
     raw = {
         "algorithm": {
             "name": "CISPO",
@@ -1958,7 +1956,6 @@ def _h100_guess_the_number_manifest(hub_id: str) -> TrainingManifest:
         "network": {
             "pretrained_model_name_or_path": hub_id,
             "max_context_length": 2048,
-            "lora_config": {"target_parameters": []},
         },
         "training": {
             "rollout_mode": "async",
@@ -2111,38 +2108,6 @@ class TestH100GuessTheNumberWeightSync:
 
         # Assert
         assert adapter.synced_step_seconds > 1.10 * nccl.synced_step_seconds
-
-
-class TestH100ExpertLoraWeightSync:
-    def test_merged_expert_lora_sync_matches_the_measured_sync(self) -> None:
-        # Arrange: Arena dev experiment 3746 on 8x H100, catalog-default LoRA
-        # (all-linear r=16 plus both packed-expert paths), the layout the
-        # planner picked: 4 FSDP trainers and 1 engine at TP 4, merged NIXL.
-        # Logged weight_sync_s after the first sync: 1.328, 1.270; sync_s
-        # 1.321, 1.264.
-        raw = _h100_guess_the_number_manifest("Qwen/Qwen3.6-35B-A3B").to_payload()
-        raw["network"]["lora_config"].pop("target_parameters")
-        raw["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
-        raw["training"].update(
-            {
-                "training_gpus_per_agent": 4,
-                "rollout_engines_per_agent": 1,
-                "rollout_batch_size": 8,
-            }
-        )
-        manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
-        device = _device("H100-80").model_copy(update={"gpus_per_node": 8})
-
-        # Act
-        plan = resolve_run_memory(
-            manifest, catalog_model(manifest.algorithm), device, 8, "cuda_ipc", False
-        )
-        quote = _quote(plan, True, "nixl")
-
-        # Assert
-        assert manifest.algorithm.lora_config.target_parameters
-        assert plan.merged_lora_sync is True
-        assert quote.sync_seconds == pytest.approx(1.30, rel=0.05)
 
 
 class TestResolveRunMemoryTeacherBundle:

@@ -90,7 +90,7 @@ integrations and pools after an upgrade, since setup never drops them:
 | `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `AGILERL_APP_<APP>_ARENA_EAI` and requires `features.snowflakeTraining`; then sets the three secrets and lists `features.snowflakePricedGpuFamilies` when Arena sends it. Secret values are never logged, returned or quoted in errors. |
 | `app_code.set_pools(gpu_families, max_gpus, broker_family, head_family)` | `app_admin` | Creates or resizes `AGILERL_APP_<APP>_BROKER_POOL`, `AGILERL_APP_<APP>_HEAD_POOL` and one `AGILERL_APP_<APP>_GPU_<FAMILY>` per listed family (CLI defaults); drops the app's `AGILERL_APP_<APP>_GPU_*` pools of families no longer listed; refuses to shrink or drop under a running service; writes `setup.json`. A GPU family missing from the region, or listed with another GPU count per node than the app sizes (Snowflake reuses the AWS `GPU_R6K_G1_*` names on GCP for nodes with half the GPUs), is refused with the GPU families the app can size there. |
 | `app_code.gpu_families()` | `app_admin` | Lists the GPU families `set_pools` can use: returned by `SHOW COMPUTE POOL INSTANCE FAMILIES` with the GPU count per node the app sizes, and in `features.snowflakePricedGpuFamilies` when Arena sends it. Reads capabilities with the three Arena secrets through `AGILERL_APP_<APP>_ARENA_EAI`. |
-| `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`, and on `export_stage`, which holds one stage. |
+| `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`. |
 | `app_code.submit(manifest, gpus, source_reference, source_alias, gpu_family, reward_file, checkpoint_steps, resume_from)` | `app_admin` | `arena snowflake submit` on the app pools: the same broker, head and worker job services in `app_state`, with the head reading the `app_state` secrets through `AGILERL_APP_<APP>_ARENA_EAI`. `manifest` and `reward_file` are file contents. When capabilities list `features.snowflakePricedGpuFamilies`, an unpriced `gpu_family` is refused and an omitted one is picked from priced pools, before anything starts. A saved pool whose family this region lists with another GPU count per node is refused the same way. That read uses the three Arena secrets through `AGILERL_APP_<APP>_ARENA_EAI`. The job reads `SELECT * FROM reference('<source_reference>', '<source_alias>')`. Returns the run id, the service names and any manifest warnings. |
 | `app_code.status(run_id)` | `app_user` | `arena snowflake status`. Refuses run ids with no `job.json` on `@app_state.runs`. |
 | `app_code.logs(run_id, role, instance)` | `app_user` | `arena snowflake logs`. |
@@ -101,44 +101,9 @@ integrations and pools after an upgrade, since setup never drops them:
 | `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
 | `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
 | `app_code.unpublish(model, version_name, drop_version)` | `app_admin` | `arena snowflake unpublish` for a model in `app_state`, then closes the service's Arena deployment. |
-| `app_code.export_model(run_id, step)` | `app_admin` | Copies a run's merged checkpoint (the files `publish` logs) to `<run_id>/checkpoint_<n>/` on the stage bound to `export_stage`; see Keep your model. |
 
 `app_user` gets the read-only procedures. Starting, cancelling, publishing and
 unpublishing spend GPU credits or drop work, so they need `app_admin`.
-`export_model` writes outside the app, so it needs `app_admin` too.
-
-## Keep your model
-
-Uninstalling the app drops `@app_state.runs` and the Model Registry models in
-`app_state`, and neither application role can read them. To keep a trained
-model, an `app_admin` binds one of the consumer's stages to the `export_stage`
-reference and calls `export_model` before uninstalling:
-
-```sql
-CREATE STAGE my_db.my_schema.arena_models;
-CALL <app>.app_code.register_reference('export_stage', 'ADD',
-  SYSTEM$REFERENCE('STAGE', 'my_db.my_schema.arena_models', 'PERSISTENT', 'READ', 'WRITE'));
-CALL <app>.app_code.export_model('<run_id>');        -- newest merged checkpoint
-CALL <app>.app_code.export_model('<run_id>', 1024);  -- the checkpoint of step 1024
-LIST @my_db.my_schema.arena_models/<run_id>/;
-```
-
-The stage can also be bound in Snowsight on the app's references. Snowflake
-requires READ with WRITE on a stage reference
-([references](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-refs)).
-
-`export_model` runs `COPY FILES` from the run's `checkpoint_<n>/merged/` to
-`@reference('export_stage')/<run_id>/checkpoint_<n>/`. Those are the Hugging
-Face files `publish` logs as version `checkpoint_<n>`. It copies nothing else
-from the app, overwrites files of the same name, and refuses when no stage is
-bound or the run has no complete merged export at that step.
-
-It starts no service and adds no usage item, so Arena bills nothing for it.
-`COPY FILES` is serverless and appears on the consumer's own Snowflake bill
-([COPY FILES](https://docs.snowflake.com/en/sql-reference/sql/copy-files)),
-which also caps each file at 5 GB. Like any call to the app, it counts towards
-the month's listing fee (see Idle months). It works after the trial ends
-unpurchased, so a consumer who does not buy keeps what they trained.
 
 ## Trial
 
@@ -152,8 +117,6 @@ purchased, `submit` and `publish` refuse with a message to purchase it, and
 each hourly run drops every live service in `app_state` (training jobs,
 publish jobs, inference services) and every served model's service, before
 metering closes their deployments. After purchase, both procedures work again.
-`export_model` is not gated: it starts nothing and only copies out a model
-trained during the trial.
 
 Purchase is read with `SYSTEM$IS_LISTING_PURCHASED()` through the secure
 function `app_code.listing_purchased()`. Called straight from a procedure or
@@ -284,8 +247,6 @@ each hourly run suspend the app's GPU pools that have no service or job left.
   multi-valued so a consumer can bind several datasets and pick one per run.
   Their `register_callback` is `app_code.register_reference`, written with the
   other procedures.
-- Reference `export_stage` (STAGE), READ and WRITE, single-valued, with the
-  same callback. `export_model` copies trained models to it.
 - Application roles and external hosts are not manifest keys. The setup script
   creates them ([application roles](https://docs.snowflake.com/en/developer-guide/native-apps/creating-setup-script#about-application-roles),
   [app specifications](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-app-specs-eai)):
@@ -315,4 +276,4 @@ each hourly run suspend the app's GPU pools that have no service or job left.
 | Trial-account probe EAI (error 509009) | The setup script creates the EAIs in a block that turns error 509009 into a trial-account message. |
 | Event table warning for `logs` | Container logs reach the consumer's active event table; consumers may share them with the provider ([event sharing](https://docs.snowflake.com/en/developer-guide/native-apps/event-about)). Containerized apps support only the `SNOWFLAKE$ALL` event definition, and container log levels are set in the service spec, not the manifest ([event definitions](https://docs.snowflake.com/en/developer-guide/native-apps/event-definition)). `logs` reads the consumer event table where the caller can see it. |
 | `submit` / `status` / `logs` / `cancel` / `publish` / `endpoint` / `unpublish` | Procedures of the same names (see Procedures). |
-| `teardown` | Dropped. Uninstalling the app drops its objects, including models and checkpoints inside it. Copy them out first with `export_model`. |
+| `teardown` | Dropped. Uninstalling the app drops its objects, including models and checkpoints inside it. Copy them out first. |

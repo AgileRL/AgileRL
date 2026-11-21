@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU contracts for context-parallel pad, shard, gather, and mixer all-to-all."""
+"""CPU contracts for context-parallel pad, shard, gather, image-token rows, and mixer all-to-all."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 
 from agilerl.distributed.context_parallel import (
+    ImageTokenShard,
     all_to_all_hidden_to_seq,
     all_to_all_seq_to_hidden,
     gather_for_cp,
@@ -177,6 +178,57 @@ class TestShardForCp:
     def test_rejects_uneven_sequence(self) -> None:
         with pytest.raises(ValueError, match="divisible by cp size"):
             shard_for_cp(torch.arange(5).reshape(1, 5), 0, 2)
+
+
+class TestImageTokenShardFeatureRows:
+    IMAGE = 9
+
+    def _shard(self, input_ids: torch.Tensor, rank: int) -> ImageTokenShard:
+        return ImageTokenShard(input_ids, torch.zeros_like(input_ids), rank, 2)
+
+    @pytest.mark.parametrize("rank", [0, 1])
+    def test_rows_match_the_full_scatter_on_this_shard(self, rank: int) -> None:
+        # Arrange: row 0 has an image across the shard boundary and one after
+        # it, row 1 one image in the first shard only.
+        image = self.IMAGE
+        input_ids = torch.tensor(
+            [
+                [1, 1, 1, image, image, 2, image, image],
+                [image, image, 3, 3, 3, 3, 3, 3],
+            ]
+        )
+        features = torch.arange(6.0)[:, None] * torch.ones(1, 3)
+        full = torch.zeros(2, 8, 3).masked_scatter(
+            (input_ids == image)[..., None], features
+        )
+        shard = self._shard(input_ids, rank)
+
+        # Act
+        rows = shard.feature_rows(image)
+
+        # Assert
+        assert torch.equal(
+            features[rows], shard.shard(full)[shard.shard(input_ids) == image]
+        )
+
+    def test_rows_follow_token_order_across_rows(self) -> None:
+        image = self.IMAGE
+        input_ids = torch.tensor(
+            [[1, 1, 1, image, image, 2, image, image], [image, image, 3, 3, 3, 3, 3, 3]]
+        )
+
+        rows = [self._shard(input_ids, rank).feature_rows(image) for rank in (0, 1)]
+
+        assert rows[0].tolist() == [0, 4, 5]
+        assert rows[1].tolist() == [1, 2, 3]
+
+    def test_shard_without_image_tokens_reads_no_rows(self) -> None:
+        image = self.IMAGE
+        input_ids = torch.tensor([[image, image, 1, 1, 1, 1, 1, 1]])
+
+        rows = self._shard(input_ids, 1).feature_rows(image)
+
+        assert rows.shape == (0,)
 
 
 def _gather_and_mixer_roundtrip_worker(rank: int, world_size: int) -> None:

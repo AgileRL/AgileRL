@@ -734,8 +734,7 @@ class TestArenaAppErrors:
 
         # Assert
         assert result.stdout.strip() == repr(
-            "ValueError: Unknown reference consumer_secret. "
-            "Bind source_table, source_view or export_stage.\n"
+            "ValueError: Unknown reference consumer_secret. Bind source_table or source_view.\n"
         )
 
 

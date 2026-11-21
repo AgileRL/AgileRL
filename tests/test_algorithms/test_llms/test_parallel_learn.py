@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""CISPO learn under cp, tp and ep matches a same-world FSDP reference for every family."""
+"""CISPO and LLM-PPO learn under cp, tp and ep match a same-world FSDP reference for every family."""
 
 from __future__ import annotations
 
@@ -21,6 +21,12 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
     GraniteMoeHybridForCausalLM,
 )
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHForCausalLM
+from transformers.models.nemotron_h_omni.configuration_nemotron_h_omni import (
+    NemotronH_Omni_Reasoning_V3_Config,
+)
+from transformers.models.nemotron_h_omni.modeling_nemotron_h_omni import (
+    NemotronH_Omni_Reasoning_V3,
+)
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
@@ -41,14 +47,17 @@ from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeForConditionalGeneration,
 )
+from transformers.models.radio.configuration_radio import RadioConfig
 
 from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.parallel_learn import (
     SEED,
     FamilyCase,
+    ImageCase,
     expert_weight,
     learn_worker,
     linear_weight,
+    ppo_learn_worker,
 )
 from tests.test_architectures.gemma4.parallel_helpers import model_config
 
@@ -68,6 +77,20 @@ QWEN3_5_TARGETS = (
     "linear_fc1",
     "linear_fc2",
 )
+QWEN3_5_LANGUAGE_TARGETS = (
+    *DENSE_TARGETS,
+    "in_proj_qkv",
+    "in_proj_z",
+    "in_proj_a",
+    "in_proj_b",
+    "out_proj",
+)
+NEMOTRON_H_TARGETS = ("in_proj", *ATTENTION_TARGETS, "up_proj", "down_proj")
+# Batch rows draw text ids 1..27, so these never collide with a prompt token.
+VISION_START = 28
+VISION_END = 29
+IMAGE_TOKEN = 30
+VIDEO_TOKEN = 31
 # fp32 cases differ from the reference only in reduction order across tp * cp ranks.
 FP32_ATOL = 1e-5
 FP32_RTOL = 1e-4
@@ -81,6 +104,11 @@ BF16_RTOL = 3e-2
 def seeded(model: type[nn.Module], config: object) -> nn.Module:
     torch.manual_seed(SEED)
     return model(config)
+
+
+def language_model_targets(names: tuple[str, ...]) -> str:
+    """PEFT regex for ``names`` in the language model only, so the vision tower stays frozen."""
+    return rf".*language_model.*\.({'|'.join(names)})"
 
 
 def qwen3_model() -> nn.Module:
@@ -125,7 +153,9 @@ def dense_probes(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def gemma4_model() -> nn.Module:
-    return seeded(Gemma4ForConditionalGeneration, model_config())
+    config = model_config()
+    config.image_token_id = IMAGE_TOKEN
+    return seeded(Gemma4ForConditionalGeneration, config)
 
 
 def gemma4_probes(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -248,8 +278,8 @@ def granitemoehybrid_probes(model: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-def nemotron_h_model() -> nn.Module:
-    config = NemotronHConfig(
+def nemotron_h_config() -> NemotronHConfig:
+    return NemotronHConfig(
         hidden_size=HIDDEN,
         vocab_size=32,
         num_attention_heads=4,
@@ -270,8 +300,38 @@ def nemotron_h_model() -> nn.Module:
         layers_block_type=["linear_attention", "full_attention", "moe", "mlp"],
         tie_word_embeddings=False,
     )
+
+
+def nemotron_h_model() -> nn.Module:
+    config = nemotron_h_config()
     config._attn_implementation = "flash_attention_2"
     return seeded(NemotronHForCausalLM, config)
+
+
+def nemotron_h_omni_model() -> nn.Module:
+    config = NemotronH_Omni_Reasoning_V3_Config(
+        text_config=nemotron_h_config(),
+        vision_config=RadioConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            image_size=16,
+            patch_size=8,
+            video_temporal_patch_size=2,
+            # get_image_features casts pixels to this dtype; the case runs in bf16.
+            dtype=torch.bfloat16,
+        ),
+        audio_config=None,
+        projector_hidden_size=16,
+        vision_hidden_size=32,
+        image_token_id=IMAGE_TOKEN,
+    )
+    config._attn_implementation = "flash_attention_2"
+    return seeded(NemotronH_Omni_Reasoning_V3, config)
+
+
+def nemotron_h_omni_probes(model: nn.Module) -> dict[str, torch.Tensor]:
+    return nemotron_h_probes(model.language_model)
 
 
 def nemotron_h_probes(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -366,7 +426,13 @@ def qwen3_5_moe_model() -> nn.Module:
         num_position_embeddings=16,
     )
     config = Qwen3_5MoeConfig(
-        text_config=text, vision_config=vision, tie_word_embeddings=False
+        text_config=text,
+        vision_config=vision,
+        tie_word_embeddings=False,
+        image_token_id=IMAGE_TOKEN,
+        video_token_id=VIDEO_TOKEN,
+        vision_start_token_id=VISION_START,
+        vision_end_token_id=VISION_END,
     )
     config._attn_implementation = "flash_attention_2"
     return seeded(Qwen3_5MoeForConditionalGeneration, config)
@@ -482,7 +548,7 @@ FAMILY_CASES = {
     ),
     "nemotron_h": FamilyCase(
         model=nemotron_h_model,
-        target_modules=("in_proj", *ATTENTION_TARGETS, "up_proj", "down_proj"),
+        target_modules=NEMOTRON_H_TARGETS,
         target_parameters=("mixer.experts.up_proj", "mixer.experts.down_proj"),
         probes=nemotron_h_probes,
         param_dtype="bfloat16",
@@ -510,6 +576,39 @@ FAMILY_CASES = {
         rtol=BF16_RTOL,
         meshes=((2, 1, 2, 2), (2, 2, 1, 1), (2, 1, 1, 2), (2, 2, 1, 2), (4, 2, 1, 1)),
         strip_towers=True,
+    ),
+    "gemma4_images": FamilyCase(
+        model=gemma4_model,
+        target_modules=language_model_targets(DENSE_TARGETS),
+        target_parameters=(),
+        probes=gemma4_probes,
+        param_dtype="float32",
+        atol=FP32_ATOL,
+        rtol=FP32_RTOL,
+        meshes=((2, 2, 1, 1), (4, 2, 1, 1), (4, 2, 2, 1)),
+        images=ImageCase(IMAGE_TOKEN, (6, 6), 3 * 2 * 2, 4),
+    ),
+    "qwen3_5_moe_images": FamilyCase(
+        model=qwen3_5_moe_model,
+        target_modules=language_model_targets(QWEN3_5_LANGUAGE_TARGETS),
+        target_parameters=("mlp.experts.gate_up_proj", "mlp.experts.down_proj"),
+        probes=qwen3_5_moe_probes,
+        param_dtype="bfloat16",
+        atol=BF16_ATOL,
+        rtol=BF16_RTOL,
+        meshes=((2, 2, 1, 1), (4, 2, 1, 1), (8, 2, 2, 2)),
+        images=ImageCase(IMAGE_TOKEN, (2, 2), 3 * 2 * 2, 4),
+    ),
+    "nemotron_h_omni_images": FamilyCase(
+        model=nemotron_h_omni_model,
+        target_modules=language_model_targets(NEMOTRON_H_TARGETS),
+        target_parameters=("mixer.experts.up_proj", "mixer.experts.down_proj"),
+        probes=nemotron_h_omni_probes,
+        param_dtype="bfloat16",
+        atol=BF16_ATOL,
+        rtol=BF16_RTOL,
+        meshes=((2, 2, 1, 1), (4, 2, 1, 1), (8, 2, 2, 2)),
+        images=ImageCase(IMAGE_TOKEN, (4, 4), 3 * 8 * 8, 4),
     ),
 }
 LEARN_CASES = [
@@ -544,6 +643,37 @@ class TestLearnWorker:
             cp,
             tp,
             ep,
+            backend="cpu:gloo,cuda:nccl",
+            timeout=900,
+        )
+
+
+# LLM-PPO is the only algorithm whose fused forward stacks two adapter copies.
+PPO_CASES = [
+    pytest.param(
+        name,
+        world,
+        id=f"{name}-world{world}-cp2",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available() or torch.cuda.device_count() < world,
+            reason=f"needs {world} CUDA devices",
+        ),
+    )
+    for name, world in (("gemma4", 2), ("gemma4_images", 2), ("gemma4_images", 4))
+]
+
+
+@pytest.mark.gpu
+class TestPPOLearnWorker:
+    @pytest.mark.parametrize(("name", "world_size"), PPO_CASES)
+    def test_cp_step_matches_fsdp_reference_and_runs_each_image_once(
+        self, name: str, world_size: int
+    ) -> None:
+        run_ranks(
+            ppo_learn_worker,
+            world_size,
+            FAMILY_CASES[name],
+            2,
             backend="cpu:gloo,cuda:nccl",
             timeout=900,
         )

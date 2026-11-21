@@ -281,13 +281,16 @@ def rank_local_step_gradients(
     make_agent: Callable[..., LLMAlgorithm],
     monkeypatch: pytest.MonkeyPatch,
     sampling_ranks: Sequence[int] = (),
+    rank_episodes: Sequence[slice] = RANK_EPISODES,
 ) -> list[dict[str, torch.Tensor]]:
-    """Step gradient of each rank's :data:`RANK_EPISODES` learned alone on one process.
+    """Step gradient of each slice of ``rank_episodes`` learned alone on one process.
 
-    :param sampling_ranks: Ranks whose episodes carry vLLM sampling log-probs.
+    :param sampling_ranks: Positions in ``rank_episodes`` whose episodes carry
+        vLLM sampling log-probs.
+    :param rank_episodes: Episode slices of the :data:`UNEVEN_ORDER` batch.
     """
     gradients = []
-    for rank, episodes in enumerate(RANK_EPISODES):
+    for rank, episodes in enumerate(rank_episodes):
         agent = make_agent(micro_batch_size_per_gpu=1, mini_batch_size=2)
         seed_lora_weights(agent)
         steps = record_step_gradients(agent, monkeypatch)

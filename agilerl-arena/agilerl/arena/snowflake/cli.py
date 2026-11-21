@@ -46,7 +46,6 @@ from agilerl.arena.snowflake.license import (
     DEFAULT_BASE_URL,
     SNOWFLAKE_DENIED,
     SnowflakeLicenseError,
-    SnowflakeUpgradeRequiredError,
     fetch_capabilities,
     partner_headers,
     snowflake_training_enabled,
@@ -79,7 +78,6 @@ from agilerl.arena.snowflake.source import (
     SnowflakeSession,
     TableSource,
 )
-from agilerl.arena.upgrade import offer_upgrade
 
 
 @click.group("snowflake")
@@ -293,9 +291,6 @@ def snowflake_errors() -> Iterator[None]:
     """
     try:
         yield
-    except SnowflakeUpgradeRequiredError as exc:
-        offer_upgrade(str(exc), snowflake=True)
-        raise click.ClickException(str(exc)) from exc
     except (ValueError, ImportError, SnowflakeLicenseError) as exc:
         raise click.ClickException(str(exc)) from exc
     except sql_errors() as exc:

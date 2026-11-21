@@ -89,17 +89,22 @@ class AgentInfo(BaseModel):
 
     :param algo: The algorithm of the agent.
     :type algo: str
+    :param multi_agent: Whether the agent is a multi-agent.
+    :type multi_agent: bool
     :param llm: Whether the agent is an LLM.
     :type llm: bool
+    :param recurrent: Whether the agent is recurrent.
+    :type recurrent: bool
     :param supervised: Whether the agent is supervised.
     :type supervised: bool
     """
 
-    # /status also reports RL-only fields (multi_agent, recurrent) that the client does not use.
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     algo: str = ""
+    multi_agent: bool = False
     llm: bool = False
+    recurrent: bool = False
     supervised: bool = False
 
 
@@ -433,6 +438,7 @@ class Agent:
     def _ensure(
         self,
         *,
+        rl: bool = False,
         supervised: bool = False,
         llm: bool = False,
     ) -> None:
@@ -441,13 +447,17 @@ class Agent:
             # Type unknown, so let the deployment answer 400 for a wrong route
             # rather than guessing here and refusing a call that would work.
             return
+        if rl and (agent.llm or agent.supervised):
+            raise ArenaInferenceError(
+                detail="Deployment is not RL. Use predict() or generate().",
+            )
         if supervised and (agent.llm or not agent.supervised):
             raise ArenaInferenceError(
-                detail="Deployment is not supervised. Use generate().",
+                detail="Deployment is not supervised. Use get_action() or generate().",
             )
         if llm and (agent.supervised or not agent.llm):
             raise ArenaInferenceError(
-                detail="Deployment is not an LLM. Use predict().",
+                detail="Deployment is not an LLM. Use get_action() or predict().",
             )
 
     @staticmethod
@@ -478,6 +488,21 @@ class Agent:
             raise ArenaInferenceError(detail="session_id must be a non-empty string.")
         return session_id.strip()
 
+    @staticmethod
+    def _multi_agent_mask(
+        info: dict[str, RLData] | None,
+    ) -> RLData:
+        if info is None or "action_mask" not in info:
+            return None
+        mask = info["action_mask"]
+        if not isinstance(mask, dict):
+            msg = (
+                "Multi-agent action_mask must be dict[agent_id, array], "
+                "not a single array."
+            )
+            raise ArenaInferenceError(detail=msg)
+        return mask
+
     def _merge_llm_params(
         self,
         params: LLMParams | dict[str, Any] | None,
@@ -493,6 +518,94 @@ class Agent:
         merged.update(overrides)
         return merged
 
+    def _build_payload(
+        self,
+        observation: RLData,
+        batched: bool,
+        hidden_state: RLData | None,
+        info: dict[str, RLData] | None,
+        env_defined_actions: RLData,
+    ) -> dict[str, Any]:
+        """Build the payload for the POST /get_action request."""
+        agent = self._agent_info() or AgentInfo()
+        is_multi = agent.multi_agent
+        batch_size = get_batch_size(observation) if batched else 1
+
+        # Multi-agent
+        if is_multi:
+            if not isinstance(observation, dict):
+                msg = (
+                    "Multi-agent inference requires observation as dict[agent_id, obs]."
+                )
+                raise ArenaInferenceError(detail=msg)
+
+            payload: dict[str, Any] = {
+                "obs": self.serialize(observation, batched),
+                "batch_size": batch_size,
+            }
+            if agent.recurrent:
+                payload["hidden_state"] = self.serialize(hidden_state, batched)
+            action_mask = self._multi_agent_mask(info)
+            if action_mask is not None:
+                payload["action_mask"] = self.serialize(action_mask, batched)
+
+            # Environment-defined actions
+            eda = env_defined_actions
+            if eda is None and info is not None:
+                raw_eda = info.get("env_defined_actions")
+                if isinstance(raw_eda, dict):
+                    eda = raw_eda
+            if eda is not None:
+                payload["env_defined_actions"] = self.serialize(eda, batched)
+            return payload
+
+        # Single-agent
+        action_mask = info.get("action_mask") if info is not None else None
+        payload = {
+            "obs": self.serialize(observation, batched),
+            "batch_size": batch_size,
+        }
+
+        # Optionally, include hidden state and action mask
+        if agent.recurrent:
+            payload["hidden_state"] = self.serialize(hidden_state, batched)
+        if action_mask is not None:
+            payload["action_mask"] = self.serialize(action_mask, batched)
+
+        return payload
+
+    @staticmethod
+    def _parse_get_action_response(
+        response_json: dict[str, SerializedRLData],
+        batched: bool,
+        *,
+        multi_agent: bool,
+        recurrent: bool,
+    ) -> tuple[RLData, RLData | None]:
+        """Parse the response from the POST /get_action request."""
+        action_raw = response_json["action"]
+        if multi_agent:
+            if not isinstance(action_raw, dict):
+                msg = "Expected multi-agent action dict in response."
+                raise ArenaInferenceError(status_code=200, detail=msg)
+            action: RLData = {
+                agent_id: Agent.deserialize(serialized, batched)
+                for agent_id, serialized in action_raw.items()
+            }
+        else:
+            deserialized_action = Agent.deserialize(action_raw, batched)
+            if deserialized_action is None:
+                msg = "Response contained no action."
+                raise ArenaInferenceError(status_code=200, detail=msg)
+            action = deserialized_action
+
+        hidden_state: RLData | None = None
+        if recurrent:
+            hidden_raw = response_json.get("hidden_state")
+            if hidden_raw is not None:
+                hidden_state = Agent.deserialize(hidden_raw, batched)
+        return action, hidden_state
+
     def status(self, *, refresh: bool = False) -> StatusResponse:
         """Return deployment metadata.
 
@@ -505,6 +618,50 @@ class Agent:
             return self.metadata
         self.metadata = self._fetch_metadata()
         return self.metadata
+
+    def get_action(
+        self,
+        observation: RLData,
+        *,
+        batched: bool = False,
+        hidden_state: RLData | None = None,
+        info: dict[str, RLData] | None = None,
+        env_defined_actions: RLData = None,
+    ) -> tuple[RLData, RLData | None]:
+        """Get actions from a deployed RL agent.
+
+        For multi-agent deployments, pass *observation* as ``dict[agent_id, obs]``.
+        Per-agent ``action_mask`` in *info* must be a dict keyed by agent id.
+
+        :param observation: The observation to the agent.
+        :type observation: RLData
+        :param batched: Whether to batch the observation.
+        :type batched: bool
+        :param hidden_state: The hidden state of the agent.
+        :type hidden_state: RLData | None
+        :param info: The info of the agent.
+        :type info: dict[str, RLData] | None
+        :param env_defined_actions: The env defined actions of the agent.
+        :type env_defined_actions: RLData | None
+        :return: A tuple containing the action and the hidden state.
+        :rtype: tuple[RLData, RLData | None]
+        """
+        self._ensure(rl=True)
+        agent = self._agent_info() or AgentInfo()
+        payload = self._build_payload(
+            observation,
+            batched,
+            hidden_state,
+            info,
+            env_defined_actions,
+        )
+        body = self._request_json("POST", "/get_action", json_body=payload)
+        return self._parse_get_action_response(
+            body,
+            batched,
+            multi_agent=agent.multi_agent,
+            recurrent=agent.recurrent,
+        )
 
     def predict(
         self,

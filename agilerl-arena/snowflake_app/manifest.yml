@@ -46,12 +46,3 @@ references:
           object_type: VIEW
           multi_valued: true
           register_callback: app_code.register_reference
-    - export_stage:
-          label: Model export stage
-          description: A stage of yours that export_model copies trained model files to, so you keep them after uninstalling. Snowflake requires READ alongside
-              WRITE.
-          privileges:
-              - READ
-              - WRITE
-          object_type: STAGE
-          register_callback: app_code.register_reference

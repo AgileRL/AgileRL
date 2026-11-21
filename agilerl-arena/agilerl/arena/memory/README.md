@@ -4,12 +4,9 @@ Closed-form peak GPU memory for an LLM RL run from model geometry, a GPU,
 and the training / generation settings.
 
 ```
-arena memory estimate manifest.yaml --gpu h100-80
+arena memory estimate manifest.yaml --gpu "NVIDIA L4"
 arena memory solve max_model_len manifest.yaml --gpu "NVIDIA L4"
 ```
-
-`--gpu` takes a GPU type from `arena resources list` (`h100-80`, `l4`) or a
-name such as `NVIDIA L4`. Without `--gpu` or `--device-gb` both commands exit 2.
 
 Pass `--config path/to/config.json` to stay offline. Install
 `agilerl-arena[hub]` to resolve a Hugging Face model id outside the Arena
@@ -19,7 +16,8 @@ Exit 0 if both phases fit, 3 if either is over budget, 2 on a usage error.
 
 A manifest that leaves `vllm_config.tensor_parallel_size` or `max_num_seqs`
 unset (with `rollout_engines_per_agent: auto`) gets them from the node's GPU
-count, as the run does. Pass `--num-gpus` with `--gpu` or `--device-gb`.
+count, as the run does. Pass `--num-gpus` with `--gpu` or `--device-gb`; a
+resource tier brings its own count.
 
 Training and generation are separate peaks on separate devices. Resource
 selection uses the larger bar. The estimate errs high.

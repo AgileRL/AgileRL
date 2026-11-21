@@ -15,19 +15,18 @@ from agilerl.arena.memory.resolve.batch import TrainerSplitError
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
+    cpu_offload_blocker,
 )
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.fsdp import (
     PARALLEL_LAYOUT_FIELDS,
     FSDPConfig,
     parallel_layout_pins,
     record_parallel_pins,
 )
-from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
-from agilerl.arena.models.manifest_rules import cpu_offload_blocker
+from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 
 
@@ -329,19 +328,15 @@ def trains_expert_parallel(manifest: TrainingManifest) -> bool:
 def trains_context_parallel(manifest: TrainingManifest) -> bool:
     """Whether the trainer can split the manifest's sequences over context parallel.
 
-    A vision-language model needs a rollout run whose engine strips its towers:
-    a text-only environment.
+    A vision-language model needs a rollout run. Its towers stay frozen, since
+    the trainer anchors LoRA under the language model, so every rank can run
+    them on the full image batch.
     """
     info = _catalog_info(manifest)
     if info is None:
         return False
-    if "vision" not in info.modalities:
-        return True
-    spec = manifest.algorithm
-    env = manifest.environment
-    text_only = isinstance(env, LLMEnvSpec) and env.text_only
-    return isinstance(spec, RolloutLLMSpec) and strips_multimodal_towers(
-        spec, text_only
+    return "vision" not in info.modalities or isinstance(
+        manifest.algorithm, RolloutLLMSpec
     )
 
 

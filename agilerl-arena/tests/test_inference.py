@@ -184,32 +184,234 @@ class TestGetBatchSize:
             Agent.get_batch_size({"a": None})
 
 
-class TestAgentRequestErrors:
+class TestBuildPayload:
+    def _make_agent(self):
+        with patch("agilerl.arena.inference.agent.httpx.Client") as mock_http_cls:
+            mock_client = MagicMock()
+            mock_http_cls.return_value = mock_client
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = STATUS_BODY
+            mock_client.request.return_value = mock_resp
+            return Agent("http://test")
+
+    def test_basic_payload(self):
+        agent = self._make_agent()
+        obs = np.array([1.0, 2.0])
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=None,
+            info=None,
+            env_defined_actions=None,
+        )
+        assert "obs" in payload
+        assert payload["batch_size"] == 1
+        assert "hidden_state" not in payload
+        assert "action_mask" not in payload
+
+    def test_batched_payload_batch_size(self):
+        agent = self._make_agent()
+        obs = np.zeros((4, 8))
+        payload = agent._build_payload(
+            obs,
+            batched=True,
+            hidden_state=None,
+            info=None,
+            env_defined_actions=None,
+        )
+        assert payload["batch_size"] == 4
+
+    def test_action_mask_from_info(self):
+        agent = self._make_agent()
+        obs = np.array([1.0])
+        mask = np.array([1, 0, 1])
+        info = {"action_mask": mask}
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=None,
+            info=info,
+            env_defined_actions=None,
+        )
+        assert payload["action_mask"] is not None
+
+    def test_hidden_state_serialized(self):
+        agent = self._make_agent()
+        obs = np.array([1.0])
+        hs = {"h": np.array([0.5, 0.5])}
+        agent.metadata = _default_metadata(recurrent=True)
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=hs,
+            info=None,
+            env_defined_actions=None,
+        )
+        assert payload["hidden_state"] is not None
+
+    def test_non_recurrent_omits_hidden_state(self):
+        agent = self._make_agent()
+        obs = np.array([1.0])
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state={"h": np.array([0.5])},
+            info=None,
+            env_defined_actions=None,
+        )
+        assert "hidden_state" not in payload
+
+    def test_multi_agent_payload(self):
+        agent = self._make_agent()
+        agent.metadata = _default_metadata(multi_agent=True)
+        obs = {"agent_0": np.array([1.0, 2.0]), "agent_1": np.array([3.0, 4.0])}
+        masks = {
+            "agent_0": np.array([1, 0]),
+            "agent_1": np.array([0, 1]),
+        }
+        info = {"action_mask": masks}
+        eda = {"agent_0": np.array([0.0])}
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=None,
+            info=info,
+            env_defined_actions=eda,
+        )
+        assert isinstance(payload["obs"], dict)
+        assert "agent_0" in payload["obs"]
+        assert "hidden_state" not in payload
+        assert "action_mask" in payload
+        assert "env_defined_actions" in payload
+
+    def test_multi_agent_recurrent_includes_hidden_state(self):
+        agent = self._make_agent()
+        agent.metadata = _default_metadata(multi_agent=True, recurrent=True)
+        obs = {"agent_0": np.array([1.0, 2.0]), "agent_1": np.array([3.0, 4.0])}
+        hs = {"agent_0": np.array([0.5, 0.5]), "agent_1": np.array([0.1, 0.2])}
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=hs,
+            info=None,
+            env_defined_actions=None,
+        )
+        assert payload["hidden_state"] is not None
+
+    def test_multi_agent_rejects_array_action_mask(self):
+        agent = self._make_agent()
+        agent.metadata = _default_metadata(multi_agent=True)
+        obs = {"agent_0": np.array([1.0])}
+        info = {"action_mask": np.array([1, 0])}
+        with pytest.raises(ArenaInferenceError, match="dict\\[agent_id"):
+            agent._build_payload(
+                obs,
+                batched=False,
+                hidden_state=None,
+                info=info,
+                env_defined_actions=None,
+            )
+
+
+class TestParseGetActionResponse:
+    def test_extracts_action_and_hidden_state_when_recurrent(self):
+        action = np.array([2])
+        hs = {"h": np.array([0.1, 0.2])}
+        resp = {
+            "action": Agent.serialize(action, batched=False),
+            "hidden_state": Agent.serialize(hs, batched=False),
+        }
+        parsed_action, parsed_hs = Agent._parse_get_action_response(
+            resp, batched=False, multi_agent=False, recurrent=True
+        )
+        np.testing.assert_array_equal(parsed_action, action)
+        np.testing.assert_array_almost_equal(parsed_hs["h"], hs["h"])
+
+    def test_ignores_hidden_state_when_not_recurrent(self):
+        action = np.array([0])
+        resp = {
+            "action": Agent.serialize(action, batched=False),
+            "hidden_state": Agent.serialize({"h": np.array([0.1])}, batched=False),
+        }
+        parsed_action, parsed_hs = Agent._parse_get_action_response(
+            resp, batched=False, multi_agent=False, recurrent=False
+        )
+        np.testing.assert_array_equal(parsed_action, action)
+        assert parsed_hs is None
+
+    def test_multi_agent_action_dict(self):
+        actions = {
+            "agent_0": np.array([1]),
+            "agent_1": np.array([2]),
+        }
+        resp = {
+            "action": {
+                k: Agent.serialize(v, batched=False) for k, v in actions.items()
+            },
+        }
+        parsed_action, parsed_hs = Agent._parse_get_action_response(
+            resp, batched=False, multi_agent=True, recurrent=False
+        )
+        assert isinstance(parsed_action, dict)
+        np.testing.assert_array_equal(parsed_action["agent_0"], actions["agent_0"])
+        np.testing.assert_array_equal(parsed_action["agent_1"], actions["agent_1"])
+        assert parsed_hs is None
+
+
+class TestGetAction:
+    def _make_agent_with_mock_http(self):
+        return _mock_agent()
+
+    def _mock_json_response(self, status_code: int, body: dict):
+        return _json_response(status_code, body)
+
+    def test_successful_get_action(self):
+        agent = self._make_agent_with_mock_http()
+        action_arr = np.array([1])
+        resp_json = {
+            "action": Agent.serialize(action_arr, batched=False),
+            "hidden_state": None,
+        }
+        agent._http.request.return_value = self._mock_json_response(200, resp_json)
+
+        obs = np.array([1.0, 2.0, 3.0])
+        action, hs = agent.get_action(obs)
+
+        np.testing.assert_array_equal(action, action_arr)
+        assert hs is None
+        agent._http.request.assert_called_once()
+        call_args = agent._http.request.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[0][1] == "http://test/get_action"
+
     def test_401_raises_auth_error(self):
-        agent = _llm_agent()
-        agent._http.request.return_value = _json_response(401, {})
+        agent = self._make_agent_with_mock_http()
+        agent._http.request.return_value = self._mock_json_response(401, {})
 
         with pytest.raises(ArenaAuthError, match="401 Unauthorized"):
-            agent.generate("hi")
+            agent.get_action(np.array([1.0]))
 
     def test_non_200_raises_api_error(self):
-        agent = _llm_agent()
-        agent._http.request.return_value = _json_response(500, {"error": "internal"})
+        agent = self._make_agent_with_mock_http()
+        agent._http.request.return_value = self._mock_json_response(
+            500, {"error": "internal"}
+        )
 
         with pytest.raises(ArenaInferenceError) as exc_info:
-            agent.generate("hi")
+            agent.get_action(np.array([1.0]))
         assert exc_info.value.status_code == 500
 
     def test_network_error_raises_api_error(self):
-        agent = _llm_agent()
+        agent = self._make_agent_with_mock_http()
         agent._http.request.side_effect = httpx.ConnectError("refused")
 
         with pytest.raises(ArenaInferenceError) as exc_info:
-            agent.generate("hi")
+            agent.get_action(np.array([1.0]))
         assert exc_info.value.status_code == 0
 
     def test_non_200_with_text_fallback(self):
-        agent = _llm_agent()
+        agent = self._make_agent_with_mock_http()
         mock_resp = MagicMock()
         mock_resp.status_code = 502
         mock_resp.json.side_effect = ValueError("not json")
@@ -217,17 +419,17 @@ class TestAgentRequestErrors:
         agent._http.request.return_value = mock_resp
 
         with pytest.raises(ArenaInferenceError) as exc_info:
-            agent.generate("hi")
+            agent.get_action(np.array([1.0]))
         assert "Bad Gateway" in exc_info.value.detail
 
     def test_400_from_server(self):
-        agent = _llm_agent()
-        agent._http.request.return_value = _json_response(
+        agent = self._make_agent_with_mock_http()
+        agent._http.request.return_value = self._mock_json_response(
             400, {"error": "wrong agent type"}
         )
 
         with pytest.raises(ArenaInferenceError) as exc_info:
-            agent.generate("hi")
+            agent.get_action(np.array([1.0]))
         assert exc_info.value.status_code == 400
 
 
@@ -598,6 +800,14 @@ class TestForbiddenErrors:
 
         with pytest.raises(ArenaAuthError, match="not allowed"):
             agent.generate("hi")
+
+    def test_403_on_rl_route_also_maps_to_auth_error(self):
+        agent = _llm_agent()
+        agent.metadata = _default_metadata()
+        agent._http.request.return_value = _json_response(403, {"error": "forbidden"})
+
+        with pytest.raises(ArenaAuthError, match="not allowed"):
+            agent.get_action(np.array([1.0]))
 
     def test_403_on_stream_asks_for_login(self):
         agent = _llm_agent()
@@ -1032,6 +1242,12 @@ class TestAgentHttpHelpers:
         with pytest.raises(ArenaInferenceError, match="Network error"):
             list(agent._request_stream("/generate_stream", json_body={"prompt": "hi"}))
 
+    def test_ensure_rejects_wrong_modality(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(llm=True, algo="GRPO")
+        with pytest.raises(ArenaInferenceError, match="not RL"):
+            agent._ensure(rl=True)
+
     def test_agent_info_requires_metadata(self):
         agent = Agent.__new__(Agent)
         agent.metadata = None
@@ -1044,15 +1260,63 @@ class TestAgentHttpHelpers:
         with pytest.raises(ArenaInferenceError, match="not supervised"):
             agent._ensure(supervised=True)
 
-    def test_ensure_rejects_llm_on_non_llm(self):
+    def test_ensure_rejects_llm_on_rl(self):
         agent = Agent.__new__(Agent)
         agent.metadata = _default_metadata(llm=False, supervised=False, algo="DQN")
         with pytest.raises(ArenaInferenceError, match="not an LLM"):
             agent._ensure(llm=True)
 
+    def test_multi_agent_mask_rejects_non_dict(self):
+        with pytest.raises(ArenaInferenceError, match="action_mask must be dict"):
+            Agent._multi_agent_mask({"action_mask": np.array([1, 0])})
+
+    def test_build_payload_includes_env_defined_actions_from_info(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(multi_agent=True)
+        obs = {"agent_0": np.array([1.0, 2.0], dtype=np.float32)}
+        eda = {"agent_0": np.array([0.5], dtype=np.float32)}
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=None,
+            info={"env_defined_actions": eda},
+            env_defined_actions=None,
+        )
+        assert "env_defined_actions" in payload
+
     def test_validate_prompts_rejects_empty_list(self):
         with pytest.raises(ArenaInferenceError, match="At least one prompt"):
             Agent._validate_prompts([])
+
+    def test_multi_agent_get_action_rejects_non_dict_observation(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(multi_agent=True)
+        with pytest.raises(ArenaInferenceError, match="dict\\[agent_id"):
+            agent._build_payload(
+                np.array([1.0]),
+                batched=False,
+                hidden_state=None,
+                info=None,
+                env_defined_actions=None,
+            )
+
+    def test_parse_get_action_rejects_non_dict_multi_agent_action(self):
+        with pytest.raises(ArenaInferenceError, match="multi-agent action dict"):
+            Agent._parse_get_action_response(
+                {"action": Agent.serialize(np.array([1.0]), batched=False)},
+                batched=False,
+                multi_agent=True,
+                recurrent=False,
+            )
+
+    def test_parse_get_action_rejects_null_single_agent_action(self):
+        with pytest.raises(ArenaInferenceError, match="no action"):
+            Agent._parse_get_action_response(
+                {"action": None},
+                batched=False,
+                multi_agent=False,
+                recurrent=False,
+            )
 
 
 class TestInferenceCacheOnDisk:
@@ -1278,6 +1542,7 @@ class TestStatusWithoutAgentInfo:
             lambda a: a.get_session("s1"),
             lambda a: a.delete_session("s1"),
             lambda a: a.predict(np.zeros(4)),
+            lambda a: a.get_action(np.zeros(8)),
         ],
     )
     def test_type_guards_defer_to_the_deployment(self, call):
@@ -1294,17 +1559,23 @@ class TestStatusWithoutAgentInfo:
         assert exc_info.value.status_code == 400
         assert "Deployment is not" not in str(exc_info.value)
 
-    def test_rl_only_status_fields_are_ignored(self):
-        agent = _agent_with_status(
-            {"deployment_id": "1", "agent": {"multi_agent": True, "recurrent": True}}
-        )
+    def test_get_action_falls_back_to_single_agent_non_recurrent(self):
+        """No reported shape means the common case: one agent, no hidden state."""
+        agent = _agent_with_status(MINIMAL_STATUS)
+        payload = agent._build_payload(np.zeros(4), False, None, None, None)
 
-        assert agent.metadata.agent is not None
-        assert agent.metadata.agent.model_dump() == {
-            "algo": "",
-            "llm": False,
-            "supervised": False,
-        }
+        assert "obs" in payload
+        assert payload["batch_size"] == 1
+        assert "hidden_state" not in payload
+
+    def test_a_reported_shape_still_drives_the_payload(self):
+        agent = _agent_with_status(
+            {"deployment_id": "1", "agent": {"multi_agent": False, "recurrent": True}}
+        )
+        payload = agent._build_payload(
+            np.zeros(4), False, {"h": np.zeros(2)}, None, None
+        )
+        assert "hidden_state" in payload
 
     def test_reported_llm_still_guards(self):
         agent = _agent_with_status({"deployment_id": "1", "agent": {"llm": False}})

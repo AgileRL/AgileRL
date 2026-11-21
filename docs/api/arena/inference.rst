@@ -4,12 +4,13 @@ Inference
 HTTP client for deployed Arena inference endpoints. Deployment metadata is
 fetched on construction (unless ``probe_on_init=False``) and exposed as
 :attr:`~agilerl.arena.inference.Agent.metadata` (:class:`~agilerl.arena.inference.StatusResponse`).
-Use :meth:`~agilerl.arena.inference.Agent.predict` (supervised), or
+Use :meth:`~agilerl.arena.inference.Agent.get_action` (RL),
+:meth:`~agilerl.arena.inference.Agent.predict` (supervised), or
 :meth:`~agilerl.arena.inference.Agent.generate` /
 :meth:`~agilerl.arena.inference.Agent.generate_stream` (LLM). Errors raise
 :class:`~agilerl.arena.exceptions.ArenaInferenceError`.
 
-Supervised requests use base64 ``.npy`` serialization via
+RL and supervised requests use base64 ``.npy`` serialization via
 :mod:`agilerl.arena.inference.serde`. LLM requests use plain JSON with
 :class:`~agilerl.arena.inference.LLMParams`.
 

@@ -170,8 +170,7 @@ def _export_source(
     sleep: Callable[[float], None],
 ) -> None:
     try:
-        # Windows can still hold a shard open; a failed delete must not mask the error.
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             shards = write_source(
                 session,
                 source_from_document(source),

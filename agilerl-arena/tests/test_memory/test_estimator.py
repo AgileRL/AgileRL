@@ -3951,6 +3951,25 @@ class TestTrainingContextParallel:
         for key in ("checkpoint_boundaries", "block_recompute"):
             assert sharded.detail[key] == shard.detail[key]
 
+    def test_gated_delta_layers_charge_their_overhead_only_under_cp(
+        self, model, device
+    ):
+        # Arrange
+        gated_delta = catalog_model("Qwen/Qwen3.5-0.8B")
+
+        # Act
+        split = component(self.breakdown(gated_delta, device, 2, 4096), "overhead")
+        unsplit = component(self.breakdown(gated_delta, device, 1, 4096), "overhead")
+        attention = component(self.breakdown(model, device, 2, 4096), "overhead")
+
+        # Assert
+        assert split.detail["context_parallel_gated_delta"] == (
+            formulas.CONTEXT_PARALLEL_GATED_DELTA_BYTES
+        )
+        assert unsplit.detail["context_parallel_gated_delta"] == 0
+        assert attention.detail["context_parallel_gated_delta"] == 0
+        assert split.n_bytes == sum(split.detail.values())
+
     def test_loss_path_runs_on_the_local_shard(self, model, device):
         # Act
         plain = self.breakdown(model, device, 1, 4096)

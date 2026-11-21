@@ -13,6 +13,7 @@ from typing import Any, Literal
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
 from agilerl.arena.memory.formulas import recommendation_fits
 from agilerl.arena.memory.manifest import (
+    async_rollout,
     configured_rollout_engines,
     device_spec_from_resource_class,
     estimate_teacher_generation,
@@ -58,7 +59,7 @@ from agilerl.arena.models.algorithms.opd import (
 )
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import parallel_layout_pins
-from agilerl.arena.models.manifest import TrainingManifest, async_rollout
+from agilerl.arena.models.manifest import TrainingManifest
 
 # Setting either count pins the split; the run searches it only when both are omitted.
 SPLIT_COUNT_KEYS = frozenset({"training_gpus_per_agent", "rollout_engines_per_agent"})

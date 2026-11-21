@@ -15,6 +15,7 @@ from agilerl.arena.memory.manifest import (
     GpuInfo,
     lookup_gpu,
     unsupported_gpu_reason,
+    validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.decode_costs import (
@@ -52,7 +53,7 @@ from agilerl.arena.memory.resolve.split import (
 from agilerl.arena.memory.resolve.weight_sync import merged_sync_seconds
 from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
+from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_resolve_parallel import plan_for
 

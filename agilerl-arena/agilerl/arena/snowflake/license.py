@@ -18,7 +18,6 @@ from agilerl.arena.auth import EXTERNAL_USER_ID_HEADER
 from agilerl.arena.client_version import (
     CLIENT_VERSION_HEADER,
     SNOWFLAKE_UPGRADE_COMMAND,
-    is_upgrade_required,
     print_update_notice,
     upgrade_required_message,
 )
@@ -67,10 +66,6 @@ logger = logging.getLogger(__name__)
 
 class SnowflakeLicenseError(Exception):
     """Snowflake training cannot start, or the usage post did not land."""
-
-
-class SnowflakeUpgradeRequiredError(SnowflakeLicenseError):
-    """Arena refuses this agilerl-arena release as below its minimum."""
 
 
 class RunRenewalRefusedError(SnowflakeLicenseError):
@@ -193,10 +188,7 @@ def fetch_capabilities(base_url: str, headers: Mapping[str, str]) -> dict[str, o
     response = _get_capabilities(base_url, headers)
     print_update_notice(response, SNOWFLAKE_UPGRADE_COMMAND)
     if response.status_code == httpx.codes.UPGRADE_REQUIRED:
-        message = upgrade_required_message(response.text)
-        if is_upgrade_required(response.status_code, response.text):
-            raise SnowflakeUpgradeRequiredError(message)
-        raise SnowflakeLicenseError(message)
+        raise SnowflakeLicenseError(upgrade_required_message(response.text))
     return _read_capabilities(response, base_url)
 
 

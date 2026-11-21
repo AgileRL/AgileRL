@@ -132,17 +132,11 @@ def with_model(base, model):
     return doc
 
 
-def without_expert_lora(doc):
-    """Train no packed-expert LoRA, the layouts these MoE cases were sized for."""
-    doc["network"]["lora_config"] = {"target_parameters": []}
-    return doc
-
-
 def moe_unset_layout():
     """Qwen3.6-35B-A3B at 32k tokens with the split and engine width omitted."""
     doc = unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
     doc["network"]["max_context_length"] = 32768
-    return without_expert_lora(doc)
+    return doc
 
 
 def tiny_model():
@@ -558,31 +552,6 @@ class TestCheckTiers:
         # Assert
         assert not check.fits
         assert check.reason == "rollout bundle of 6 GPUs exceeds 4 GPUs on one node"
-
-    def test_an_engine_wider_than_a_node_does_not_fit(self):
-        # Arrange: a width-8 engine on 4-GPU nodes; no node can hold it.
-        manifest = teacher_manifest(
-            "Qwen/Qwen3.5-9B", teacher_width=2, rollout_engines_per_agent=1
-        )
-        manifest.algorithm.vllm_config.tensor_parallel_size = 8
-        tiers = [
-            {
-                **tier("a100-4x", "NVIDIA A100-SXM4-80GB", 4, 8.0),
-                "gpus_per_node": 4,
-                "node_counts": [3],
-            }
-        ]
-
-        # Act
-        (check,) = check_tiers(
-            tiers, manifest, catalog_model(manifest.algorithm), builder()
-        )
-
-        # Assert
-        assert not check.fits
-        assert (
-            check.reason == "engine tensor_parallel_size 8 exceeds 4 GPUs on one node"
-        )
 
     def test_a_teacher_model_without_a_layout_gets_a_split_that_fits(self):
         # Arrange: no student width, trainer or engine count, or teacher width.
@@ -1362,10 +1331,8 @@ class TestCheckTiers:
     def test_a_pinned_layout_off_the_nodes_is_priced_under_an_open_count(self):
         # Arrange: up to 15 trainers on two 8-GPU nodes; pinned ep=5 groups
         # straddle the nodes past 8 of them.
-        doc = without_expert_lora(
-            unset_split(
-                with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
-            )
+        doc = unset_split(
+            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
         )
         doc["algorithm"]["fsdp"] = {"ep": 5}
         doc["algorithm"]["batch_size"] = 40
@@ -1388,10 +1355,8 @@ class TestCheckTiers:
     ):
         # Arrange: nothing fits, so every layout is priced. Up to 15 trainers
         # on two 8-GPU nodes; ep=5 sits on one node at 5 trainers only.
-        doc = without_expert_lora(
-            unset_split(
-                with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
-            )
+        doc = unset_split(
+            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
         )
         doc["algorithm"]["batch_size"] = 40
         manifest = TrainingManifest.model_validate(doc)

@@ -10,9 +10,10 @@ It reads the training manifest, the GPU name, and the checkpoint
 Two commands:
 
 * ``arena memory estimate`` — peak VRAM for a training manifest. Exit 0 if
-  both phases fit, 3 if either is over budget, 2 on a usage error. Pass
-  ``--gpu`` with a GPU type from ``arena resources list`` (for example
-  ``--gpu h100-80``), or ``--device-gb``; without either it exits 2.
+  both phases fit, 3 if either is over budget, 2 on a usage error. Without ``--gpu`` or
+  ``--device-gb`` it picks the cheapest Arena resource tier (by credits per
+  node-hour) whose node holds the manifest's GPU layout and fits both phases.
+  This needs ``arena login``.
 * ``arena memory solve max_model_len`` — the longest context the training run
   still fits on ``--gpu`` or ``--device-gb``, with the rest of the manifest
   held fixed. It uses the same underprediction buffer as ``estimate``. The
@@ -22,7 +23,7 @@ Two commands:
 
    pip install 'agilerl-arena[hub]'
 
-   arena memory estimate manifest.yaml --gpu h100-80
+   arena memory estimate manifest.yaml
    arena memory estimate manifest.yaml --gpu "NVIDIA L4"
 
    arena memory solve max_model_len manifest.yaml --gpu "NVIDIA L4"
@@ -34,7 +35,8 @@ extra fetches ``config.json`` from Hugging Face; pass
 The run picks ``vllm_config.tensor_parallel_size`` from the node's GPU count
 when the manifest leaves it unset. It splits an unset ``max_num_seqs`` across
 the engines ``rollout_engines_per_agent: auto`` starts. For either, pass
-``--num-gpus`` with ``--gpu`` or ``--device-gb``. ``solve`` picks them again at each candidate value.
+``--num-gpus`` with ``--gpu`` or ``--device-gb``; a resource tier brings its
+own count. ``solve`` picks them again at each candidate value.
 
 The two phase bars (training and generation) never peak at once. Resource
 selection sizes against the larger of the two. The estimate errs high.

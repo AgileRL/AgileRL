@@ -41,7 +41,6 @@ from agilerl.arena.snowflake.license import (
     RunRenewalRefusedError,
     SnowflakeDeployment,
     SnowflakeLicenseError,
-    SnowflakeUpgradeRequiredError,
     SnowflakeUsage,
     TrainingDisabledError,
     UnknownUsageError,
@@ -1033,16 +1032,6 @@ class TestFetchCapabilities:
             fetch_capabilities(BASE_URL, {"Authorization": "Bearer org-key"})
 
         assert str(caught.value) == OUTDATED
-        assert isinstance(caught.value, SnowflakeUpgradeRequiredError)
-
-    def test_another_426_is_not_an_upgrade(self, arena: Arena) -> None:
-        arena.replies = [reply(426, {"error": "other", "description": "Refused."})]
-
-        with pytest.raises(SnowflakeLicenseError) as caught:
-            fetch_capabilities(BASE_URL, {"Authorization": "Bearer org-key"})
-
-        assert str(caught.value) == "Refused."
-        assert not isinstance(caught.value, SnowflakeUpgradeRequiredError)
 
     def test_an_update_header_prints_one_notice(
         self, arena: Arena, capsys: pytest.CaptureFixture[str]
