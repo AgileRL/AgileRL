@@ -3,14 +3,16 @@
 
 """Free trial of the Arena Snowflake Native App: when an unpurchased listing install stops.
 
-``arena_app`` and ``app_billing`` import this module, which imports neither.
-The setup script lists all three files in each procedure's ``IMPORTS``, which
-puts them on the path side by side.
+Every other app module imports this one, which imports none of them, so it
+also sets up logging and tracebacks for whichever module a procedure's handler
+is in. The setup script lists every module in each procedure's ``IMPORTS``,
+which puts them on the path side by side.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -27,6 +29,16 @@ APP_SCHEMA = "app_state"
 TRIAL = timedelta(days=7) - timedelta(minutes=60)
 
 logger = logging.getLogger(__name__)
+
+# Snowflake writes procedure logs to the event table from the root logger; the
+# CLI's console handler would keep agilerl.arena records on stderr instead.
+ARENA_LOGGER = logging.getLogger("agilerl.arena")
+ARENA_LOGGER.handlers.clear()
+ARENA_LOGGER.propagate = True
+
+# Snowflake returns a procedure's formatted exception to the caller; without this
+# the consumer sees the app's stack and file paths around the message.
+sys.tracebacklimit = 0
 
 
 def trial_ended(session: SnowflakeSession) -> bool:

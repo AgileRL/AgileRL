@@ -210,7 +210,14 @@ class TestConfigure:
         configure(session, ORG_KEY, USER_ID, "https://arena.agilerl.com")
 
         others = [s for s in session.statements if s not in secret_sql(session)]
-        assert others == ["DESCRIBE NETWORK RULE app_state.arena_api_egress"]
+        assert others == [
+            "DESCRIBE NETWORK RULE app_state.arena_api_egress",
+            "DELETE FROM app_state.arena_key",
+            (
+                "INSERT INTO app_state.arena_key (source, issued_at) "
+                "VALUES ('configure', CURRENT_TIMESTAMP())"
+            ),
+        ]
 
     def test_refuses_a_key_without_the_org_prefix_before_any_sql(
         self, monkeypatch: pytest.MonkeyPatch
@@ -852,7 +859,7 @@ class TestGpuFamilies:
         )
         session = FakeSession([GCP_FAMILIES])
 
-        with pytest.raises(ValueError, match="Arena is not configured"):
+        with pytest.raises(ValueError, match="Arena is not connected"):
             gpu_families(session)
 
         assert session.statements == []

@@ -26,7 +26,7 @@ CREATE OR ALTER NETWORK RULE app_state.arena_api_egress
   MODE = EGRESS
   VALUE_LIST = ('arena.agilerl.com:443');
 
--- app_code.configure sets the values. reconcile_usage names the secrets, so they exist from install.
+-- app_code.configure or app_code.connect_arena sets the values. reconcile_usage names the secrets, so they exist from install.
 CREATE SECRET IF NOT EXISTS app_state.arena_org_key
   TYPE = GENERIC_STRING
   SECRET_STRING = '';
@@ -34,6 +34,10 @@ CREATE SECRET IF NOT EXISTS app_state.arena_external_user_id
   TYPE = GENERIC_STRING
   SECRET_STRING = '';
 CREATE SECRET IF NOT EXISTS app_state.arena_base_url
+  TYPE = GENERIC_STRING
+  SECRET_STRING = '';
+-- Secret of the claim app_code.connect_arena has open; blank otherwise.
+CREATE SECRET IF NOT EXISTS app_state.arena_claim_secret
   TYPE = GENERIC_STRING
   SECRET_STRING = '';
 
@@ -102,7 +106,8 @@ BEGIN
     ALLOWED_AUTHENTICATION_SECRETS = (
       app_state.arena_org_key,
       app_state.arena_external_user_id,
-      app_state.arena_base_url
+      app_state.arena_base_url,
+      app_state.arena_claim_secret
     );
 END;
 $$;
@@ -184,6 +189,21 @@ CREATE TABLE IF NOT EXISTS app_state.billed_hours (
   PRIMARY KEY (kind, usage_id, hour_start_ms)
 );
 
+-- Where the saved org key came from: 'connect' keys are rotated by the app, 'configure' keys by AgileRL.
+CREATE TABLE IF NOT EXISTS app_state.arena_key (
+  source STRING,
+  issued_at TIMESTAMP_TZ
+);
+
+-- The claim app_code.connect_arena has open, at most one row.
+-- A row is inserted only while the table is empty, before Arena is called.
+CREATE TABLE IF NOT EXISTS app_state.arena_claim (
+  claim_id STRING,
+  base_url STRING,
+  expires_at TIMESTAMP_TZ,
+  proven_at TIMESTAMP_TZ
+);
+
 -- When the app was installed; app_code.submit and publish refuse an unpurchased listing install once its trial ends.
 CREATE TABLE IF NOT EXISTS app_state.trial (
   started_at TIMESTAMP_TZ
@@ -232,7 +252,7 @@ CREATE OR REPLACE PROCEDURE app_code.register_reference(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.register_reference';
 GRANT USAGE ON PROCEDURE app_code.register_reference(STRING, STRING, STRING)
   TO APPLICATION ROLE app_admin;
@@ -250,9 +270,38 @@ CREATE OR REPLACE PROCEDURE app_code.configure(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.configure';
 GRANT USAGE ON PROCEDURE app_code.configure(STRING, STRING, STRING)
+  TO APPLICATION ROLE app_admin;
+
+-- Connects the app to a new Arena organisation; Arena delivers the key to the app, never to a person.
+CREATE OR REPLACE PROCEDURE app_code.connect_arena(base_url STRING DEFAULT 'https://arena.agilerl.com')
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'app_keys.connect_arena';
+GRANT USAGE ON PROCEDURE app_code.connect_arena(STRING)
+  TO APPLICATION ROLE app_admin;
+
+CREATE OR REPLACE PROCEDURE app_code.rotate_arena_key()
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'app_keys.rotate_arena_key';
+GRANT USAGE ON PROCEDURE app_code.rotate_arena_key()
   TO APPLICATION ROLE app_admin;
 
 CREATE OR REPLACE PROCEDURE app_code.set_pools(
@@ -269,7 +318,7 @@ CREATE OR REPLACE PROCEDURE app_code.set_pools(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.set_pools';
 GRANT USAGE ON PROCEDURE app_code.set_pools(ARRAY, NUMBER, STRING, STRING)
   TO APPLICATION ROLE app_admin;
@@ -283,7 +332,7 @@ CREATE OR REPLACE PROCEDURE app_code.gpu_families()
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.gpu_families';
 GRANT USAGE ON PROCEDURE app_code.gpu_families()
   TO APPLICATION ROLE app_admin;
@@ -307,7 +356,7 @@ CREATE OR REPLACE PROCEDURE app_code.submit(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.submit';
 GRANT USAGE ON PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)
   TO APPLICATION ROLE app_admin;
@@ -321,7 +370,7 @@ CREATE OR REPLACE PROCEDURE app_code.status(run_id STRING)
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.status';
 GRANT USAGE ON PROCEDURE app_code.status(STRING)
   TO APPLICATION ROLE app_user;
@@ -339,7 +388,7 @@ CREATE OR REPLACE PROCEDURE app_code.logs(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.logs';
 GRANT USAGE ON PROCEDURE app_code.logs(STRING, STRING, NUMBER)
   TO APPLICATION ROLE app_user;
@@ -353,7 +402,7 @@ CREATE OR REPLACE PROCEDURE app_code.cancel(run_id STRING)
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.cancel';
 GRANT USAGE ON PROCEDURE app_code.cancel(STRING)
   TO APPLICATION ROLE app_admin;
@@ -376,7 +425,7 @@ CREATE OR REPLACE PROCEDURE app_code.publish(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.publish';
 GRANT USAGE ON PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)
   TO APPLICATION ROLE app_admin;
@@ -393,7 +442,7 @@ CREATE OR REPLACE PROCEDURE app_code.endpoint(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.endpoint';
 GRANT USAGE ON PROCEDURE app_code.endpoint(STRING, STRING)
   TO APPLICATION ROLE app_user;
@@ -411,7 +460,7 @@ CREATE OR REPLACE PROCEDURE app_code.unpublish(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.unpublish';
 GRANT USAGE ON PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)
   TO APPLICATION ROLE app_admin;
@@ -429,7 +478,7 @@ CREATE OR REPLACE PROCEDURE app_code.export_model(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.export_model';
 GRANT USAGE ON PROCEDURE app_code.export_model(STRING, NUMBER)
   TO APPLICATION ROLE app_admin;
@@ -444,7 +493,7 @@ CREATE OR REPLACE PROCEDURE app_code.reconcile_usage()
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.reconcile_usage';
 
 -- The Arena integration is named per app, so the Arena procedures get it and their secrets here.
@@ -452,15 +501,18 @@ EXECUTE IMMEDIATE $$
 DECLARE
   arena_access STRING;
   secrets STRING DEFAULT ' SECRETS = (''org_key'' = app_state.arena_org_key, ''external_user_id'' = app_state.arena_external_user_id, ''base_url'' = app_state.arena_base_url)';
+  claim_secrets STRING DEFAULT ' SECRETS = (''org_key'' = app_state.arena_org_key, ''external_user_id'' = app_state.arena_external_user_id, ''base_url'' = app_state.arena_base_url, ''claim_secret'' = app_state.arena_claim_secret)';
 BEGIN
   SELECT ' SET EXTERNAL_ACCESS_INTEGRATIONS = (' || app_code.object_prefix() || 'ARENA_EAI)'
     INTO :arena_access;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.configure(STRING, STRING, STRING)' || arena_access;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.connect_arena(STRING)' || arena_access || claim_secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.rotate_arena_key()' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.gpu_families()' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)' || arena_access || secrets;
-  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.reconcile_usage()' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.reconcile_usage()' || arena_access || claim_secrets;
 END;
 $$;
 
@@ -484,7 +536,7 @@ CREATE OR REPLACE PROCEDURE app_code.version_init()
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.version_init';
 
 -- Runs the task rather than reconcile_usage: a task run never overlaps another, and

@@ -3,9 +3,9 @@
 
 """Billing for the Arena Snowflake Native App: the billing task, idle GPU pools, and served models.
 
-``arena_app`` imports this module, and this module imports ``app_trial``. The
-setup script lists all three files in each procedure's ``IMPORTS``, which puts
-them on the path side by side.
+``arena_app`` and ``app_keys`` import this module, and this module imports
+``app_trial``. The setup script lists all four files in each procedure's
+``IMPORTS``, which puts them on the path side by side.
 """
 
 from __future__ import annotations
@@ -51,22 +51,42 @@ BILLING_TASK = f"{APP_SCHEMA}.reconcile_usage_task"
 logger = logging.getLogger(__name__)
 
 
-def arena_partner() -> tuple[str, dict[str, str]]:
-    """Arena origin and partner headers from the secrets ``configure`` saved.
+def saved_secret(name: str) -> str:
+    """Read a secret the procedure's ``SECRETS`` clause names.
 
-    :return: The origin and the headers.
-    :raises ValueError: No org key has been saved.
+    :param name: Name in the ``SECRETS`` clause.
+    :return: The value.
     """
     # Lazy import of an optional package: _snowflake exists only inside a Snowflake procedure.
     import _snowflake  # noqa: PLC0415 -- not installable outside Snowflake
 
-    org_key = _snowflake.get_generic_secret_string("org_key")
+    return _snowflake.get_generic_secret_string(name)
+
+
+def saved_partner() -> tuple[str, dict[str, str]] | None:
+    """Arena origin and partner headers from the secrets ``configure`` or ``connect_arena`` saved.
+
+    :return: The origin and the headers, or ``None`` when no org key is saved.
+    """
+    org_key = saved_secret("org_key")
     if not org_key:
-        msg = "Arena is not configured. An app_admin calls app_code.configure first."
+        return None
+    return saved_secret("base_url"), partner_headers(
+        org_key, saved_secret("external_user_id")
+    )
+
+
+def arena_partner() -> tuple[str, dict[str, str]]:
+    """Arena origin and partner headers from the saved secrets.
+
+    :return: The origin and the headers.
+    :raises ValueError: No org key has been saved.
+    """
+    partner = saved_partner()
+    if partner is None:
+        msg = "Arena is not connected. An app_admin calls app_code.connect_arena first."
         raise ValueError(msg)
-    external_user_id = _snowflake.get_generic_secret_string("external_user_id")
-    base_url = _snowflake.get_generic_secret_string("base_url")
-    return base_url, partner_headers(org_key, external_user_id)
+    return partner
 
 
 def sync_billing_task(session: SnowflakeSession) -> bool:
@@ -89,10 +109,12 @@ def sync_billing_task(session: SnowflakeSession) -> bool:
 
 
 def app_busy(session: SnowflakeSession) -> bool:
-    """Whether a service in ``app_state`` is live or a usage item still needs billing.
+    """Whether a service in ``app_state`` is live, a usage item still needs billing, or a proven claim waits for its key.
 
     An item Arena has only answered 404 for does not count: a run that never
     reached Arena would keep the task running for the 30 days until it settles.
+    A claim counts only until it expires, so a signup link nobody opens costs
+    at most two hours of task runs.
 
     :param session: Procedure session.
     :return: True while the billing task has work.
@@ -104,7 +126,15 @@ def app_busy(session: SnowflakeSession) -> bool:
         "SELECT COUNT(*) AS N FROM app_state.usage_items WHERE settled_at IS NULL "
         "AND (first_seen_at IS NOT NULL OR first_404_at IS NULL)",
     )
-    return int(str(lowered(row)["n"])) > 0
+    if int(str(lowered(row)["n"])) > 0:
+        return True
+    return bool(
+        collect(
+            session,
+            "SELECT claim_id FROM app_state.arena_claim WHERE proven_at IS NOT NULL "
+            "AND expires_at > CURRENT_TIMESTAMP()",
+        )
+    )
 
 
 def suspend_idle_gpu_pools(session: SnowflakeSession) -> list[str]:
@@ -553,18 +583,25 @@ def open_served(
         started_at = datetime.fromtimestamp(
             int(str(existing["opened_ms"])) / 1000, timezone.utc
         )
-    [row] = collect(session, "SELECT CURRENT_ACCOUNT() AS ACCOUNT")
+    [row] = collect(
+        session,
+        "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+        "app_code.listing_purchased() AS PURCHASED",
+    )
+    account = lowered(row)
     try:
         open_call(
             SnowflakeDeployment(
                 deployment_id=deployment_id,
-                snowflake_account=str(lowered(row)["account"]),
+                snowflake_account=str(account["account"]),
+                snowflake_region=str(account["region"]),
                 gpu_count=served.gpu_count,
                 gpu_family=served.gpu_family,
                 started_at=started_at,
                 model=served.model,
                 version=served.version,
                 run_id=served.run_id,
+                purchased=account["purchased"] is True,
             )
         )
     except DeploymentRefusedError as exc:
