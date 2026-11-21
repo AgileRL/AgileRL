@@ -70,6 +70,47 @@ class TestReplayBufferLen:
 
 
 class TestReplayBufferAdd:
+    @pytest.mark.parametrize("buffer_class", [ReplayBuffer, PrioritizedReplayBuffer])
+    @pytest.mark.parametrize("prefix_size", [0, 2])
+    @pytest.mark.parametrize("batch_size", [2, 3, 5, 8])
+    def test_batch_matches_sequential_writes(
+        self, buffer_class, prefix_size, batch_size
+    ):
+        """Oversized batches retain the latest transitions and the circular position."""
+        capacity = 3
+        batched = buffer_class(max_size=capacity)
+        sequential = buffer_class(max_size=capacity)
+        total = prefix_size + batch_size
+        data = TensorDict(
+            {
+                "state": TensorDict(
+                    {"value": torch.arange(total + 1).reshape(-1, 1)},
+                    batch_size=[total + 1],
+                ),
+                "reward": torch.arange(total + 1, dtype=torch.float32),
+            },
+            batch_size=[total + 1],
+        )
+        if prefix_size:
+            batched.add(data[:prefix_size].clone())
+        for i in range(total):
+            sequential.add(data[i : i + 1].clone())
+        batched.add(data[prefix_size:total].clone())
+
+        assert batched.size == sequential.size == min(total, capacity)
+        assert batched.counter == sequential.counter == total
+        assert batched.is_full == sequential.is_full
+        assert (batched.storage == sequential.storage).all()
+
+        # The next write must overwrite the same transition in both buffers.
+        for buffer in (batched, sequential):
+            buffer.add(data[total : total + 1].clone())
+        assert (batched.storage == sequential.storage).all()
+        assert batched.counter == sequential.counter == total + 1
+        if isinstance(batched, PrioritizedReplayBuffer):
+            assert batched.tree_ptr == sequential.tree_ptr
+            assert batched.sum_tree.sum() == sequential.sum_tree.sum()
+
     def test_buffer_initialization(self):
         """Test that the buffer correctly initializes storage when adding first data."""
         buffer = ReplayBuffer(max_size=1000)

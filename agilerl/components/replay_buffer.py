@@ -138,6 +138,9 @@ class ReplayBuffer:
     def add(self, data: TensorDict) -> TensorDict | None:
         """Add a transition to the buffer.
 
+        Batches larger than the capacity retain only their newest transitions,
+        with the same circular position and counter as sequential additions.
+
         :param data: Transition to add to the buffer
         :type data: TensorDict | dict[str, Any]
         :return: The first transition leaving the n-step window for n-step buffers, None otherwise
@@ -155,12 +158,17 @@ class ReplayBuffer:
         storage = self._storage if self._storage is not None else self._init(data)
 
         # Add to circular storage
-        start = self._cursor
-        end = self._cursor + _n_transitions
+        skipped = max(0, _n_transitions - self.max_size)
+        start = (self._cursor + skipped) % self.max_size
+        if skipped:
+            retained = data[skipped:]
+            assert isinstance(retained, TensorDict)
+            data = retained
+        end = start + data.shape[0]
         if end > self.max_size:
             n = self.max_size - start
             storage[start:] = data[:n]
-            storage[: _n_transitions - n] = data[n:]
+            storage[: data.shape[0] - n] = data[n:]
         else:
             storage[start:end] = data
 
