@@ -85,6 +85,14 @@ TRIAL_QUERY = re.compile(
     r"DATEADD\('second', -(\d+), CURRENT_TIMESTAMP\(\)\) AS ENDED FROM app_state\.trial"
 )
 TRIAL_ENDED = "The free trial of AgileRL Arena has ended"
+INSTALL_ROW = Row(
+    REGION="AWS_EU_WEST_2",
+    ACCOUNT="AB12345",
+    ACCOUNT_NAME="ACME",
+    ORGANIZATION_NAME="ACMEORG",
+    APPLICATION_NAME="ARENA_APP",
+    PURCHASED=True,
+)
 
 
 @pytest.fixture
@@ -174,6 +182,8 @@ class AppSession:
         self.statements.append(statement)
         if (ended := self.install.ended(statement)) is not None:
             return ended
+        if statement.startswith("SELECT CURRENT_REGION() AS REGION, CURRENT_ACCOUNT()"):
+            return Result([INSTALL_ROW])
         for pred, rows in self.routes:
             if pred(statement):
                 return Result(rows)
@@ -314,6 +324,8 @@ class TestSubmit:
         [container] = spec(head)["spec"]["containers"]
         assert container["image"] == IMAGE
         assert container["env"]["ARENA_SNOWFLAKE_CHANNEL"] == "native_app"
+        assert container["env"]["ARENA_SNOWFLAKE_REGION"] == "AWS_EU_WEST_2"
+        assert container["env"]["ARENA_SNOWFLAKE_PURCHASED"] == "true"
         assert all(
             "ARENA_SNOWFLAKE_CHANNEL" not in item["env"]
             for item in spec(workers)["spec"]["containers"]
@@ -880,7 +892,13 @@ def publish_session(
                 "SHOW ENDPOINTS IN SERVICE ARENA_APP.app_state.qwen_checkpoint_2",
                 [Row(name="inference", ingress_url="abc-app.snowflakecomputing.app")],
             ),
-            exact("SELECT CURRENT_ACCOUNT() AS ACCOUNT", [Row(ACCOUNT="AB12345")]),
+            exact(
+                (
+                    "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+                    "app_code.listing_purchased() AS PURCHASED"
+                ),
+                [Row(ACCOUNT="AB12345", REGION="AWS_EU_WEST_2", PURCHASED=True)],
+            ),
             (
                 lambda s: s.startswith("MERGE INTO app_state.usage_items "),
                 [Row(**{"number of rows inserted": 1})],
@@ -951,11 +969,13 @@ class TestPublish:
         deployment_id = str(body.pop("deploymentId"))
         assert body == {
             "snowflakeAccount": "AB12345",
+            "snowflakeRegion": "AWS_EU_WEST_2",
             "gpuCount": 1,
             "gpuFamily": "GPU_NV_S",
             "channel": "native_app",
             "model": "qwen",
             "version": "checkpoint_2",
+            "purchased": True,
             "runId": RUN_ID,
         }
         assert started_at >= before.replace(microsecond=0)
@@ -1047,7 +1067,7 @@ class TestPublish:
         monkeypatch.setitem(SECRETS, "org_key", "")
         session = publish_session()
 
-        with pytest.raises(ValueError, match="Arena is not configured"):
+        with pytest.raises(ValueError, match="Arena is not connected"):
             publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
 
         assert executes(session) == []

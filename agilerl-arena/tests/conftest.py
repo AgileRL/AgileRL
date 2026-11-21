@@ -42,6 +42,7 @@ if (
     collect_ignore = [
         "test_snowflake_app_billing.py",
         "test_snowflake_app_config.py",
+        "test_snowflake_app_keys.py",
         "test_snowflake_app_manifest.py",
         "test_snowflake_app_runs.py",
     ]

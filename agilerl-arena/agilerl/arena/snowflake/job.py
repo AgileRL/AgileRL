@@ -27,7 +27,7 @@ from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
-from agilerl.arena.snowflake.license import CHANNEL_ENV
+from agilerl.arena.snowflake.license import CHANNEL_ENV, PURCHASED_ENV, REGION_ENV
 from agilerl.arena.snowflake.ports import TrainerPorts, service_endpoints
 from agilerl.arena.snowflake.profile import (
     ARENA_API_INTEGRATION,
@@ -144,6 +144,8 @@ class SubmitSettings:
     arena_api_integration: str = ARENA_API_INTEGRATION
     service_schema: str | None = None
     channel: str | None = None
+    snowflake_region: str | None = None
+    listing_purchased: bool | None = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -884,14 +886,14 @@ def render_head_spec(settings: SubmitSettings, run_id: str) -> str:
     memory_gib = cpu_memory_gib(settings.head_family)
     container = _ray_container(settings, run_id, memory_gib, None)
     container["secrets"] = arena_container_secrets(settings.secrets_schema)
-    if settings.channel is not None:
-        container["env"] = {**container["env"], CHANNEL_ENV: settings.channel}
+    extra = {CHANNEL_ENV: settings.channel, REGION_ENV: settings.snowflake_region}
+    if settings.listing_purchased is not None:
+        extra[PURCHASED_ENV] = str(settings.listing_purchased).lower()
+    container["env"] |= {k: v for k, v in extra.items() if v is not None}
     return _dump_spec(
         {
             "spec": {
-                "containers": [
-                    container,
-                ],
+                "containers": [container],
                 "endpoints": service_endpoints(None),
                 "volumes": [
                     stage_volume(runs_prefix(settings.runs_stage, run_id)),

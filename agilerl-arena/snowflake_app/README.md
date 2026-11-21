@@ -52,11 +52,76 @@ does not exist or is not granted to an application role` as a second result
 row. It is harmless: the setup script creates and grants the procedure, and
 binding `source_table` or `source_view` works. `SHOW REFERENCES IN APPLICATION <app>` lists the bindings.
 
+## Connect to Arena
+
+After installing, an `app_admin` runs:
+
+```sql
+CALL <app>.app_code.connect_arena();
+```
+
+`CONNECT` is a reserved word in Snowflake SQL, so the procedure is `connect_arena`.
+
+It returns a link. Open it, sign up or sign in, and create the Arena
+organisation for this Snowflake account. Then run `connect_arena()` again, or wait up
+to an hour: the app collects its org key by itself. Nobody sees or types the
+key; it goes straight into the app's secrets.
+
+How the app proves it is this install:
+
+1. `connect_arena()` sends Arena the account's region (`CURRENT_REGION()`), locator
+   (`CURRENT_ACCOUNT()`), account and organisation names, the app's name, and
+   whether the listing is purchased. Arena answers with a claim id and a claim
+   secret, which the app saves in `app_state.arena_claim_secret`.
+2. Arena writes a one-time code for that region and locator to
+   `claims.challenges`, a table shared from the application package. Consumers
+   cannot query shared package content, and the app reads only the row for its
+   own region and locator, so only this install sees the code. In another
+   region the row arrives after a listing refresh Arena starts, so
+   `connect_arena()` waits up to two minutes for it.
+3. The app sends the code back, and Arena returns the signup link.
+4. Once the admin has created the organisation, `connect_arena()` or the hourly task
+   collects the key into the three Arena secrets, then checks it with
+   `GET /api/cli/v1/capabilities`. Arena issues the key once, so a failed check
+   leaves the key saved.
+
+A second `connect_arena()` while the first is still starting does not open
+another claim. It asks you to run it again in a moment.
+
+A claim lasts two hours. While a proven claim waits for signup, the hourly
+task runs to collect the key; this only happens in the month you ran
+`connect_arena()`, which already counts as a month of use. If the code has not
+arrived, or Arena cannot see the install yet, `connect_arena()` says so and the next
+call carries on with the same claim. Running `connect_arena()` on an app whose key
+Arena still accepts changes nothing. After Arena revokes the key (for example
+"Disconnect app" in Arena), `connect_arena()` starts a new claim.
+
+The app rotates a key it collected once it is 90 days old, from `submit`,
+`publish` with serving, `connect_arena()` or an hourly run that is billing anyway,
+and never while a run's services are live: they read the key when they start.
+The new key's first use revokes every other key of this install, except the one
+it replaced, which keeps working for 5 more minutes.
+
+After an unpurchased trial ends, Arena also refuses run heartbeats and repeat
+opens and deployment heartbeats (403 `snowflake_trial_ended`). A run's head
+stops renewing and the trainer stops when its token expires; the hourly task
+drops a served model's service and closes its deployment, and both log the
+trial message.
+`CALL <app>.app_code.rotate_arena_key();` rotates it now.
+
+Run and deployment opens send the app's region and its `listing_purchased()`
+flag, so Arena sees a purchase at once instead of after its daily sync.
+
+Keys AgileRL issues by hand (tests, enterprise deals) still go in with
+`app_code.configure(org_key, external_user_id, base_url)`. The app does not
+rotate those.
+
 ## Procedures
 
 Python 3.13 stored procedures in `app_code/arena_app.py` (billing and
-served-model helpers in `app_code/app_billing.py`, the trial check in
-`app_code/app_trial.py`), owner's rights, with
+served-model helpers in `app_code/app_billing.py`, `connect` and key rotation
+in `app_code/app_keys.py`, the trial check in `app_code/app_trial.py`), owner's
+rights, with
 the other `agilerl-arena` dependencies they import (`aiofiles`, `click`,
 `cryptography`, `deprecation`, `httpx`, `jwcrypto`, `lazy_loader`, `numpy`,
 `pydantic`, `pyyaml`, `requests`, `requests-toolbelt`, `rich`) and
@@ -87,7 +152,9 @@ integrations and pools after an upgrade, since setup never drops them:
 
 | Procedure | Role | Does |
 |---|---|---|
-| `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `AGILERL_APP_<APP>_ARENA_EAI` and requires `features.snowflakeTraining`; then sets the three secrets and lists `features.snowflakePricedGpuFamilies` when Arena sends it. Secret values are never logged, returned or quoted in errors. |
+| `app_code.connect_arena(base_url)` | `app_admin` | Starts or carries on one claim with Arena, reads its code from `claims.challenges`, proves it, and returns the signup link. A second call while a claim is starting is asked to run again. Once the claim is linked, collects the org key into the three secrets, then checks capabilities; a failed check leaves the key saved. See Connect to Arena. With a saved key Arena still accepts, only rotates it when due. Refused after an unpurchased trial. `base_url` defaults to `https://arena.agilerl.com` and must be in `app_state.arena_api_egress`. |
+| `app_code.rotate_arena_key()` | `app_admin` | Swaps a key `connect` collected for a new one (`POST /api/cli/v1/snowflake/app-keys/rotate`), saves it, and uses it once; Arena retires the old key 5 minutes later. Refused for keys from `configure` and while a run's services are live. |
+| `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | For keys AgileRL issues by hand. Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `AGILERL_APP_<APP>_ARENA_EAI` and requires `features.snowflakeTraining`; then sets the three secrets and lists `features.snowflakePricedGpuFamilies` when Arena sends it. Secret values are never logged, returned or quoted in errors. |
 | `app_code.set_pools(gpu_families, max_gpus, broker_family, head_family)` | `app_admin` | Creates or resizes `AGILERL_APP_<APP>_BROKER_POOL`, `AGILERL_APP_<APP>_HEAD_POOL` and one `AGILERL_APP_<APP>_GPU_<FAMILY>` per listed family (CLI defaults); drops the app's `AGILERL_APP_<APP>_GPU_*` pools of families no longer listed; refuses to shrink or drop under a running service; writes `setup.json`. A GPU family missing from the region, or listed with another GPU count per node than the app sizes (Snowflake reuses the AWS `GPU_R6K_G1_*` names on GCP for nodes with half the GPUs), is refused with the GPU families the app can size there. |
 | `app_code.gpu_families()` | `app_admin` | Lists the GPU families `set_pools` can use: returned by `SHOW COMPUTE POOL INSTANCE FAMILIES` with the GPU count per node the app sizes, and in `features.snowflakePricedGpuFamilies` when Arena sends it. Reads capabilities with the three Arena secrets through `AGILERL_APP_<APP>_ARENA_EAI`. |
 | `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`, and on `export_stage`, which holds one stage. |
@@ -95,9 +162,9 @@ integrations and pools after an upgrade, since setup never drops them:
 | `app_code.status(run_id)` | `app_user` | `arena snowflake status`. Refuses run ids with no `job.json` on `@app_state.runs`. |
 | `app_code.logs(run_id, role, instance)` | `app_user` | `arena snowflake logs`. |
 | `app_code.cancel(run_id)` | `app_admin` | `arena snowflake cancel`, then suspends the app's GPU pools that have no service or job left. |
-| `app_code.reconcile_usage()` | none | Bills usage, suspends the app's GPU pools that have no service or job left, then suspends its task when the app is idle; see Billing. Only the hourly task calls it, so two calls never overlap. |
+| `app_code.reconcile_usage()` | none | Collects the key of a linked claim, bills usage, rotates a key `connect` collected once it is 90 days old, suspends the app's GPU pools that have no service or job left, then suspends its task when the app is idle; see Billing. Only the hourly task calls it, so two calls never overlap. |
 | `app_code.reconcile_now()` | `app_admin` | Queues a run of `app_state.reconcile_usage_task` with `EXECUTE TASK`, so billing can be run by hand. It starts after any run in progress. |
-| `app_code.version_init()` | none | Version initializer: after install, upgrade, or a failed upgrade, resumes the billing task when the app has work to bill and leaves it suspended otherwise. |
+| `app_code.version_init()` | none | Version initializer: after install, upgrade, or a failed upgrade, points `setup.json` at this version's image (a version runs only its own image, so `submit` and `publish` would otherwise refuse until `set_pools` ran again), then resumes the billing task when the app has work to bill and leaves it suspended otherwise. |
 | `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
 | `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
 | `app_code.unpublish(model, version_name, drop_version)` | `app_admin` | `arena snowflake unpublish` for a model in `app_state`, then closes the service's Arena deployment. |
@@ -252,6 +319,9 @@ served model. After billing, each hourly run suspends the task when no
 service in `app_state` is live and every usage item has settled, except items
 Arena has only answered 404 for, so a run's last hours are billed first. The
 check runs again after suspending, so a run submitted meanwhile resumes it.
+`connect_arena()` also resumes it after Arena accepts a claim's code, and a proven
+claim keeps it resumed until the key is collected or the claim expires two
+hours later; key collection and rotation never resume it by themselves.
 Pools resume when a service starts and suspend themselves after
 `AUTO_SUSPEND_SECS` (300) with no service; the warehouse after 60 seconds.
 A GPU pool still waiting for a node never reaches that timer, so `cancel` and
@@ -310,7 +380,7 @@ each hourly run suspend the app's GPU pools that have no service or job left.
 | Network rules + EAIs `arena_hf_eai`, `arena_api_eai` | `CREATE EXTERNAL ACCESS INTEGRATION` privilege; the setup script creates the rules `app_state.hf_egress` and `app_state.arena_api_egress`, the integrations `AGILERL_APP_<APP>_HF_EAI` and `AGILERL_APP_<APP>_ARENA_EAI`, and the `hf_access` and `arena_access` app specifications the consumer approves. Setup fails if either integration name is already in the account and the app does not own it; on upgrade the app keeps the ones it owns. |
 | `grant --host` → `arena_env_eai` | Not built yet; follow-up. Planned: an `app_admin` procedure creates a rule, EAI and app specification for each extra host; the consumer approves each specification. |
 | `grant --table` (SELECT + USAGE) | References `source_table` / `source_view`, SELECT only. No `--source-query`: custom SQL goes in a view the consumer binds. |
-| Secrets `arena_org_key`, `arena_external_user_id`, `arena_base_url` | Same three secrets in `app_state`, created empty by the setup script and set by `app_code.configure` after a `GET /api/cli/v1/capabilities` check. `AGILERL_APP_<APP>_ARENA_EAI` allows them, so `reconcile_usage` can read them. |
+| Secrets `arena_org_key`, `arena_external_user_id`, `arena_base_url` | Same three secrets in `app_state`, created empty by the setup script. `app_code.connect_arena` sets them when Arena issues the key, then checks `GET /api/cli/v1/capabilities`; a failed check leaves them saved. `app_code.configure` sets them only after that check. `AGILERL_APP_<APP>_ARENA_EAI` allows them, so `reconcile_usage` can read them. |
 | `setup.json` runtime profile | Same document shape at `@app_state.runs/_arena/setup.json`, written by `app_code.set_pools`. No key material. |
 | Trial-account probe EAI (error 509009) | The setup script creates the EAIs in a block that turns error 509009 into a trial-account message. |
 | Event table warning for `logs` | Container logs reach the consumer's active event table; consumers may share them with the provider ([event sharing](https://docs.snowflake.com/en/developer-guide/native-apps/event-about)). Containerized apps support only the `SNOWFLAKE$ALL` event definition, and container log levels are set in the service spec, not the manifest ([event definitions](https://docs.snowflake.com/en/developer-guide/native-apps/event-definition)). `logs` reads the consumer event table where the caller can see it. |
