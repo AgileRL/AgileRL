@@ -2514,6 +2514,60 @@ class TestDownloadExperimentMetrics:
         api_key_client.preview_experiment_metrics_csv.assert_not_called()
         assert existing.read_text() == "old"
 
+    def test_error_for_existing_file_names_the_overwrite_flag(
+        self, api_key_client, tmp_path
+    ):
+        target = tmp_path / "metrics.csv"
+        target.write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+
+        with pytest.raises(FileExistsError, match="--overwrite"):
+            api_key_client.download_experiment_metrics("exp1", output_path=target)
+
+    def test_overwrite_replaces_existing_file(self, api_key_client, tmp_path):
+        target = tmp_path / "metrics.csv"
+        target.write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+
+        result = api_key_client.download_experiment_metrics(
+            "exp1", output_path=target, overwrite=True
+        )
+
+        assert result == target
+        assert target.read_bytes() == b"new"
+
+    def test_overwrite_replaces_resolved_directory_target(
+        self, api_key_client, tmp_path
+    ):
+        (tmp_path / "custom.csv").write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", 'attachment; filename="custom.csv"')
+        )
+
+        result = api_key_client.download_experiment_metrics(
+            "exp1", output_path=tmp_path, overwrite=True
+        )
+
+        assert result == tmp_path / "custom.csv"
+        assert result.read_bytes() == b"new"
+
+    def test_overwrite_refuses_a_directory_at_the_resolved_path(
+        self, api_key_client, tmp_path
+    ):
+        (tmp_path / "custom.csv").mkdir()
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", 'attachment; filename="custom.csv"')
+        )
+
+        with pytest.raises(FileExistsError, match="a directory of that name"):
+            api_key_client.download_experiment_metrics(
+                "exp1", output_path=tmp_path, overwrite=True
+            )
+
     def test_creates_parent_directory_if_missing(self, api_key_client, tmp_path):
         api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"new", "text/csv", None)

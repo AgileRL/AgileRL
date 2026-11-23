@@ -773,6 +773,11 @@ def experiment_checkpoints(
     help="Destination file path. Defaults to a name derived from the experiment.",
 )
 @click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Replace the destination file if it already exists.",
+)
+@click.option(
     "--preview-rows",
     type=click.IntRange(0),
     default=5,
@@ -790,18 +795,23 @@ def experiment_metrics(
     experiment_name: str,
     metrics: tuple[str, ...],
     output_file: Path | None,
+    overwrite: bool,
     preview_rows: int,
     project: str | None,
 ) -> None:
     """Download metrics for an experiment by name."""
     with arena_client(config) as client:
         metrics_list: list[str] | None = list(metrics) if metrics else None
-        target_path = client.download_experiment_metrics(
-            experiment_name=experiment_name,
-            output_path=output_file,
-            metrics=metrics_list,
-            project=project,
-        )
+        try:
+            target_path = client.download_experiment_metrics(
+                experiment_name=experiment_name,
+                output_path=output_file,
+                metrics=metrics_list,
+                project=project,
+                overwrite=overwrite,
+            )
+        except FileExistsError as exc:
+            raise click.ClickException(str(exc)) from exc
 
         # Preview the metrics if requested
         if preview_rows > 0:

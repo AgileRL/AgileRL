@@ -1624,6 +1624,7 @@ class TestExperimentMetricsCommand:
             output_path=None,
             metrics=None,
             project=None,
+            overwrite=False,
         )
 
     def test_metrics_no_preview(self, runner, mock_client, tmp_path):
@@ -1664,6 +1665,7 @@ class TestExperimentMetricsCommand:
             output_path=None,
             metrics=["loss", "reward"],
             project=None,
+            overwrite=False,
         )
 
     def test_metrics_forwards_the_project(self, runner, mock_client, tmp_path):
@@ -1691,6 +1693,7 @@ class TestExperimentMetricsCommand:
             output_path=None,
             metrics=None,
             project="llm-work",
+            overwrite=False,
         )
 
     def test_metrics_non_csv_content_type(self, runner, mock_client, tmp_path):
@@ -1721,6 +1724,55 @@ class TestExperimentMetricsCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "metrics", "my-exp"])
         assert result.exit_code == 0
+
+    def test_metrics_overwrite_flag_is_forwarded(self, runner, mock_client, tmp_path):
+        target = tmp_path / "metrics.csv"
+        target.write_text("step,loss\n1,0.1\n")
+        mock_client.download_experiment_metrics.return_value = target
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "experiments",
+                    "metrics",
+                    "my-exp",
+                    "--output-file",
+                    str(target),
+                    "--overwrite",
+                    "--preview-rows",
+                    "0",
+                ],
+            )
+
+        assert result.exit_code == 0
+        mock_client.download_experiment_metrics.assert_called_once_with(
+            experiment_name="my-exp",
+            output_path=target,
+            metrics=None,
+            project=None,
+            overwrite=True,
+        )
+
+    def test_metrics_existing_file_error_names_the_flag(
+        self, runner, mock_client, tmp_path
+    ):
+        target = tmp_path / "metrics.csv"
+        mock_client.download_experiment_metrics.side_effect = FileExistsError(
+            f"Cannot write to {target}: a file of that name already exists. "
+            "Remove it, choose a different output path, or pass --overwrite "
+            "(overwrite=True in the SDK) to replace it."
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["experiments", "metrics", "my-exp", "--output-file", str(target)],
+            )
+
+        assert result.exit_code == 1
+        assert "--overwrite" in result.output
+        assert not isinstance(result.exception, FileExistsError)
 
 
 class TestAgentListCommand:
