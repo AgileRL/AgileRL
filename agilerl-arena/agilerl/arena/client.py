@@ -1190,6 +1190,9 @@ class ArenaClient:
         self,
         algorithm: str,
         *,
+        env_name: str | None = None,
+        env_version: str | None = None,
+        env_entrypoint: str | None = None,
         dataset_name: str | None = None,
         field: str | None = None,
         pretrained_model_name_or_path: str | None = None,
@@ -1200,6 +1203,13 @@ class ArenaClient:
 
         :param algorithm: Catalog algorithm name.
         :type algorithm: str
+        :param env_name: Arena environment name.
+        :type env_name: str | None
+        :param env_version: Environment version. Required with ``env_entrypoint``
+            (``v1`` and ``1`` are both accepted).
+        :type env_version: str | None
+        :param env_entrypoint: Environment entrypoint.
+        :type env_entrypoint: str | None
         :param dataset_name: Dataset name.
         :type dataset_name: str | None
         :param field: RunSpec section to return (``algorithm``, ``environment``,
@@ -1213,6 +1223,9 @@ class ArenaClient:
         """
         params: dict[str, Any] = {"algorithm": algorithm}
         optional = {
+            "gymEnv": env_name,
+            "gymEnvVersion": env_version,
+            "gymEnvEntrypoint": env_entrypoint,
             "datasetName": dataset_name,
             "field": field,
             "pretrainedModelNameOrPath": pretrained_model_name_or_path,
@@ -1657,6 +1670,7 @@ class ArenaClient:
         experiment_name: str,
         output_path: str | os.PathLike[str] | None = None,
         metrics: list[str] | None = None,
+        project: str | None = None,
     ) -> Path:
         """Download experiment metrics to a local file.
 
@@ -1668,6 +1682,8 @@ class ArenaClient:
         :type output_path: str | os.PathLike[str] | None
         :param metrics: The metrics to download. If None, download all metrics.
         :type metrics: list[str] | None
+        :param project: Project name; defaults to the saved default project.
+        :type project: str | None
         :returns: The path to the written file.
         :rtype: Path
         :raises FileExistsError: If the resolved output path already exists.
@@ -1688,6 +1704,7 @@ class ArenaClient:
             experiment_name,
             preview_rows=50_000,
             metrics=metrics,
+            project=project,
         )
         if not (content_type or "").startswith("text/csv"):
             body_preview = payload.decode("utf-8", errors="replace")[:500]
@@ -2209,7 +2226,8 @@ class ArenaClient:
         data: dict[str, str] = {
             "name": name,
             "version": version,
-            # The platform defaults language_based to false.
+            # The platform requires multi_agent and defaults language_based to false.
+            "multi_agent": "false",
             "language_based": "true",
             "do_rollouts": str(do_rollouts).lower(),
         }
