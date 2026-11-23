@@ -108,6 +108,7 @@ from agilerl.arena.memory.specs import TENSOR_PARALLEL_MODEL_TYPES, ModelArch
 from agilerl.arena.models.model_info import (
     LORA_EXCLUDED_MODULES,
     REASONING_PARSERS,
+    REMOTE_CODE_MODEL_TYPES,
     SUPPORTED_MODEL_INFO,
 )
 from agilerl.distributed.tensor_parallel import apply_tensor_parallel
@@ -302,6 +303,16 @@ class TestFamilyRuntimeConfigs:
             for model_type, runtime in FAMILY_RUNTIME_CONFIGS.items()
             if runtime.vllm.trust_remote_code is True
         } == {"mimo_v2"}
+
+    def test_remote_code_model_types_match_the_arena_table(self) -> None:
+        remote_code = {
+            model_type
+            for model_type, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.vllm.trust_remote_code is True
+            or runtime.trainer.trust_remote_code is True
+        }
+
+        assert remote_code == REMOTE_CODE_MODEL_TYPES
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm.enable_prefix_caching is True
