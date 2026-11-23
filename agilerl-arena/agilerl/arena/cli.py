@@ -20,6 +20,7 @@ from agilerl.arena import console
 from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
 from agilerl.arena.cli_agent import register_deployment_commands
 from agilerl.arena.cli_datasets import datasets_group
+from agilerl.arena.cli_experiment_logs import register_experiment_log_commands
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.cli_secrets import secrets_group
 from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
@@ -580,6 +581,9 @@ def models_info(config: CommandConfig, model_name: str) -> None:
 @main.group("experiments")
 def experiment() -> None:
     """Manage experiments (training jobs) by name."""
+
+
+register_experiment_log_commands(experiment)
 
 
 @experiment.command("submit")
