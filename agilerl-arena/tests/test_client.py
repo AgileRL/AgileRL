@@ -1725,6 +1725,119 @@ class TestArenaClientSubmitExperimentHpo:
         api_key_client._open_stream.assert_not_called()
 
 
+QUOTE = {
+    "resource_id": "h100-80-8x",
+    "resource_name": "NVIDIA H100 80GB x8",
+    "gpu_type": "h100-80",
+    "num_gpus": 8,
+    "num_nodes": 1,
+    "hourly_cost": 25.6,
+    "max_steps": 1000,
+    "step_seconds": 36.0,
+    "estimated_hours": 11.25,
+    "estimated_cost": 288.0,
+}
+
+
+def _quote_transport(
+    client: ArenaClient, handler: Callable[[httpx.Request], httpx.Response]
+) -> None:
+    """Send *client*'s requests to *handler* instead of the network."""
+    client._http = httpx.Client(
+        base_url=client._base_url, transport=httpx.MockTransport(handler)
+    )
+
+
+def _ndjson(*events: dict) -> str:
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _validated_grpo(mock_validated: MagicMock) -> None:
+    mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+    mock_validated.return_value.training.hpo = False
+    mock_validated.return_value.mutation = None
+
+
+@patch("agilerl.arena.client.TrainingManifest.get_validated")
+class TestArenaClientQuoteExperiment:
+    def test_returns_the_quote_the_server_completes_with(
+        self, mock_validated, api_key_client
+    ):
+        # Arrange
+        _validated_grpo(mock_validated)
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            body = _ndjson(
+                {
+                    "kind": "status",
+                    "stage": "submission",
+                    "status": "running",
+                    "message": "Estimated cost: $25.60 per hour",
+                },
+                {
+                    "kind": "status",
+                    "stage": "quote",
+                    "status": "completed",
+                    "message": "Priced the run",
+                    "detail": QUOTE,
+                },
+            )
+            return httpx.Response(200, text=body)
+
+        _quote_transport(api_key_client, handler)
+
+        # Act
+        quote = api_key_client.quote_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=8,
+            gpu_type="h100-80",
+            project="proj",
+        )
+
+        # Assert
+        assert quote == QUOTE
+        assert requests[0].url.path == "/api/cli/v1/experiments/jobs/quote"
+        assert json.loads(requests[0].content) == {
+            "manifest": {"algorithm": "GRPO"},
+            "project": "proj",
+            "num_gpus": 8,
+            "gpu_type": "h100-80",
+        }
+        assert "idempotency-key" not in requests[0].headers
+
+    def test_server_without_quotes_raises_404(self, mock_validated, api_key_client):
+        _validated_grpo(mock_validated)
+        _quote_transport(api_key_client, lambda _: httpx.Response(404, text=""))
+
+        with pytest.raises(ArenaAPIError) as raised:
+            api_key_client.quote_experiment(
+                manifest={"algorithm": "GRPO"}, project="proj"
+            )
+
+        assert raised.value.status_code == 404
+
+    def test_a_failed_check_raises_a_training_error(
+        self, mock_validated, api_key_client
+    ):
+        _validated_grpo(mock_validated)
+        failed = _ndjson(
+            {
+                "kind": "status",
+                "stage": "submission",
+                "status": "failed",
+                "message": "No resource class has enough GPU memory for this run.",
+            }
+        )
+        _quote_transport(api_key_client, lambda _: httpx.Response(200, text=failed))
+
+        with pytest.raises(ArenaTrainingError, match="enough GPU memory"):
+            api_key_client.quote_experiment(
+                manifest={"algorithm": "GRPO"}, project="proj"
+            )
+
+
 class TestExperimentMethods:
     def test_list_experiments(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"name": "exp1"}])

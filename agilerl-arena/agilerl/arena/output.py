@@ -331,6 +331,21 @@ def supports_interactive_selection() -> bool:
         return False
 
 
+def stdin_is_a_terminal() -> bool:
+    """Whether stdin can answer a prompt.
+
+    False when stdin is a pipe or closed. Redirected stdout still counts: the
+    prompt is written to stderr.
+
+    :returns: Whether stdin is a terminal.
+    :rtype: bool
+    """
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _read_key_windows() -> str | None:
     char = msvcrt.getwch()
     if char in ("\x00", "\xe0"):
