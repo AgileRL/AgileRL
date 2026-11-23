@@ -175,6 +175,7 @@ def write_request(run_dir: Path, **overrides: object) -> Path:
         "database": "ARENA",
         "gpu_count": 1,
         "image_build_compute_pool": "arena_head_pool",
+        "ingress": True,
         "max_model_len": None,
         "model_name": "arena_policy",
         "run_id": RUN_ID,
@@ -270,6 +271,20 @@ class TestRunPublish:
             },
         }
         assert session.closed
+
+    def test_a_request_without_ingress_serves_with_no_public_endpoint(
+        self, run_dir: Path, registry: RegistryCalls
+    ) -> None:
+        # Arrange
+        registry.services[1]["inference_endpoint"] = None
+
+        # Act
+        endpoint = run_publish(write_request(run_dir, ingress=False), Session())
+
+        # Assert
+        assert endpoint is None
+        assert registry.version is not None
+        assert registry.version.service["ingress_enabled"] is False
 
     def test_step_metrics_come_from_that_steps_row(
         self, run_dir: Path, registry: RegistryCalls

@@ -152,6 +152,7 @@ def publish(
                 version_name=version_name,
                 step=step,
                 serve=serve,
+                ingress=True,
                 compute_pool=compute_pool,
                 image_build_pool=image_build_pool,
                 image=image,

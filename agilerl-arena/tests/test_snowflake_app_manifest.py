@@ -73,7 +73,6 @@ class TestManifest:
         names = [name for entry in MANIFEST["privileges"] for name in entry]
 
         assert sorted(names) == [
-            "BIND SERVICE ENDPOINT",
             "CREATE COMPUTE POOL",
             "CREATE EXTERNAL ACCESS INTEGRATION",
             "CREATE WAREHOUSE",
@@ -85,6 +84,23 @@ class TestManifest:
             for entry in MANIFEST["privileges"]
             for name in entry
         )
+
+    def test_app_creates_no_public_endpoint(self) -> None:
+        # Arrange
+        files = [
+            APP_DIR / "manifest.yml",
+            APP_DIR / "setup_script.sql",
+            *sorted((APP_DIR / "app_code").glob("*.py")),
+        ]
+
+        # Act
+        text = "\n".join(path.read_text() for path in files)
+
+        # Assert
+        assert "BIND SERVICE ENDPOINT" not in text
+        assert "ALL_ENDPOINTS_USAGE" not in text
+        assert "ingress=True" not in text
+        assert not re.search(r"public[\"']?\s*:\s*true", text, re.IGNORECASE)
 
     def test_references_read_a_table_or_view_and_write_one_stage(self) -> None:
         references = {

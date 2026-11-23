@@ -44,13 +44,12 @@ BEGIN
     FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
     WHERE "granted_on" = 'ACCOUNT'
       AND "privilege" IN (
-        'CREATE COMPUTE POOL', 'CREATE WAREHOUSE', 'BIND SERVICE ENDPOINT',
-        'CREATE EXTERNAL ACCESS INTEGRATION'
+        'CREATE COMPUTE POOL', 'CREATE WAREHOUSE', 'CREATE EXTERNAL ACCESS INTEGRATION'
       );
-  IF (granted <> 4) THEN
+  IF (granted <> 3) THEN
     RAISE missing_grant;
   END IF;
-  RETURN 'all 4 manifest privileges granted';
+  RETURN 'all 3 manifest privileges granted';
 END;
 $$;
 
@@ -220,7 +219,7 @@ $$;
 -- CALL arena_app_s6.app_code.status('<run_id>');  -- repeat until state: COMPLETE
 -- SELECT * FROM arena_app_s6.app_state.arena_metrics WHERE run_id = '<run_id>' ORDER BY seq;
 -- CALL arena_app_s6.app_code.publish('<run_id>', 'arena_s6_model', NULL, NULL, TRUE);
--- CALL arena_app_s6.app_code.endpoint('arena_s6_model');
+-- CALL arena_app_s6.app_code.endpoint('arena_s6_model');  -- run the example SELECT it returns
 -- CALL arena_app_s6.app_code.unpublish('arena_s6_model', NULL, TRUE);
 
 DROP APPLICATION arena_app_s6 CASCADE;

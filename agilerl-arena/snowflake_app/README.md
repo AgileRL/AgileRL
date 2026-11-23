@@ -165,9 +165,9 @@ integrations and pools after an upgrade, since setup never drops them:
 | `app_code.reconcile_usage()` | none | Collects the key of a linked claim, bills usage, rotates a key `connect` collected once it is 90 days old, suspends the app's GPU pools that have no service or job left, then suspends its task when the app is idle; see Billing. Only the hourly task calls it, so two calls never overlap. |
 | `app_code.reconcile_now()` | `app_admin` | Queues a run of `app_state.reconcile_usage_task` with `EXECUTE TASK`, so billing can be run by hand. It starts after any run in progress. |
 | `app_code.version_init()` | none | Version initializer: after install, upgrade, or a failed upgrade, points `setup.json` at this version's image (a version runs only its own image, so `submit` and `publish` would otherwise refuse until `set_pools` ran again), then resumes the billing task when the app has work to bill and leaves it suspended otherwise. |
-| `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
-| `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
-| `app_code.unpublish(model, version_name, drop_version)` | `app_admin` | `arena snowflake unpublish` for a model in `app_state`, then closes the service's Arena deployment. |
+| `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service with no endpoint outside Snowflake and bills it as an Arena deployment; see Billing. Once the service is up, after publish or on the next hourly run, the app creates the SQL function `app_state.<SERVICE>_CHAT` and grants it, and the service's `INFERENCE_SERVICE_FUNCTION_USAGE` role, to `app_user`; see Call a served agent. |
+| `app_code.endpoint(model, version_name)` | `app_user` | Returns the chat function of the served model on a version in `app_state` and a `SELECT` that calls it. |
+| `app_code.unpublish(model, version_name, drop_version)` | `app_admin` | `arena snowflake unpublish` for a model in `app_state`, then drops the service's chat function and closes its Arena deployment. |
 | `app_code.export_model(run_id, step)` | `app_admin` | Copies a run's merged checkpoint (the files `publish` logs) to `<run_id>/checkpoint_<n>/` on the stage bound to `export_stage`; see Keep your model. |
 
 `app_user` gets the read-only procedures. Starting, cancelling, publishing and
@@ -189,6 +189,40 @@ modules. `false` does not let a remote-code family through. These checks run
 before the app runs any SQL or starts anything. These models still train on
 Arena, with the `arena` CLI, and on BYOC. The reward file is the buyer's own
 code and is not checked.
+
+## Call a served agent
+
+A served model has no endpoint outside Snowflake. Account roles holding
+`app_user` call it from SQL, Snowpark or a notebook through its chat function,
+which takes the chat messages, a temperature and a token limit, and returns the
+OpenAI chat completion as an OBJECT:
+
+```sql
+CALL <app>.app_code.publish('<run_id>', 'support_agent', NULL, NULL, TRUE);
+CALL <app>.app_code.endpoint('support_agent');  -- the function and an example call
+SELECT <app>.app_state.SUPPORT_AGENT_CHECKPOINT_1024_CHAT(
+  PARSE_JSON('[{"role": "user", "content": "Hello"}]'),
+  0.7,
+  256
+):choices[0]:message:content::STRING AS reply;
+```
+
+Run it over a table of prompts to answer them all in one query. For every chat
+option, call the Model Registry's own method on the service, which `app_user`
+can also use. It takes all ten arguments in this order: messages, temperature,
+max_completion_tokens, stop, n, stream, top_p, frequency_penalty,
+presence_penalty, response_format:
+
+```sql
+SELECT <app>.app_state.SUPPORT_AGENT_CHECKPOINT_1024!__CALL__(
+  PARSE_JSON('[{"role": "user", "content": "Hello"}]'), 0.7, 256, NULL, 1, FALSE, 1.0, 0.0, 0.0, NULL
+);
+```
+
+The service suspends after 30 minutes without calls and resumes on the next
+one. That first call takes about 2 minutes, and longer when the GPU pool has
+to start a node too. To serve the agent over HTTPS outside Snowflake, copy it
+out with `export_model` (see Keep your model) and serve it yourself.
 
 ## Keep your model
 
@@ -349,9 +383,9 @@ each hourly run suspend the app's GPU pools that have no service or job left.
   install ([automated granting](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-auto-privs)).
   External access through app specifications requires version 2
   ([request external access](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-app-specs-eai)).
-- Privileges: `CREATE COMPUTE POOL`, `CREATE WAREHOUSE`, `BIND SERVICE ENDPOINT`,
+- Privileges: `CREATE COMPUTE POOL`, `CREATE WAREHOUSE`,
   `CREATE EXTERNAL ACCESS INTEGRATION`, `EXECUTE TASK`, `EXECUTE MANAGED TASK`.
-  All six are on the auto-grant list, so the app can resume the
+  All five are on the auto-grant list, so the app can resume the
   billing task. A version 2 manifest cannot change this list in a patch.
 - `lifecycle_callbacks.version_initializer` is `app_code.version_init`
   ([version initializer](https://docs.snowflake.com/en/developer-guide/native-apps/update-app-develop)).
@@ -392,7 +426,7 @@ each hourly run suspend the app's GPU pools that have no service or job left.
 | Resource monitor `arena_monitor` | Dropped. Only `ACCOUNTADMIN` can create a resource monitor ([resource monitors](https://docs.snowflake.com/en/user-guide/resource-monitors)) and `CREATE RESOURCE MONITOR` is not on the app auto-grant list. The consumer may assign their own monitor to the app's warehouse. |
 | Budget `arena_gpu_budget` | Dropped from the app; consumer-side step. Creating a custom budget needs `SNOWFLAKE.BUDGET_CREATOR`, which an app cannot be auto-granted. The consumer can add the app to their own budget, which tracks every warehouse and compute pool the app owns; app-owned objects cannot be added one by one ([custom budgets](https://docs.snowflake.com/en/user-guide/budgets/custom-budget)). |
 | Compute pools and `pools set` | `CREATE COMPUTE POOL` privilege. No pool exists after install, since an idle pool bills; `app_code.set_pools` creates and resizes them. No budget link (budgets are dropped). `uses_gpu: true` is set because worker pools use GPU families. |
-| `BIND SERVICE ENDPOINT ON ACCOUNT` | `BIND SERVICE ENDPOINT` privilege. |
+| `BIND SERVICE ENDPOINT ON ACCOUNT` | Dropped. No service the app creates has a public endpoint; served models are called through their chat functions. |
 | Network rules + EAIs `arena_hf_eai`, `arena_api_eai` | `CREATE EXTERNAL ACCESS INTEGRATION` privilege; the setup script creates the rules `app_state.hf_egress` and `app_state.arena_api_egress`, the integrations `AGILERL_APP_<APP>_HF_EAI` and `AGILERL_APP_<APP>_ARENA_EAI`, and the `hf_access` and `arena_access` app specifications the consumer approves. Setup fails if either integration name is already in the account and the app does not own it; on upgrade the app keeps the ones it owns. |
 | `grant --host` → `arena_env_eai` | Not built yet; follow-up. Planned: an `app_admin` procedure creates a rule, EAI and app specification for each extra host; the consumer approves each specification. |
 | `grant --table` (SELECT + USAGE) | References `source_table` / `source_view`, SELECT only. No `--source-query`: custom SQL goes in a view the consumer binds. |

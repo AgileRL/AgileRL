@@ -22,7 +22,7 @@ The connection's warehouse runs the statements. The script:
 1. Creates `arena_app_s6` from the second-newest patch of the newest version.
    This runs the setup script, including the external access integrations and
    the trial-account (509009) block.
-2. Checks the four manifest privileges were granted automatically, then
+2. Checks the three manifest privileges were granted automatically, then
    approves the `hf_access` and `arena_access` specifications.
 3. Upgrades to the newest patch, so setup reruns while the app already owns
    both integrations. Checks the upgrade completed, both `AGILERL_APP_ARENA_APP_S6_*`
