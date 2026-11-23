@@ -376,7 +376,8 @@ the CLI) and a GPU count as ``num_gpus`` (``--num-gpus``) when you submit.
 
          arena resources list
 
-Example output from CLI command:
+Example output from CLI command. Arena cloud L4 and A100 GPUs are not available for LLM training,
+so they are not listed:
 
 .. list-table::
    :header-rows: 1
@@ -385,15 +386,15 @@ Example output from CLI command:
    * - GPU type
      - GPUs per node
      - Dev only
-   * - h100-80
+   * - gpu-b200-sxm-a
      - 1, 8
      -
-   * - l4
-     - 1, 4, 8
+   * - gpu-rtx6000-a
+     - 1, 8
      -
-   * - b200
+   * - h100-80
      - 8
-     - yes
+     -
 
 Job Submission
 ~~~~~~~~~~~~~~
