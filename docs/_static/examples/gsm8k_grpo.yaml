@@ -15,9 +15,13 @@ environment:
     name: gsm8k
     env_type: rollout
     dataset: gsm8k
+    rubric_file_path: reward.py
     prompt_template:
-        system_0: You are a helpful assistant.
+        system_0: Reason step by step. End with the final number in <answer></answer> tags, like <answer>42</answer>.
         user_1: '{question}'
+    chat_template_kwargs:
+        enable_thinking: false
+    max_reward: 2.0
 
 replay_buffer:
     kind: llm

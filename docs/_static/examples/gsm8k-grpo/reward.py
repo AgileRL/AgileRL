@@ -1,78 +1,58 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+"""GSM8K reward: the right final number, in the ``<answer>`` tags the prompt asks for."""
+
 import re
 
-from openenv.core.rubrics.base import Rubric
-
-from agilerl.llm_envs.rubrics import reward_fn_to_rubric
-
-
-def extract_gold_answer(answer: str) -> str | None:
-    """Return the final numeric answer from a GSM8K answer (the value after ``####``)."""
-    match = re.search(r"####\s*(-?[\d,]+)", answer)
-    return match.group(1).replace(",", "").strip() if match else None
+ANSWER_BLOCK = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
 
-def extract_model_answer(completion: str) -> str | None:
-    """Return the final number inside the model's ``<answer>...</answer>`` block."""
-    block = re.search(r"<answer>([\s\S]*?)</answer>", completion)
-    if block is None:
-        return None
-    number = re.search(r"-?[\d,]+", block.group(1))
-    return number.group(0).replace(",", "").strip() if number else None
+def final_text(completion: str) -> str:
+    """Return the text after the last ``</think>``, or the whole completion when there is none."""
+    return completion.rpartition("</think>")[2].strip()
 
 
-def correctness_reward(answer: str, completion: str) -> float:
-    gold = extract_gold_answer(answer)
-    predicted = extract_model_answer(completion)
-    if gold is None or predicted is None:
+def to_number(text: str) -> float | None:
+    """Return the first number in ``text``, ignoring thousands separators."""
+    match = NUMBER.search(text)
+    return float(match.group(0).replace(",", "")) if match else None
+
+
+def gold_answer(answer: str) -> float | None:
+    """Return a GSM8K row's final answer: the number after ``####``."""
+    _, marker, final = answer.rpartition("####")
+    return to_number(final) if marker else None
+
+
+def correctness_reward(text: str, answer: str) -> float:
+    """Return 1.0 when the last ``<answer>`` block holds the gold number."""
+    blocks = ANSWER_BLOCK.findall(text)
+    if not blocks:
         return 0.0
-    return 1.0 if predicted == gold else 0.0
+    predicted = to_number(blocks[-1])
+    return 1.0 if predicted is not None and predicted == gold_answer(answer) else 0.0
 
 
-def format_reward(completion: str) -> float:
-    text = "<think>" + completion
-    regex = r"^<think>[\s\S]*?</think>\n<answer>[\s\S]*?</answer>$"
-    return 1.0 if re.match(regex, text.strip()) else 0.0
+def format_reward(text: str) -> float:
+    """Return 1.0 when the text ends with one ``<answer>`` block holding only a number."""
+    blocks = ANSWER_BLOCK.findall(text)
+    if len(blocks) != 1 or not text.endswith("</answer>"):
+        return 0.0
+    return 1.0 if NUMBER.fullmatch(blocks[0].strip()) else 0.0
 
 
-def reward_fn(question: str, answer: str, completion: str) -> float:
-    """Combined GSM8K reward: answer correctness plus output format."""
-    del question
-    return correctness_reward(answer, completion) + format_reward(completion)
+def reward_fn(completion: str, answer: str, question: str) -> float:
+    """Score one completion: correctness plus format, at most 2.0.
 
+    Both parts read only the text after the reasoning, so a number the model
+    tries while thinking does not count.
 
-def _combined(completion: str, answer, question) -> float:
-    del question
-    return correctness_reward(answer, completion) + format_reward(completion)
-
-
-RUBRIC = reward_fn_to_rubric(_combined, name="gsm8k")
-
-
-class Correctness(Rubric):
-    """Example leaf rubric for component-level reporting."""
-
-    def forward(self, action, observation) -> float:
-        return correctness_reward(str(observation.answer), action.message)
-
-
-class Format(Rubric):
-    """Example leaf rubric for component-level reporting."""
-
-    def forward(self, action, observation) -> float:
-        del observation
-        return format_reward(action.message)
-
-
-class Combined(Rubric):
-    """Example composition: OpenEnv auto-registers ``correct`` / ``fmt`` children."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.correct = Correctness()
-        self.fmt = Format()
-
-    def forward(self, action, observation) -> float:
-        return self.correct(action, observation) + self.fmt(action, observation)
+    :param completion: The model's turn, reasoning included when it has any.
+    :param answer: The row's GSM8K answer, ending ``#### <number>``.
+    :param question: The row's question.
+    :return: The reward.
+    """
+    text = final_text(completion)
+    return correctness_reward(text, answer) + format_reward(text)
