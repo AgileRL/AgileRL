@@ -23,9 +23,13 @@ Tutorials
 
 - :doc:`GRPO on GSM8K <grpo_gsm8k>`: Register the **GSM8K** math dataset from Hugging Face, write a
   reward function, fine-tune ``Qwen/Qwen3.5-0.8B`` with GRPO, and deploy the model for inference.
+- :doc:`GRPO with an LLM judge <grpo_llm_judge>`: Store a judge's API key as an organization
+  secret, combine a correctness check with an LLM judge in a rubric, watch the judge's metrics
+  and notes, and try RULER, which scores a whole group in one judge call.
 
 .. toctree::
    :maxdepth: 1
    :hidden:
 
    GRPO on GSM8K <grpo_gsm8k>
+   GRPO with an LLM judge <grpo_llm_judge>
