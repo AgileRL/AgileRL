@@ -22,6 +22,7 @@ from agilerl.arena.cli_agent import register_deployment_commands
 from agilerl.arena.cli_datasets import datasets_group
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.cli_secrets import secrets_group
+from agilerl.arena.cli_user import user_group
 from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
@@ -303,36 +304,6 @@ def manifest_template(
 def manifest_schema_command() -> None:
     """Print the training manifest JSON Schema."""
     click.echo(json.dumps(manifest_schema(), indent=2))
-
-
-@main.group("user")
-def user_group() -> None:
-    """Retrieve user / account information."""
-
-
-@user_group.command("profile")
-@click.pass_obj
-def user_profile(
-    config: CommandConfig,
-) -> None:
-    """Get current authenticated user profile."""
-    with arena_client(config) as client:
-        user = client.get_current_user()
-        if json_output_enabled():
-            emit_json_result(user)
-            return
-        click.echo(f"User: {user.get('first_name', '')} {user.get('last_name', '')}")
-        click.echo(f"Email: {user.get('email', '')}")
-
-
-@user_group.command("credits")
-@click.pass_obj
-def user_credits(
-    config: CommandConfig,
-) -> None:
-    """Get remaining account credits."""
-    with arena_client(config) as client:
-        emit_result(client.get_user_credits())
 
 
 @main.group("resources")
@@ -1466,6 +1437,7 @@ def load_cli_plugins(group: click.Group) -> None:
 main.add_command(datasets_group)
 main.add_command(memory_group)
 main.add_command(secrets_group)
+main.add_command(user_group)
 main.add_command(snowflake_group)
 
 if __name__ == "__main__":
