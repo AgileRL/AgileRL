@@ -20,8 +20,6 @@ privileges:
           description: Creates the Pulsar broker, Ray head and GPU worker compute pools that training and serving run on.
     - CREATE WAREHOUSE:
           description: Creates one XSMALL warehouse for exporting the bound table and writing run metrics.
-    - BIND SERVICE ENDPOINT:
-          description: Exposes the vLLM endpoint of a model published with serving turned on.
     - CREATE EXTERNAL ACCESS INTEGRATION:
           description: Lets training reach Hugging Face for base model weights and the Arena host for run licensing. You approve each host.
     - EXECUTE TASK:

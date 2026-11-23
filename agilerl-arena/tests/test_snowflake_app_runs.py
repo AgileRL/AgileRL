@@ -416,6 +416,22 @@ class TestSubmit:
             f"workers: {job['workers_service']}",
         ]
 
+    def test_no_service_the_run_starts_has_a_public_endpoint(self) -> None:
+        # Arrange
+        session = submit_session()
+
+        # Act
+        submit(session, SFT, 1, "source_table", "prompts", None, None, 5, None)
+
+        # Assert
+        endpoints = [
+            endpoint
+            for statement in executes(session)
+            for endpoint in spec(statement)["spec"].get("endpoints", [])
+        ]
+        assert endpoints
+        assert all(endpoint["public"] is False for endpoint in endpoints)
+
     def test_records_the_run_for_billing_before_any_service_starts(self) -> None:
         session = submit_session()
 
@@ -1054,10 +1070,6 @@ def publish_session(
                 [Row(LOGS="out of memory")],
             ),
             exact(
-                "SHOW ENDPOINTS IN SERVICE ARENA_APP.app_state.qwen_checkpoint_2",
-                [Row(name="inference", ingress_url="abc-app.snowflakecomputing.app")],
-            ),
-            exact(
                 (
                     "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
                     "app_code.listing_purchased() AS PURCHASED"
@@ -1097,6 +1109,7 @@ class TestPublish:
             "checkpoint_2",
             "qwen_checkpoint_2",
         )
+        assert request["ingress"] is False
         [job] = executes(session)
         assert job.startswith(
             "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
@@ -1112,7 +1125,7 @@ class TestPublish:
             "model: ARENA_APP.app_state.qwen\n"
             "version: checkpoint_2\n"
             "service: qwen_checkpoint_2\n"
-            "endpoint: abc-app.snowflakecomputing.app\n"
+            "function: ARENA_APP.app_state.QWEN_CHECKPOINT_2_CHAT\n"
             f"deployment: {deployment_id}"
         )
 
@@ -1170,11 +1183,23 @@ class TestPublish:
         ]
         assert session.statements.index(recorded) < min(waits)
         assert session.statements.index(insert) > max(waits)
-        grant = session.statements.index(
-            "GRANT SERVICE ROLE app_state.QWEN_CHECKPOINT_2!ALL_ENDPOINTS_USAGE "
-            "TO APPLICATION ROLE app_user"
+        create = session.statements.index(
+            "CREATE FUNCTION IF NOT EXISTS app_state.QWEN_CHECKPOINT_2_CHAT"
+            "(messages ARRAY, temperature FLOAT, max_completion_tokens INT)\n"
+            "RETURNS OBJECT\n"
+            "AS $$SELECT app_state.QWEN_CHECKPOINT_2!__CALL__(messages, temperature, "
+            "max_completion_tokens, NULL, 1, FALSE, 1.0, 0.0, 0.0, NULL)$$"
         )
-        assert max(waits) < grant < session.statements.index(insert)
+        grant = session.statements.index(
+            "GRANT USAGE ON FUNCTION app_state.QWEN_CHECKPOINT_2_CHAT"
+            "(ARRAY, FLOAT, INT) TO APPLICATION ROLE app_user"
+        )
+        service_role = session.statements.index(
+            "GRANT SERVICE ROLE app_state.QWEN_CHECKPOINT_2!"
+            "INFERENCE_SERVICE_FUNCTION_USAGE TO APPLICATION ROLE app_user"
+        )
+        assert max(waits) < create < grant < service_role
+        assert service_role < session.statements.index(insert)
         assert not any(s.startswith("DROP") for s in session.statements)
 
     def test_a_failed_job_leaves_the_serve_recorded_for_the_hourly_task(
@@ -1214,6 +1239,9 @@ class TestPublish:
             "DROP SERVICE IF EXISTS app_state.QWEN_CHECKPOINT_2"
         )
         assert drop > session.statements.index(insert)
+        assert session.statements[drop - 1] == (
+            "DROP FUNCTION IF EXISTS app_state.QWEN_CHECKPOINT_2_CHAT(ARRAY, FLOAT, INT)"
+        )
         refusal = (
             "Could not record the Snowflake deployment with Arena. "
             f"Arena answered {status}: {INACTIVE}"
@@ -1321,21 +1349,31 @@ def served_session(services: list[str]) -> AppSession:
                     )
                 ],
             ),
-            exact(
-                "SHOW ENDPOINTS IN SERVICE ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2",
-                [Row(name="inference", ingress_url="abc-app.snowflakecomputing.app")],
-            ),
         ]
     )
 
 
 class TestEndpoint:
-    def test_returns_the_ingress_url_of_the_served_version(self) -> None:
+    def test_returns_the_chat_function_and_a_call_to_run(self) -> None:
         session = served_session(["ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2"])
 
         text = endpoint(session, "qwen", None)
 
-        assert text == "abc-app.snowflakecomputing.app"
+        assert text == (
+            "function: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2_CHAT\n"
+            "example:\n"
+            "SELECT ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2_CHAT(\n"
+            """  PARSE_JSON('[{"role": "user", "content": "Hello"}]'),\n"""
+            "  0.7,\n"
+            "  256\n"
+            "):choices[0]:message:content::STRING AS reply;"
+        )
+
+    def test_refuses_a_version_with_no_service(self) -> None:
+        session = served_session([])
+
+        with pytest.raises(ValueError, match="has 0 inference services"):
+            endpoint(session, "qwen", "checkpoint_2")
 
     def test_refuses_a_model_the_app_does_not_have(self) -> None:
         session = served_session([])
@@ -1355,9 +1393,14 @@ class TestUnpublish:
         assert [s for s in session.statements if s.startswith("DROP")] == [
             "DROP SERVICE ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2",
             "DROP MODEL ARENA_APP.app_state.qwen",
+            (
+                "DROP FUNCTION IF EXISTS ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2_CHAT"
+                "(ARRAY, FLOAT, INT)"
+            ),
         ]
         assert text == (
             "dropped service: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2\n"
+            "dropped function: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2_CHAT\n"
             "dropped model: ARENA_APP.app_state.qwen"
         )
 
@@ -1381,6 +1424,7 @@ class TestUnpublish:
         # Assert
         assert text == (
             "dropped service: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2\n"
+            "dropped function: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2_CHAT\n"
             f"closed deployment: {DEPLOYMENT_ID}"
         )
         [call] = arena.calls
@@ -1391,10 +1435,11 @@ class TestUnpublish:
         drop = session.statements.index(
             "DROP SERVICE ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2"
         )
-        assert session.statements[drop + 1] == (
+        forget = session.statements.index(
             "DELETE FROM app_state.served_models "
             "WHERE service_name IN ('QWEN_CHECKPOINT_2')"
         )
+        assert drop < forget
         assert session.statements[-1].startswith(
             "UPDATE app_state.usage_items SET closed_at = TO_TIMESTAMP_TZ("
         )
@@ -1414,7 +1459,10 @@ class TestUnpublish:
 
         text = unpublish(session, "qwen", None, False)
 
-        assert text == "dropped service: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2"
+        assert text == (
+            "dropped service: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2\n"
+            "dropped function: ARENA_APP.APP_STATE.QWEN_CHECKPOINT_2_CHAT"
+        )
         assert f"Arena has no deployment {DEPLOYMENT_ID} to close" in caplog.text
 
     def test_refuses_a_version_with_nothing_to_drop(self) -> None:

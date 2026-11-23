@@ -31,6 +31,12 @@ from agilerl.arena.snowflake.publish import (
     PublishJob,
     PublishSettings,
     ServedVersion,
+    chat_example,
+    chat_function,
+    create_chat_function_sql,
+    drop_chat_function_sql,
+    grant_chat_function_sql,
+    grant_service_function_sql,
     publish_job_name,
     select_checkpoint,
     served_version,
@@ -59,6 +65,7 @@ SERVICE_DOCUMENT: PublishDocument = {
     "database": "ARENA",
     "gpu_count": 1,
     "image_build_compute_pool": "arena_head_pool",
+    "ingress": True,
     "max_model_len": None,
     "model_name": "arena_policy",
     "run_id": RUN_ID,
@@ -257,6 +264,7 @@ def settings(**overrides: object) -> PublishSettings:
         version_name=None,
         step=None,
         serve=True,
+        ingress=True,
         compute_pool=None,
         image_build_pool="arena_head_pool",
         image=None,
@@ -287,6 +295,7 @@ class TestSubmitPublish:
             "database": "ARENA",
             "gpu_count": 1,
             "image_build_compute_pool": "arena_head_pool",
+            "ingress": True,
             "max_model_len": None,
             "model_name": "arena_policy",
             "run_id": RUN_ID,
@@ -798,6 +807,49 @@ class TestVersionEndpoint:
             version_endpoint(account, served(services=services))
 
         assert account.statements == []
+
+
+class TestChatFunction:
+    def test_create_calls_the_registry_chat_method_with_openai_defaults(self) -> None:
+        statement = create_chat_function_sql("app_state.POLICY")
+
+        assert statement == (
+            "CREATE FUNCTION IF NOT EXISTS app_state.POLICY_CHAT"
+            "(messages ARRAY, temperature FLOAT, max_completion_tokens INT)\n"
+            "RETURNS OBJECT\n"
+            "AS $$SELECT app_state.POLICY!__CALL__(messages, temperature, "
+            "max_completion_tokens, NULL, 1, FALSE, 1.0, 0.0, 0.0, NULL)$$"
+        )
+
+    def test_grant_and_drop_name_the_function_with_its_argument_types(self) -> None:
+        grant = grant_chat_function_sql("app_state.POLICY", "APPLICATION ROLE app_user")
+        service_role = grant_service_function_sql(
+            "app_state.POLICY", "APPLICATION ROLE app_user"
+        )
+        drop = drop_chat_function_sql("app_state.POLICY")
+
+        assert grant == (
+            "GRANT USAGE ON FUNCTION app_state.POLICY_CHAT(ARRAY, FLOAT, INT) "
+            "TO APPLICATION ROLE app_user"
+        )
+        assert service_role == (
+            "GRANT SERVICE ROLE app_state.POLICY!INFERENCE_SERVICE_FUNCTION_USAGE "
+            "TO APPLICATION ROLE app_user"
+        )
+        assert drop == (
+            "DROP FUNCTION IF EXISTS app_state.POLICY_CHAT(ARRAY, FLOAT, INT)"
+        )
+
+    def test_example_reads_the_reply_text(self) -> None:
+        example = chat_example(chat_function(POLICY_SERVICE))
+
+        assert example == (
+            f"SELECT {POLICY_SERVICE}_CHAT(\n"
+            """  PARSE_JSON('[{"role": "user", "content": "Hello"}]'),\n"""
+            "  0.7,\n"
+            "  256\n"
+            "):choices[0]:message:content::STRING AS reply;"
+        )
 
 
 class TestUnpublish:

@@ -25,7 +25,8 @@ from app_billing import (
     BILLING_TASK,
     arena_partner,
     close_deployments,
-    grant_endpoint_usage,
+    drop_served_service,
+    grant_chat_function,
     open_served,
     published_model,
     reconcile_summary,
@@ -105,12 +106,14 @@ from agilerl.arena.snowflake.profile import (
 from agilerl.arena.snowflake.publish import (
     PublishSession,
     PublishSettings,
+    chat_example,
+    chat_function,
+    drop_chat_function_sql,
     registry_schema,
     select_checkpoint,
     served_version,
-    service_endpoint,
     submit_publish,
-    version_endpoint,
+    version_service,
     wait_for_publish,
 )
 from agilerl.arena.snowflake.publish import unpublish as drop_served
@@ -1028,12 +1031,13 @@ def publish(
     :param model_name: Model Registry model name.
     :param version_name: Registry version. ``None`` uses the checkpoint directory name.
     :param step: Checkpoint step. ``None`` takes the newest complete merged export.
-    :param serve: Start a vLLM service with a public endpoint after logging the model.
+    :param serve: Start a vLLM service after logging the model, with no
+        endpoint outside Snowflake, and a SQL function ``app_user`` calls it with.
     :param gpu_count: GPUs the service requests.
     :param service_name: Service name. ``None`` uses ``<model>_<version>``.
     :param max_model_len: vLLM ``--max-model-len``, or ``None``.
-    :return: The job, model, version, and any service, its endpoint, and its
-        Arena deployment.
+    :return: The job, model, version, and any service, its chat function, and
+        its Arena deployment.
     :raises ValueError: An argument is invalid, Arena is not configured for a
         served model, the app has no such run, or the run has no usable
         checkpoint.
@@ -1060,6 +1064,7 @@ def publish(
             version_name=version_name,
             step=step,
             serve=serve,
+            ingress=False,
             compute_pool=sole_gpu_pool(profile),
             image_build_pool=profile.pools.head.pool,
             image=profile.image,
@@ -1088,7 +1093,7 @@ def publish(
     if served is not None and partner is not None:
         base_url, headers = partner
         try:
-            grant_endpoint_usage(session, served.service)
+            grant_chat_function(session, served.service)
             deployment_id = open_served(
                 session,
                 served,
@@ -1098,26 +1103,31 @@ def publish(
                 datetime.now(timezone.utc),
             )
         except Exception:
-            collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{service}")
+            drop_served_service(session, served.service)
             raise
+        function = chat_function(f"{database}.{schema}.{served.service}")
         lines.append(f"service: {service}")
-        lines.append(f"endpoint: {service_endpoint(session, document)}")
+        lines.append(f"function: {function}")
         lines.append(f"deployment: {deployment_id}")
     return "\n".join(lines)
 
 
 def endpoint(session: SnowflakeSession, model: str, version_name: str | None) -> str:
-    """Ingress URL of the inference service on a published model version.
+    """Name the SQL function that calls a published version's served model, with an example.
+
+    The app creates the function once the service is up, at the end of
+    ``publish`` or on the next hourly task run.
 
     :param session: Procedure session.
     :param model: Model Registry model name in ``app_state``.
     :param version_name: Version. ``None`` takes the one version that has a service.
-    :return: The URL, or Snowflake's provisioning message while ingress starts.
+    :return: The function's name and a ``SELECT`` that calls it.
     :raises ValueError: The model, version, or service is not there.
     """
     database, schema = app_registry(session)
     served = served_version(session, database, schema, model, version_name)
-    return version_endpoint(session, served)
+    function = chat_function(version_service(served))
+    return f"function: {function}\nexample:\n{chat_example(function)}"
 
 
 def unpublish(
@@ -1125,7 +1135,8 @@ def unpublish(
 ) -> str:
     """Drop the inference service of a published version and, when asked, the version.
 
-    Then closes the Arena deployment of each dropped service.
+    Then drops the chat function of each dropped service and closes its Arena
+    deployment.
 
     :param session: Procedure session.
     :param model: Model Registry model name in ``app_state``.
@@ -1142,7 +1153,11 @@ def unpublish(
     database, schema = app_registry(session)
     served = served_version(session, database, schema, model, version_name)
     drop_served(session, served, drop_version)
-    lines = [f"dropped service: {service}" for service in served.services]
+    lines = []
+    for service in served.services:
+        collect(session, drop_chat_function_sql(service))
+        lines.append(f"dropped service: {service}")
+        lines.append(f"dropped function: {chat_function(service)}")
     if drop_version and served.only_version:
         lines.append(f"dropped model: {served.model}")
     elif drop_version:

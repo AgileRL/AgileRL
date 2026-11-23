@@ -36,6 +36,12 @@ from agilerl.arena.snowflake.license import (
     partner_headers,
     snowflake_usage,
 )
+from agilerl.arena.snowflake.publish import (
+    create_chat_function_sql,
+    drop_chat_function_sql,
+    grant_chat_function_sql,
+    grant_service_function_sql,
+)
 from agilerl.arena.snowflake.setup_sql import string_literal
 
 if TYPE_CHECKING:
@@ -186,6 +192,8 @@ def reconcile_summary(session: SnowflakeSession) -> str:
             for name, status in service_statuses(session).items()
             if service_live(status) or name in served
         )
+        for name in served:
+            collect(session, drop_chat_function_sql(f"{APP_SCHEMA}.{name}"))
         ended = end_trial(session, services)
 
     # One task run covers every item, so each request retries only briefly.
@@ -262,6 +270,15 @@ def service_live(status: str | None) -> bool:
     return status is not None and status not in stopped
 
 
+def service_callable(status: str | None) -> bool:
+    """Whether SQL can call a service: live, or suspended until its next call resumes it.
+
+    :param status: Upper-case ``SHOW SERVICES`` status, or ``None`` when the service is gone.
+    :return: True for a live, suspending or suspended service.
+    """
+    return service_live(status) or status in {"SUSPENDING", "SUSPENDED"}
+
+
 def meter_deployments(
     session: SnowflakeSession, calls: DeploymentCalls, now: datetime
 ) -> str:
@@ -274,8 +291,9 @@ def meter_deployments(
     is marked closed, so it settles from the usage read, and its service gets
     a new deployment. Every live service in ``app_state.served_models`` with
     no open deployment gets one; a refused open drops the service. A service
-    dropped while metering its open deployment is not granted endpoint usage.
-    Every other live service is, including one already metered. A 404 is
+    dropped while metering its open deployment gets no chat function. Every
+    other live or suspended service does, including one already metered,
+    since its first SQL call resumes it. A 404 is
     logged and the deployment is left. A deployment Arena has never answered
     for does not count its service as metered, so its open is sent again.
     The first other Arena failure stops metering.
@@ -337,10 +355,10 @@ def meter_deployments(
             counts[outcome] += 1
             metered.add(service)
     for service, model in served.items():
-        if service in dropped or not service_live(statuses.get(service)):
+        if service in dropped or not service_callable(statuses.get(service)):
             continue
-        grant_endpoint_usage(session, service)
-        if service in metered:
+        grant_chat_function(session, service)
+        if service in metered or not service_live(statuses.get(service)):
             continue
         try:
             open_served(session, model, calls.open, now)
@@ -442,7 +460,7 @@ def meter_deployment(
     try:
         calls.heartbeat(deployment_id, now)
     except TrainingDisabledError as exc:
-        collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{service}")
+        drop_served_service(session, service)
         try:
             calls.close(deployment_id, now)
         except UnknownUsageError:
@@ -499,17 +517,31 @@ def published_model(
     )
 
 
-def grant_endpoint_usage(session: SnowflakeSession, service: str) -> None:
-    """Let ``app_user`` call the endpoints of a service, which only the app can call otherwise.
+def grant_chat_function(session: SnowflakeSession, service: str) -> None:
+    """Create the chat function of a live service and let ``app_user`` call it.
+
+    The service has no endpoint outside Snowflake, so SQL is the only way in.
+    ``app_user`` also gets the service's own ``__CALL__`` method, which takes
+    every chat option.
 
     :param session: Procedure session.
     :param service: Service in ``app_state``.
     """
-    collect(
-        session,
-        f"GRANT SERVICE ROLE {APP_SCHEMA}.{service}!ALL_ENDPOINTS_USAGE "
-        "TO APPLICATION ROLE app_user",
-    )
+    qualified = f"{APP_SCHEMA}.{service}"
+    grantee = "APPLICATION ROLE app_user"
+    collect(session, create_chat_function_sql(qualified))
+    collect(session, grant_chat_function_sql(qualified, grantee))
+    collect(session, grant_service_function_sql(qualified, grantee))
+
+
+def drop_served_service(session: SnowflakeSession, service: str) -> None:
+    """Drop a served model's chat function and its service.
+
+    :param session: Procedure session.
+    :param service: Service in ``app_state``.
+    """
+    collect(session, drop_chat_function_sql(f"{APP_SCHEMA}.{service}"))
+    collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{service}")
 
 
 def record_served(session: SnowflakeSession, served: ServedModel) -> None:
@@ -605,7 +637,7 @@ def open_served(
             )
         )
     except DeploymentRefusedError as exc:
-        collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{served.service}")
+        drop_served_service(session, served.service)
         mark_deployment(session, deployment_id, now, str(exc))
         raise
     return deployment_id

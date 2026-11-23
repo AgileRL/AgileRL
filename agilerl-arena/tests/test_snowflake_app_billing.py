@@ -40,6 +40,7 @@ from agilerl.arena.snowflake.license import (
     TrainingDisabledError,
     UnknownUsageError,
 )
+from agilerl.arena.snowflake.publish import create_chat_function_sql
 from tests.test_snowflake_app_runs import RUN_ID as PUBLISH_RUN_ID
 from tests.test_snowflake_app_runs import (
     AppSession,
@@ -76,7 +77,7 @@ SETUP_JSON = "@app_state.runs/_arena/setup.json"
 
 
 class BillingSession(UsageBillingSession):
-    """Refuses a grant for a gone service, answers the trial query, and keeps the task's and GPU pools' state."""
+    """Refuses a chat function for a gone service, answers the trial query, and keeps the task's and GPU pools' state."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -88,7 +89,7 @@ class BillingSession(UsageBillingSession):
         self.file = Files({})
 
     def sql(self, statement: str) -> Result:
-        """Run ``statement``, refusing a grant for a service that is gone.
+        """Run ``statement``, refusing a chat function for a service that is gone.
 
         :param statement: SQL to run.
         :return: The statement result.
@@ -138,10 +139,8 @@ class BillingSession(UsageBillingSession):
             self.statements.append(statement)
             self.task = "suspended" if statement.endswith("SUSPEND") else "started"
             return Result([])
-        if statement.startswith("GRANT SERVICE ROLE app_state."):
-            service = statement.removeprefix("GRANT SERVICE ROLE app_state.").split(
-                "!", 1
-            )[0]
+        if statement.startswith("CREATE FUNCTION IF NOT EXISTS app_state."):
+            service = statement.split("AS $$SELECT app_state.", 1)[1].split("!", 1)[0]
             if service not in self.services:
                 msg = f"Service '{service}' does not exist or not authorized."
                 raise SnowparkSQLException(msg)
@@ -197,7 +196,10 @@ class PublishBillingSession(BillingSession):
             return Result([])
         billing_prefixes = (
             "SHOW SERVICES IN SCHEMA app_state",
+            "CREATE FUNCTION IF NOT EXISTS app_state.",
+            "GRANT USAGE ON FUNCTION app_state.",
             "GRANT SERVICE ROLE app_state.",
+            "DROP FUNCTION IF EXISTS app_state.",
             "DROP SERVICE IF EXISTS app_state.",
             "SELECT service_name, model, version, run_id, ",
             (
@@ -274,6 +276,20 @@ def serving_session(services: dict[str, str]) -> BillingSession:
     return session
 
 
+def app_user_grants(service: str) -> list[str]:
+    """Grants that let ``app_user`` call a served service from SQL."""
+    return [
+        (
+            f"GRANT USAGE ON FUNCTION app_state.{service}_CHAT(ARRAY, FLOAT, INT) "
+            "TO APPLICATION ROLE app_user"
+        ),
+        (
+            f"GRANT SERVICE ROLE app_state.{service}!INFERENCE_SERVICE_FUNCTION_USAGE "
+            "TO APPLICATION ROLE app_user"
+        ),
+    ]
+
+
 def served_row(service: str) -> dict[str, object]:
     return {
         "service_name": service,
@@ -291,21 +307,18 @@ def item(session: BillingSession, usage_id: str) -> dict[str, object]:
 
 
 class TestBillingSession:
-    def test_grant_of_a_missing_service_raises(self) -> None:
+    def test_chat_function_of_a_missing_service_raises(self) -> None:
         # Arrange
         session = BillingSession()
         session.services = {"LIVE": "RUNNING"}
-        statement = (
-            "GRANT SERVICE ROLE app_state.GONE!ALL_ENDPOINTS_USAGE "
-            "TO APPLICATION ROLE app_user"
-        )
+        statement = create_chat_function_sql("app_state.GONE")
 
         # Act
         with pytest.raises(SnowparkSQLException, match="GONE"):
             session.sql(statement)
 
         # Assert
-        assert session.grants == []
+        assert session.functions == []
         assert session.services == {"LIVE": "RUNNING"}
 
 
@@ -419,12 +432,8 @@ class TestMeterDeployments:
             SNOWFLAKE_DENIED,
         )
         assert dropped["last_error_at"] == NOW_MS
-        assert session.grants == [
-            (
-                "GRANT SERVICE ROLE app_state.B!ALL_ENDPOINTS_USAGE "
-                "TO APPLICATION ROLE app_user"
-            )
-        ]
+        assert session.grants == app_user_grants("B")
+        assert session.functions == ["app_state.B_CHAT"]
 
     def test_an_ended_trial_on_heartbeat_drops_the_service_through_arena(
         self, arena: Arena
@@ -500,12 +509,7 @@ class TestMeterDeployments:
             SNOWFLAKE_DENIED,
         )
         assert "Arena has no deployment dep-a to close." in caplog.text
-        assert session.grants == [
-            (
-                "GRANT SERVICE ROLE app_state.B!ALL_ENDPOINTS_USAGE "
-                "TO APPLICATION ROLE app_user"
-            )
-        ]
+        assert session.grants == app_user_grants("B")
 
     def test_a_deployment_arena_closed_is_reopened_with_the_service_kept(
         self,
@@ -580,7 +584,7 @@ class TestMeterDeployments:
         assert [d.deployment_id for d in arena.opens] == ["ORPHAN-20261116T150000Z"]
         assert item(session, "ORPHAN-20261116T150000Z")["service_name"] == "ORPHAN"
 
-    def test_app_user_can_call_every_live_served_service(self) -> None:
+    def test_app_user_can_call_every_live_or_suspended_served_service(self) -> None:
         # Arrange
         session = serving_session({"A": "RUNNING", "B": "SUSPENDED"})
         session.served.append(served_row("ORPHAN"))
@@ -591,11 +595,15 @@ class TestMeterDeployments:
         meter_deployments(session, arena.calls(), NOW)
 
         # Assert
-        assert session.grants == [
-            f"GRANT SERVICE ROLE app_state.{service}!ALL_ENDPOINTS_USAGE "
-            "TO APPLICATION ROLE app_user"
-            for service in ("A", "ORPHAN")
+        assert session.functions == [
+            "app_state.A_CHAT",
+            "app_state.B_CHAT",
+            "app_state.ORPHAN_CHAT",
         ]
+        assert session.grants == (
+            app_user_grants("A") + app_user_grants("B") + app_user_grants("ORPHAN")
+        )
+        assert [d.deployment_id for d in arena.opens] == ["ORPHAN-20261116T150000Z"]
 
     def test_a_recorded_serve_whose_service_never_started_is_left_pending(
         self,
@@ -984,6 +992,7 @@ class TestReconcileUsage:
                 "ARENA_RUN_0_HEAD": "DONE",
             }
         )
+        session.functions = ["app_state.A_CHAT"]
         session.install = listing_trial(6.98)
         arena.replies = [
             reply(200, {"ok": True}),
@@ -1007,6 +1016,7 @@ class TestReconcileUsage:
         )
         assert session.services == {"ARENA_RUN_0_HEAD": "DONE"}
         assert session.served == []
+        assert session.functions == []
         assert [call["url"] for call in arena.calls] == [
             f"{DEPLOYMENTS}/dep-a/close",
             f"{DEPLOYMENTS}/dep-a/usage",

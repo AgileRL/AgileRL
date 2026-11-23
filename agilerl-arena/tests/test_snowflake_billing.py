@@ -112,6 +112,7 @@ class BillingSession:
         self.services: dict[str, str] = {}
         self.served: list[dict[str, object]] = []
         self.grants: list[str] = []
+        self.functions: list[str] = []
 
     def add_item(
         self,
@@ -176,8 +177,20 @@ class BillingSession:
                     for name, status in self.services.items()
                 ]
             )
-        if statement.startswith("GRANT SERVICE ROLE app_state."):
+        if statement.startswith("CREATE FUNCTION IF NOT EXISTS app_state."):
+            name = statement.split()[5].split("(", 1)[0]
+            if name not in self.functions:
+                self.functions.append(name)
+            return Result([])
+        if statement.startswith(
+            ("GRANT USAGE ON FUNCTION app_state.", "GRANT SERVICE ROLE app_state.")
+        ):
             self.grants.append(statement)
+            return Result([])
+        if statement.startswith("DROP FUNCTION IF EXISTS app_state."):
+            name = statement.split()[4].split("(", 1)[0]
+            if name in self.functions:
+                self.functions.remove(name)
             return Result([])
         if statement.startswith("DROP SERVICE IF EXISTS app_state."):
             self.services.pop(statement.rsplit(".", 1)[1], None)
