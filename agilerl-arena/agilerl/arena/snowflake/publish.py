@@ -41,6 +41,10 @@ from agilerl.arena.snowflake.source import (
     SnowflakeSession,
 )
 
+# The chat function takes messages, temperature and max_completion_tokens.
+CHAT_FUNCTION_ARGUMENTS = "messages ARRAY, temperature FLOAT, max_completion_tokens INT"
+CHAT_FUNCTION_TYPES = "ARRAY, FLOAT, INT"
+
 MERGED_EXPORT_REQUIRED = (
     "Runs write merged/ when their checkpoint_export trigger fires, by default "
     "at the final save, so a run stopped before then or an earlier step has none."
@@ -68,6 +72,7 @@ class PublishDocument(TypedDict):
     database: str
     gpu_count: int
     image_build_compute_pool: str
+    ingress: bool
     max_model_len: int | None
     model_name: str
     run_id: str
@@ -87,6 +92,8 @@ class PublishSettings:
     :param version_name: Registry version. ``None`` uses the checkpoint directory name.
     :param step: Checkpoint step. ``None`` takes the newest complete merged export.
     :param serve: Start a vLLM service after logging the model.
+    :param ingress: Give the service a public endpoint. Without one, only SQL
+        inside the account reaches it.
     :param compute_pool: Pool for the publish job and the service. ``None`` uses the run's.
     :param image_build_pool: CPU pool that builds the service's inference image.
     :param image: Job image. ``None`` uses the run's.
@@ -105,6 +112,7 @@ class PublishSettings:
     version_name: str | None
     step: int | None
     serve: bool
+    ingress: bool
     compute_pool: str | None
     image_build_pool: str
     image: str | None
@@ -188,6 +196,7 @@ def submit_publish(
         "database": database,
         "gpu_count": settings.gpu_count,
         "image_build_compute_pool": image_build_pool,
+        "ingress": settings.ingress,
         "max_model_len": settings.max_model_len,
         "model_name": model_name,
         "run_id": settings.run_id,
@@ -395,6 +404,16 @@ def version_endpoint(session: SnowflakeSession, served: ServedVersion) -> str:
     :return: The URL, or Snowflake's provisioning message while ingress starts.
     :raises ValueError: The version has no service or several.
     """
+    return ingress_url(session, version_service(served))
+
+
+def version_service(served: ServedVersion) -> str:
+    """The version's one inference service.
+
+    :param served: Version from :func:`served_version`.
+    :return: The fully qualified service name.
+    :raises ValueError: The version has no service or several.
+    """
     if len(served.services) != 1:
         listed = "".join(f"\n  {service}" for service in served.services)
         msg = (
@@ -402,7 +421,83 @@ def version_endpoint(session: SnowflakeSession, served: ServedVersion) -> str:
             f"{len(served.services)} inference services{listed}"
         )
         raise ValueError(msg)
-    return ingress_url(session, served.services[0])
+    return served.services[0]
+
+
+def chat_function(service: str) -> str:
+    """SQL function that sends a chat request to a served model.
+
+    :param service: Service name, qualified or not.
+    :return: ``<service>_CHAT``, in the service's schema.
+    """
+    return f"{service}_CHAT"
+
+
+def create_chat_function_sql(service: str) -> str:
+    """``CREATE FUNCTION`` for the :func:`chat_function` of a service.
+
+    The function calls the ``__call__`` method the Model Registry gives the
+    service, with OpenAI's defaults for the chat arguments it does not take.
+
+    :param service: Service name, qualified or not.
+    :return: The SQL statement. It leaves an existing function as it is.
+    """
+    # The method takes all ten OPENAI_CHAT_SIGNATURE inputs, in signature order.
+    call = (
+        f"SELECT {service}!__CALL__(messages, temperature, max_completion_tokens, "
+        "NULL, 1, FALSE, 1.0, 0.0, 0.0, NULL)"
+    )
+    return (
+        f"CREATE FUNCTION IF NOT EXISTS {chat_function(service)}"
+        f"({CHAT_FUNCTION_ARGUMENTS})\nRETURNS OBJECT\nAS $${call}$$"
+    )
+
+
+def grant_service_function_sql(service: str, role: str) -> str:
+    """``GRANT SERVICE ROLE`` that lets ``role`` call the service's own ``__CALL__`` method.
+
+    :param service: Service name, qualified or not.
+    :param role: Grantee, like ``APPLICATION ROLE app_user``.
+    :return: The SQL statement.
+    """
+    return f"GRANT SERVICE ROLE {service}!INFERENCE_SERVICE_FUNCTION_USAGE TO {role}"
+
+
+def grant_chat_function_sql(service: str, role: str) -> str:
+    """``GRANT USAGE`` on the :func:`chat_function` of a service.
+
+    :param service: Service name, qualified or not.
+    :param role: Grantee, like ``APPLICATION ROLE app_user``.
+    :return: The SQL statement.
+    """
+    return (
+        f"GRANT USAGE ON FUNCTION {chat_function(service)}({CHAT_FUNCTION_TYPES}) "
+        f"TO {role}"
+    )
+
+
+def drop_chat_function_sql(service: str) -> str:
+    """``DROP FUNCTION IF EXISTS`` for the :func:`chat_function` of a service.
+
+    :param service: Service name, qualified or not.
+    :return: The SQL statement.
+    """
+    return f"DROP FUNCTION IF EXISTS {chat_function(service)}({CHAT_FUNCTION_TYPES})"
+
+
+def chat_example(function: str) -> str:
+    """A ``SELECT`` that sends one message to a served model through its chat function.
+
+    :param function: Fully qualified :func:`chat_function` name.
+    :return: The statement, ready to run.
+    """
+    return (
+        f"SELECT {function}(\n"
+        """  PARSE_JSON('[{"role": "user", "content": "Hello"}]'),\n"""
+        "  0.7,\n"
+        "  256\n"
+        "):choices[0]:message:content::STRING AS reply;"
+    )
 
 
 def unpublish(

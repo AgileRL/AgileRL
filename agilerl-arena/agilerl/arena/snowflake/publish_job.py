@@ -155,7 +155,8 @@ def start_vllm_service(version: ModelVersion, request: PublishDocument) -> str |
 
     :param version: Logged model version.
     :param request: Parsed request file with ``service_name`` set.
-    :return: The ingress endpoint, or ``None`` while Snowflake provisions it.
+    :return: The ingress endpoint, or ``None`` while Snowflake provisions it or
+        when the request asks for no ingress.
     :raises ValueError: The version does not list the new service.
     """
     # Deferred optional extra: snowflake-job, installed only in the job image.
@@ -172,7 +173,7 @@ def start_vllm_service(version: ModelVersion, request: PublishDocument) -> str |
         service_compute_pool=request["compute_pool"],
         image_build_compute_pool=request["image_build_compute_pool"],
         min_instances=0,
-        ingress_enabled=True,
+        ingress_enabled=request["ingress"],
         gpu_requests=str(request["gpu_count"]),
         inference_engine_options={
             "engine": InferenceEngine.VLLM,
