@@ -1251,8 +1251,8 @@ class ArenaTrainer(Trainer):
 
     def train(
         self,
-        resource_id: str | int | None = None,
-        num_nodes: int | None = None,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
         project: str | None = None,
         experiment_name: str | None = None,
         reward_file: str | Path | bytes | None = None,
@@ -1260,10 +1260,11 @@ class ArenaTrainer(Trainer):
     ) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
-        :param resource_id: Arena cluster type or resource id for the job.
-        :type resource_id: str | int | None
-        :param num_nodes: The number of nodes to use for training.
-        :type num_nodes: int | None
+        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes that
+            fit the run's memory estimate.
+        :type num_gpus: int | None
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
+        :type gpu_type: str | None
         :param project: The project to submit the experiment to.
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
@@ -1277,8 +1278,8 @@ class ArenaTrainer(Trainer):
         """
         return self._client.submit_experiment(
             self.to_manifest(),
-            resource_id=resource_id,
-            num_nodes=num_nodes,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
             project=project,
             experiment_name=experiment_name,
             reward_file=reward_file,

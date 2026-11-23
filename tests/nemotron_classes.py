@@ -14,7 +14,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHMamba2Mixer,
 )
 
-from agilerl.architectures.nemotron_h.mamba import (
+from agilerl.architectures.nemotron_h.layers import (
     FUSED_PATH_PATCHED_FLAG,
     STREAM_PATCHED_FLAG,
 )

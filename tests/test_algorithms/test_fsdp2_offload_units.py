@@ -18,7 +18,12 @@ from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwen3Config
-from transformers.conversion_mapping import Concatenate, WeightConverter
+from transformers.conversion_mapping import (
+    Concatenate,
+    WeightConverter,
+    WeightRenaming,
+    register_checkpoint_conversion_mapping,
+)
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.distributed import (
@@ -2266,6 +2271,34 @@ class TestSafetensorsShardKeys:
         from agilerl.distributed.fsdp import _checkpoint_transform_groups
 
         assert _checkpoint_transform_groups(nn.Linear(2, 2)) == []
+
+    def test_descendant_of_a_mapped_model_type_gets_no_scoped_copy(self) -> None:
+        from agilerl.distributed.fsdp import _checkpoint_transform_groups
+
+        # Arrange
+        config = PretrainedConfig()
+        config.model_type = "agilerl_fsdp_shared_type"
+        renaming = WeightRenaming("^old", "new")
+        register_checkpoint_conversion_mapping(
+            "agilerl_fsdp_shared_type", [renaming], overwrite=True
+        )
+
+        class Inner(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.config = config
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Inner()
+                self.config = config
+
+        # Act
+        groups = _checkpoint_transform_groups(Root())
+
+        # Assert
+        assert [prefix for prefix, _ in groups] == [""]
 
     def test_missing_key_raises_without_a_language_tower(self, tmp_path):
         from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors

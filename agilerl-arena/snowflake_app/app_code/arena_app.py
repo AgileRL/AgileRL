@@ -3,29 +3,60 @@
 
 """Stored procedures of the Arena Snowflake Native App: setup, runs, and published models.
 
-The setup script registers each handler with ``IMPORTS`` of this file and
+The setup script registers each handler with ``IMPORTS`` of this file,
+``app_billing.py``, ``app_keys.py``, ``app_trial.py`` and
 ``agilerl_arena.zip``, so these run as owner's-rights procedures inside the app.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from snowflake.snowpark.exceptions import SnowparkSQLException
+from app_billing import (
+    APP_SCHEMA,
+    BILLING_TASK,
+    arena_partner,
+    close_deployments,
+    grant_endpoint_usage,
+    open_served,
+    published_model,
+    reconcile_summary,
+    record_served,
+    saved_partner,
+    suspend_idle_gpu_pools,
+    sync_billing_task,
+)
+from app_keys import (
+    app_capabilities,
+    arena_origin,
+    claim_account,
+    collect_linked_key,
+    priced_lines,
+    rotate_if_due,
+    save_arena_key,
+)
+from app_trial import refuse_ended_trial
 
+from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.opd import OPDSpec
+from agilerl.arena.models.model_info import (
+    REMOTE_CODE_MODEL_TYPES,
+    SUPPORTED_MODEL_INFO,
+)
 from agilerl.arena.snowflake.account import blocking_services, shrink_message
-from agilerl.arena.snowflake.billing import reconcile
 from agilerl.arena.snowflake.catalog import (
     PoolState,
     collect,
     existing_pools,
+    family_sized,
     load_families,
     remote_profile,
 )
@@ -35,6 +66,7 @@ from agilerl.arena.snowflake.job import (
     SubmitSettings,
     cancel_run,
     choose_gpu_family,
+    load_manifest,
     lowered,
     manifest_fits,
     new_run_id,
@@ -45,28 +77,16 @@ from agilerl.arena.snowflake.job import (
 from agilerl.arena.snowflake.license import (
     NATIVE_APP_CHANNEL,
     SNOWFLAKE_DENIED,
-    DeploymentClosedError,
-    DeploymentRefusedError,
-    SnowflakeDeployment,
+    AppKey,
+    ClaimAccount,
     SnowflakeLicenseError,
-    SnowflakeUsage,
-    TrainingDisabledError,
-    UnknownUsageError,
-    arena_api_base_url,
-    arena_api_hostname,
-    close_snowflake_deployment,
     fetch_capabilities,
-    heartbeat_snowflake_deployment,
     open_snowflake_deployment,
     partner_headers,
+    snowflake_priced_families,
     snowflake_training_enabled,
-    snowflake_usage,
 )
 from agilerl.arena.snowflake.profile import (
-    ARENA_API_RULE,
-    ARENA_BASE_URL_SECRET,
-    ARENA_EXTERNAL_USER_SECRET,
-    ARENA_ORG_KEY_SECRET,
     CPU_POOL_MAX_NODES,
     CPU_POOL_MIN_NODES,
     DEFAULT_GPU_NODES,
@@ -78,14 +98,15 @@ from agilerl.arena.snowflake.profile import (
     AccountProfile,
     CpuPool,
     GpuPool,
+    profile_from_mapping,
     put_setup_json,
     sole_gpu_pool,
 )
 from agilerl.arena.snowflake.publish import (
-    PublishDocument,
     PublishSession,
     PublishSettings,
     registry_schema,
+    select_checkpoint,
     served_version,
     service_endpoint,
     submit_publish,
@@ -96,54 +117,83 @@ from agilerl.arena.snowflake.publish import unpublish as drop_served
 from agilerl.arena.snowflake.setup import (
     ORG_KEY_PREFIX,
     family_listed,
+    format_family_lines,
     missing_family_message,
+    no_gpu_message,
     nodes_for_gpus,
     unsupported_gpu_message,
 )
 from agilerl.arena.snowflake.setup_sql import (
     PoolPlan,
     pool_statements,
-    secret_statements,
     string_literal,
 )
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from agilerl.arena.models.manifest import TrainingManifest
+    from agilerl.arena.snowflake.catalog import GpuFamily
 
-APP_SCHEMA = "app_state"
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
+# Single-valued, unlike the source references.
+EXPORT_REFERENCE = "EXPORT_STAGE"
 # snowflake-app-build replaces the tag with the release tag, as in manifest.yml.
 IMAGE = "/arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130"
 SETUP_PREFIX = f"@{APP_SCHEMA}.{RUNS_STAGE}/_arena"
-# Account-level names. The agilerl_app_ prefix keeps them apart from the CLI's objects.
-WAREHOUSE = "agilerl_app_wh"
-BROKER_POOL = "agilerl_app_broker_pool"
-HEAD_POOL = "agilerl_app_head_pool"
-GPU_POOL_PREFIX = "agilerl_app_gpu_"
-HF_INTEGRATION = "agilerl_app_hf_eai"
-API_INTEGRATION = "agilerl_app_arena_eai"
 
 logger = logging.getLogger(__name__)
 
-# Snowflake writes procedure logs to the event table from the root logger; the
-# CLI's console handler would keep agilerl.arena records on stderr instead.
-ARENA_LOGGER = logging.getLogger("agilerl.arena")
-ARENA_LOGGER.handlers.clear()
-ARENA_LOGGER.propagate = True
+
+@dataclass(frozen=True)
+class AppNames:
+    """Account-level names of this app's objects, ``<prefix><suffix>``.
+
+    The setup script creates the warehouse and integrations with the same
+    prefix and suffixes. The ``AGILERL_APP_`` start of the prefix keeps them
+    apart from the CLI's ``arena_`` objects.
+    """
+
+    warehouse: str
+    broker_pool: str
+    head_pool: str
+    gpu_pool_prefix: str
+    hf_integration: str
+    api_integration: str
+
+
+def app_names(session: SnowflakeSession) -> AppNames:
+    """Names from ``app_code.object_prefix()``, which derives them from the app name.
+
+    :param session: Procedure session.
+    :return: The names.
+    """
+    [row] = collect(session, "SELECT app_code.object_prefix() AS PREFIX")
+    prefix = str(lowered(row)["prefix"])
+    return AppNames(
+        warehouse=f"{prefix}WH",
+        broker_pool=f"{prefix}BROKER_POOL",
+        head_pool=f"{prefix}HEAD_POOL",
+        gpu_pool_prefix=f"{prefix}GPU_",
+        hf_integration=f"{prefix}HF_EAI",
+        api_integration=f"{prefix}ARENA_EAI",
+    )
 
 
 def configure(
-    session: SnowflakeSession, org_key: str, external_user_id: str, base_url: str
+    session: SnowflakeSession,
+    org_key: str,
+    external_user_id: str,
+    base_url: str | None,
 ) -> str:
-    """Check the org key with Arena, then save the three Arena secrets in ``app_state``.
+    """Check an org key AgileRL issued with Arena, then save the three Arena secrets in ``app_state``.
 
     No secret value is logged, returned, or quoted in an error.
 
     :param session: Procedure session.
     :param org_key: Arena organisation key.
     :param external_user_id: External user id the key acts for.
-    :param base_url: Arena origin. Its host must be in the app's Arena network rule.
+    :param base_url: Arena origin, or ``None`` for ``https://arena.agilerl.com``.
+        Its host must be in the app's Arena network rule.
     :return: Confirmation.
     :raises ValueError: The key is not an org key, the user id is empty, or the
         base URL host is not in the Arena network rule.
@@ -156,96 +206,37 @@ def configure(
     if not org_key.startswith(ORG_KEY_PREFIX):
         msg = (
             "That is not an Arena org key.\n"
-            f"Ask AgileRL for a Snowflake org key (it starts with {ORG_KEY_PREFIX}).\n"
+            "Run CALL app_code.connect_arena() to connect, or paste a key AgileRL gave "
+            f"you (it starts with {ORG_KEY_PREFIX}).\n"
             "Nothing was saved."
         )
         raise ValueError(msg)
     if external_user_id == "":
         msg = "Pass the Arena external user id.\nNothing was saved."
         raise ValueError(msg)
-    origin = arena_origin(session, base_url)
+    # An explicit NULL from SQL skips the procedure's DEFAULT, so default here too.
+    origin = arena_origin(session, base_url or "https://arena.agilerl.com")
     caps = fetch_capabilities(origin, partner_headers(org_key, external_user_id))
     if not snowflake_training_enabled(caps):
         raise SnowflakeLicenseError(SNOWFLAKE_DENIED)
-    for name, value in (
-        (ARENA_ORG_KEY_SECRET, org_key),
-        (ARENA_EXTERNAL_USER_SECRET, external_user_id),
-        (ARENA_BASE_URL_SECRET, origin),
-    ):
-        save_secret(session, name, value)
-    return (
-        "Saved the Arena org key, external user id, and base URL.\n"
-        "Arena allows Snowflake training for this organisation."
+    save_arena_key(
+        session, origin, AppKey(org_key, external_user_id, None, None), "configure"
     )
-
-
-def arena_origin(session: SnowflakeSession, base_url: str) -> str:
-    """``https://<host>`` for ``base_url``, refused when the Arena rule does not allow the host.
-
-    :param session: Procedure session.
-    :param base_url: Arena origin as the admin typed it.
-    :return: The origin.
-    :raises ValueError: The value does not name one host, or the host is not in the rule.
-    """
-    try:
-        host = arena_api_hostname(base_url or "")
-    except ValueError:
-        # The library message quotes the value, which may be a pasted secret.
-        msg = "The base URL does not name one host.\nNothing was saved."
-        raise ValueError(msg) from None
-    allowed = rule_hosts(session, f"{APP_SCHEMA}.{ARENA_API_RULE}")
-    if f"{host.lower()}:443" not in allowed:
-        msg = (
-            "The base URL host is not in the app's Arena network rule "
-            f"({', '.join(sorted(allowed))}), so the app cannot reach it.\n"
-            "Nothing was saved."
-        )
-        raise ValueError(msg)
-    return arena_api_base_url(host)
-
-
-def rule_hosts(session: SnowflakeSession, rule: str) -> set[str]:
-    """Lower-case ``host:port`` values of a network rule.
-
-    :param session: Procedure session.
-    :param rule: Qualified network rule name.
-    :return: The values.
-    """
-    hosts: set[str] = set()
-    for row in collect(session, f"DESCRIBE NETWORK RULE {rule}"):
-        raw = str(lowered(row).get("value_list") or "")
-        hosts.update(item.strip().lower() for item in raw.split(",") if item.strip())
-    return hosts
-
-
-def save_secret(session: SnowflakeSession, name: str, value: str) -> None:
-    """Create the secret when missing, then set its value.
-
-    :param session: Procedure session.
-    :param name: Secret name in ``app_state``.
-    :param value: Secret string.
-    :raises RuntimeError: Snowflake rejected a statement. The error names the
-        secret, not its value.
-    """
-    try:
-        for statement in secret_statements(APP_SCHEMA, name, value):
-            collect(session, statement)
-    except SnowparkSQLException as exc:
-        # A Snowflake error can quote the statement, which holds the value.
-        msg = (
-            f"Snowflake did not save {APP_SCHEMA}.{name} "
-            f"(Snowflake error {exc.sql_error_code})."
-        )
-        raise RuntimeError(msg) from None
+    lines = [
+        "Saved the Arena org key, external user id, and base URL.",
+        "Arena allows Snowflake training for this organisation.",
+    ]
+    return "\n".join([*lines, *priced_lines(caps)])
 
 
 def register_reference(
     session: SnowflakeSession, ref_name: str, operation: str, ref_or_alias: str
 ) -> None:
-    """Bind, unbind, or clear a consumer table or view on a source reference.
+    """Bind, unbind, or clear a consumer object on a reference.
 
-    Snowflake calls this when the consumer changes a ``source_table`` or
-    ``source_view`` binding. Both references are multi-valued.
+    Snowflake calls this when the consumer changes a ``source_table``,
+    ``source_view`` or ``export_stage`` binding. The source references are
+    multi-valued; ``export_stage`` holds one stage.
 
     :param session: Procedure session.
     :param ref_name: Reference name from the manifest.
@@ -254,15 +245,18 @@ def register_reference(
     :raises ValueError: The reference or operation is unknown.
     """
     name = (ref_name or "").upper()
-    if name not in SOURCE_REFERENCES:
-        msg = f"Unknown reference {ref_name}. Bind source_table or source_view."
+    if name not in (*SOURCE_REFERENCES, EXPORT_REFERENCE):
+        msg = (
+            f"Unknown reference {ref_name}. "
+            "Bind source_table, source_view or export_stage."
+        )
         raise ValueError(msg)
     reference = string_literal(name)
+    add = "SET_REFERENCE" if name == EXPORT_REFERENCE else "ADD_REFERENCE"
     match (operation or "").upper():
         case "ADD":
             statement = (
-                f"SELECT SYSTEM$ADD_REFERENCE({reference}, "
-                f"{string_literal(ref_or_alias)})"
+                f"SELECT SYSTEM${add}({reference}, {string_literal(ref_or_alias)})"
             )
         case "REMOVE":
             statement = (
@@ -298,29 +292,36 @@ def set_pools(
     :param head_family: Instance family of the Ray head pool, or ``None`` for
         ``CPU_X64_SL``.
     :return: One line per pool.
-    :raises ValueError: A family is unknown or not in this region, an existing
-        pool uses another family, or a running service blocks the change.
+    :raises ValueError: A family is unknown, missing from this region or with
+        another GPU count per node here, an existing pool uses another family,
+        or a running service blocks the change.
     """
     names = gpu_names(gpu_families, max_gpus)
     # An explicit NULL from SQL skips the procedure's DEFAULT, so default here too.
     broker = (broker_family or "CPU_X64_L").strip().upper()
     head = (head_family or "CPU_X64_SL").strip().upper()
     families = load_families(session)
-    for family, role in (
-        (broker, "broker"),
-        (head, "head"),
-        *((n, "GPU") for n in names),
-    ):
+    for family, role in ((broker, "broker"), (head, "head")):
         if not family_listed(family, families):
             raise ValueError(missing_family_message(family, role))
+    for name in names:
+        if not family_sized(name, families):
+            rerun = "CALL <app>.app_code.set_pools(['<name>'])"
+            raise ValueError(no_gpu_message(name, families, rerun))
     saved = remote_profile(
         session, f"{SETUP_PREFIX}/setup.json", f"{APP_SCHEMA}.{FILE_FORMAT}"
     )
+    objects = app_names(session)
     plans = pool_plans(
-        broker, head, names, max_gpus, saved.pools.gpu if saved is not None else {}
+        objects,
+        broker,
+        head,
+        names,
+        max_gpus,
+        saved.pools.gpu if saved is not None else {},
     )
     existing = existing_pools(session)
-    leftovers = checked_leftovers(session, plans, existing)
+    leftovers = checked_leftovers(session, objects, plans, existing)
     for plan in plans:
         state = existing.get(plan.name.upper())
         for statement in pool_statements(state.max_nodes if state else None, plan):
@@ -328,7 +329,7 @@ def set_pools(
     for name in leftovers:
         collect(session, f"ALTER COMPUTE POOL {name} STOP ALL")
         collect(session, f"DROP COMPUTE POOL {name}")
-    put_setup_json(session, app_profile(plans, saved), SETUP_PREFIX)
+    put_setup_json(session, app_profile(objects, plans, saved), SETUP_PREFIX)
     lines = [
         f"{plan.name}  {plan.family}  {plan.role}"
         if plan.max_gpus is None
@@ -361,7 +362,33 @@ def gpu_names(gpu_families: list[str], max_gpus: int | None) -> list[str]:
     return names
 
 
+def gpu_families(session: SnowflakeSession) -> str:
+    """GPU families ``set_pools`` can use: in this region with the app's GPU count, and priced by Arena.
+
+    :param session: Procedure session.
+    :return: One line per family, or the region's GPU families when none qualifies.
+    :raises ValueError: Arena is not configured.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    priced = snowflake_priced_families(app_capabilities(*arena_partner()))
+    region = load_families(session)
+    usable = [
+        item
+        for item in region
+        if family_sized(item.name, region)
+        and (priced is None or item.name.upper() in priced)
+    ]
+    if usable:
+        return "GPU families set_pools can use here:\n" + format_family_lines(usable)
+    return (
+        "No GPU family in this region is both sized by the app and priced by Arena.\n"
+        "GPU families SHOW COMPUTE POOL INSTANCE FAMILIES returned:\n"
+        + format_family_lines([item for item in region if item.gpu_count > 0])
+    )
+
+
 def pool_plans(
+    objects: AppNames,
     broker: str,
     head: str,
     names: list[str],
@@ -370,6 +397,7 @@ def pool_plans(
 ) -> list[PoolPlan]:
     """Broker, head, then one GPU pool per family.
 
+    :param objects: The app's account-level names.
     :param broker: Instance family of the broker pool.
     :param head: Instance family of the head pool.
     :param names: GPU families.
@@ -380,9 +408,21 @@ def pool_plans(
     """
     plans = [
         PoolPlan(
-            BROKER_POOL, broker, "broker", CPU_POOL_MIN_NODES, CPU_POOL_MAX_NODES, None
+            objects.broker_pool,
+            broker,
+            "broker",
+            CPU_POOL_MIN_NODES,
+            CPU_POOL_MAX_NODES,
+            None,
         ),
-        PoolPlan(HEAD_POOL, head, "head", CPU_POOL_MIN_NODES, CPU_POOL_MAX_NODES, None),
+        PoolPlan(
+            objects.head_pool,
+            head,
+            "head",
+            CPU_POOL_MIN_NODES,
+            CPU_POOL_MAX_NODES,
+            None,
+        ),
     ]
     for name in names:
         spec = GPU_FAMILIES[name]
@@ -394,7 +434,7 @@ def pool_plans(
             cap = spec.gpus * DEFAULT_GPU_NODES
         plans.append(
             PoolPlan(
-                f"{GPU_POOL_PREFIX}{name}",
+                f"{objects.gpu_pool_prefix}{name}",
                 name,
                 "gpu",
                 1,
@@ -407,12 +447,14 @@ def pool_plans(
 
 def checked_leftovers(
     session: SnowflakeSession,
+    objects: AppNames,
     plans: list[PoolPlan],
     existing: dict[str, PoolState],
 ) -> list[str]:
     """App GPU pools no plan keeps, once every plan and drop is known to be safe.
 
     :param session: Procedure session.
+    :param objects: The app's account-level names.
     :param plans: Pools to create or resize.
     :param existing: Compute pools in the account, keyed by upper-case name.
     :return: Upper-case names of the pools to drop.
@@ -437,7 +479,7 @@ def checked_leftovers(
     leftovers = [
         name
         for name in existing
-        if name.startswith(GPU_POOL_PREFIX.upper()) and name not in kept
+        if name.startswith(objects.gpu_pool_prefix) and name not in kept
     ]
     for name in leftovers:
         blocked = blocking_services(session, name, 0)
@@ -447,9 +489,12 @@ def checked_leftovers(
     return leftovers
 
 
-def app_profile(plans: list[PoolPlan], saved: AccountProfile | None) -> AccountProfile:
+def app_profile(
+    objects: AppNames, plans: list[PoolPlan], saved: AccountProfile | None
+) -> AccountProfile:
     """``setup.json`` fields for the app, in the shape the CLI writes.
 
+    :param objects: The app's account-level names.
     :param plans: Broker, head, then GPU pools.
     :param saved: Profile already saved. Its extra integrations stay.
     :return: The profile.
@@ -458,10 +503,12 @@ def app_profile(plans: list[PoolPlan], saved: AccountProfile | None) -> AccountP
     extra = saved.external_access_integrations if saved is not None else ()
     return AccountProfile(
         image=IMAGE,
-        warehouse=WAREHOUSE,
+        warehouse=objects.warehouse,
         stage=f"{APP_SCHEMA}.{RUNS_STAGE}",
         metrics_table=f"{APP_SCHEMA}.{METRICS_TABLE}",
-        external_access_integrations=tuple(dict.fromkeys((HF_INTEGRATION, *extra))),
+        external_access_integrations=tuple(
+            dict.fromkeys((objects.hf_integration, *extra))
+        ),
         pools=AccountPools(
             broker=CpuPool(broker.name, broker.family),
             head=CpuPool(head.name, head.family),
@@ -504,7 +551,11 @@ def submit(
         from, or ``None``.
     :return: The run id, the service names, and any manifest warnings.
     :raises ValueError: An argument is out of range, the source is not a bound
-        reference, the pools are not set, or the manifest cannot run on them.
+        reference, a model is outside the catalog or runs remote code, the
+        pools are not set, Arena has no price for the family, or the manifest
+        cannot run on them.
+    :raises PermissionError: The trial has ended and the listing is not purchased.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
     if gpus < 1:
         msg = "gpus must be at least 1.\nNothing was started."
@@ -513,7 +564,6 @@ def submit(
         msg = "checkpoint_steps must be at least 1.\nNothing was started."
         raise ValueError(msg)
     source = reference_source(source_reference, source_alias)
-    profile = app_setup(session)
     with (
         tempfile.TemporaryDirectory() as tmp,
         warnings.catch_warnings(record=True) as caught,
@@ -529,14 +579,26 @@ def submit(
         job_manifest = write_job_manifest(
             submitted, source, reward_path is not None, directory
         )
+        refuse_remote_code(load_manifest(job_manifest))
+        refuse_ended_trial(session)
+        profile = app_setup(session)
+        pools = run_pools(session, profile, gpu_family)
         family = choose_gpu_family(
-            profile.pools.gpu,
+            pools,
             gpus,
             gpu_family,
             lambda pool: manifest_fits(job_manifest, pool, gpus),
         )
         settings = submit_settings(
-            profile, source, gpus, family, checkpoint_steps, reward_path, resume_from
+            profile,
+            app_names(session).api_integration,
+            source,
+            gpus,
+            family,
+            checkpoint_steps,
+            reward_path,
+            resume_from,
+            claim_account(session),
         )
         run_id = new_run_id()
         # Recorded before any service starts, so a started run is always billed.
@@ -545,6 +607,7 @@ def submit(
             "INSERT INTO app_state.usage_items (kind, usage_id, opened_at) "
             f"VALUES ('run', {string_literal(run_id)}, CURRENT_TIMESTAMP())",
         )
+        collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
         _, services = submit_job(session, job_manifest, settings, run_id)
     lines = [
         f"run_id: {run_id}",
@@ -560,24 +623,115 @@ def submit(
     return "\n".join(lines)
 
 
+def run_pools(
+    session: SnowflakeSession, profile: AccountProfile, gpu_family: str | None
+) -> dict[str, GpuPool]:
+    """GPU pools a new run may use: priced by Arena and sized for this region.
+
+    Rotates a due Arena key first, so the run's head reads the rotated key.
+
+    :param session: Procedure session.
+    :param profile: The app's ``setup.json``.
+    :param gpu_family: Family the caller named, or ``None``.
+    :return: The pools, keyed by family.
+    :raises ValueError: No pool, or not the named one, has a price and the GPUs
+        the app sized.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    partner = rotate_if_due(session, arena_partner())
+    priced = priced_pools(profile.pools.gpu, gpu_family, partner)
+    return sized_pools(priced, load_families(session), gpu_family)
+
+
+def priced_pools(
+    pools: dict[str, GpuPool],
+    gpu_family: str | None,
+    partner: tuple[str, dict[str, str]],
+) -> dict[str, GpuPool]:
+    """Keep the app's GPU pools whose family Arena has a Snowflake price for.
+
+    Arena refuses an unpriced family only when the head opens the run, after
+    the GPU nodes have started, so ``submit`` checks first.
+
+    :param pools: GPU pools in ``setup.json``, keyed by family.
+    :param gpu_family: Family the caller named, or ``None``.
+    :param partner: Arena origin and partner headers.
+    :return: The priced pools, or every pool when Arena does not list prices.
+    :raises ValueError: The named family has no price, or no pool's family has one.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    priced = snowflake_priced_families(app_capabilities(*partner))
+    if priced is None:
+        return pools
+    listed = ", ".join(sorted(priced)) or "none"
+    if gpu_family is not None and gpu_family not in priced:
+        msg = (
+            f"Arena has no Snowflake price for {gpu_family}, so it would refuse "
+            f"the run after the GPUs start.\nPriced families: {listed}.\n"
+            "Nothing was started."
+        )
+        raise ValueError(msg)
+    kept = {family: pool for family, pool in pools.items() if family in priced}
+    if not kept:
+        msg = (
+            f"Arena has no Snowflake price for any of the app's GPU pools "
+            f"({', '.join(sorted(pools))}).\nPriced families: {listed}. "
+            "An app_admin calls set_pools with one of them.\nNothing was started."
+        )
+        raise ValueError(msg)
+    return kept
+
+
+def sized_pools(
+    pools: dict[str, GpuPool], region: list[GpuFamily], gpu_family: str | None
+) -> dict[str, GpuPool]:
+    """Keep the app's GPU pools whose family this region has with the GPUs the app sized.
+
+    :param pools: GPU pools in ``setup.json``, keyed by family.
+    :param region: Families in this region.
+    :param gpu_family: Family the caller named, or ``None``.
+    :return: The pools :func:`family_sized` accepts.
+    :raises ValueError: The named family, or every pool's family, fails that check.
+    """
+    kept = {
+        family: pool for family, pool in pools.items() if family_sized(family, region)
+    }
+    refused = sorted(set(pools) - set(kept))
+    if gpu_family in refused or (refused and not kept):
+        named = [gpu_family] if gpu_family in refused else refused
+        msg = (
+            f"This region does not have {', '.join(named)} with the GPUs per node "
+            "the app sized, so the run would ask for GPUs the nodes lack.\n"
+            "An app_admin lists usable families with gpu_families() and calls "
+            "set_pools with one of them.\n"
+            "Nothing was started."
+        )
+        raise ValueError(msg)
+    return kept
+
+
 def submit_settings(
     profile: AccountProfile,
+    api_integration: str,
     source: QuerySource | None,
     gpus: int,
     family: str,
     checkpoint_steps: int | None,
     reward_path: Path | None,
     resume_from: str | None,
+    install: ClaimAccount,
 ) -> SubmitSettings:
     """Build the settings of a run on the app's pools, secrets, and integrations.
 
     :param profile: The app's ``setup.json``.
+    :param api_integration: The app's Arena integration.
     :param source: Query the run reads, or ``None``.
     :param gpus: GPUs for the run.
     :param family: GPU family of the run's pool.
     :param checkpoint_steps: Training steps between checkpoints, or ``None``.
     :param reward_path: Reward function file, or ``None``.
     :param resume_from: Run to resume from, or ``None``.
+    :param install: Region and purchased flag the head sends with the run open.
     :return: The settings.
     """
     pool = profile.pools.gpu[family]
@@ -600,10 +754,59 @@ def submit_settings(
         head_family=profile.pools.head.family,
         resume_from=resume_from,
         secrets_schema=APP_SCHEMA,
-        arena_api_integration=API_INTEGRATION,
+        arena_api_integration=api_integration,
         service_schema=APP_SCHEMA,
         channel=NATIVE_APP_CHANNEL,
+        snowflake_region=install.region,
+        listing_purchased=install.purchased,
     )
+
+
+def refuse_remote_code(manifest: TrainingManifest) -> None:
+    """Refuse a model whose run would execute code from outside the app package.
+
+    Snowflake does not let a Native App run code from outside its package. A
+    model outside the catalog is refused too, since the app cannot read its
+    config before the run starts.
+
+    :param manifest: The run's manifest.
+    :raises ValueError: ``vllm_engine_args.trust_remote_code`` is true, or the
+        policy or teacher model is outside the catalog or its family loads
+        Python from its Hugging Face repo.
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, LLMAlgorithmSpec):
+        return
+    if algorithm.vllm_engine_args.get("trust_remote_code"):
+        msg = (
+            "algorithm.vllm_engine_args.trust_remote_code is not available in "
+            "the Snowflake app. It runs code from the model's Hugging Face "
+            "repository, and Snowflake does not allow a Native App to run code "
+            "from outside its package. Remove it from the manifest.\n"
+            "Nothing was started."
+        )
+        raise ValueError(msg)
+    hub_ids = [algorithm.pretrained_model_name_or_path]
+    if isinstance(algorithm, OPDSpec) and algorithm.teacher.model is not None:
+        hub_ids.append(algorithm.teacher.model.pretrained_model_name_or_path)
+    for hub_id in hub_ids:
+        info = SUPPORTED_MODEL_INFO.get(hub_id)
+        if info is None:
+            msg = (
+                f"{hub_id} is not in the Arena model catalog, so the Snowflake "
+                "app cannot check that it runs without outside code. Pick a "
+                "model from 'arena models supported'.\nNothing was started."
+            )
+            raise ValueError(msg)
+        if info.model_type in REMOTE_CODE_MODEL_TYPES:
+            msg = (
+                f"{hub_id} is not available in the Snowflake app. It runs code "
+                "from its Hugging Face repository, and Snowflake does not allow "
+                "a Native App to run code from outside its package. Train it on "
+                "Arena or with the arena CLI, or pick another model from "
+                "'arena models supported'.\nNothing was started."
+            )
+            raise ValueError(msg)
 
 
 def reference_source(reference: str | None, alias: str | None) -> QuerySource | None:
@@ -701,334 +904,110 @@ def logs(session: SnowflakeSession, run_id: str, role: str, instance: int) -> st
 
 
 def cancel(session: SnowflakeSession, run_id: str) -> str:
-    """Drop a run's broker, head, and workers.
+    """Drop a run's broker, head, and workers, then suspend GPU pools left with nothing on them.
 
     :param session: Procedure session.
     :param run_id: Run id from ``submit``.
-    :return: Confirmation.
+    :return: Confirmation and the suspended pools.
     :raises ValueError: The app has no such run.
     """
     known_run(session, run_id)
     cancel_run(session, run_id, APP_SCHEMA)
-    return f"cancelled: {run_id}"
+    lines = [f"cancelled: {run_id}"]
+    lines.extend(f"suspended: {pool}" for pool in suspend_idle_gpu_pools(session))
+    return "\n".join(lines)
 
 
-def arena_partner() -> tuple[str, dict[str, str]]:
-    """Arena origin and partner headers from the secrets ``configure`` saved.
+def export_model(session: SnowflakeSession, run_id: str, step: int | None) -> str:
+    """Copy a run's merged checkpoint to ``<run_id>/<checkpoint>/`` on the stage bound to ``export_stage``.
 
-    :return: The origin and the headers.
-    :raises ValueError: No org key has been saved.
+    Starts no service and adds no usage item, so it is not billed by Arena, and
+    works after the trial ends: it only hands back a model trained in the app.
+
+    :param session: Procedure session.
+    :param run_id: Run id from ``submit``.
+    :param step: Checkpoint step. ``None`` takes the newest complete merged export.
+    :return: The checkpoint, the stage path, and how many files were copied.
+    :raises ValueError: No stage is bound to ``export_stage``, the app has no
+        such run, or the run has no complete merged export at that step.
     """
-    # Lazy import of an optional package: _snowflake exists only inside a Snowflake procedure.
-    import _snowflake  # noqa: PLC0415 -- not installable outside Snowflake
-
-    org_key = _snowflake.get_generic_secret_string("org_key")
-    if not org_key:
-        msg = "Arena is not configured. An app_admin calls app_code.configure first."
+    [row] = collect(
+        session,
+        f"SELECT SYSTEM$GET_ALL_REFERENCES({string_literal(EXPORT_REFERENCE)}) AS REFS",
+    )
+    if json.loads(str(lowered(row)["refs"])) == []:
+        msg = (
+            "No stage is bound to export_stage.\n"
+            "Bind one of your stages to it with WRITE, then call export_model again."
+        )
         raise ValueError(msg)
-    external_user_id = _snowflake.get_generic_secret_string("external_user_id")
-    base_url = _snowflake.get_generic_secret_string("base_url")
-    return base_url, partner_headers(org_key, external_user_id)
+    known_run(session, run_id)
+    prefix = runs_prefix(f"{APP_SCHEMA}.{RUNS_STAGE}", run_id)
+    checkpoint, _, _ = select_checkpoint(
+        collect(session, f"LIST {prefix}/"), run_id, step
+    )
+    path = f"{run_id}/{checkpoint}/"
+    copied = collect(
+        session,
+        f"COPY FILES INTO @reference({string_literal(EXPORT_REFERENCE)})/{path} "
+        f"FROM {prefix}/{checkpoint}/merged/",
+    )
+    return "\n".join(
+        [f"checkpoint: {checkpoint}", f"path: {path}", f"files: {len(copied)}"]
+    )
 
 
 def reconcile_usage(session: SnowflakeSession) -> str:
-    """Meter served models, then bill every unsettled run and deployment; the hourly task calls this.
+    """Collect a linked claim's key, stop everything after an unpurchased trial, meter and bill, rotate an old key, suspend idle GPU pools and an idle task, and log at INFO.
 
     :param session: Procedure session.
-    :return: The :func:`meter_deployments` and :func:`reconcile` summaries,
-        or why nothing ran.
+    :return: What happened to a claim, the :func:`end_trial`,
+        :func:`meter_deployments` and :func:`reconcile` summaries, or why
+        nothing ran, then the GPU pools and billing task it suspended.
     """
-    try:
-        base_url, headers = arena_partner()
-    except ValueError as exc:
-        return str(exc)
-
-    # One task run covers every item, so each request retries only briefly.
-    def fetch(kind: str, usage_id: str) -> SnowflakeUsage:
-        return snowflake_usage(kind, usage_id, base_url, headers, time.sleep, 30.0)
-
-    def open_call(deployment: SnowflakeDeployment) -> None:
-        open_snowflake_deployment(deployment, base_url, headers, time.sleep)
-
-    def heartbeat(deployment_id: str, now: datetime) -> None:
-        heartbeat_snowflake_deployment(
-            deployment_id, now, base_url, headers, time.sleep, 30.0
-        )
-
-    def close(deployment_id: str, now: datetime) -> None:
-        close_snowflake_deployment(
-            deployment_id, now, base_url, headers, time.sleep, 30.0
-        )
-
-    metered = meter_deployments(
-        session,
-        DeploymentCalls(open_call, heartbeat, close),
-        datetime.now(timezone.utc),
-    )
-    return f"{metered}; {reconcile(session, fetch, int(time.time() * 1000))}"
+    claim = collect_linked_key(session)
+    summary = reconcile_summary(session)
+    if claim is not None:
+        summary = f"{claim}; {summary}"
+    partner = saved_partner()
+    if partner is not None:
+        rotate_if_due(session, partner)
+    pools = suspend_idle_gpu_pools(session)
+    if pools:
+        summary += f"; suspended idle GPU pools {', '.join(pools)}"
+    if not sync_billing_task(session):
+        summary += f"; nothing left to bill, suspended {BILLING_TASK}"
+    logger.info("reconcile_usage: %s", summary)
+    return summary
 
 
-@dataclass(frozen=True)
-class DeploymentCalls:
-    """Arena deployment requests: open, heartbeat, and close."""
+def version_init(session: SnowflakeSession) -> str:
+    """Point ``setup.json`` at this version's image, and resume the billing task only when there is work to bill.
 
-    open: Callable[[SnowflakeDeployment], None]
-    heartbeat: Callable[[str, datetime], None]
-    close: Callable[[str, datetime], None]
-
-
-@dataclass(frozen=True)
-class ServedModel:
-    """A service ``publish`` started, as ``app_state.served_models`` records it.
-
-    :param service: Upper-case service name in ``app_state``.
-    :param model: Model Registry model name.
-    :param version: Model Registry version name.
-    :param run_id: Run the model was published from.
-    :param gpu_family: Instance family of the serving pool.
-    :param gpu_count: GPUs the service requests.
-    """
-
-    service: str
-    model: str
-    version: str
-    run_id: str
-    gpu_family: str
-    gpu_count: int
-
-
-def service_live(status: str | None) -> bool:
-    """Whether a ``SHOW SERVICES`` status is billed as serving.
-
-    :param status: Upper-case status, or ``None`` when the service is gone.
-    :return: True while the service exists and is neither suspended nor ended.
-    """
-    stopped = {
-        "SUSPENDING",
-        "SUSPENDED",
-        "DONE",
-        "FAILED",
-        "CANCELLED",
-        "CANCELED",
-        "DELETING",
-        "DELETED",
-    }
-    return status is not None and status not in stopped
-
-
-def meter_deployments(
-    session: SnowflakeSession, calls: DeploymentCalls, now: datetime
-) -> str:
-    """Heartbeat each open deployment, close those whose service is not live, and open missing ones.
-
-    A suspended service is not live, so suspending closes its deployment and
-    a resumed service gets a new one. A heartbeat refused because Snowflake
-    training is off drops the service and closes the deployment. The row is
-    marked closed only after that close returns. A deployment Arena has closed
-    is marked closed, so it settles from the usage read, and its service gets
-    a new deployment. Every live service in ``app_state.served_models`` with
-    no open deployment gets one; a refused open drops the service. A service
-    dropped while metering its open deployment is not granted endpoint usage.
-    Every other live service is, including one already metered. A 404 is
-    logged and the deployment is left. A deployment Arena has never answered
-    for does not count its service as metered, so a live service is opened.
-    The first other Arena failure stops metering.
+    Snowflake calls this after install and upgrade, and the previous version's
+    after a failed upgrade, whose setup script may already have suspended the
+    task. A version accepts only its own image, so ``submit`` and ``publish``
+    would refuse the image an earlier version saved.
 
     :param session: Procedure session.
-    :param calls: Arena deployment requests.
-    :param now: Current time, timezone-aware.
-    :return: Counts of open deployments, heartbeats, closes, opens, dropped
-        services, deployments Arena answered 404 for, and failures.
+    :return: What was done to the image and the task.
     """
-    served = served_models(session)
-    rows = collect(
-        session,
-        "SELECT usage_id, service_name, first_seen_at FROM app_state.usage_items "
-        "WHERE kind = 'deployment' AND settled_at IS NULL AND closed_at IS NULL "
-        "AND service_name IS NOT NULL ORDER BY opened_at",
+    lines = []
+    # LIST and GET need no warehouse; an upgrade Snowflake starts has none.
+    setup_json = f"{SETUP_PREFIX}/setup.json"
+    profile = (
+        profile_from_mapping(json.loads(session.file.get_stream(setup_json).read()))
+        if collect(session, f"LIST {setup_json}")
+        else None
     )
-    statuses = service_statuses(session) if rows or served else {}
-    counts = dict.fromkeys(
-        ("heartbeat", "closed", "opened", "dropped", "missing", "failed"), 0
-    )
-    metered: set[str] = set()
-    dropped: set[str] = set()
-    for row in rows:
-        values = lowered(row)
-        deployment_id, service = str(values["usage_id"]), str(values["service_name"])
-        try:
-            outcome = meter_deployment(
-                session, deployment_id, service, statuses.get(service), calls, now
-            )
-        except UnknownUsageError:
-            logger.warning(
-                "Arena has no deployment %s of service %s. Leaving it.",
-                deployment_id,
-                service,
-            )
-            counts["missing"] += 1
-            # Arena has answered for this deployment, so do not open another.
-            if values["first_seen_at"] is not None:
-                metered.add(service)
-            continue
-        except SnowflakeLicenseError as exc:
-            logger.warning(
-                "Could not meter deployment %s with Arena, so this run meters "
-                "no more deployments: %s",
-                deployment_id,
-                exc,
-            )
-            counts["failed"] += 1
-            return deployment_summary(len(rows), counts)
-        except SnowparkSQLException:
-            logger.exception("Could not drop service %s", service)
-            counts["failed"] += 1
-            metered.add(service)
-            continue
-        if outcome == "dropped":
-            dropped.add(service)
-        if outcome != "reopen":
-            counts[outcome] += 1
-            metered.add(service)
-    for service, model in served.items():
-        if service in dropped or not service_live(statuses.get(service)):
-            continue
-        grant_endpoint_usage(session, service)
-        if service in metered:
-            continue
-        try:
-            open_served(session, model, calls.open, now)
-        except DeploymentRefusedError:
-            counts["dropped"] += 1
-            continue
-        except SnowflakeLicenseError as exc:
-            logger.warning(
-                "Could not open a deployment for service %s with Arena, so this "
-                "run opens no more: %s",
-                service,
-                exc,
-            )
-            counts["failed"] += 1
-            break
-        counts["opened"] += 1
-    return deployment_summary(len(rows), counts)
-
-
-def service_statuses(session: SnowflakeSession) -> dict[str, str]:
-    """Upper-case ``SHOW SERVICES`` status of each service in ``app_state``, keyed by name.
-
-    :param session: Procedure session.
-    :return: The statuses.
-    """
-    return {
-        str(values["name"]).upper(): str(values.get("status") or "").upper()
-        for values in map(
-            lowered, collect(session, f"SHOW SERVICES IN SCHEMA {APP_SCHEMA}")
-        )
-    }
-
-
-def served_models(session: SnowflakeSession) -> dict[str, ServedModel]:
-    """Rows of ``app_state.served_models``, keyed by service name.
-
-    :param session: Procedure session.
-    :return: The served models.
-    """
-    rows = collect(
-        session,
-        "SELECT service_name, model, version, run_id, gpu_family, "
-        "gpu_count FROM app_state.served_models",
-    )
-    return {
-        str(v["service_name"]): ServedModel(
-            str(v["service_name"]),
-            str(v["model"]),
-            str(v["version"]),
-            str(v["run_id"]),
-            str(v["gpu_family"]),
-            int(str(v["gpu_count"])),
-        )
-        for v in map(lowered, rows)
-    }
-
-
-def deployment_summary(deployments: int, counts: dict[str, int]) -> str:
-    """One line of :func:`meter_deployments` counts.
-
-    :param deployments: Open deployments read.
-    :param counts: Count of each outcome.
-    :return: The line.
-    """
-    return f"deployments: {deployments}, " + ", ".join(
-        f"{name}: {count}" for name, count in counts.items()
-    )
-
-
-def meter_deployment(
-    session: SnowflakeSession,
-    deployment_id: str,
-    service: str,
-    status: str | None,
-    calls: DeploymentCalls,
-    now: datetime,
-) -> str:
-    """Heartbeat one open deployment while its service is live, or close it.
-
-    :param session: Procedure session.
-    :param deployment_id: Arena deployment id.
-    :param service: Service name in ``app_state``.
-    :param status: ``SHOW SERVICES`` status, or ``None`` when the service is gone.
-    :param calls: Arena deployment requests.
-    :param now: Current time, timezone-aware.
-    :return: ``heartbeat``, ``closed``, ``dropped``, or ``reopen`` when Arena
-        had closed it and the service needs a new deployment.
-    :raises UnknownUsageError: Arena has no such deployment.
-    :raises SnowflakeLicenseError: The Arena request failed.
-    :raises SnowparkSQLException: Snowflake did not drop the service.
-    """
-    if not service_live(status):
-        try:
-            calls.close(deployment_id, now)
-        except UnknownUsageError:
-            logger.warning("Arena has no deployment %s to close.", deployment_id)
-        mark_deployment(session, deployment_id, now, None)
-        return "closed"
-    try:
-        calls.heartbeat(deployment_id, now)
-    except TrainingDisabledError as exc:
-        collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{service}")
-        try:
-            calls.close(deployment_id, now)
-        except UnknownUsageError:
-            logger.warning("Arena has no deployment %s to close.", deployment_id)
-        mark_deployment(session, deployment_id, now, str(exc))
-        return "dropped"
-    except DeploymentClosedError as exc:
-        mark_deployment(session, deployment_id, now, str(exc))
-        return "reopen"
-    return "heartbeat"
-
-
-def mark_deployment(
-    session: SnowflakeSession, deployment_id: str, now: datetime, error: str | None
-) -> None:
-    """Stamp a deployment closed, with Arena's reason when there is one.
-
-    :param session: Procedure session.
-    :param deployment_id: Arena deployment id.
-    :param now: Current time, timezone-aware.
-    :param error: Reason logged and stored in ``last_error``, or ``None``.
-    """
-    stamp = f"TO_TIMESTAMP_TZ({int(now.timestamp() * 1000)}, 3)"
-    columns = f"closed_at = {stamp}"
-    if error is not None:
-        logger.warning("Deployment %s: %s", deployment_id, error)
-        columns += f", last_error = {string_literal(error)}, last_error_at = {stamp}"
-    collect(
-        session,
-        f"UPDATE app_state.usage_items SET {columns} WHERE kind = 'deployment' "
-        f"AND usage_id = {string_literal(deployment_id)}",
-    )
+    if profile is not None and profile.image != IMAGE:
+        put_setup_json(session, replace(profile, image=IMAGE), SETUP_PREFIX)
+        lines.append(f"image set to {IMAGE}")
+    if sync_billing_task(session):
+        lines.append(f"resumed {BILLING_TASK}")
+    else:
+        lines.append(f"nothing to bill, suspended {BILLING_TASK}")
+    return "; ".join(lines)
 
 
 def publish(
@@ -1060,13 +1039,15 @@ def publish(
         checkpoint.
     :raises RuntimeError: The publish job failed or outlived the wait. A
         service it starts later gets its deployment from the hourly task.
+    :raises PermissionError: The trial has ended and the listing is not purchased.
     :raises SnowflakeLicenseError: Arena did not open the deployment. The
         service was dropped.
     """
     if gpu_count < 1:
         msg = "gpu_count must be at least 1.\nNothing was published."
         raise ValueError(msg)
-    partner = arena_partner() if serve else None
+    refuse_ended_trial(session)
+    partner = rotate_if_due(session, arena_partner()) if serve else None
     known_run(session, run_id)
     profile = app_setup(session)
     database, schema = app_registry(session)
@@ -1097,6 +1078,7 @@ def publish(
     if service is not None:
         served = published_model(profile, document, service, run_id)
         record_served(session, served)
+        collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
     wait_for_publish(session, job)
     lines = [
         f"job: {job.name}",
@@ -1122,124 +1104,6 @@ def publish(
         lines.append(f"endpoint: {service_endpoint(session, document)}")
         lines.append(f"deployment: {deployment_id}")
     return "\n".join(lines)
-
-
-def published_model(
-    profile: AccountProfile, document: PublishDocument, service: str, run_id: str
-) -> ServedModel:
-    """Build the record of what a publish job's service serves.
-
-    :param profile: The app's ``setup.json``.
-    :param document: Publish job document.
-    :param service: The document's service name.
-    :param run_id: Run the model was published from.
-    :return: The served model.
-    """
-    families = {pool.pool.upper(): family for family, pool in profile.pools.gpu.items()}
-    return ServedModel(
-        service.upper(),
-        document["model_name"],
-        document["version_name"],
-        run_id,
-        families[document["compute_pool"].upper()],
-        document["gpu_count"],
-    )
-
-
-def grant_endpoint_usage(session: SnowflakeSession, service: str) -> None:
-    """Let ``app_user`` call the endpoints of a service, which only the app can call otherwise.
-
-    :param session: Procedure session.
-    :param service: Service in ``app_state``.
-    """
-    collect(
-        session,
-        f"GRANT SERVICE ROLE {APP_SCHEMA}.{service}!ALL_ENDPOINTS_USAGE "
-        "TO APPLICATION ROLE app_user",
-    )
-
-
-def record_served(session: SnowflakeSession, served: ServedModel) -> None:
-    """Replace the ``app_state.served_models`` row of a service.
-
-    Recorded before the service exists, so the hourly task can open its
-    deployment when the publish wait ends first.
-
-    :param session: Procedure session.
-    :param served: What the service serves.
-    """
-    name = string_literal(served.service)
-    collect(session, f"DELETE FROM app_state.served_models WHERE service_name = {name}")
-    collect(
-        session,
-        "INSERT INTO app_state.served_models "
-        "(service_name, model, version, run_id, gpu_family, gpu_count) VALUES "
-        f"({name}, {string_literal(served.model)}, {string_literal(served.version)}, "
-        f"{string_literal(served.run_id)}, {string_literal(served.gpu_family)}, "
-        f"{served.gpu_count})",
-    )
-
-
-def open_served(
-    session: SnowflakeSession,
-    served: ServedModel,
-    open_call: Callable[[SnowflakeDeployment], None],
-    now: datetime,
-) -> str:
-    """Open a new Arena deployment for a live service; a refused open drops the service.
-
-    The deployment is added to ``app_state.usage_items`` before Arena opens it,
-    so the hourly task bills an open whose answer was lost.
-
-    :param session: Procedure session.
-    :param served: What the service serves.
-    :param open_call: Arena open of a deployment.
-    :param now: Start of the deployment, timezone-aware.
-    :return: The deployment id.
-    :raises DeploymentRefusedError: Arena refused the open. The service was
-        dropped and the deployment marked closed with Arena's reason.
-    :raises SnowflakeLicenseError: The open did not land.
-    """
-    deployment_id = deployment_name(served.service, now)
-    collect(
-        session,
-        "INSERT INTO app_state.usage_items "
-        "(kind, usage_id, opened_at, service_name) VALUES ('deployment', "
-        f"{string_literal(deployment_id)}, CURRENT_TIMESTAMP(), "
-        f"{string_literal(served.service)})",
-    )
-    [row] = collect(session, "SELECT CURRENT_ACCOUNT() AS ACCOUNT")
-    try:
-        open_call(
-            SnowflakeDeployment(
-                deployment_id=deployment_id,
-                snowflake_account=str(lowered(row)["account"]),
-                gpu_count=served.gpu_count,
-                gpu_family=served.gpu_family,
-                started_at=now,
-                model=served.model,
-                version=served.version,
-                run_id=served.run_id,
-            )
-        )
-    except DeploymentRefusedError as exc:
-        collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{served.service}")
-        mark_deployment(session, deployment_id, now, str(exc))
-        raise
-    return deployment_id
-
-
-def deployment_name(service: str, started_at: datetime) -> str:
-    """Arena deployment id ``<SERVICE>-<yyyymmddThhmmssZ>``.
-
-    :param service: Service name.
-    :param started_at: Start, timezone-aware.
-    :return: The id, at most 64 characters.
-    """
-    stamp = started_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # bill_hours takes ids of at most 64 characters, and Arena refuses $.
-    prefix = service.upper().replace("$", "_")[: 63 - len(stamp)]
-    return f"{prefix}-{stamp}"
 
 
 def endpoint(session: SnowflakeSession, model: str, version_name: str | None) -> str:
@@ -1288,47 +1152,3 @@ def unpublish(
         for deployment_id in close_deployments(session, served.services)
     )
     return "\n".join(lines)
-
-
-def close_deployments(
-    session: SnowflakeSession, services: tuple[str, ...]
-) -> list[str]:
-    """Forget dropped services and close their open Arena deployments, stamped now.
-
-    :param session: Procedure session.
-    :param services: Fully qualified service names.
-    :return: Deployment ids Arena closed. A deployment Arena has no record of
-        is logged and left out.
-    :raises ValueError: A deployment needs closing and Arena is not configured.
-    :raises SnowflakeLicenseError: Arena did not close a deployment.
-    """
-    if not services:
-        return []
-    names = ", ".join(
-        string_literal(service.rsplit(".", 1)[-1].upper()) for service in services
-    )
-    collect(
-        session, f"DELETE FROM app_state.served_models WHERE service_name IN ({names})"
-    )
-    rows = collect(
-        session,
-        "SELECT usage_id FROM app_state.usage_items WHERE kind = 'deployment' "
-        f"AND settled_at IS NULL AND closed_at IS NULL AND service_name IN ({names})",
-    )
-    if not rows:
-        return []
-    base_url, headers = arena_partner()
-    ended_at = datetime.now(timezone.utc)
-    closed = []
-    for row in rows:
-        deployment_id = str(lowered(row)["usage_id"])
-        try:
-            close_snowflake_deployment(
-                deployment_id, ended_at, base_url, headers, time.sleep
-            )
-        except UnknownUsageError:
-            logger.warning("Arena has no deployment %s to close.", deployment_id)
-        else:
-            closed.append(deployment_id)
-        mark_deployment(session, deployment_id, ended_at, None)
-    return closed

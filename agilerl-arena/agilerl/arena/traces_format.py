@@ -17,20 +17,29 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar, get_args, get_type_hints
+from typing import TYPE_CHECKING, Any, TypeVar, get_args, get_type_hints
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 __all__ = [
     "ANSWER",
     "BASE_MODEL",
     "CALL_ID",
+    "CALL_IDS",
     "CHECKPOINT_ID",
     "COMPLETION",
+    "COMPLETION_LOGPROBS",
+    "COMPLETION_TOKEN_IDS",
     "FINISH_REASON",
+    "FINISH_REASONS",
     "JSON_TEXT_COLUMNS",
     "MANIFEST_FIELDS",
     "MANIFEST_FILE",
+    "MESSAGES",
     "METADATA",
     "MODEL_VERSION",
+    "PAIR_COLUMNS",
     "PROMPT",
     "REASONING_KEYS",
     "RECEIVED_AT",
@@ -40,16 +49,19 @@ __all__ = [
     "SCORE_FIELDS",
     "SEGMENT_INDEX",
     "SESSION_ID",
-    "SNAPSHOT_CALLS_FILE",
+    "SNAPSHOT_SEGMENTS_FILE",
     "TOOLS",
     "TRACES_FORMAT",
     "TRACES_SCHEMA_VERSION",
     "TRACE_COLUMNS",
+    "WEIGHT",
     "ExcludedCounts",
     "ModelVersionCount",
     "SnapshotFile",
     "SnapshotManifest",
     "TimeRange",
+    "input_shape",
+    "manifest_json",
     "read_manifest",
     "write_manifest",
 ]
@@ -62,9 +74,15 @@ TRACES_SCHEMA_VERSION = 1
 
 PROMPT = "prompt"
 COMPLETION = "completion"
+MESSAGES = "messages"
 TOOLS = "tools"
 ANSWER = "answer"
 CALL_ID = "call_id"
+CALL_IDS = "call_ids"
+COMPLETION_TOKEN_IDS = "completion_token_ids"
+"""Per assistant message, the sampled token ids; kept for off-policy use, ignored by training."""
+COMPLETION_LOGPROBS = "completion_logprobs"
+"""Per assistant message, the sampled tokens' logprobs; kept for off-policy use, ignored by training."""
 SESSION_ID = "session_id"
 SEGMENT_INDEX = "segment_index"
 MODEL_VERSION = "model_version"
@@ -73,14 +91,14 @@ BASE_MODEL = "base_model"
 RECEIVED_AT = "received_at"
 SCORES = "scores"
 FINISH_REASON = "finish_reason"
+FINISH_REASONS = "finish_reasons"
 METADATA = "metadata"
 
 TRACE_COLUMNS = (
-    PROMPT,
-    COMPLETION,
+    MESSAGES,
     TOOLS,
     ANSWER,
-    CALL_ID,
+    CALL_IDS,
     SESSION_ID,
     SEGMENT_INDEX,
     MODEL_VERSION,
@@ -88,23 +106,61 @@ TRACE_COLUMNS = (
     BASE_MODEL,
     RECEIVED_AT,
     SCORES,
-    FINISH_REASON,
+    FINISH_REASONS,
+    COMPLETION_TOKEN_IDS,
+    COMPLETION_LOGPROBS,
     METADATA,
 )
-"""Every column of a traces row, in the spec's order."""
+"""Every column of a stored traces row (a segment), in the spec's order."""
 
-REQUIRED_COLUMNS = (PROMPT, COMPLETION)
-JSON_TEXT_COLUMNS = (PROMPT, COMPLETION, TOOLS)
-"""Columns a Parquet traces file holds as JSON text."""
+REQUIRED_COLUMNS = (MESSAGES,)
+PAIR_COLUMNS = (PROMPT, COMPLETION)
+"""Columns of the prompt/completion import shape, which the platform converts to segments."""
 
-SCORE_FIELDS = ("name", "value", "source", "label", "comment")
-"""Keys of one entry in a row's ``scores`` list."""
+JSON_TEXT_COLUMNS = (
+    MESSAGES,
+    TOOLS,
+    CALL_IDS,
+    FINISH_REASONS,
+    SCORES,
+    COMPLETION_TOKEN_IDS,
+    COMPLETION_LOGPROBS,
+    METADATA,
+)
+"""Nested columns, which a Parquet file may hold as JSON text or native values; readers accept either. The import shape's prompt and completion may be JSON text too."""
+
+SCORE_FIELDS = ("name", "value", "source", "label", "comment", "turn")
+"""Keys of one entry in a row's ``scores`` list; ``turn`` indexes the segment's assistant messages."""
+
+WEIGHT = "weight"
+"""Assistant message key, 0 or 1 as in OpenAI chat fine-tuning: 0 marks the turn as context, never trained; unset means 1. Strip it before sending messages to a serving API."""
 
 REASONING_KEYS = ("reasoning_content", "thinking", "reasoning")
 """Message keys an assistant turn's reasoning is read from; writers use the first."""
 
 MANIFEST_FILE = "manifest.json"
-SNAPSHOT_CALLS_FILE = "calls.parquet"
+SNAPSHOT_SEGMENTS_FILE = "segments.parquet"
+
+
+def input_shape(columns: Iterable[str]) -> str:
+    """The shape of an uploaded row: ``prompt_completion`` with both pair columns, else ``segments`` with ``messages``.
+
+    A raw recorder dump carries a ``messages`` column beside its pairs; it is ignored.
+
+    :param columns: The row's non-null column names.
+    :return: ``"prompt_completion"`` or ``"segments"``.
+    :raises ValueError: If the columns name neither shape.
+    """
+    names = set(columns)
+    if set(PAIR_COLUMNS) <= names:
+        return "prompt_completion"
+    if MESSAGES in names:
+        return "segments"
+    msg = (
+        "A traces row needs a 'messages' column, or 'prompt' and 'completion' "
+        f"columns to import; got {sorted(names)}."
+    )
+    raise ValueError(msg)
 
 
 @dataclass(frozen=True)
@@ -127,10 +183,16 @@ class TimeRange:
 
 @dataclass(frozen=True)
 class ExcludedCounts:
-    """Calls left out of a snapshot because they cannot be traces rows."""
+    """Calls left out of a snapshot because they cannot be traces rows.
+
+    :ivar no_content: Captured without content.
+    :ivar error_or_cancelled: Ended in ``error`` or ``cancelled``.
+    :ivar invalid: In a segment that breaks the traces spec.
+    """
 
     no_content: int = 0
     error_or_cancelled: int = 0
+    invalid: int = 0
 
 
 @dataclass(frozen=True)
@@ -144,7 +206,11 @@ class SnapshotFile:
 
 @dataclass(frozen=True)
 class SnapshotManifest:
-    """A snapshot's ``manifest.json``."""
+    """A snapshot's ``manifest.json``.
+
+    :ivar row_count: Segments in ``files``.
+    :ivar turn_count: Assistant messages across all segments.
+    """
 
     snapshot_id: str
     row_count: int
@@ -161,6 +227,7 @@ class SnapshotManifest:
     excluded: ExcludedCounts = dataclasses.field(default_factory=ExcludedCounts)
     organization_id: str | None = None
     deployment_ids: list[str] = dataclasses.field(default_factory=list)
+    turn_count: int | None = None
     format: str = TRACES_FORMAT
     schema_version: int = TRACES_SCHEMA_VERSION
 
@@ -182,15 +249,25 @@ REQUIRED_MANIFEST_FIELDS = (
 """The keys the platform reads."""
 
 
+def manifest_json(manifest: SnapshotManifest) -> str:
+    """``manifest`` as ``manifest.json`` text, timestamps as ISO 8601.
+
+    :param manifest: The manifest.
+    :return: The JSON text.
+    :raises TypeError: If a value, such as one in ``filter``, is not JSON.
+    """
+    return json.dumps(
+        dataclasses.asdict(manifest), default=_iso, indent=2, sort_keys=True
+    )
+
+
 def write_manifest(path: str | Path, manifest: SnapshotManifest) -> None:
-    """Write ``manifest`` as JSON, timestamps as ISO 8601.
+    """Write ``manifest`` as :func:`manifest_json` text.
 
     :param path: The ``manifest.json`` to write.
     :param manifest: The manifest.
     """
-    Path(path).write_text(
-        json.dumps(dataclasses.asdict(manifest), default=_iso, indent=2, sort_keys=True)
-    )
+    Path(path).write_text(manifest_json(manifest))
 
 
 def read_manifest(path: str | Path) -> SnapshotManifest:
@@ -239,6 +316,7 @@ def read_manifest(path: str | Path) -> SnapshotManifest:
         "parent_snapshot_id": _optional(data, "parent_snapshot_id", str),
         "organization_id": _optional(data, "organization_id", str),
         "deployment_ids": _optional(data, "deployment_ids", list),
+        "turn_count": _optional(data, "turn_count", int),
     }
     if data.get("created_at") is not None:
         optional["created_at"] = _timestamp(_typed(data, "created_at", str))

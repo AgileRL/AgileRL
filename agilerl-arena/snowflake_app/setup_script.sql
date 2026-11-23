@@ -26,7 +26,7 @@ CREATE OR ALTER NETWORK RULE app_state.arena_api_egress
   MODE = EGRESS
   VALUE_LIST = ('arena.agilerl.com:443');
 
--- app_code.configure sets the values. reconcile_usage names the secrets, so they exist from install.
+-- app_code.configure or app_code.connect_arena sets the values. reconcile_usage names the secrets, so they exist from install.
 CREATE SECRET IF NOT EXISTS app_state.arena_org_key
   TYPE = GENERIC_STRING
   SECRET_STRING = '';
@@ -36,16 +36,38 @@ CREATE SECRET IF NOT EXISTS app_state.arena_external_user_id
 CREATE SECRET IF NOT EXISTS app_state.arena_base_url
   TYPE = GENERIC_STRING
   SECRET_STRING = '';
+-- Secret of the claim app_code.connect_arena has open; blank otherwise.
+CREATE SECRET IF NOT EXISTS app_state.arena_claim_secret
+  TYPE = GENERIC_STRING
+  SECRET_STRING = '';
+
+CREATE OR ALTER VERSIONED SCHEMA app_code;
+GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_user;
+-- Direct as well as through app_user: app_admin holds the reference callback.
+GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_admin;
+
+-- Account-level objects are named per app, so installs in one account do not collide.
+-- The job code takes only unquoted identifiers, so a quoted app name maps to A-Z, 0-9 and _.
+CREATE OR REPLACE FUNCTION app_code.object_prefix()
+  RETURNS STRING
+  AS
+$$
+  'AGILERL_APP_' || REGEXP_REPLACE(UPPER(CURRENT_DATABASE()), '[^A-Z0-9_]', '_') || '_'
+$$;
 
 -- Setup reruns on every upgrade, so an integration the app already owns is kept;
 -- one it does not own fails setup, because an existing integration keeps its own network rules.
 EXECUTE IMMEDIATE $$
 DECLARE
+  hf_integration STRING;
+  arena_integration STRING;
   trial_account EXCEPTION (-20509, 'Snowpark Container Services and external access integrations are not available on trial accounts (Snowflake error 509009). Add a payment method to the account, then install the app again.');
-  name_taken EXCEPTION (-20510, 'An integration named agilerl_app_hf_eai or agilerl_app_arena_eai already exists in this account and the app does not own it. Rename or drop it, then install the app again.');
+  name_taken EXCEPTION (-20510, 'An integration named AGILERL_APP_<app name>_HF_EAI or AGILERL_APP_<app name>_ARENA_EAI already exists in this account and the app does not own it. Rename or drop it, or install the app under another name.');
 BEGIN
+  SELECT app_code.object_prefix() || 'HF_EAI', app_code.object_prefix() || 'ARENA_EAI'
+    INTO :hf_integration, :arena_integration;
   BEGIN
-    CREATE EXTERNAL ACCESS INTEGRATION agilerl_app_hf_eai
+    CREATE EXTERNAL ACCESS INTEGRATION IDENTIFIER(:hf_integration)
       ALLOWED_NETWORK_RULES = (app_state.hf_egress)
       ENABLED = TRUE;
   EXCEPTION
@@ -57,14 +79,14 @@ BEGIN
         RAISE;
       END IF;
       BEGIN
-        DESCRIBE INTEGRATION agilerl_app_hf_eai;
+        DESCRIBE INTEGRATION IDENTIFIER(:hf_integration);
       EXCEPTION
         WHEN OTHER THEN
           RAISE name_taken;
       END;
   END;
   BEGIN
-    CREATE EXTERNAL ACCESS INTEGRATION agilerl_app_arena_eai
+    CREATE EXTERNAL ACCESS INTEGRATION IDENTIFIER(:arena_integration)
       ALLOWED_NETWORK_RULES = (app_state.arena_api_egress)
       ENABLED = TRUE;
   EXCEPTION
@@ -73,22 +95,22 @@ BEGIN
         RAISE;
       END IF;
       BEGIN
-        DESCRIBE INTEGRATION agilerl_app_arena_eai;
+        DESCRIBE INTEGRATION IDENTIFIER(:arena_integration);
       EXCEPTION
         WHEN OTHER THEN
           RAISE name_taken;
       END;
   END;
+  -- A procedure may read only the secrets its integration allows.
+  ALTER EXTERNAL ACCESS INTEGRATION IDENTIFIER(:arena_integration) SET
+    ALLOWED_AUTHENTICATION_SECRETS = (
+      app_state.arena_org_key,
+      app_state.arena_external_user_id,
+      app_state.arena_base_url,
+      app_state.arena_claim_secret
+    );
 END;
 $$;
-
--- A procedure may read only the secrets its integration allows.
-ALTER EXTERNAL ACCESS INTEGRATION agilerl_app_arena_eai SET
-  ALLOWED_AUTHENTICATION_SECRETS = (
-    app_state.arena_org_key,
-    app_state.arena_external_user_id,
-    app_state.arena_base_url
-  );
 
 ALTER APPLICATION SET SPECIFICATION hf_access
   TYPE = EXTERNAL_ACCESS
@@ -167,6 +189,28 @@ CREATE TABLE IF NOT EXISTS app_state.billed_hours (
   PRIMARY KEY (kind, usage_id, hour_start_ms)
 );
 
+-- Where the saved org key came from: 'connect' keys are rotated by the app, 'configure' keys by AgileRL.
+CREATE TABLE IF NOT EXISTS app_state.arena_key (
+  source STRING,
+  issued_at TIMESTAMP_TZ
+);
+
+-- The claim app_code.connect_arena has open, at most one row.
+-- A row is inserted only while the table is empty, before Arena is called.
+CREATE TABLE IF NOT EXISTS app_state.arena_claim (
+  claim_id STRING,
+  base_url STRING,
+  expires_at TIMESTAMP_TZ,
+  proven_at TIMESTAMP_TZ
+);
+
+-- When the app was installed; app_code.submit and publish refuse an unpurchased listing install once its trial ends.
+CREATE TABLE IF NOT EXISTS app_state.trial (
+  started_at TIMESTAMP_TZ
+);
+INSERT INTO app_state.trial (started_at)
+  SELECT CURRENT_TIMESTAMP() WHERE NOT EXISTS (SELECT 1 FROM app_state.trial);
+
 -- Read-only grants: app_user reads metrics; app_admin, which holds app_user, also audits billing.
 GRANT USAGE ON SCHEMA app_state TO APPLICATION ROLE app_user;
 GRANT SELECT ON TABLE app_state.arena_metrics TO APPLICATION ROLE app_user;
@@ -175,16 +219,25 @@ GRANT SELECT ON TABLE app_state.billed_hours TO APPLICATION ROLE app_admin;
 GRANT SELECT ON TABLE app_state.served_models TO APPLICATION ROLE app_admin;
 
 -- Compute pools are created by app_code.set_pools, not here: an idle pool bills.
-CREATE WAREHOUSE IF NOT EXISTS agilerl_app_wh
-  WAREHOUSE_SIZE = XSMALL
-  AUTO_SUSPEND = 60
-  AUTO_RESUME = TRUE
-  INITIALLY_SUSPENDED = TRUE;
+EXECUTE IMMEDIATE $$
+DECLARE
+  warehouse STRING;
+BEGIN
+  SELECT app_code.object_prefix() || 'WH' INTO :warehouse;
+  CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER(:warehouse)
+    WAREHOUSE_SIZE = XSMALL
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+END;
+$$;
 
-CREATE OR ALTER VERSIONED SCHEMA app_code;
-GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_user;
--- Direct as well as through app_user: app_admin holds the reference callback.
-GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_admin;
+-- Called straight from an app procedure or task, SYSTEM$IS_LISTING_PURCHASED is TRUE on a trial
+-- install too; only a secure function or view returns FALSE until the consumer buys.
+-- An install not from a listing gets TRUE.
+CREATE OR REPLACE SECURE FUNCTION app_code.listing_purchased()
+  RETURNS BOOLEAN
+  AS 'SYSTEM$IS_LISTING_PURCHASED()';
 
 CREATE OR REPLACE PROCEDURE app_code.register_reference(
     ref_name STRING,
@@ -199,7 +252,7 @@ CREATE OR REPLACE PROCEDURE app_code.register_reference(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.register_reference';
 GRANT USAGE ON PROCEDURE app_code.register_reference(STRING, STRING, STRING)
   TO APPLICATION ROLE app_admin;
@@ -217,10 +270,38 @@ CREATE OR REPLACE PROCEDURE app_code.configure(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.configure';
 GRANT USAGE ON PROCEDURE app_code.configure(STRING, STRING, STRING)
+  TO APPLICATION ROLE app_admin;
+
+-- Connects the app to a new Arena organisation; Arena delivers the key to the app, never to a person.
+CREATE OR REPLACE PROCEDURE app_code.connect_arena(base_url STRING DEFAULT 'https://arena.agilerl.com')
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'app_keys.connect_arena';
+GRANT USAGE ON PROCEDURE app_code.connect_arena(STRING)
+  TO APPLICATION ROLE app_admin;
+
+CREATE OR REPLACE PROCEDURE app_code.rotate_arena_key()
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'app_keys.rotate_arena_key';
+GRANT USAGE ON PROCEDURE app_code.rotate_arena_key()
   TO APPLICATION ROLE app_admin;
 
 CREATE OR REPLACE PROCEDURE app_code.set_pools(
@@ -237,9 +318,23 @@ CREATE OR REPLACE PROCEDURE app_code.set_pools(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.set_pools';
 GRANT USAGE ON PROCEDURE app_code.set_pools(ARRAY, NUMBER, STRING, STRING)
+  TO APPLICATION ROLE app_admin;
+
+CREATE OR REPLACE PROCEDURE app_code.gpu_families()
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'arena_app.gpu_families';
+GRANT USAGE ON PROCEDURE app_code.gpu_families()
   TO APPLICATION ROLE app_admin;
 
 -- Run and publish procedures create services in app_state: a versioned schema cannot hold one.
@@ -261,7 +356,7 @@ CREATE OR REPLACE PROCEDURE app_code.submit(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.submit';
 GRANT USAGE ON PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)
   TO APPLICATION ROLE app_admin;
@@ -275,7 +370,7 @@ CREATE OR REPLACE PROCEDURE app_code.status(run_id STRING)
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.status';
 GRANT USAGE ON PROCEDURE app_code.status(STRING)
   TO APPLICATION ROLE app_user;
@@ -293,7 +388,7 @@ CREATE OR REPLACE PROCEDURE app_code.logs(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.logs';
 GRANT USAGE ON PROCEDURE app_code.logs(STRING, STRING, NUMBER)
   TO APPLICATION ROLE app_user;
@@ -307,7 +402,7 @@ CREATE OR REPLACE PROCEDURE app_code.cancel(run_id STRING)
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.cancel';
 GRANT USAGE ON PROCEDURE app_code.cancel(STRING)
   TO APPLICATION ROLE app_admin;
@@ -330,13 +425,7 @@ CREATE OR REPLACE PROCEDURE app_code.publish(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.publish';
 GRANT USAGE ON PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)
   TO APPLICATION ROLE app_admin;
@@ -353,7 +442,7 @@ CREATE OR REPLACE PROCEDURE app_code.endpoint(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.endpoint';
 GRANT USAGE ON PROCEDURE app_code.endpoint(STRING, STRING)
   TO APPLICATION ROLE app_user;
@@ -371,15 +460,27 @@ CREATE OR REPLACE PROCEDURE app_code.unpublish(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.unpublish';
 GRANT USAGE ON PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)
+  TO APPLICATION ROLE app_admin;
+
+-- Copies a run's model to the consumer's export_stage. No services and no usage items, so it is never billed.
+CREATE OR REPLACE PROCEDURE app_code.export_model(
+    run_id STRING,
+    step NUMBER DEFAULT NULL
+  )
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'arena_app.export_model';
+GRANT USAGE ON PROCEDURE app_code.export_model(STRING, NUMBER)
   TO APPLICATION ROLE app_admin;
 
 -- Granted to no role: only the hourly task calls it, so two calls never overlap.
@@ -392,34 +493,63 @@ CREATE OR REPLACE PROCEDURE app_code.reconcile_usage()
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.reconcile_usage';
 
--- manifest.yml's version_initializer. Snowflake calls the previous version's after a
--- failed upgrade, whose setup script may already have suspended the task.
-CREATE OR REPLACE PROCEDURE app_code.version_init()
-  RETURNS STRING
-  LANGUAGE SQL
-  AS
-$$
+-- The Arena integration is named per app, so the Arena procedures get it and their secrets here.
+EXECUTE IMMEDIATE $$
+DECLARE
+  arena_access STRING;
+  secrets STRING DEFAULT ' SECRETS = (''org_key'' = app_state.arena_org_key, ''external_user_id'' = app_state.arena_external_user_id, ''base_url'' = app_state.arena_base_url)';
+  claim_secrets STRING DEFAULT ' SECRETS = (''org_key'' = app_state.arena_org_key, ''external_user_id'' = app_state.arena_external_user_id, ''base_url'' = app_state.arena_base_url, ''claim_secret'' = app_state.arena_claim_secret)';
 BEGIN
-  ALTER TASK IF EXISTS app_state.reconcile_usage_task RESUME;
-  RETURN 'resumed app_state.reconcile_usage_task';
+  SELECT ' SET EXTERNAL_ACCESS_INTEGRATIONS = (' || app_code.object_prefix() || 'ARENA_EAI)'
+    INTO :arena_access;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.configure(STRING, STRING, STRING)' || arena_access;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.connect_arena(STRING)' || arena_access || claim_secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.rotate_arena_key()' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.gpu_families()' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.reconcile_usage()' || arena_access || claim_secrets;
 END;
 $$;
 
 -- Serverless, so no warehouse resumes; a failed run must not suspend billing.
 -- Suspended first because an upgrade may change the definition of a started task.
+-- Left suspended: version_init, submit and publish resume it only while there is work to bill.
 ALTER TASK IF EXISTS app_state.reconcile_usage_task SUSPEND;
 CREATE OR ALTER TASK app_state.reconcile_usage_task
   USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
   SCHEDULE = '60 MINUTES'
   SUSPEND_TASK_AFTER_NUM_FAILURES = 0
   AS CALL app_code.reconcile_usage();
-ALTER TASK app_state.reconcile_usage_task RESUME;
+
+-- manifest.yml's version_initializer.
+CREATE OR REPLACE PROCEDURE app_code.version_init()
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_keys.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'arena_app.version_init';
+
+-- Runs the task rather than reconcile_usage: a task run never overlaps another, and
+-- two overlapping calls could each open an Arena deployment for one service.
+CREATE OR REPLACE PROCEDURE app_code.reconcile_now()
+  RETURNS STRING
+  LANGUAGE SQL
+  AS
+$$
+BEGIN
+  EXECUTE TASK app_state.reconcile_usage_task;
+  RETURN 'Billing run queued after any run in progress. Its summary is logged at INFO.';
+END;
+$$;
+GRANT USAGE ON PROCEDURE app_code.reconcile_now()
+  TO APPLICATION ROLE app_admin;

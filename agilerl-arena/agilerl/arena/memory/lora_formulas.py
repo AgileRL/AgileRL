@@ -9,6 +9,7 @@ Pure functions of :mod:`agilerl.arena.memory.specs` and
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from functools import lru_cache
 from typing import NamedTuple
 
 from agilerl.arena.memory.formulas import (
@@ -57,7 +58,8 @@ class NcclReshardRefitBytes(NamedTuple):
     shard. Misc: ``misc_bucket`` is the reused broadcast bucket plus any
     weight too large for it, ``misc_module`` the largest misc module gathered
     whole (base weight and fp32 LoRA factors), and ``misc_fp32_copy`` the
-    fp32 copy of its base the merge accumulates into.
+    fp32 copy of its base the merge accumulates into. ``pack_slot`` is the
+    PACK staging buffer kept on every rank for the whole refit.
     """
 
     misc_bucket: int
@@ -65,6 +67,7 @@ class NcclReshardRefitBytes(NamedTuple):
     misc_fp32_copy: int
     bulk_group: int
     bulk_fp32_temp: int
+    pack_slot: int
 
     @property
     def bulk_phase(self) -> int:
@@ -78,8 +81,8 @@ class NcclReshardRefitBytes(NamedTuple):
 
     @property
     def total(self) -> int:
-        """Peak extra bytes of the refit."""
-        return max(self.bulk_phase, self.misc_phase)
+        """Peak extra bytes of the refit, including the live PACK slot."""
+        return max(self.bulk_phase, self.misc_phase) + self.pack_slot
 
 
 def _attention_lora_widths(
@@ -285,11 +288,6 @@ def _decoder_lora_linears(
     return linears + _per_layer_input_lora_linears(arch)
 
 
-def tower_lora_linears(arch: ModelArch, targets: Collection[str]) -> list[LoraLinear]:
-    """Tower and connector linears whose module name is one of ``targets``."""
-    return [linear for linear in arch.tower_lora_linears if linear.target in targets]
-
-
 def _lora_linear_param_count(linears: Sequence[LoraLinear], rank: int) -> int:
     """LoRA parameters of ``linears``: ``rank * (in + out)`` per wrapped linear."""
     return rank * sum(
@@ -297,6 +295,7 @@ def _lora_linear_param_count(linears: Sequence[LoraLinear], rank: int) -> int:
     )
 
 
+@lru_cache(maxsize=256)
 def lora_param_count(
     arch: ModelArch, rank: int, scope: LoraTargetScope = "all-linear"
 ) -> int:
@@ -313,11 +312,6 @@ def engine_lora_param_count(arch: ModelArch, rank: int) -> int:
     return _lora_linear_param_count(
         _decoder_lora_linears(arch, "all-linear", 1, ()), rank
     )
-
-
-def tower_lora_param_count(arch: ModelArch, rank: int, targets: Collection[str]) -> int:
-    """LoRA adapter parameters on the tower and connector linears ``targets`` name."""
-    return _lora_linear_param_count(tower_lora_linears(arch, targets), rank)
 
 
 def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
@@ -337,6 +331,34 @@ def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
     if arch.gated_mlp:
         widths += expert_inter
     return int(arch.moe_layers * n_experts * rank * widths)
+
+
+@lru_cache(maxsize=256)
+def _merged_lora_sync_tensor_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    n_packed_matrices: int,
+    dtype_bytes: float,
+) -> tuple[int, ...]:
+    """Bytes of each merged weight a merged-LoRA sync pushes, in layer order."""
+    sizes = [
+        (linear.in_features * linear.out_features, linear.count)
+        for linear in decoder_lora_linears(arch, scope)
+    ]
+    if n_packed_matrices and arch.n_experts and arch.n_experts > 1:
+        expert_inter = arch.expert_intermediate_size or arch.intermediate_size
+        down = arch.n_experts * arch.expert_width * expert_inter
+        gate_up = (2 if arch.gated_mlp else 1) * down
+        sizes.append((gate_up, arch.moe_layers))
+        if n_packed_matrices > 1:
+            sizes.append((down, arch.moe_layers))
+    layers = arch.n_layers
+    return tuple(
+        int(size * dtype_bytes)
+        for layer in range(layers)
+        for size, count in sizes
+        for _ in range(count * (layer + 1) // layers - count * layer // layers)
+    )
 
 
 def merged_lora_sync_tensor_bytes(
@@ -359,24 +381,9 @@ def merged_lora_sync_tensor_bytes(
     :param dtype_bytes: Bytes per element of the engines' weight dtype.
     :return: One entry per pushed tensor, in checkpoint layer order.
     """
-    sizes = [
-        (linear.in_features * linear.out_features, linear.count)
-        for linear in decoder_lora_linears(arch, scope)
-    ]
-    if n_packed_matrices and arch.n_experts and arch.n_experts > 1:
-        expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-        down = arch.n_experts * arch.expert_width * expert_inter
-        gate_up = (2 if arch.gated_mlp else 1) * down
-        sizes.append((gate_up, arch.moe_layers))
-        if n_packed_matrices > 1:
-            sizes.append((down, arch.moe_layers))
-    layers = arch.n_layers
-    return [
-        int(size * dtype_bytes)
-        for layer in range(layers)
-        for size, count in sizes
-        for _ in range(count * (layer + 1) // layers - count * layer // layers)
-    ]
+    return list(
+        _merged_lora_sync_tensor_bytes(arch, scope, n_packed_matrices, dtype_bytes)
+    )
 
 
 def merged_lora_sync_bytes(
@@ -589,6 +596,30 @@ def nccl_reshard_receive_bucket_bytes(
     return max(_misc_buckets(misc, dtype_bytes))
 
 
+def nccl_reshard_pack_slot_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    layout: NcclReshardLayout,
+    dtype_bytes: float,
+) -> int:
+    """Bytes of the one PACK staging slot a rank allocates on the first reshard.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param layout: Trainer sharding and engine width.
+    :param dtype_bytes: Bytes per element of the sync dtype.
+    :return: 0 when nothing is bulk. Otherwise the largest bulk tensor's
+        bigger local shard, and at least 2 KiB.
+    """
+    blocks = nccl_reshard_sync_linears(arch, scope, layout)[0]
+    largest = max((elements for block in blocks for elements in block), default=0)
+    if largest == 0:
+        return 0
+    shard = largest // min(layout.trainer_shards, layout.engine_tensor_parallel)
+    # nccl-extensions allocates at least 2 KiB.
+    return max(int(shard * dtype_bytes), 2 * 1024)
+
+
 def nccl_reshard_refit_bytes(
     arch: ModelArch,
     scope: LoraTargetScope,
@@ -603,7 +634,8 @@ def nccl_reshard_refit_bytes(
     is charged. Misc phase, after it: rank 0 keeps the reused bucket, a
     weight too large for it takes a buffer of its own, and the largest misc
     module is gathered whole (base at ``dtype_bytes``, fp32 LoRA factors)
-    beside the fp32 copy of its base the merge accumulates into.
+    beside the fp32 copy of its base the merge accumulates into. Every rank
+    also keeps one PACK staging slot for the whole refit.
 
     :param arch: Model architecture.
     :param scope: Adapter target scope.
@@ -648,6 +680,7 @@ def nccl_reshard_refit_bytes(
         misc_fp32_copy=misc_fp32_copy,
         bulk_group=bulk_group,
         bulk_fp32_temp=bulk_fp32_temp,
+        pack_slot=nccl_reshard_pack_slot_bytes(arch, scope, layout, dtype_bytes),
     )
 
 

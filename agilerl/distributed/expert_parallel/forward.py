@@ -260,19 +260,23 @@ def _dispatch_adapter_ids(
 
 
 def _ep_param_grad_hook(param: nn.Parameter) -> Callable[[torch.Tensor], None]:
-    """Accumulate a local shard grad onto an EP ``DTensor`` parameter.
+    """Move a local leaf's accumulated grad onto its EP ``DTensor`` parameter.
 
     Local views of a ``DTensor`` cannot carry ``.grad`` back to it, so the
-    detached leaf used for the local kernel copies its grad here as a
-    same-placed ``DTensor``. Grad accumulation across micro-batches sums.
+    detached leaf used for the local kernel hands its grad over here as a
+    same-placed ``DTensor`` and drops its own reference. Grad accumulation
+    across micro-batches sums.
     """
 
-    def hook(grad: torch.Tensor) -> None:
+    def hook(leaf: torch.Tensor) -> None:
         assert isinstance(param, DTensor)
+        grad = leaf.grad
+        assert grad is not None
+        # The autograd graph holds the leaf until backward ends.
+        leaf.grad = None
         local = param.to_local()
         if grad.stride() != local.stride():
-            # Fused AdamW needs grad strides to match the param's. This hook
-            # skips AccumulateGrad, which would otherwise copy into that layout.
+            # Fused AdamW needs grad strides to match the param's.
             grad = torch.empty_like(local).copy_(grad)
         shard = DTensor.from_local(
             grad, param.device_mesh, param.placements, run_check=False
@@ -285,11 +289,11 @@ def _ep_param_grad_hook(param: nn.Parameter) -> Callable[[torch.Tensor], None]:
 def local_param_dict(module: nn.Module) -> dict[str, torch.Tensor]:
     """Plain-tensor views of a module's params for the EP-blind local kernel.
 
-    Frozen ``DTensor`` params pass as ``to_local()`` views; under an FSDP
-    gather, :class:`_RegatherForBackward` refills their storage for backward.
-    Trainable ones become detached leaf copies; a hook copies each leaf grad
-    back onto the sharded parameter (see :func:`_ep_param_grad_hook`). Dense
-    params pass through untouched.
+    ``DTensor`` params pass as ``to_local()`` views; under an FSDP gather,
+    :class:`_RegatherForBackward` refills their storage for backward.
+    Trainable ones are detached leaf views; a hook moves each leaf grad onto
+    the sharded parameter (see :func:`_ep_param_grad_hook`). Dense params
+    pass through untouched.
 
     :param module: Module whose parameters the local kernel reads.
     :return: Parameter and buffer tensors keyed by name.
@@ -299,8 +303,8 @@ def local_param_dict(module: nn.Module) -> dict[str, torch.Tensor]:
         if not isinstance(param, DTensor):
             params[name] = param
         elif param.requires_grad:
-            leaf = param.to_local().detach().clone().requires_grad_(True)
-            leaf.register_hook(_ep_param_grad_hook(param))
+            leaf = param.to_local().detach().requires_grad_(True)
+            leaf.register_post_accumulate_grad_hook(_ep_param_grad_hook(param))
             params[name] = leaf
         else:
             params[name] = param.to_local()

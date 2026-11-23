@@ -9,7 +9,11 @@ import copy
 import pytest
 
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
-from agilerl.arena.memory.manifest import lookup_gpu, training_memory_from_manifest
+from agilerl.arena.memory.manifest import (
+    lightest_training_memory_from_manifest,
+    lookup_gpu,
+    training_memory_from_manifest,
+)
 from agilerl.arena.memory.resolve.batch import TrainerSplitError, catalog_model
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
@@ -522,39 +526,30 @@ ROLLOUT_ENV = {
 
 class TestTrainsContextParallel:
     @pytest.mark.parametrize(
-        ("hub_id", "environment", "tower_modules", "expected"),
+        ("hub_id", "environment", "expected"),
         [
-            ("Qwen/Qwen2.5-0.5B-Instruct", None, None, True),
-            ("Qwen/Qwen3.5-0.8B", None, None, True),
-            ("Qwen/Qwen3.5-0.8B", {**ROLLOUT_ENV, "modality": "text"}, None, True),
-            ("Qwen/Qwen3.5-0.8B", ROLLOUT_ENV, None, False),
-            ("Qwen/Qwen3.5-0.8B", None, ["qkv"], False),
-            ("local/uncatalogued-model", None, None, False),
+            ("Qwen/Qwen2.5-0.5B-Instruct", None, True),
+            ("Qwen/Qwen3.5-0.8B", None, True),
+            ("Qwen/Qwen3.5-0.8B", {**ROLLOUT_ENV, "modality": "text"}, True),
+            ("Qwen/Qwen3.5-0.8B", ROLLOUT_ENV, False),
+            ("local/uncatalogued-model", None, False),
         ],
         ids=[
             "text-model",
             "vl-on-a-dataset",
             "vl-on-a-text-env",
             "vl-on-an-env-of-unknown-modality",
-            "vl-with-tower-lora",
             "uncatalogued",
         ],
     )
     def test_a_vision_language_model_needs_its_towers_stripped(
-        self, hub_id, environment, tower_modules, expected
+        self, hub_id, environment, expected
     ):
         # Arrange
         doc = copy.deepcopy(MANIFEST)
         doc["network"]["pretrained_model_name_or_path"] = hub_id
         if environment is not None:
             doc["environment"] = environment
-        if tower_modules is not None:
-            doc["network"]["lora_config"] = {
-                "lora_r": 8,
-                "lora_alpha": 16,
-                "target_modules": ["q_proj"],
-                "tower_target_modules": tower_modules,
-            }
         manifest = TrainingManifest.model_validate(doc)
 
         # Act / Assert
@@ -681,6 +676,7 @@ class TestTrainingMemoryFromManifest:
         doc["network"] = {
             "pretrained_model_name_or_path": "Qwen/Qwen3.6-35B-A3B",
             "max_context_length": 65536,
+            "lora_config": {"target_parameters": []},
         }
         doc["training"]["training_gpus_per_agent"] = 4
         manifest = TrainingManifest.model_validate(doc)
@@ -699,3 +695,60 @@ class TestTrainingMemoryFromManifest:
         assert plan.fsdp.cpu_offload is True
         assert plan.breakdown.fits
         assert not plan.breakdown.fits_with_buffer
+
+
+class TestLightestTrainingMemoryFromManifest:
+    def test_a_pinned_layout_gives_its_lightest_plan(self):
+        # Arrange
+        doc = copy.deepcopy(MANIFEST)
+        doc["training"]["training_gpus_per_agent"] = 2
+        manifest = manifest_at_layout(
+            TrainingManifest.model_validate(doc), ParallelLayout()
+        )
+        gpu = lookup_gpu("NVIDIA L4")
+        assert gpu is not None
+        model = catalog_model(manifest.algorithm)
+        assert model is not None
+
+        # Act
+        plan = lightest_training_memory_from_manifest(
+            manifest, model, gpu.device_spec()
+        )
+
+        # Assert
+        assert plan.fsdp is not None
+        assert (plan.fsdp.tp, plan.fsdp.ep, plan.fsdp.cp) == (1, 1, 1)
+        assert plan.gradient_checkpointing is True
+        assert plan.settings.n_training_gpus == 2
+
+    def test_a_layout_that_cannot_divide_the_trainers_raises(self):
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"shard_group_size": 4}
+        doc["training"]["training_gpus_per_agent"] = 2
+        manifest = TrainingManifest.model_validate(doc)
+        gpu = lookup_gpu("NVIDIA L4")
+        assert gpu is not None
+        model = catalog_model(manifest.algorithm)
+        assert model is not None
+
+        with pytest.raises(TrainerSplitError, match="No training layout can run"):
+            lightest_training_memory_from_manifest(manifest, model, gpu.device_spec())
+
+    def test_a_searched_layout_raises(self):
+        # Arrange: an open MoE layout searches expert parallel too.
+        doc = copy.deepcopy(SFT_MANIFEST)
+        doc["network"] = {
+            "pretrained_model_name_or_path": "Qwen/Qwen3.6-35B-A3B",
+            "max_context_length": 4096,
+        }
+        doc["training"]["training_gpus_per_agent"] = 4
+        manifest = TrainingManifest.model_validate(doc)
+        gpu = lookup_gpu("NVIDIA L4")
+        assert gpu is not None
+        device = gpu.device_spec().model_copy(update={"gpus_per_node": 4})
+        model = catalog_model(manifest.algorithm)
+        assert model is not None
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="layouts, not one"):
+            lightest_training_memory_from_manifest(manifest, model, device)

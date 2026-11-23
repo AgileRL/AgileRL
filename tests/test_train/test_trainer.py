@@ -983,8 +983,8 @@ class TestArenaTrainerTrain:
             client=mock_client,
         )
         trainer.train(
-            resource_id="arena-medium",
-            num_nodes=2,
+            num_gpus=2,
+            gpu_type="l4",
             project="GSM8K Tutorial",
             experiment_name="gsm8k-grpo",
             reward_file="reward.py",
@@ -992,8 +992,8 @@ class TestArenaTrainerTrain:
         )
 
         kwargs = mock_client.submit_experiment.call_args.kwargs
-        assert kwargs["resource_id"] == "arena-medium"
-        assert kwargs["num_nodes"] == 2
+        assert kwargs["num_gpus"] == 2
+        assert kwargs["gpu_type"] == "l4"
         assert kwargs["project"] == "GSM8K Tutorial"
         assert kwargs["experiment_name"] == "gsm8k-grpo"
         assert kwargs["reward_file"] == "reward.py"

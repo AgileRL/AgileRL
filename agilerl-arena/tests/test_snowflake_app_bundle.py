@@ -17,11 +17,9 @@ TAG = "1.38.0-py313-cu130"
 
 def app_build(tmp_path: Path) -> Path:
     build = tmp_path / "build"
-    (build / "app_code").mkdir(parents=True)
+    build.mkdir()
     shutil.copy(APP_DIR / "manifest.yml", build / "manifest.yml")
-    shutil.copy(
-        APP_DIR / "app_code" / "arena_app.py", build / "app_code" / "arena_app.py"
-    )
+    shutil.copytree(APP_DIR / "app_code", build / "app_code")
     return build
 
 
@@ -54,10 +52,14 @@ class TestSetTag:
 
         manifest = (build / "manifest.yml").read_text(encoding="utf-8")
         code = (build / "app_code" / "arena_app.py").read_text(encoding="utf-8")
+        shipped = "".join(
+            path.read_text(encoding="utf-8")
+            for path in (build / "app_code").glob("*.py")
+        )
         image = f"/arena_provider/images/repo/snowflake-job:{TAG}"
         assert f"- {image}\n" in manifest
         assert f'IMAGE = "{image}"' in code
-        assert "0.0.0-py313-cu130" not in manifest + code
+        assert "0.0.0-py313-cu130" not in manifest + shipped
 
 
 class TestWriteZip:

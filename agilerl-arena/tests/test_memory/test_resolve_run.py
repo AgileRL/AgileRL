@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -13,7 +14,6 @@ from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.manifest import (
     nccl_reshard_layout_supported,
     training_memory_from_manifest,
-    validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.fsdp import (
@@ -47,7 +47,7 @@ from agilerl.arena.memory.resolve.weight_sync import (
 )
 from agilerl.arena.memory.specs import DeviceSpec, GiB, TrainingSettings
 from agilerl.arena.models import model_info
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 from agilerl.arena.models.model_info import supported_path
 from tests.test_memory.test_cli import MANIFEST
 from tests.test_memory.test_resolve_split import (
@@ -754,6 +754,10 @@ class TestCachedTrainingPlan:
         monkeypatch.setattr(
             "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
         )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
+            lambda *args: _plan_with_host(0, None),
+        )
 
         def price(device):
             return _cached_training_plan(cache, placed, model, device, 1, mode, True)
@@ -813,6 +817,10 @@ class TestCachedTrainingPlan:
         monkeypatch.setattr(
             "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
         )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
+            lambda *args: _plan_with_host(0, None),
+        )
 
         # Act
         buffered = _cached_training_plan(cache, placed, model, device, 1, mode, True)
@@ -826,6 +834,82 @@ class TestCachedTrainingPlan:
         assert bare.breakdown.host_total_bytes == 1000
         assert bare.breakdown.host_usable_bytes is None
         assert len(cache.host_misses) == 1
+
+    def test_fixed_host_bytes_over_the_buffer_skip_the_buffered_gpu_search(
+        self, monkeypatch
+    ) -> None:
+        # Arrange: the lightest plan fits the GPU and holds 1000 fixed host
+        # bytes, which fit the 1000-byte share only without the buffer.
+        placed = manifest_at_layout(
+            TrainingManifest.model_validate(MANIFEST), ParallelLayout()
+        )
+        mode = WeightSyncMode(False, "nixl")
+        device = _device("L4").model_copy(update={"host_bytes_per_gpu": 1000})
+        cache = SearchCache()
+        priced: list[int | None] = []
+
+        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+            priced.append(device.host_bytes_per_gpu)
+            return _plan_with_host(1000, None)
+
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
+            lambda *args: _plan_with_host(1000, None),
+        )
+
+        # Act
+        buffered = _cached_training_plan(
+            cache, placed, tiny_model(), device, 1, mode, True
+        )
+        bare = _cached_training_plan(
+            cache, placed, tiny_model(), device, 1, mode, False
+        )
+
+        # Assert
+        assert buffered is None
+        assert cache.host_limited
+        assert bare.breakdown.host_total_bytes == 1000
+        assert priced == [None]
+
+    def test_a_lightest_plan_over_the_gpu_leaves_the_gpu_search_to_decide(
+        self, monkeypatch
+    ) -> None:
+        # Arrange: the lightest plan is over the GPU, so its host bytes say nothing.
+        placed = manifest_at_layout(
+            TrainingManifest.model_validate(MANIFEST), ParallelLayout()
+        )
+        mode = WeightSyncMode(False, "nixl")
+        device = _device("L4").model_copy(update={"host_bytes_per_gpu": 1000})
+        cache = SearchCache()
+        lightest = _plan_with_host(1000, None)
+        over = replace(
+            lightest,
+            breakdown=lightest.breakdown.model_copy(update={"device_usable_bytes": 0}),
+        )
+        priced: list[int | None] = []
+
+        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+            priced.append(device.host_bytes_per_gpu)
+            raise TrainingMemoryUnfitError(over, device)
+
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
+            lambda *args: over,
+        )
+
+        # Act
+        plan = _cached_training_plan(cache, placed, tiny_model(), device, 1, mode, True)
+
+        # Assert
+        assert plan is None
+        assert not cache.host_limited
+        assert priced == [None]
 
 
 class TestPickWeightSync:
@@ -1845,7 +1929,10 @@ class TestQwen35NineBWeightSync:
 
 
 def _h100_guess_the_number_manifest(hub_id: str) -> TrainingManifest:
-    """CISPO on GuessTheNumber, 4 trainers and 2 TP2 engines, the measured 8x H100 layout."""
+    """CISPO on GuessTheNumber, 4 trainers and 2 TP2 engines, the measured 8x H100 layout.
+
+    The measured runs trained no packed-expert LoRA (``target_parameters: []``).
+    """
     raw = {
         "algorithm": {
             "name": "CISPO",
@@ -1871,6 +1958,7 @@ def _h100_guess_the_number_manifest(hub_id: str) -> TrainingManifest:
         "network": {
             "pretrained_model_name_or_path": hub_id,
             "max_context_length": 2048,
+            "lora_config": {"target_parameters": []},
         },
         "training": {
             "rollout_mode": "async",
@@ -2023,3 +2111,122 @@ class TestH100GuessTheNumberWeightSync:
 
         # Assert
         assert adapter.synced_step_seconds > 1.10 * nccl.synced_step_seconds
+
+
+class TestH100ExpertLoraWeightSync:
+    def test_merged_expert_lora_sync_matches_the_measured_sync(self) -> None:
+        # Arrange: Arena dev experiment 3746 on 8x H100, catalog-default LoRA
+        # (all-linear r=16 plus both packed-expert paths), the layout the
+        # planner picked: 4 FSDP trainers and 1 engine at TP 4, merged NIXL.
+        # Logged weight_sync_s after the first sync: 1.328, 1.270; sync_s
+        # 1.321, 1.264.
+        raw = _h100_guess_the_number_manifest("Qwen/Qwen3.6-35B-A3B").to_payload()
+        raw["network"]["lora_config"].pop("target_parameters")
+        raw["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
+        raw["training"].update(
+            {
+                "training_gpus_per_agent": 4,
+                "rollout_engines_per_agent": 1,
+                "rollout_batch_size": 8,
+            }
+        )
+        manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
+        device = _device("H100-80").model_copy(update={"gpus_per_node": 8})
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), device, 8, "cuda_ipc", False
+        )
+        quote = _quote(plan, True, "nixl")
+
+        # Assert
+        assert manifest.algorithm.lora_config.target_parameters
+        assert plan.merged_lora_sync is True
+        assert quote.sync_seconds == pytest.approx(1.30, rel=0.05)
+
+
+class TestResolveRunMemoryTeacherBundle:
+    def test_a_teacher_that_fills_the_node_leaves_no_student_width(self) -> None:
+        # Arrange: a width-4 teacher fills a 4-GPU node, so no student width fits beside it.
+        manifest = validated_run_manifest(
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {
+                        "name": "OPD",
+                        "batch_size": 4,
+                        "group_size": 4,
+                        "max_output_tokens": 256,
+                        "teacher": {
+                            "model": {
+                                "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+                                "vllm_config": {"tensor_parallel_size": 4},
+                            }
+                        },
+                    },
+                    "environment": {
+                        "env_type": "rollout",
+                        "dataset": "openai/gsm8k",
+                        "reward_file_path": "reward.py",
+                        "prompt_template": {"user_0": "{question}"},
+                    },
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                        "max_context_length": 2048,
+                    },
+                    "training": {
+                        "max_steps": 10,
+                        "pop_size": 1,
+                        "rollout_mode": "async",
+                    },
+                    "replay_buffer": {"kind": "llm"},
+                }
+            )
+        )
+        device = _device("L4").model_copy(update={"gpus_per_node": 4})
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="No trainer / rollout-engine split of 12"):
+            resolve_run_memory(manifest, catalog_model(manifest.algorithm), device, 12)
+
+    def test_a_pinned_student_width_beside_its_teacher_must_fit_one_node(self) -> None:
+        # Arrange: a pinned width-2 student beside a width-4 teacher needs 6 of a 4-GPU node.
+        manifest = validated_run_manifest(
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {
+                        "name": "OPD",
+                        "batch_size": 4,
+                        "group_size": 4,
+                        "max_output_tokens": 256,
+                        "vllm_config": {"tensor_parallel_size": 2},
+                        "teacher": {
+                            "model": {
+                                "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+                                "vllm_config": {"tensor_parallel_size": 4},
+                            }
+                        },
+                    },
+                    "environment": {
+                        "env_type": "rollout",
+                        "dataset": "openai/gsm8k",
+                        "reward_file_path": "reward.py",
+                        "prompt_template": {"user_0": "{question}"},
+                    },
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                        "max_context_length": 2048,
+                    },
+                    "training": {
+                        "max_steps": 10,
+                        "pop_size": 1,
+                        "rollout_mode": "async",
+                    },
+                    "replay_buffer": {"kind": "llm"},
+                }
+            )
+        )
+        device = _device("L4").model_copy(update={"gpus_per_node": 4})
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="No trainer / rollout-engine split of 12"):
+            resolve_run_memory(manifest, catalog_model(manifest.algorithm), device, 12)

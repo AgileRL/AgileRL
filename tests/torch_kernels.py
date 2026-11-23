@@ -18,7 +18,7 @@ from transformers.models.nemotron_h import modeling_nemotron_h
 from transformers.models.qwen3_5 import modeling_qwen3_5
 from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
 
-from agilerl.architectures.qwen3_5 import packed as qwen_packed
+from agilerl.architectures.qwen3_5 import patches as qwen_packed
 
 GDN_KERNELS = (
     "causal_conv1d_fn",

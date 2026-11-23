@@ -3,7 +3,7 @@
 Traces datasets
 ===============
 
-A ``traces`` dataset holds recorded model calls. The same dataset trains
+A ``traces`` dataset holds recorded model sessions, one segment per row. The same dataset trains
 **SFT** and **on-policy distillation** (OPD, including self-distillation) with
 no re-upload and no column mapping. Deployed-model traces from continual
 learning and hand-made teacher traces use the same shape.
@@ -14,15 +14,20 @@ Standard
 - **Messages and tools** follow the OpenAI Chat Completions schema, which
   ``POST /v1/chat/completions`` (vLLM), customer harnesses and the inference
   trace recorder already use.
-- **Rows** follow Hugging Face TRL's conversational *prompt-completion* layout:
-  ``prompt`` (the messages the model saw) plus ``completion`` (the message it
-  produced), with ``tools`` beside them.
+- **Rows** follow Hugging Face TRL's conversational ``messages`` layout: one
+  row is one stretch of a session, with ``tools`` beside it.
 - OpenEnv defines environment-server actions and observations, not a trace
   format. Record an OpenEnv rollout in this format by logging each model call
   it makes.
 
-Row (one model call)
---------------------
+Row (one segment)
+-----------------
+
+A row is one append-only stretch of a session: every model call in it only
+appended to the history. A rewritten history (compaction, a dropped tool
+output, a changed system prompt) or a ``model_version`` change starts a new
+row. A 50-turn segment is stored once instead of about 50 times; training
+expands it in memory.
 
 .. list-table::
    :header-rows: 1
@@ -32,45 +37,50 @@ Row (one model call)
      - Type
      - Required
      - Meaning
-   * - ``prompt``
+   * - ``messages``
      - list of messages
      - yes
-     - The conversation the model was given, in order, including system
-       messages and tool results. It does not end with an assistant message.
-   * - ``completion``
-     - list of exactly one assistant message
-     - yes
-     - The reference turn: what the teacher or deployed model replied.
+     - The segment in order. It has at least one assistant message without
+       ``weight: 0`` and does not start with an assistant message. Each
+       assistant message's tool calls are answered by ``tool`` messages before
+       the next assistant message; the final one's may be unanswered. Messages
+       after the last assistant message are ignored by training.
    * - ``tools``
      - list of tool definitions, or null
      - no
-     - The tool schemas available on this call.
+     - The tool schemas available in the segment.
+   * - ``call_ids``
+     - list of strings or nulls, or null
+     - no
+     - One per assistant message, in order, for lineage. Any entry may be
+       null. Training ignores it.
+   * - ``finish_reasons``
+     - list of strings, or null
+     - no
+     - One per assistant message: ``stop``, ``length`` or ``tool_calls``. A
+       ``length`` turn (truncated) is not a training target.
    * - ``answer``
      - string, or null
      - no
      - A short gold final answer for a rubric. OPD with the default zero
        reward ignores it.
-   * - ``call_id``
-     - string
-     - no
-     - Unique row id (ULID from the recorder), for deduplication and score joins.
    * - ``session_id``
      - string, or null
      - no
-     - Conversation key. Rows sharing one, ordered by ``segment_index`` then
-       ``received_at``, form a conversation.
+     - Conversation key. Rows sharing one, ordered by ``segment_index``, form a
+       session.
    * - ``segment_index``
      - int, or null
      - no
-     - Segment within a session. A rewritten history starts a new segment.
+     - Segment within a session.
    * - ``model_version``
      - string, or null
      - no
-     - Hash of base model, adapter and chat template that produced ``completion``.
+     - Hash of base model, adapter and chat template that produced the segment.
    * - ``checkpoint_id``
      - string, or null
      - no
-     - Arena checkpoint or adapter that produced ``completion``.
+     - Arena checkpoint or adapter that produced the segment.
    * - ``base_model``
      - string, or null
      - no
@@ -78,40 +88,52 @@ Row (one model call)
    * - ``received_at``
      - timestamp (UTC), or null
      - no
-     - When the call happened, for windowing.
+     - When the segment's first call happened, for windowing.
    * - ``scores``
-     - list of ``{name, value, source, label, comment}``, or null
+     - list of ``{name, value, source, label, comment, turn}``, or null
      - no
      - Named scores (user feedback, judge id plus rubric hash). ``value`` is a
-       number or null; ``label`` and ``comment`` are optional free text.
-       Filter only.
-   * - ``finish_reason``
-     - string, or null
-     - no
-     - ``stop``, ``length`` or ``tool_calls``. Readers may drop ``length``
-       rows (truncated completions).
+       number or null; ``label`` and ``comment`` are optional free text;
+       ``turn`` (0-based index into the assistant messages) scores one turn,
+       and unset scores the whole segment. Filter only.
    * - ``metadata``
      - map of string to string, or null
      - no
      - Free-form. Ignored by training.
 
 Unknown extra columns are allowed and ignored. A hand upload needs only
-``prompt`` and ``completion``, plus ``tools`` when there are tools.
+``messages``, plus ``tools`` when there are tools.
 
-**Encoding.** ``prompt``, ``completion`` and ``tools`` hold native JSON in
-JSONL. In parquet they are JSON text in a string column, because message
-objects vary in keys and a fixed Arrow struct breaks across files. Readers and
-the validator accept either. Snapshot ``calls.parquet`` files always use JSON
-text, and store ``scores`` as a native Arrow list of structs.
+**Encoding.** ``messages`` and ``tools`` hold native JSON in JSONL. In parquet
+they are JSON text in a string column, because message objects vary in keys
+and a fixed Arrow struct breaks across files. Readers and the validator accept
+either. Snapshot ``segments.parquet`` files always use JSON text, and store
+``scores`` as a native Arrow list of structs.
 
-**Duplicate prompts are valid.** A request with ``n > 1`` gives several rows
-with the same ``prompt`` and different ``completion``. SFT and OPD use each row.
+**Duplicate rows are valid.**
 
-A conversation may instead be one row with a ``messages`` column (TRL
-conversational form), as the continual-learning loop's SFT export writes it.
-SFT trains every assistant turn of such a row. A dataset with both forms is
-read as ``prompt`` / ``completion``, and its ``messages`` column is ignored. A rollout needs
-``prompt`` / ``completion`` rows.
+Importing prompt/completion pairs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An upload may instead hold one model call per row: ``prompt`` (a list of
+messages, or a string as one user message) and ``completion`` (one assistant
+message, a list of messages, or a string as one assistant message), with
+optional ``call_id`` and ``finish_reason``. A string cell is read as JSON
+only when it holds a message or a list of messages; any other text,
+``{"query": "x"}``, ``42`` or ``"hi"`` included, is the message's content as
+it is. A
+``prompt`` ending with an assistant message is invalid: the completion is the
+next assistant turn. A file with both ``prompt`` and
+``completion`` is read as pairs, and a ``messages`` column beside them (a raw
+recorder dump's request) is ignored. Arena converts each pair to the segment
+``messages = prompt + completion`` on import. Only the completion trains: the
+prompt's assistant messages get ``weight: 0``. With a ``call_id``,
+``call_ids`` gives it to the completion's assistant messages and null to the
+prompt's; any ``call_ids`` or ``finish_reasons`` already on a pair row are
+dropped. Rows that are prefixes of a longer row are merged
+into it, so a per-call dump becomes the real conversation and no turn trains
+twice. The trainer reads only segments: it drops a pair with a warning, and
+rejects a split with no segment.
 
 Messages
 ^^^^^^^^
@@ -119,14 +141,24 @@ Messages
 Exactly the OpenAI Chat Completions message objects:
 
 - ``{"role": "system" | "developer" | "user", "content": <string | list of content parts>}``
-- ``{"role": "assistant", "content": <string | null>, "reasoning_content": <string>, "tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "<JSON string>"}}]}``
-- ``{"role": "tool", "tool_call_id": "...", "content": <string>}``
+- ``{"role": "assistant", "content": <string | null>, "reasoning_content": <string>, "tool_calls": [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "<JSON string>"}}], "weight": <0 | 1>}``
+- ``{"role": "tool", "tool_call_id": "...", "content": <string | null>}``, null
+  only after the last assistant message
 
 Reasoning is not in the OpenAI schema. Writers use ``reasoning_content``
 (vLLM, DeepSeek, and the key chat templates render). Readers also accept
 ``reasoning`` and ``thinking``. ``function.arguments`` stays a JSON *string*
 encoding an object, as OpenAI sends it. A tool result answers a call made
 earlier in the same row, and with ``tools`` set every call names one of them.
+An assistant message's optional ``weight`` follows OpenAI chat fine-tuning:
+``0`` marks it as context, not a training target (the harness inserted it, or
+the previous segment already trained it), and a missing ``weight`` means 1.
+Other values, and ``weight`` on any other role, are invalid. Training strips
+``weight`` before any chat-template render and before a rollout sends
+messages to a serving API. Two assistant
+messages in a row are allowed only when the later one has ``weight: 0``:
+training gives each target the messages before it as its prompt, which must
+not end with an assistant turn.
 
 Tool definitions
 ^^^^^^^^^^^^^^^^
@@ -139,21 +171,24 @@ Example
 .. code-block:: json
 
    {
-     "prompt": [
+     "messages": [
        {"role": "system", "content": "You are the IT helpdesk agent."},
        {"role": "user", "content": "I can't sign in, MFA keeps failing."},
        {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup_user", "arguments": "{\"email\": \"a@b.com\"}"}}]},
-       {"role": "tool", "tool_call_id": "c1", "content": "{\"mfa\": \"totp\", \"locked\": true}"}
-     ],
-     "completion": [
+       {"role": "tool", "tool_call_id": "c1", "content": "{\"mfa\": \"totp\", \"locked\": true}"},
        {"role": "assistant", "reasoning_content": "Account is locked after failed TOTP attempts...", "content": "Your account was locked after too many attempts. I've sent an unlock link."}
      ],
      "tools": [{"type": "function", "function": {"name": "lookup_user", "description": "Find a user", "parameters": {"type": "object", "properties": {"email": {"type": "string"}}, "required": ["email"]}}}],
-     "call_id": "01JD...", "session_id": "s-42", "segment_index": 0, "model_version": "m-7f3a"
+     "call_ids": ["01JC...", "01JD..."], "finish_reasons": ["tool_calls", "stop"],
+     "session_id": "s-42", "segment_index": 0, "model_version": "m-7f3a"
    }
 
 How each algorithm reads a row
 ------------------------------
+
+Each target assistant message of a row (see ``weight`` and
+``finish_reasons``) trains exactly once. Assistant message *k* is the turn
+``prompt = messages[:k]``, ``completion = [messages[k]]``, built in memory.
 
 .. list-table::
    :header-rows: 1
@@ -163,27 +198,29 @@ How each algorithm reads a row
      - Reads
      - Notes
    * - SFT
-     - ``prompt`` + ``completion`` (+ ``tools``), rendered with the student's
-       chat template
-     - Loss on the completion only; assistant turns inside ``prompt`` are
-       context. ``messages`` rows train every assistant turn.
+     - The whole segment (+ ``tools``), rendered once with the student's chat
+       template
+     - Loss on every target assistant turn; other messages are context. A
+       template that renders earlier turns differently once later ones follow
+       (gpt-oss drops their analysis) trains each target turn after its own
+       prompt instead, with a warning.
    * - OPD, separate teacher (``teacher.model``)
-     - ``prompt`` (+ ``tools``) as the single-turn rollout prompt
-     - The student samples one assistant turn and the teacher scores it.
-       ``completion`` is unused.
+     - Each target turn's prompt (+ ``tools``) as a single-turn rollout prompt
+     - The student samples one assistant turn and the teacher scores it. The
+       recorded turn is unused.
    * - OPD, self-distillation (default teacher)
-     - ``prompt`` (+ ``tools``) as the rollout prompt; ``completion`` as the
-       teacher's reference
-     - ``{reference}`` in ``teacher.template`` is the completion rendered as
-       the student would write it: reasoning, content and tool calls.
+     - Each target turn's prompt (+ ``tools``) as the rollout prompt; the turn
+       itself as the teacher's reference
+     - ``{reference}`` in ``teacher.template`` is the turn rendered as the
+       student would write it: reasoning, content and tool calls.
    * - Reward
      - Zero without a rubric, so the OPD update is pure distillation
      - A ``rubric_file_path`` replaces it, and is required for any other
        rollout algorithm.
 
-Every row is one step deep: a multi-turn tool conversation becomes one row per
-assistant turn, each with the history so far as ``prompt``. That gives OPD over
-agent traces without a replay environment, so ``max_turns`` stays 1.
+Every rollout prompt is one step deep: each target turn of a segment is a
+prompt with the history so far. That gives OPD over agent traces without a
+replay environment, so ``max_turns`` stays 1.
 
 Not supported yet: preference pairs (DPO uses the ``preference`` dataset type),
 per-turn rewards, token ids and log-probs, and GRPO on traces without a rubric.
@@ -201,7 +238,7 @@ On-policy distillation:
 
    algorithm:
      name: OPD
-     teacher: {}            # self-distillation: the reference is each row's completion
+     teacher: {}            # self-distillation: the reference is each target turn
    environment:
      env_type: rollout
      dataset_format: traces
@@ -209,7 +246,7 @@ On-policy distillation:
      # rubric_file_path: optional; without it every turn scores 0
 
 ``teacher.context_key`` defaults to ``reference_trace`` for self-distillation
-and is filled from ``completion``. A ``teacher.model`` reads no reference
+and is filled from each target turn. A ``teacher.model`` reads no reference
 unless ``context_key`` is set.
 
 SFT:
@@ -235,9 +272,11 @@ Uploading
    arena datasets create helpdesk-traces --category traces --file ./traces.jsonl
 
 The file is JSONL (``.jsonl``, ``.ndjson`` or ``.json`` holding one object per
-line), a parquet file or a folder of parquet shards. The CLI (and
+line), a parquet file or a folder of parquet shards, in segment rows or
+prompt/completion pairs. The CLI (and
 :meth:`~agilerl.arena.client.ArenaClient.create_dataset`) checks every row
-against this page before uploading and lists bad rows by number, counting from
+against this page, a pair as the segment it becomes, before uploading the
+file as it is and lists bad rows by number, counting from
 1. Parquet checks need ``pyarrow``. Validate without uploading with
 :func:`agilerl.arena.models.traces.validate_traces_file`.
 
@@ -248,9 +287,10 @@ A ``traces`` dataset is backed by **either**:
 
 1. an **uploaded file** in this shape, or
 2. a **snapshot**: a frozen export from the continual-learning trace query
-   service (``manifest.json`` + ``calls.parquet``) at an artifact-store URI,
-   which may be the customer's own bucket. Arena stores only the snapshot id,
-   URI, row count, model versions present and creator.
+   service (``manifest.json`` + ``segments.parquet``) at an artifact-store
+   URI, which may be the customer's own bucket. The manifest's ``row_count``
+   counts segments and ``turn_count`` assistant messages. Arena stores only the snapshot id, URI, row count, model versions
+   present and creator.
 
 Snapshots never change, and their lineage (filter, parent snapshot) is kept in
 ``manifest.json``. A growing dataset is a series of snapshots, and a run names

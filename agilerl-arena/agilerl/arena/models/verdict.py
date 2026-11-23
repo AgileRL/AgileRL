@@ -13,6 +13,7 @@ import yaml
 from pydantic import ValidationError
 
 from agilerl.arena.models import LLMAlgorithmSpec, __version__
+from agilerl.arena.models.hpo import no_op_mutation_probabilities
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.registry import did_you_mean
@@ -20,6 +21,10 @@ from agilerl.arena.models.registry import did_you_mean
 EXIT_OK = 0
 EXIT_INVALID = 1
 EXIT_FAILED = 2
+
+HPO_UNAVAILABLE_MESSAGE = (
+    "HPO is no longer available in Arena; remove it from the manifest."
+)
 
 
 def loc_to_path(loc: tuple[Any, ...]) -> str:
@@ -107,6 +112,24 @@ def model_warnings(manifest: TrainingManifest) -> list[str]:
     return [msg]
 
 
+def hpo_fields(manifest: TrainingManifest) -> list[str]:
+    """List the manifest fields that turn on HPO, which Arena does not run.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: ``training.hpo`` and/or ``mutation``, or an empty list.
+    :rtype: list[str]
+    """
+    fields = ["training.hpo"] if manifest.training.hpo else []
+    mutation = manifest.mutation
+    if mutation is not None and (
+        mutation.rl_hp_selection
+        or mutation.probabilities != no_op_mutation_probabilities()
+    ):
+        fields.append("mutation")
+    return fields
+
+
 def verdict(document: dict[str, Any]) -> dict[str, Any]:
     """Validate *document* and report the outcome as one JSON-safe record.
 
@@ -118,16 +141,27 @@ def verdict(document: dict[str, Any]) -> dict[str, Any]:
     try:
         manifest = TrainingManifest.model_validate(document)
     except (ValidationError, ValueError) as err:
-        return {
-            "ok": False,
-            "errors": errors(err),
-            "warnings": [],
-            "manifest_version": __version__,
-        }
+        failures = errors(err)
+    else:
+        failures = [
+            {
+                "path": field,
+                "message": HPO_UNAVAILABLE_MESSAGE,
+                "kind": "hpo_unavailable",
+            }
+            for field in hpo_fields(manifest)
+        ]
+        if not failures:
+            return {
+                "ok": True,
+                "payload": manifest.to_payload(),
+                "warnings": model_warnings(manifest),
+                "manifest_version": __version__,
+            }
     return {
-        "ok": True,
-        "payload": manifest.to_payload(),
-        "warnings": model_warnings(manifest),
+        "ok": False,
+        "errors": failures,
+        "warnings": [],
         "manifest_version": __version__,
     }
 
@@ -136,7 +170,9 @@ __all__ = [
     "EXIT_FAILED",
     "EXIT_INVALID",
     "EXIT_OK",
+    "HPO_UNAVAILABLE_MESSAGE",
     "errors",
+    "hpo_fields",
     "loc_to_path",
     "model_warnings",
     "read_manifest",

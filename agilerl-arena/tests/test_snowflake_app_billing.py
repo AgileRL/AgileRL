@@ -6,20 +6,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import app_trial
 import httpx
 import pytest
+from app_billing import DeploymentCalls, meter_deployments
 from snowflake.snowpark.exceptions import SnowparkSQLException
+from snowflake_app.app_code import arena_app
 from snowflake_app.app_code.arena_app import (
-    DeploymentCalls,
-    meter_deployments,
+    IMAGE,
+    publish,
     reconcile_usage,
+    version_init,
 )
 
 from agilerl.arena.snowflake import license as license_mod
@@ -33,6 +40,15 @@ from agilerl.arena.snowflake.license import (
     TrainingDisabledError,
     UnknownUsageError,
 )
+from tests.test_snowflake_app_runs import RUN_ID as PUBLISH_RUN_ID
+from tests.test_snowflake_app_runs import (
+    AppSession,
+    Files,
+    Install,
+    listing_trial,
+    publish_session,
+)
+from tests.test_snowflake_app_runs import Result as AppResult
 from tests.test_snowflake_billing import (
     HOUR_13_MS,
     HOUR_MS,
@@ -46,10 +62,30 @@ from tests.test_snowflake_billing import (
     BillingSession as UsageBillingSession,
 )
 from tests.test_snowflake_license import Arena, reply
+from tests.test_snowflake_setup import Row
+
+APP_PREFIX = "AGILERL_APP_ARENA_APP_"
+GPU_POOL = f"{APP_PREFIX}GPU_GPU_NV_S"
+
+FORCED_DROP = re.compile(r"DROP SERVICE IF EXISTS app_state\.(\w+) FORCE")
+PROVEN_CLAIMS = (
+    "SELECT claim_id FROM app_state.arena_claim WHERE proven_at IS NOT NULL "
+    "AND expires_at > CURRENT_TIMESTAMP()"
+)
+SETUP_JSON = "@app_state.runs/_arena/setup.json"
 
 
 class BillingSession(UsageBillingSession):
-    """Refuses a service-role grant once that service is gone."""
+    """Refuses a grant for a gone service, answers the trial query, and keeps the task's and GPU pools' state."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.install = Install()
+        self.task = "started"
+        self.pools: dict[str, dict[str, object]] = {}
+        self.proven_claims: list[Row] = []
+        self.setup_doc: dict[str, object] | None = None
+        self.file = Files({})
 
     def sql(self, statement: str) -> Result:
         """Run ``statement``, refusing a grant for a service that is gone.
@@ -57,6 +93,51 @@ class BillingSession(UsageBillingSession):
         :param statement: SQL to run.
         :return: The statement result.
         """
+        if (ended := self.install.ended(statement)) is not None:
+            self.statements.append(statement)
+            return ended
+        if statement == PROVEN_CLAIMS:
+            self.statements.append(statement)
+            return Result(self.proven_claims)
+        if statement == f"LIST {SETUP_JSON}":
+            self.statements.append(statement)
+            if self.setup_doc is None:
+                return Result([])
+            self.file.staged[SETUP_JSON] = json.dumps(self.setup_doc)
+            return Result([Row(name="runs/_arena/setup.json")])
+        if "app_state.arena_claim" in statement or "app_state.arena_key" in statement:
+            self.statements.append(statement)
+            return Result([])
+        if forced := FORCED_DROP.fullmatch(statement):
+            self.statements.append(statement)
+            self.services.pop(forced.group(1), None)
+            return Result([])
+        if statement == "DELETE FROM app_state.served_models":
+            self.statements.append(statement)
+            self.served.clear()
+            return Result([])
+        if statement == "SELECT app_code.object_prefix() AS PREFIX":
+            self.statements.append(statement)
+            return Result([Row(PREFIX=APP_PREFIX)])
+        if statement == f"SHOW COMPUTE POOLS LIKE '{APP_PREFIX}GPU_%'":
+            self.statements.append(statement)
+            return Result([Row(name=name, **pool) for name, pool in self.pools.items()])
+        if statement.startswith("ALTER COMPUTE POOL ") and statement.endswith(
+            " SUSPEND"
+        ):
+            self.statements.append(statement)
+            self.pools[statement.split()[3]]["state"] = "SUSPENDED"
+            return Result([])
+        if statement in {
+            "ALTER TASK app_state.reconcile_usage_task SUSPEND",
+            "ALTER TASK app_state.reconcile_usage_task RESUME",
+        }:
+            for prefix in list(self.hooks):
+                if statement.startswith(prefix):
+                    self.hooks.pop(prefix)()
+            self.statements.append(statement)
+            self.task = "suspended" if statement.endswith("SUSPEND") else "started"
+            return Result([])
         if statement.startswith("GRANT SERVICE ROLE app_state."):
             service = statement.removeprefix("GRANT SERVICE ROLE app_state.").split(
                 "!", 1
@@ -65,6 +146,74 @@ class BillingSession(UsageBillingSession):
                 msg = f"Service '{service}' does not exist or not authorized."
                 raise SnowparkSQLException(msg)
         return super().sql(statement)
+
+
+class PublishBillingSession(BillingSession):
+    """Billing session that answers publish's other statements from a publish session.
+
+    ``during_wait`` runs once, at the first poll of the publish job, standing
+    in for the hourly task.
+    """
+
+    def __init__(
+        self,
+        publish: AppSession,
+        during_wait: Callable[[PublishBillingSession], None],
+    ) -> None:
+        super().__init__()
+        self.publish = publish
+        self.file = publish.file
+        self.during_wait: Callable[[PublishBillingSession], None] | None = during_wait
+
+    def sql(self, statement: str) -> Result | AppResult:
+        """Run ``statement`` on the billing tables, or on the publish session.
+
+        :param statement: SQL to run.
+        :return: The statement result.
+        """
+        if self.during_wait is not None and statement.startswith(
+            "SHOW SERVICE CONTAINERS IN SERVICE app_state.ARENA_PUBLISH_"
+        ):
+            during_wait, self.during_wait = self.during_wait, None
+            during_wait(self)
+        if statement.startswith("DELETE FROM app_state.served_models "):
+            self.statements.append(statement)
+            return Result([])
+        if statement.startswith("INSERT INTO app_state.served_models "):
+            self.statements.append(statement)
+            service, model, version, run_id, family = re.findall(
+                r"'([^']*)'", statement
+            )
+            self.served.append(
+                {
+                    "service_name": service,
+                    "model": model,
+                    "version": version,
+                    "run_id": run_id,
+                    "gpu_family": family,
+                    "gpu_count": int(statement.rsplit(", ", 1)[1].rstrip(")")),
+                }
+            )
+            return Result([])
+        billing_prefixes = (
+            "SHOW SERVICES IN SCHEMA app_state",
+            "GRANT SERVICE ROLE app_state.",
+            "DROP SERVICE IF EXISTS app_state.",
+            "SELECT service_name, model, version, run_id, ",
+            (
+                "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+                "app_code.listing_purchased() AS PURCHASED"
+            ),
+            "SELECT SYSTEM$CREATE_BILLING_EVENTS(",
+            "SELECT app_code.object_prefix() AS PREFIX",
+            "SHOW COMPUTE POOLS LIKE ",
+        )
+        if any(
+            table in statement
+            for table in ("app_state.usage_items", "app_state.billed_hours")
+        ) or statement.startswith(billing_prefixes):
+            return super().sql(statement)
+        return self.publish.sql(statement)
 
 
 NOW = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
@@ -277,6 +426,31 @@ class TestMeterDeployments:
             )
         ]
 
+    def test_an_ended_trial_on_heartbeat_drops_the_service_through_arena(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        ended = reply(403, {"error": "snowflake_trial_ended", "description": "ended"})
+        arena.replies = [ended, reply(200)]
+        calls = DeploymentCalls(
+            lambda deployment: None,
+            lambda deployment_id, now: license_mod.heartbeat_snowflake_deployment(
+                deployment_id, now, "https://arena.test", {}, lambda s: None, 0.0
+            ),
+            lambda deployment_id, now: license_mod.close_snowflake_deployment(
+                deployment_id, now, "https://arena.test", {}, lambda s: None, 0.0
+            ),
+        )
+
+        # Act
+        summary = meter_deployments(session, calls, NOW)
+
+        # Assert
+        assert "dropped: 1" in summary
+        assert session.services == {}
+        assert item(session, "dep-a")["last_error"] == license_mod.TRIAL_ENDED
+
     def test_training_off_leaves_the_row_open_when_the_close_fails(self) -> None:
         # Arrange
         session = serving_session({"A": "RUNNING", "B": "RUNNING"})
@@ -461,7 +635,7 @@ class TestMeterDeployments:
         assert arena.opens == []
         assert "Arena has no deployment dep-a of service A. Leaving it." in caplog.text
 
-    def test_a_never_seen_404_opens_the_live_service(self) -> None:
+    def test_a_never_seen_404_opens_the_same_deployment_again(self) -> None:
         # Arrange
         session = serving_session({"A": "RUNNING", "B": "RUNNING"})
         arena = DeploymentArena({"dep-a": UnknownUsageError("no deployment")})
@@ -473,11 +647,33 @@ class TestMeterDeployments:
         assert summary.endswith(
             "heartbeat: 1, closed: 0, opened: 1, dropped: 0, missing: 1, failed: 0"
         )
-        assert [deployment.deployment_id for deployment in arena.opens] == [
-            "A-20261116T150000Z"
-        ]
+        [deployment] = arena.opens
+        assert (deployment.deployment_id, deployment.started_at) == (
+            "dep-a",
+            datetime(2026, 11, 16, 13, 0, tzinfo=timezone.utc),
+        )
         assert item(session, "dep-a")["closed_at"] is None
-        assert item(session, "A-20261116T150000Z")["service_name"] == "A"
+        assert [row["usage_id"] for row in session.items] == ["dep-a", "dep-b"]
+
+    def test_a_refused_repeat_open_closes_the_deployment_now(self) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        refusal = "Arena answered 409: Inactive."
+        arena = DeploymentArena(
+            {"dep-a": UnknownUsageError("no deployment")},
+            DeploymentRefusedError(refusal),
+        )
+
+        # Act
+        summary = meter_deployments(session, arena.calls(), NOW)
+
+        # Assert
+        assert "opened: 0, dropped: 1, missing: 1" in summary
+        assert session.services == {}
+        assert [d.deployment_id for d in arena.opens] == ["dep-a"]
+        closed = item(session, "dep-a")
+        assert (closed["closed_at"], closed["last_error"]) == (NOW_MS, refusal)
+        assert len(session.items) == 1
 
     def test_first_arena_failure_stops_metering_and_opening(
         self, caplog: pytest.LogCaptureFixture
@@ -521,6 +717,10 @@ def arena(monkeypatch: pytest.MonkeyPatch) -> Arena:
     return fake
 
 
+def app_paths(arena_root: Path) -> list[str]:
+    return [str(arena_root), str(arena_root / "snowflake_app" / "app_code")]
+
+
 def open_usage(cents: int) -> httpx.Response:
     return reply(
         200,
@@ -550,7 +750,7 @@ class TestArenaAppLogging:
         result = subprocess.run(
             [sys.executable, "-c", script],
             cwd=arena_root,
-            env={**os.environ, "PYTHONPATH": str(arena_root)},
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(app_paths(arena_root))},
             capture_output=True,
             text=True,
             check=True,
@@ -561,6 +761,64 @@ class TestArenaAppLogging:
             "[('agilerl.arena.snowflake.billing', 'ERROR', 'Could not bill run r')]"
         )
         assert "Could not bill" not in result.stderr
+
+
+class TestArenaAppErrors:
+    def test_procedure_errors_reach_the_caller_as_the_message_only(self) -> None:
+        # Arrange
+        arena_root = Path(__file__).resolve().parents[1]
+        script = (
+            "import traceback\n"
+            "from snowflake_app.app_code import arena_app\n"
+            "try:\n"
+            "    arena_app.register_reference(None, 'consumer_secret', 'ADD', 'ref-1')\n"
+            "except ValueError:\n"
+            "    print(repr(traceback.format_exc()))\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=arena_root,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(app_paths(arena_root))},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip() == repr(
+            "ValueError: Unknown reference consumer_secret. "
+            "Bind source_table, source_view or export_stage.\n"
+        )
+
+    def test_errors_from_the_keys_module_hide_the_stack_too(self) -> None:
+        # Arrange
+        # Snowflake loads a handler's module alone, so app_keys must not rely on arena_app.
+        arena_root = Path(__file__).resolve().parents[1]
+        script = (
+            "import traceback\n"
+            "import app_keys\n"
+            "try:\n"
+            "    app_keys.arena_origin(None, 'not a url')\n"
+            "except ValueError:\n"
+            "    print(repr(traceback.format_exc()))\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=arena_root,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(app_paths(arena_root))},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip() == repr(
+            "ValueError: The base URL does not name one host.\nNothing was saved.\n"
+        )
 
 
 class TestReconcileUsage:
@@ -585,6 +843,25 @@ class TestReconcileUsage:
         ]
         [event] = session.events
         assert (event["subclass"], event["base_charge"]) == ("deployment", 9.57)
+
+    def test_a_successful_run_logs_its_summary_at_info(
+        self, arena: Arena, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Arrange
+        caplog.set_level(logging.INFO, logger=arena_app.logger.name)
+        session = serving_session({"A": "RUNNING"})
+        arena.replies = [reply(200, {"billableHours": []}), open_usage(957)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        [record] = [r for r in caplog.records if r.name == arena_app.logger.name]
+        assert (record.levelname, record.getMessage()) == (
+            "INFO",
+            f"reconcile_usage: {summary}",
+        )
+        assert "events: 1, failed: 0, missing: 0, skipped: 0" in summary
 
     def test_a_non_listing_install_is_refused_and_logged_for_the_event_table(
         self, arena: Arena, caplog: pytest.LogCaptureFixture
@@ -642,6 +919,46 @@ class TestReconcileUsage:
         assert item(session, "dep-a")["settled_at"] is not None
         assert json.loads(session.events[0]["objects"]) == ["dep-a"]
 
+    def test_a_run_during_the_publish_wait_leaves_one_deployment_billed_once(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        hourly: list[str] = []
+
+        def hourly_run(session: PublishBillingSession) -> None:
+            session.services["QWEN_CHECKPOINT_2"] = "PENDING"
+            hourly.append(reconcile_usage(session))
+
+        session = PublishBillingSession(publish_session(), hourly_run)
+        arena.replies = [
+            reply(201, {"billableHours": []}),
+            open_usage(957),
+            reply(201, {"billableHours": []}),
+            reply(200, {"billableHours": []}),
+            open_usage(957),
+        ]
+
+        # Act
+        text = publish(session, PUBLISH_RUN_ID, "qwen", None, None, True, 1, None, None)
+        hourly.append(reconcile_usage(session))
+
+        # Assert
+        [deployment] = [row for row in session.items if row["kind"] == "deployment"]
+        deployment_id = str(deployment["usage_id"])
+        assert text.endswith(f"deployment: {deployment_id}")
+        opens = [call["json"] for call in arena.calls if call["url"] == DEPLOYMENTS]
+        assert len(opens) == 2
+        assert opens[0] == opens[1]
+        assert opens[0]["deploymentId"] == deployment_id
+        assert "opened: 1" in hourly[0]
+        assert "events: 1" in hourly[0]
+        assert "heartbeat: 1, closed: 0, opened: 0" in hourly[1]
+        assert "events: 0" in hourly[1]
+        [event] = session.events
+        assert json.loads(event["objects"]) == [deployment_id]
+        assert event["base_charge"] == 9.57
+        assert session.services == {"QWEN_CHECKPOINT_2": "PENDING"}
+
     def test_a_failed_heartbeat_does_not_stop_billing(self, arena: Arena) -> None:
         # Arrange
         session = serving_session({"A": "RUNNING"})
@@ -654,14 +971,369 @@ class TestReconcileUsage:
         assert "failed: 1; items: 1, settled: 0, events: 1, failed: 0" in summary
         assert len(session.events) == 1
 
-    def test_unconfigured_arena_runs_nothing(
-        self, arena: Arena, monkeypatch: pytest.MonkeyPatch
+    def test_an_ended_trial_stops_every_service_and_closes_the_deployment(
+        self, arena: Arena, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # Arrange
+        caplog.set_level(logging.INFO)
+        session = serving_session({"A": "RUNNING"})
+        session.services.update(
+            {
+                "ARENA_RUN_1_HEAD": "RUNNING",
+                "ARENA_RUN_1_WORKERS": "PENDING",
+                "ARENA_RUN_0_HEAD": "DONE",
+            }
+        )
+        session.install = listing_trial(6.98)
+        arena.replies = [
+            reply(200, {"ok": True}),
+            reply(
+                200,
+                {
+                    "ok": True,
+                    "data": {"state": "closed", "billableHours": [hour_at(0, 10)]},
+                },
+            ),
+        ]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert summary.startswith(
+            "trial ended, dropped services: 3; deployments: 1, heartbeat: 0, "
+            "closed: 1, opened: 0, dropped: 0, missing: 0, failed: 0; "
+            "items: 1, settled: 1, events: 1"
+        )
+        assert session.services == {"ARENA_RUN_0_HEAD": "DONE"}
+        assert session.served == []
+        assert [call["url"] for call in arena.calls] == [
+            f"{DEPLOYMENTS}/dep-a/close",
+            f"{DEPLOYMENTS}/dep-a/usage",
+        ]
+        assert item(session, "dep-a")["closed_at"] is not None
+        assert [
+            r.getMessage()
+            for r in caplog.records
+            if r.name in {arena_app.logger.name, app_trial.logger.name}
+            and r.levelname == "INFO"
+        ][:3] == [
+            "Trial ended unpurchased: dropped service A",
+            "Trial ended unpurchased: dropped service ARENA_RUN_1_HEAD",
+            "Trial ended unpurchased: dropped service ARENA_RUN_1_WORKERS",
+        ]
+
+    @pytest.mark.parametrize(
+        ("age_days", "purchased"), [(6.9, False), (30, True)], ids=["trial", "bought"]
+    )
+    def test_services_keep_running_during_the_trial_or_once_bought(
+        self, arena: Arena, age_days: float, purchased: bool
+    ) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        session.services["ARENA_RUN_1_HEAD"] = "RUNNING"
+        session.install = Install(listing_trial(age_days).started_at, purchased)
+        arena.replies = [reply(200, {"billableHours": []}), open_usage(957)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert summary.startswith("deployments: 1, heartbeat: 1, closed: 0")
+        assert session.services == {"A": "RUNNING", "ARENA_RUN_1_HEAD": "RUNNING"}
+        assert not any(s.startswith("DROP") for s in session.statements)
+
+    def test_unconfigured_arena_runs_nothing(
+        self,
+        arena: Arena,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.INFO, logger=arena_app.logger.name)
         monkeypatch.setitem(SECRETS, "org_key", "")
         session = serving_session({"A": "RUNNING"})
 
         summary = reconcile_usage(session)
 
-        assert summary.startswith("Arena is not configured.")
-        assert session.statements == []
+        assert summary.startswith("Arena is not connected.")
+        assert session.statements == [
+            "DELETE FROM app_state.arena_claim WHERE expires_at <= CURRENT_TIMESTAMP()",
+            (
+                "SELECT claim_id, base_url, proven_at IS NOT NULL AS PROVEN "
+                "FROM app_state.arena_claim"
+            ),
+            "SELECT app_code.object_prefix() AS PREFIX",
+            f"SHOW COMPUTE POOLS LIKE '{APP_PREFIX}GPU_%'",
+            "SHOW SERVICES IN SCHEMA app_state",
+            "ALTER TASK app_state.reconcile_usage_task RESUME",
+        ]
         assert arena.calls == []
+        assert [
+            (r.levelname, r.getMessage())
+            for r in caplog.records
+            if r.name == arena_app.logger.name
+        ] == [("INFO", f"reconcile_usage: {summary}")]
+
+
+def closed_usage(cents: int) -> httpx.Response:
+    return reply(
+        200,
+        {"ok": True, "data": {"state": "closed", "billableHours": [hour_at(0, cents)]}},
+    )
+
+
+class TestReconcileUsageBillingTask:
+    def test_a_finished_run_bills_its_last_hours_then_suspends_the_task(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [closed_usage(25)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "items: 1, settled: 1, events: 1" in summary
+        assert summary.endswith(
+            "; nothing left to bill, suspended app_state.reconcile_usage_task"
+        )
+        assert session.task == "suspended"
+        [event] = session.events
+        assert (event["subclass"], event["base_charge"]) == ("run", 0.25)
+        emit = next(
+            i
+            for i, s in enumerate(session.statements)
+            if s.startswith("SELECT SYSTEM$")
+        )
+        assert emit < session.statements.index(
+            "ALTER TASK app_state.reconcile_usage_task SUSPEND"
+        )
+
+    def test_an_open_run_keeps_the_task_started(self, arena: Arena) -> None:
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [
+            reply(200, {"ok": True, "data": {"state": "open", "billableHours": []}})
+        ]
+
+        summary = reconcile_usage(session)
+
+        assert "suspended" not in summary
+        assert session.task == "started"
+        assert "ALTER TASK app_state.reconcile_usage_task SUSPEND" not in (
+            session.statements
+        )
+
+    def test_a_live_service_keeps_the_task_started_with_nothing_to_bill(
+        self, arena: Arena
+    ) -> None:
+        session = BillingSession()
+        session.services = {"ARENA_PUBLISH_1": "RUNNING"}
+
+        summary = reconcile_usage(session)
+
+        assert summary.endswith("unconfirmed: 0")
+        assert session.task == "started"
+
+    def test_a_run_arena_never_saw_does_not_keep_the_task_started(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [reply(404)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "settled: 0, events: 0, failed: 0, missing: 1" in summary
+        assert item(session, RUN_ID)["settled_at"] is None
+        assert session.task == "suspended"
+
+    def test_an_ended_trial_suspends_the_task_once_its_last_run_settles(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.install = listing_trial(6.98)
+        session.services = {"ARENA_RUN_1_HEAD": "RUNNING"}
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [
+            reply(200, {"ok": True, "data": {"state": "open", "billableHours": []}}),
+            closed_usage(25),
+        ]
+
+        # Act
+        first = reconcile_usage(session)
+        task_after_sweep = session.task
+        second = reconcile_usage(session)
+
+        # Assert
+        assert first.startswith("trial ended, dropped services: 1; ")
+        assert session.services == {}
+        assert task_after_sweep == "started"
+        assert "items: 1, settled: 1, events: 1" in second
+        assert second.endswith(
+            "; nothing left to bill, suspended app_state.reconcile_usage_task"
+        )
+        assert session.task == "suspended"
+
+    def test_a_run_submitted_while_suspending_resumes_the_task(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.hooks["ALTER TASK app_state.reconcile_usage_task SUSPEND"] = lambda: (
+            session.add_item("arena-20261116150000-def456", NOW_MS)
+        )
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "suspended" not in summary
+        assert session.task == "started"
+        recheck = (
+            "SELECT COUNT(*) AS N FROM app_state.usage_items WHERE settled_at IS NULL "
+            "AND (first_seen_at IS NOT NULL OR first_404_at IS NULL)"
+        )
+        assert session.statements[-2:] == [
+            recheck,
+            "ALTER TASK app_state.reconcile_usage_task RESUME",
+        ]
+
+
+def gpu_pool(state: str, services: int = 0, jobs: int = 0) -> dict[str, object]:
+    return {"state": state, "num_services": services, "num_jobs": jobs}
+
+
+class TestReconcileUsageGpuPools:
+    def test_suspends_a_gpu_pool_left_starting_with_nothing_on_it(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.pools = {GPU_POOL: gpu_pool("STARTING")}
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert session.pools[GPU_POOL]["state"] == "SUSPENDED"
+        assert f"; suspended idle GPU pools {GPU_POOL};" in summary
+        assert session.task == "suspended"
+
+    @pytest.mark.parametrize(
+        "pool",
+        [
+            gpu_pool("ACTIVE", services=1),
+            gpu_pool("ACTIVE", jobs=1),
+            gpu_pool("SUSPENDED"),
+        ],
+    )
+    def test_leaves_a_pool_with_work_or_already_suspended(
+        self, arena: Arena, pool: dict[str, object]
+    ) -> None:
+        session = BillingSession()
+        session.pools = {GPU_POOL: dict(pool)}
+
+        summary = reconcile_usage(session)
+
+        assert session.pools[GPU_POOL] == pool
+        assert "GPU pools" not in summary
+        assert not any(s.startswith("ALTER COMPUTE POOL") for s in session.statements)
+
+    def test_leaves_pools_of_another_app_that_match_the_like_pattern(
+        self, arena: Arena
+    ) -> None:
+        session = BillingSession()
+        other = "AGILERL_APP_ARENA_APPXGPU_GPU_NV_S"
+        session.pools = {other: gpu_pool("IDLE")}
+
+        reconcile_usage(session)
+
+        assert session.pools[other]["state"] == "IDLE"
+
+
+class TestVersionInit:
+    def test_an_idle_app_leaves_the_task_suspended(self) -> None:
+        session = BillingSession()
+        session.services = {"ARENA_PUBLISH_1": "DONE"}
+
+        text = version_init(session)
+
+        assert text == "nothing to bill, suspended app_state.reconcile_usage_task"
+        assert session.task == "suspended"
+
+    def test_an_unsettled_deployment_resumes_the_task(self) -> None:
+        session = BillingSession()
+        session.add_item("dep-a", HOUR_13_MS, "deployment", service_name="A")
+        session.task = "suspended"
+
+        text = version_init(session)
+
+        assert text == "resumed app_state.reconcile_usage_task"
+        assert session.task == "started"
+
+    def test_an_upgrade_points_the_saved_profile_at_this_versions_image(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.setup_doc = saved_profile(
+            "/arena_provider/images/repo/snowflake-job:39.5.0-py313-cu130"
+        )
+
+        # Act
+        text = version_init(session)
+
+        # Assert
+        assert text == (
+            f"image set to {IMAGE}; "
+            "nothing to bill, suspended app_state.reconcile_usage_task"
+        )
+        [(path, uploaded)] = session.file.puts.items()
+        assert path == SETUP_JSON
+        assert json.loads(uploaded) == {**session.setup_doc, "image": IMAGE}
+
+    def test_a_profile_already_on_this_image_is_left_alone(self) -> None:
+        session = BillingSession()
+        session.setup_doc = saved_profile(IMAGE)
+
+        version_init(session)
+
+        assert session.file.puts == {}
+
+    def test_an_install_before_set_pools_writes_no_profile(self) -> None:
+        session = BillingSession()
+
+        version_init(session)
+
+        assert session.file.puts == {}
+
+
+def saved_profile(image: str) -> dict[str, object]:
+    """``setup.json`` as ``set_pools`` writes it, on ``image``."""
+    return {
+        "image": image,
+        "warehouse": "AGILERL_APP_ARENA_APP_WH",
+        "stage": "app_state.runs",
+        "metrics_table": "app_state.arena_metrics",
+        "external_access_integrations": ["AGILERL_APP_ARENA_APP_HF_EAI"],
+        "pools": {
+            "broker": {
+                "pool": "AGILERL_APP_ARENA_APP_BROKER_POOL",
+                "family": "CPU_X64_L",
+            },
+            "head": {"pool": "AGILERL_APP_ARENA_APP_HEAD_POOL", "family": "CPU_X64_SL"},
+            "gpu": {
+                "GPU_NV_S": {
+                    "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
+                    "max_gpus": 2,
+                    "gpus_per_node": 1,
+                    "gpu_memory_gib": 24,
+                }
+            },
+        },
+    }

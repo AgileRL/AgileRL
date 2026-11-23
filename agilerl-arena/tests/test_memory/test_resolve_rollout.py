@@ -9,16 +9,12 @@ import pytest
 from agilerl.arena.memory.resolve.rollout import (
     MERGED_SYNC_BUCKET_BYTES,
     MULTI_TURN_SPECULATIVE_CONFIG,
-    apply_run_rollout_mode,
-    async_rollout_algorithm,
     checkpoint_quantized,
     default_rollout_batch_size,
     drafts_by_default,
     drafts_with_mtp,
     merged_lora_sync_blockers,
     merged_sync_bucket_bytes,
-    rollout_engines_blocker,
-    run_rollout_engines,
     runs_dual_stream_lora,
 )
 from agilerl.arena.memory.specs import GiB, MiB
@@ -31,6 +27,12 @@ from agilerl.arena.models.algorithms import (
     SFTSpec,
 )
 from agilerl.arena.models.algorithms.base import AlgorithmSpec
+from agilerl.arena.models.manifest_rules import (
+    apply_run_rollout_mode,
+    async_rollout_algorithm,
+    rollout_engines_blocker,
+    run_rollout_engines,
+)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 # quantization_config of openai/gpt-oss-20b on the Hub.
@@ -138,19 +140,25 @@ class TestApplyRunRolloutMode:
 
 class TestDraftsByDefault:
     def test_multi_turn_attention_only_engine_drafts(self) -> None:
-        assert drafts_by_default(True, False, 0.0, False) is True
+        assert drafts_by_default(True, False, 0.0, False, 16) is True
+
+    def test_widest_step_inside_the_graph_ceiling_drafts(self) -> None:
+        assert drafts_by_default(True, False, 0.0, False, 102) is True
+
+    def test_step_past_the_graph_ceiling_does_not_draft(self) -> None:
+        assert drafts_by_default(True, False, 0.0, False, 103) is False
 
     def test_single_turn_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(False, False, 0.0, False) is False
+        assert drafts_by_default(False, False, 0.0, False, 16) is False
 
     def test_hybrid_ssm_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(True, True, 0.0, False) is False
+        assert drafts_by_default(True, True, 0.0, False, 16) is False
 
     def test_min_p_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(True, False, 0.05, False) is False
+        assert drafts_by_default(True, False, 0.05, False, 16) is False
 
     def test_logit_bias_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(True, False, 0.0, True) is False
+        assert drafts_by_default(True, False, 0.0, True, 16) is False
 
 
 class TestRunsDualStreamLora:
@@ -166,33 +174,27 @@ class TestMergedLoraSyncBlockers:
     def test_unquantized_engine_takes_merged_weights(
         self, quantization: str | None
     ) -> None:
-        assert merged_lora_sync_blockers(quantization, False, False, False) == []
+        assert merged_lora_sync_blockers(quantization, False, False) == []
 
     def test_quantized_engine_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_blockers("fp8", False, False, False) == [
+        assert merged_lora_sync_blockers("fp8", False, False) == [
             "vllm_config.quantization is 'fp8'"
         ]
 
     def test_quantized_checkpoint_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_blockers(None, True, False, False) == [
+        assert merged_lora_sync_blockers(None, True, False) == [
             "the checkpoint's config.json ships a quantization config"
         ]
 
-    def test_tower_lora_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_blockers(None, False, True, False) == [
-            "lora_config.tower_target_modules targets the vision tower"
-        ]
-
     def test_mtp_drafting_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_blockers(None, False, False, True) == [
+        assert merged_lora_sync_blockers(None, False, True) == [
             "vllm_engine_args.speculative_config drafts with MTP"
         ]
 
     def test_lists_every_blocker(self) -> None:
-        assert merged_lora_sync_blockers("fp8", True, True, True) == [
+        assert merged_lora_sync_blockers("fp8", True, True) == [
             "vllm_config.quantization is 'fp8'",
             "the checkpoint's config.json ships a quantization config",
-            "lora_config.tower_target_modules targets the vision tower",
             "vllm_engine_args.speculative_config drafts with MTP",
         ]
 

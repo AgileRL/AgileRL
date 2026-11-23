@@ -496,8 +496,6 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
 
          # Train on Arena.
          trainer.train(
-          resource_id="arena-medium",
-          num_nodes=2,
           project="my-project",
           experiment_name="lunar-lander-dqn",
          )
@@ -508,12 +506,10 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
       .. code-block:: bash
 
          arena experiments submit dqn.yaml \
-             --resource-id arena-medium \
-             --num-nodes 2 \
              --project my-project \
              --experiment-name lunar-lander-dqn
 
 .. seealso::
 
-   :ref:`tutorial_arena_end_to_end` for a complete walkthrough of validating, training, and deploying
-   using a custom environment.
+   :ref:`tutorial_arena_grpo_gsm8k` for a complete walkthrough of training and deploying
+   an LLM on Arena.

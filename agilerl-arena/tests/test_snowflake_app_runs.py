@@ -10,7 +10,8 @@ import json
 import re
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,13 +23,16 @@ from snowflake_app.app_code.arena_app import (
     IMAGE,
     cancel,
     endpoint,
+    export_model,
     logs,
     publish,
+    refuse_remote_code,
     status,
     submit,
     unpublish,
 )
 
+from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.snowflake import license as license_mod
 from agilerl.arena.snowflake.license import SnowflakeLicenseError
 from tests.test_snowflake_license import Arena, reply
@@ -39,16 +43,16 @@ STEM = "ARENA_RUN_20261109163457_ABC123"
 RUN_DIR = f"@app_state.runs/{RUN_ID}"
 SETUP = {
     "image": IMAGE,
-    "warehouse": "agilerl_app_wh",
+    "warehouse": "AGILERL_APP_ARENA_APP_WH",
     "stage": "app_state.runs",
     "metrics_table": "app_state.arena_metrics",
-    "external_access_integrations": ["agilerl_app_hf_eai"],
+    "external_access_integrations": ["AGILERL_APP_ARENA_APP_HF_EAI"],
     "pools": {
-        "broker": {"pool": "agilerl_app_broker_pool", "family": "CPU_X64_L"},
-        "head": {"pool": "agilerl_app_head_pool", "family": "CPU_X64_SL"},
+        "broker": {"pool": "AGILERL_APP_ARENA_APP_BROKER_POOL", "family": "CPU_X64_L"},
+        "head": {"pool": "AGILERL_APP_ARENA_APP_HEAD_POOL", "family": "CPU_X64_SL"},
         "gpu": {
             "GPU_NV_S": {
-                "pool": "agilerl_app_gpu_GPU_NV_S",
+                "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
                 "max_gpus": 2,
                 "gpus_per_node": 1,
                 "gpu_memory_gib": 24,
@@ -67,6 +71,60 @@ SFT = yaml.safe_dump(
         "training": {"max_steps": 2},
     }
 )
+MIMO = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
+REWARD = "def reward(completion, **row):\n    return 1.0\n"
+
+
+def grpo_manifest(hub_id: str) -> str:
+    """A GRPO rollout over source rows that trains ``hub_id``."""
+    return yaml.safe_dump(
+        {
+            "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+            "environment": {
+                "env_type": "rollout",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 128,
+            },
+            "training": {"max_steps": 2},
+        }
+    )
+
+
+def engine_args_manifest(hub_id: str, trust_remote_code: bool) -> str:
+    """``grpo_manifest`` with ``vllm_engine_args.trust_remote_code`` set."""
+    document = yaml.safe_load(grpo_manifest(hub_id))
+    document["algorithm"]["vllm_engine_args"] = {"trust_remote_code": trust_remote_code}
+    return yaml.safe_dump(document)
+
+
+def opd_manifest(teacher_id: str) -> TrainingManifest:
+    """An OPD run of Qwen2.5-0.5B scored by ``teacher_id``."""
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {
+                "name": "OPD",
+                "batch_size": 2,
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {"model": {"pretrained_model_name_or_path": teacher_id}},
+            },
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+            },
+            "training": {"max_steps": 100, "rollout_engines_per_agent": 1},
+        }
+    )
+
+
 # An owner's-rights procedure runs in its own schema, the versioned app_code.
 CURRENT = Row(DATABASE_NAME="ARENA_APP", SCHEMA_NAME="APP_CODE")
 Route = tuple[Callable[[str], bool], list[Row]]
@@ -78,6 +136,19 @@ SECRETS = {
 DEPLOYMENT_ID = "QWEN_CHECKPOINT_2-20261116T130000Z"
 DEPLOYMENT_ID_RE = re.compile(r"QWEN_CHECKPOINT_2-\d{8}T\d{6}Z")
 INACTIVE = "The Snowflake entitlement is not active."
+TRIAL_QUERY = re.compile(
+    r"SELECT NOT app_code\.listing_purchased\(\) AND MIN\(started_at\) <= "
+    r"DATEADD\('second', -(\d+), CURRENT_TIMESTAMP\(\)\) AS ENDED FROM app_state\.trial"
+)
+TRIAL_ENDED = "The free trial of AgileRL Arena has ended"
+INSTALL_ROW = Row(
+    REGION="AWS_EU_WEST_2",
+    ACCOUNT="AB12345",
+    ACCOUNT_NAME="ACME",
+    ORGANIZATION_NAME="ACMEORG",
+    APPLICATION_NAME="ARENA_APP",
+    PURCHASED=True,
+)
 
 
 @pytest.fixture
@@ -120,18 +191,55 @@ class Files:
         return io.BytesIO(self.staged[stage_location].encode("utf-8"))
 
 
+@dataclass
+class Install:
+    """When the app was installed and what ``app_code.listing_purchased()`` returns.
+
+    The default is an install not from a listing, which reads as purchased.
+    """
+
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    purchased: bool = True
+
+    def ended(self, statement: str) -> Result | None:
+        """Evaluate the trial query like Snowflake, or ``None`` for any other statement.
+
+        :param statement: SQL to answer.
+        :return: One ``ENDED`` row, or ``None``.
+        """
+        match = TRIAL_QUERY.fullmatch(statement)
+        if match is None:
+            return None
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=int(match.group(1)))
+        return Result([Row(ENDED=not self.purchased and self.started_at <= cutoff)])
+
+
+def listing_trial(age_days: float) -> Install:
+    """An unpurchased listing install made ``age_days`` ago."""
+    started = datetime.now(timezone.utc) - timedelta(days=age_days)
+    return Install(started, purchased=False)
+
+
 class AppSession:
     """Procedure session that records statements and answers from routes."""
 
     def __init__(
-        self, routes: list[Route] | None = None, staged: dict[str, str] | None = None
+        self,
+        routes: list[Route] | None = None,
+        staged: dict[str, str] | None = None,
+        install: Install | None = None,
     ) -> None:
         self.routes = list(routes or [])
         self.statements: list[str] = []
         self.file = Files(staged or {})
+        self.install = install or Install()
 
     def sql(self, statement: str) -> Result:
         self.statements.append(statement)
+        if (ended := self.install.ended(statement)) is not None:
+            return ended
+        if statement.startswith("SELECT CURRENT_REGION() AS REGION, CURRENT_ACCOUNT()"):
+            return Result([INSTALL_ROW])
         for pred, rows in self.routes:
             if pred(statement):
                 return Result(rows)
@@ -143,7 +251,7 @@ class FailingHeadSession(AppSession):
 
     def sql(self, statement: str) -> Result:
         if statement.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_head_pool"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_HEAD_POOL"
         ):
             self.statements.append(statement)
             msg = "head pool is full"
@@ -155,12 +263,12 @@ def exact(statement: str, rows: list[Row]) -> Route:
     return (lambda s: s == statement, rows)
 
 
-def setup_route() -> Route:
+def setup_route(setup: dict | None = None) -> Route:
     return (
         lambda s: s.startswith(
             "SELECT $1 AS DOC FROM @app_state.runs/_arena/setup.json"
         ),
-        [Row(DOC=json.dumps(SETUP))],
+        [Row(DOC=json.dumps(setup or SETUP))],
     )
 
 
@@ -179,21 +287,65 @@ def spec(statement: str) -> dict:
     return yaml.safe_load(statement.split("$$\n", 1)[1].removesuffix("$$"))
 
 
-def submit_session() -> AppSession:
+def submit_session(
+    setup: dict | None = None,
+    region: list[Row] | None = None,
+    install: Install | None = None,
+) -> AppSession:
     return AppSession(
         [
-            setup_route(),
+            setup_route(setup),
+            exact(
+                "SELECT app_code.object_prefix() AS PREFIX",
+                [Row(PREFIX="AGILERL_APP_ARENA_APP_")],
+            ),
+            exact(
+                "SHOW COMPUTE POOL INSTANCE FAMILIES",
+                region or [Row(name="GPU_NV_S", gpu_count=1)],
+            ),
             (
                 lambda s: s.startswith(
-                    "DESCRIBE COMPUTE POOL agilerl_app_gpu_GPU_NV_S"
+                    "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
                 ),
                 [Row(instance_family="GPU_NV_S", max_nodes=2)],
             ),
-        ]
+            (
+                lambda s: s.startswith(
+                    "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48"
+                ),
+                [Row(instance_family="GPU_R6K_G1_48", max_nodes=2)],
+            ),
+        ],
+        install=install,
     )
 
 
+def r6k_setup() -> dict:
+    """``SETUP`` with a GPU_R6K_G1_48 pool recorded at the AWS layout beside GPU_NV_S."""
+    r6k = {
+        "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48",
+        "max_gpus": 4,
+        "gpus_per_node": 2,
+        "gpu_memory_gib": 96,
+    }
+    pools = {**SETUP["pools"], "gpu": {**SETUP["pools"]["gpu"], "GPU_R6K_G1_48": r6k}}
+    return {**SETUP, "pools": pools}
+
+
+def capabilities(priced: list[str] | None) -> httpx.Response:
+    """Arena capabilities with ``priced`` as the priced families, or none listed."""
+    features: dict[str, object] = {"snowflakeTraining": True}
+    if priced is not None:
+        features["snowflakePricedGpuFamilies"] = priced
+    return reply(200, {"ok": True, "data": {"schemaVersion": 1, "features": features}})
+
+
 class TestSubmit:
+    @pytest.fixture(autouse=True)
+    def priced_arena(self, arena: Arena) -> Arena:
+        arena.replies = [capabilities(["GPU_NV_S"])]
+        return arena
+
     def test_starts_the_cli_services_on_the_app_pools_and_secrets(self) -> None:
         # Arrange
         session = submit_session()
@@ -205,26 +357,31 @@ class TestSubmit:
         run_id = text.splitlines()[0].removeprefix("run_id: ")
         broker, head, workers = executes(session)
         assert broker.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_broker_pool\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_BROKER_POOL\n"
         )
         assert head.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_head_pool\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_HEAD_POOL\n"
         )
         assert workers.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_gpu_GPU_NV_S\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
         )
         assert all(
-            "QUERY_WAREHOUSE = agilerl_app_wh" in s for s in (broker, head, workers)
+            "QUERY_WAREHOUSE = AGILERL_APP_ARENA_APP_WH" in s
+            for s in (broker, head, workers)
         )
         assert "EXTERNAL_ACCESS_INTEGRATIONS" not in broker
         assert (
-            "EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_hf_eai, agilerl_app_arena_eai)"
+            "EXTERNAL_ACCESS_INTEGRATIONS = (AGILERL_APP_ARENA_APP_HF_EAI, AGILERL_APP_ARENA_APP_ARENA_EAI)"
             in head
         )
-        assert "EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_hf_eai)\n" in workers
+        assert (
+            "EXTERNAL_ACCESS_INTEGRATIONS = (AGILERL_APP_ARENA_APP_HF_EAI)\n" in workers
+        )
         [container] = spec(head)["spec"]["containers"]
         assert container["image"] == IMAGE
         assert container["env"]["ARENA_SNOWFLAKE_CHANNEL"] == "native_app"
+        assert container["env"]["ARENA_SNOWFLAKE_REGION"] == "AWS_EU_WEST_2"
+        assert container["env"]["ARENA_SNOWFLAKE_PURCHASED"] == "true"
         assert all(
             "ARENA_SNOWFLAKE_CHANNEL" not in item["env"]
             for item in spec(workers)["spec"]["containers"]
@@ -273,6 +430,17 @@ class TestSubmit:
         )
         assert insert < session.statements.index(executes(session)[0])
 
+    def test_resumes_the_billing_task_after_recording_the_run(self) -> None:
+        session = submit_session()
+
+        submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        insert = next(i for i, s in enumerate(session.statements) if "usage_items" in s)
+        resume = session.statements.index(
+            "ALTER TASK app_state.reconcile_usage_task RESUME"
+        )
+        assert insert < resume < session.statements.index(executes(session)[0])
+
     def test_a_failed_service_start_still_leaves_the_run_for_billing(self) -> None:
         # Arrange
         session = FailingHeadSession(submit_session().routes)
@@ -289,29 +457,15 @@ class TestSubmit:
         assert f"@app_state.runs/{run_id}/job.json" in session.file.puts
 
     def test_stages_the_reward_file_beside_the_manifest(self) -> None:
-        manifest = yaml.safe_dump(
-            {
-                "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
-                "environment": {
-                    "env_type": "rollout",
-                    "prompt_template": {"user_0": "{question}"},
-                },
-                "network": {
-                    "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
-                    "max_context_length": 128,
-                },
-                "training": {"max_steps": 2},
-            }
-        )
-        reward = "def reward(completion, **row):\n    return 1.0\n"
+        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B")
         session = submit_session()
 
         text = submit(
-            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", reward, None, None
+            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", REWARD, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
-        assert session.file.puts[f"@app_state.runs/{run_id}/reward.py"] == reward
+        assert session.file.puts[f"@app_state.runs/{run_id}/reward.py"] == REWARD
         job = json.loads(session.file.puts[f"@app_state.runs/{run_id}/job.json"])
         assert job["reward_file"] is True
         assert job["source"]["sql"] == "SELECT * FROM reference('SOURCE_VIEW', 'gsm8k')"
@@ -390,6 +544,305 @@ class TestSubmit:
             submit(session, SFT, 4, "source_table", "prompts", None, None, None, None)
 
         assert executes(session) == []
+
+    def test_refuses_a_named_family_arena_has_no_price_for(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_M"])]
+        session = submit_session()
+
+        # Act
+        with pytest.raises(ValueError, match="no Snowflake price for GPU_NV_S") as exc:
+            submit(
+                session, SFT, 1, "source_table", "prompts", "GPU_NV_S", None, None, None
+            )
+
+        # Assert
+        assert "Priced families: GPU_NV_M." in str(exc.value)
+        assert not any("usage_items" in s for s in session.statements)
+        assert not any("EXECUTE JOB SERVICE" in s for s in session.statements)
+
+    def test_refuses_when_no_app_pool_is_priced(self, priced_arena: Arena) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities([])]
+        session = submit_session()
+
+        # Act
+        with pytest.raises(
+            ValueError, match=r"any of the app's GPU pools \(GPU_NV_S\)"
+        ) as exc:
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        # Assert
+        assert "Priced families: none." in str(exc.value)
+        assert not any("EXECUTE JOB SERVICE" in s for s in session.statements)
+
+    def test_an_arena_that_lists_no_prices_still_starts_the_run(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(None)]
+        session = submit_session()
+
+        # Act
+        text = submit(
+            session, SFT, 1, "source_table", "prompts", None, None, None, None
+        )
+
+        # Assert
+        assert text.startswith("run_id: arena-")
+        assert any("EXECUTE JOB SERVICE" in s for s in session.statements)
+
+    def test_runs_on_an_r6k_pool_where_the_region_has_the_aws_gpu_count(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"])]
+        region = [
+            Row(name="GPU_NV_S", gpu_count=1),
+            Row(name="GPU_R6K_G1_48", gpu_count=2),
+        ]
+        session = submit_session(r6k_setup(), region)
+
+        # Act
+        submit(
+            session,
+            SFT,
+            2,
+            "source_table",
+            "prompts",
+            "GPU_R6K_G1_48",
+            None,
+            None,
+            None,
+        )
+
+        # Assert
+        workers = executes(session)[2]
+        assert workers.startswith(
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48\n"
+        )
+
+    def test_refuses_a_named_family_the_region_has_with_another_gpu_count(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"])]
+        region = [
+            Row(name="GPU_NV_S", gpu_count=1),
+            Row(name="GPU_R6K_G1_48", gpu_count=1),
+        ]
+        session = submit_session(r6k_setup(), region)
+
+        # Act
+        with pytest.raises(ValueError, match="does not have GPU_R6K_G1_48") as raised:
+            submit(
+                session,
+                SFT,
+                2,
+                "source_table",
+                "prompts",
+                "GPU_R6K_G1_48",
+                None,
+                None,
+                None,
+            )
+
+        # Assert
+        assert str(raised.value) == (
+            "This region does not have GPU_R6K_G1_48 with the GPUs per node the app "
+            "sized, so the run would ask for GPUs the nodes lack.\n"
+            "An app_admin lists usable families with gpu_families() and calls "
+            "set_pools with one of them.\n"
+            "Nothing was started."
+        )
+        assert not any("usage_items" in s for s in session.statements)
+        assert executes(session) == []
+
+    def test_refuses_when_no_recorded_family_has_the_sized_gpu_count(self) -> None:
+        session = submit_session(region=[Row(name="GPU_NV_S")])
+
+        with pytest.raises(ValueError, match="does not have GPU_NV_S with the GPUs"):
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        assert executes(session) == []
+
+    def test_reads_the_prices_with_the_partner_key(self, priced_arena: Arena) -> None:
+        # Act
+        submit(
+            submit_session(), SFT, 1, "source_table", "prompts", None, None, None, None
+        )
+
+        # Assert
+        [call] = priced_arena.calls
+        assert call["url"] == "https://arena.test/api/cli/v1/capabilities"
+        assert call["headers"]["Authorization"] == "Bearer arena_org_key-1"
+
+    def test_starts_the_run_during_an_unpurchased_trial(self) -> None:
+        session = submit_session(install=listing_trial(6.9))
+
+        text = submit(
+            session, SFT, 1, "source_table", "prompts", None, None, None, None
+        )
+
+        assert text.startswith("run_id: arena-")
+        assert len(executes(session)) == 3
+
+    def test_refuses_once_an_unpurchased_trial_has_ended(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        session = submit_session(install=listing_trial(6.98))
+
+        # Act
+        with pytest.raises(PermissionError, match=TRIAL_ENDED) as exc:
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        # Assert
+        assert "Purchase the AgileRL Arena listing" in str(exc.value)
+        assert executes(session) == []
+        assert not any("usage_items" in s for s in session.statements)
+        assert not any(s.startswith("ALTER TASK") for s in session.statements)
+        assert session.file.puts == {}
+        assert priced_arena.calls == []
+
+    def test_a_purchased_listing_starts_after_the_trial(self) -> None:
+        session = submit_session(
+            install=Install(
+                datetime.now(timezone.utc) - timedelta(days=30), purchased=True
+            )
+        )
+
+        text = submit(
+            session, SFT, 1, "source_table", "prompts", None, None, None, None
+        )
+
+        assert text.startswith("run_id: arena-")
+        assert len(executes(session)) == 3
+
+    def test_refuses_a_model_that_runs_remote_code_before_any_sql(self) -> None:
+        # Arrange
+        session = submit_session()
+
+        # Act
+        with pytest.raises(
+            ValueError, match="not available in the Snowflake app"
+        ) as exc:
+            submit(
+                session,
+                grpo_manifest(MIMO),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        # Assert
+        assert str(exc.value).startswith(f"{MIMO} is not available")
+        assert str(exc.value).endswith("Nothing was started.")
+        assert session.statements == []
+        assert session.file.puts == {}
+
+    def test_refuses_a_model_outside_the_catalog(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(
+            ValueError, match="acme/custom-model is not in the Arena model catalog"
+        ):
+            submit(
+                session,
+                grpo_manifest("acme/custom-model"),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        assert session.statements == []
+
+    def test_refuses_trust_remote_code_in_the_engine_args_before_any_sql(
+        self,
+    ) -> None:
+        # Arrange
+        session = submit_session()
+        manifest = engine_args_manifest("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", True)
+
+        # Act
+        with pytest.raises(
+            ValueError,
+            match=r"vllm_engine_args\.trust_remote_code is not available",
+        ):
+            submit(
+                session, manifest, 1, "SOURCE_VIEW", "gsm8k", None, REWARD, None, None
+            )
+
+        # Assert
+        assert session.statements == []
+        assert session.file.puts == {}
+
+    def test_engine_args_trust_remote_code_false_still_refuses_mimo(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(ValueError, match=f"{MIMO} is not available"):
+            submit(
+                session,
+                engine_args_manifest(MIMO, False),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        assert session.statements == []
+        assert session.file.puts == {}
+
+
+class TestRefuseRemoteCode:
+    def test_accepts_a_catalog_teacher_without_remote_code(self) -> None:
+        refuse_remote_code(opd_manifest("Qwen/Qwen3-4B"))
+
+    def test_accepts_trust_remote_code_false_on_a_catalog_model(self) -> None:
+        manifest = opd_manifest("Qwen/Qwen3-4B")
+        manifest.algorithm.vllm_engine_args["trust_remote_code"] = False
+
+        refuse_remote_code(manifest)
+
+    def test_refuses_a_teacher_whose_family_runs_remote_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            "snowflake_app.app_code.arena_app.REMOTE_CODE_MODEL_TYPES",
+            frozenset({"qwen3"}),
+        )
+        manifest = opd_manifest("Qwen/Qwen3-4B")
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="Qwen/Qwen3-4B is not available in the Snowflake app"
+        ):
+            refuse_remote_code(manifest)
+
+    def test_leaves_a_classic_rl_manifest_to_submit_validation(self) -> None:
+        manifest = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+                "training": {"max_steps": 2},
+            }
+        )
+
+        refuse_remote_code(manifest)
 
 
 class TestStatus:
@@ -484,9 +937,24 @@ class TestLogs:
             logs(session, RUN_ID, "head", 0)
 
 
+def prefix_route() -> Route:
+    return exact(
+        "SELECT app_code.object_prefix() AS PREFIX",
+        [Row(PREFIX="AGILERL_APP_ARENA_APP_")],
+    )
+
+
+def gpu_pools_route(*pools: Row) -> Route:
+    return exact("SHOW COMPUTE POOLS LIKE 'AGILERL_APP_ARENA_APP_GPU_%'", list(pools))
+
+
+def suspends(session: AppSession) -> list[str]:
+    return [s for s in session.statements if s.startswith("ALTER COMPUTE POOL")]
+
+
 class TestCancel:
     def test_drops_the_three_services_of_the_run(self) -> None:
-        session = AppSession([known()])
+        session = AppSession([known(), prefix_route()])
 
         text = cancel(session, RUN_ID)
 
@@ -497,6 +965,51 @@ class TestCancel:
             f"DROP SERVICE IF EXISTS app_state.{STEM}_WORKERS FORCE",
         ]
 
+    def test_suspends_a_gpu_pool_left_with_nothing_on_it_after_the_drops(
+        self,
+    ) -> None:
+        # Arrange
+        starting = Row(
+            name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
+            state="STARTING",
+            num_services=0,
+            num_jobs=0,
+        )
+        session = AppSession([known(), prefix_route(), gpu_pools_route(starting)])
+
+        # Act
+        text = cancel(session, RUN_ID)
+
+        # Assert
+        assert text == (
+            f"cancelled: {RUN_ID}\nsuspended: AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
+        )
+        assert session.statements[-1] == (
+            "ALTER COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S SUSPEND"
+        )
+
+    def test_leaves_a_gpu_pool_another_run_or_model_still_uses(self) -> None:
+        serving = Row(
+            name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_M",
+            state="ACTIVE",
+            num_services=1,
+            num_jobs=0,
+        )
+        training = Row(
+            name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
+            state="ACTIVE",
+            num_services=0,
+            num_jobs=1,
+        )
+        session = AppSession(
+            [known(), prefix_route(), gpu_pools_route(serving, training)]
+        )
+
+        text = cancel(session, RUN_ID)
+
+        assert text == f"cancelled: {RUN_ID}"
+        assert suspends(session) == []
+
     def test_drops_nothing_for_a_run_the_app_does_not_have(self) -> None:
         session = AppSession()
 
@@ -506,11 +1019,13 @@ class TestCancel:
         assert not any(s.startswith("DROP") for s in session.statements)
 
 
-def publish_session(job_status: str = "DONE") -> AppSession:
+def publish_session(
+    job_status: str = "DONE", install: Install | None = None
+) -> AppSession:
     run = {
-        "compute_pool": "agilerl_app_gpu_GPU_NV_S",
+        "compute_pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
         "image": IMAGE,
-        "warehouse": "agilerl_app_wh",
+        "warehouse": "AGILERL_APP_ARENA_APP_WH",
     }
     listing = [
         Row(name=f"runs/{RUN_ID}/checkpoint_2/merged/model.safetensors", size=2**30),
@@ -542,9 +1057,20 @@ def publish_session(job_status: str = "DONE") -> AppSession:
                 "SHOW ENDPOINTS IN SERVICE ARENA_APP.app_state.qwen_checkpoint_2",
                 [Row(name="inference", ingress_url="abc-app.snowflakecomputing.app")],
             ),
-            exact("SELECT CURRENT_ACCOUNT() AS ACCOUNT", [Row(ACCOUNT="AB12345")]),
+            exact(
+                (
+                    "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+                    "app_code.listing_purchased() AS PURCHASED"
+                ),
+                [Row(ACCOUNT="AB12345", REGION="AWS_EU_WEST_2", PURCHASED=True)],
+            ),
+            (
+                lambda s: s.startswith("MERGE INTO app_state.usage_items "),
+                [Row(**{"number of rows inserted": 1})],
+            ),
         ],
         staged={f"{RUN_DIR}/job.json": json.dumps(run)},
+        install=install,
     )
 
 
@@ -565,17 +1091,17 @@ class TestPublish:
         [request_path] = [p for p in session.file.puts if "/publish-" in p]
         request = json.loads(session.file.puts[request_path])
         assert (request["database"], request["schema"]) == ("ARENA_APP", "app_state")
-        assert request["compute_pool"] == "agilerl_app_gpu_GPU_NV_S"
-        assert request["image_build_compute_pool"] == "agilerl_app_head_pool"
+        assert request["compute_pool"] == "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
+        assert request["image_build_compute_pool"] == "AGILERL_APP_ARENA_APP_HEAD_POOL"
         assert (request["checkpoint"], request["service_name"]) == (
             "checkpoint_2",
             "qwen_checkpoint_2",
         )
         [job] = executes(session)
         assert job.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_gpu_GPU_NV_S\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
         )
-        assert "QUERY_WAREHOUSE = agilerl_app_wh" in job
+        assert "QUERY_WAREHOUSE = AGILERL_APP_ARENA_APP_WH" in job
         assert spec(job)["spec"]["containers"][0]["image"] == IMAGE
         name = job.splitlines()[1].removeprefix("NAME = ")
         assert name.startswith("app_state.ARENA_PUBLISH_")
@@ -608,27 +1134,34 @@ class TestPublish:
         deployment_id = str(body.pop("deploymentId"))
         assert body == {
             "snowflakeAccount": "AB12345",
+            "snowflakeRegion": "AWS_EU_WEST_2",
             "gpuCount": 1,
             "gpuFamily": "GPU_NV_S",
             "channel": "native_app",
             "model": "qwen",
             "version": "checkpoint_2",
+            "purchased": True,
             "runId": RUN_ID,
         }
         assert started_at >= before.replace(microsecond=0)
         assert deployment_id == (
             f"QWEN_CHECKPOINT_2-{started_at.strftime('%Y%m%dT%H%M%SZ')}"
         )
-        recorded, insert = [s for s in session.statements if s.startswith("INSERT")]
+        [recorded] = [s for s in session.statements if s.startswith("INSERT")]
         assert recorded == (
             "INSERT INTO app_state.served_models (service_name, model, version, "
             "run_id, gpu_family, gpu_count) VALUES ('QWEN_CHECKPOINT_2', 'qwen', "
             f"'checkpoint_2', '{RUN_ID}', 'GPU_NV_S', 1)"
         )
+        [insert] = [s for s in session.statements if s.startswith("MERGE")]
         assert insert == (
-            "INSERT INTO app_state.usage_items (kind, usage_id, opened_at, "
-            f"service_name) VALUES ('deployment', '{deployment_id}', "
-            "CURRENT_TIMESTAMP(), 'QWEN_CHECKPOINT_2')"
+            "MERGE INTO app_state.usage_items AS t USING (SELECT "
+            "'QWEN_CHECKPOINT_2' AS service_name) AS s ON t.kind = 'deployment' "
+            "AND t.service_name = s.service_name AND t.closed_at IS NULL AND "
+            "t.settled_at IS NULL WHEN NOT MATCHED THEN INSERT (kind, usage_id, "
+            "opened_at, service_name) VALUES ('deployment', "
+            f"'{deployment_id}', TO_TIMESTAMP_TZ({int(started_at.timestamp())}000, "
+            "3), s.service_name)"
         )
         waits = [
             i
@@ -674,9 +1207,9 @@ class TestPublish:
         insert = next(
             s
             for s in session.statements
-            if s.startswith("INSERT INTO app_state.usage_items")
+            if s.startswith("MERGE INTO app_state.usage_items")
         )
-        deployment_id = re.findall(r"'([^']*)'", insert)[1]
+        deployment_id = re.findall(r"'([^']*)'", insert)[3]
         drop = session.statements.index(
             "DROP SERVICE IF EXISTS app_state.QWEN_CHECKPOINT_2"
         )
@@ -699,7 +1232,7 @@ class TestPublish:
         monkeypatch.setitem(SECRETS, "org_key", "")
         session = publish_session()
 
-        with pytest.raises(ValueError, match="Arena is not configured"):
+        with pytest.raises(ValueError, match="Arena is not connected"):
             publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
 
         assert executes(session) == []
@@ -712,6 +1245,24 @@ class TestPublish:
 
         assert "deployment" not in text
         assert not any(s.startswith("INSERT") for s in session.statements)
+        assert not any(s.startswith("ALTER TASK") for s in session.statements)
+
+    def test_serving_resumes_the_billing_task_after_recording_the_serve(
+        self, arena: Arena
+    ) -> None:
+        session = publish_session("FAILED")
+
+        with pytest.raises(RuntimeError, match="failed"):
+            publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
+
+        recorded = next(
+            i
+            for i, s in enumerate(session.statements)
+            if s.startswith("INSERT INTO app_state.served_models")
+        )
+        assert session.statements[recorded + 1] == (
+            "ALTER TASK app_state.reconcile_usage_task RESUME"
+        )
 
     def test_a_failed_job_raises_with_its_log(self) -> None:
         session = publish_session("FAILED")
@@ -727,6 +1278,27 @@ class TestPublish:
 
         assert executes(session) == []
         assert session.file.puts == {}
+        assert arena.calls == []
+
+    def test_serves_during_an_unpurchased_trial(self, arena: Arena) -> None:
+        session = publish_session(install=listing_trial(1))
+        arena.replies = [deployment_opened()]
+
+        text = publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
+
+        assert "service: qwen_checkpoint_2" in text
+        assert len(arena.calls) == 1
+
+    def test_refuses_once_an_unpurchased_trial_has_ended(self, arena: Arena) -> None:
+        session = publish_session(install=listing_trial(6.98))
+
+        with pytest.raises(PermissionError, match=TRIAL_ENDED):
+            publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
+
+        assert executes(session) == []
+        assert session.file.puts == {}
+        assert not any(s.startswith("INSERT") for s in session.statements)
+        assert not any(s.startswith("ALTER TASK") for s in session.statements)
         assert arena.calls == []
 
 
@@ -854,10 +1426,124 @@ class TestUnpublish:
         assert not any(s.startswith("DROP") for s in session.statements)
 
 
+REFERENCES_QUERY = "SELECT SYSTEM$GET_ALL_REFERENCES('EXPORT_STAGE') AS REFS"
+
+
+def export_session(bound: bool = True, install: Install | None = None) -> AppSession:
+    """A run with merged exports at steps 2 and 4, and ``export_stage`` bound or not."""
+    listing = [
+        Row(name=f"runs/{RUN_ID}/job.json", size=10),
+        Row(name=f"runs/{RUN_ID}/checkpoint_2/merged/model.safetensors", size=2**30),
+        Row(name=f"runs/{RUN_ID}/checkpoint_2/merged/.complete", size=0),
+        Row(name=f"runs/{RUN_ID}/checkpoint_4/merged/model.safetensors", size=2**30),
+        Row(name=f"runs/{RUN_ID}/checkpoint_4/merged/config.json", size=100),
+        Row(name=f"runs/{RUN_ID}/checkpoint_4/merged/.complete", size=0),
+        Row(name=f"runs/{RUN_ID}/checkpoint_6/model.safetensors", size=2**30),
+    ]
+    copied = [
+        Row(file="model.safetensors"),
+        Row(file="config.json"),
+        Row(file=".complete"),
+    ]
+    return AppSession(
+        [
+            exact(REFERENCES_QUERY, [Row(REFS='["ref-1"]' if bound else "[]")]),
+            known(),
+            exact(f"LIST {RUN_DIR}/", listing),
+            (lambda s: s.startswith("COPY FILES INTO "), copied),
+        ],
+        install=install,
+    )
+
+
+def copies(session: AppSession) -> list[str]:
+    return [s for s in session.statements if s.startswith("COPY FILES")]
+
+
+class TestExportModel:
+    def test_copies_the_newest_merged_checkpoint_to_the_bound_stage(self) -> None:
+        session = export_session()
+
+        text = export_model(session, RUN_ID, None)
+
+        assert copies(session) == [
+            (
+                "COPY FILES INTO @reference('EXPORT_STAGE')/"
+                f"{RUN_ID}/checkpoint_4/ FROM {RUN_DIR}/checkpoint_4/merged/"
+            )
+        ]
+        assert text == (
+            f"checkpoint: checkpoint_4\npath: {RUN_ID}/checkpoint_4/\nfiles: 3"
+        )
+
+    def test_copies_the_checkpoint_of_the_given_step(self) -> None:
+        session = export_session()
+
+        text = export_model(session, RUN_ID, 2)
+
+        assert copies(session) == [
+            (
+                "COPY FILES INTO @reference('EXPORT_STAGE')/"
+                f"{RUN_ID}/checkpoint_2/ FROM {RUN_DIR}/checkpoint_2/merged/"
+            )
+        ]
+        assert text.startswith("checkpoint: checkpoint_2\n")
+
+    def test_starts_nothing_and_records_no_usage(self) -> None:
+        session = export_session()
+
+        export_model(session, RUN_ID, None)
+
+        assert executes(session) == []
+        assert not any(
+            "usage_items" in s or s.startswith("ALTER TASK") for s in session.statements
+        )
+
+    def test_exports_after_an_unpurchased_trial_ends(self) -> None:
+        session = export_session(install=listing_trial(age_days=8))
+
+        text = export_model(session, RUN_ID, None)
+
+        assert text.startswith("checkpoint: checkpoint_4\n")
+        assert len(copies(session)) == 1
+
+    def test_refuses_when_no_stage_is_bound(self) -> None:
+        session = export_session(bound=False)
+
+        with pytest.raises(ValueError, match="No stage is bound to export_stage"):
+            export_model(session, RUN_ID, None)
+
+        assert copies(session) == []
+
+    def test_refuses_a_run_the_app_does_not_have(self) -> None:
+        session = AppSession([exact(REFERENCES_QUERY, [Row(REFS='["ref-1"]')])])
+
+        with pytest.raises(ValueError, match=f"This app has no run {RUN_ID}"):
+            export_model(session, RUN_ID, None)
+
+        assert copies(session) == []
+
+    def test_refuses_a_step_without_a_merged_export(self) -> None:
+        session = export_session()
+
+        with pytest.raises(ValueError, match="checkpoint 6 has no complete merged/"):
+            export_model(session, RUN_ID, 6)
+
+        assert copies(session) == []
+
+    def test_refuses_a_malformed_run_id(self) -> None:
+        session = export_session()
+
+        with pytest.raises(ValueError, match="run"):
+            export_model(session, "../other", None)
+
+        assert copies(session) == []
+
+
 class TestRunProcedureStatements:
     def test_no_run_procedure_runs_use(self, arena: Arena) -> None:
         # Arrange
-        arena.replies = [deployment_opened()]
+        arena.replies = [capabilities(["GPU_NV_S"]), deployment_opened()]
         running = Row(name=f"{STEM}_HEAD", status="RUNNING")
         run_session = AppSession(
             [
@@ -865,6 +1551,7 @@ class TestRunProcedureStatements:
                 exact(
                     f"SHOW JOB SERVICES LIKE '{STEM}%' IN SCHEMA app_state", [running]
                 ),
+                prefix_route(),
             ]
         )
         sessions = [

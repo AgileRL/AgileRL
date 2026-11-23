@@ -73,6 +73,11 @@ from agilerl.arena.models.schema import (
     strip_non_form_algorithm_fields,
     training_then,
 )
+from agilerl.arena.models.verdict import (
+    HPO_UNAVAILABLE_MESSAGE,
+    hpo_fields,
+    verdict,
+)
 
 DQN = {
     "algorithm": {"name": "DQN", "lr": 0.001},
@@ -674,10 +679,9 @@ class TestCrossSectionConsistency:
         with pytest.raises(ValidationError, match="apiVersion"):
             TrainingManifest.model_validate({**DQN, "apiVersion": "agilerl.com/v99"})
 
-    @pytest.mark.parametrize("replay_buffer", [None, {"max_size": 64}])
-    def test_async_rollout_requires_the_llm_rollout_buffer(self, replay_buffer) -> None:
+    def test_async_rollout_rejects_the_rl_replay_buffer(self) -> None:
         # The rollout engines queue their groups in the LLM deque; the
-        # RL buffer (or none) has nowhere to put them.
+        # RL buffer has nowhere to put them.
         broken = manifest(
             GRPO,
             environment={
@@ -693,9 +697,33 @@ class TestCrossSectionConsistency:
                 "rollout_engines_per_agent": 1,
             },
         )
-        broken["replay_buffer"] = replay_buffer
+        broken["replay_buffer"] = {"max_size": 64}
         with pytest.raises(ValidationError, match="LLMRolloutBufferSpec"):
             TrainingManifest.model_validate(broken)
+
+    def test_async_rollout_defaults_a_missing_buffer_to_the_llm_rollout_buffer(
+        self,
+    ) -> None:
+        payload = manifest(
+            GRPO,
+            environment={
+                "env_type": "rollout",
+                "factory": "gem:make",
+                "entrypoint": "game:Sudoku-v0",
+                "dataset": None,
+                "reward_file_path": None,
+                "prompt_template": None,
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+        )
+
+        validated = TrainingManifest.model_validate(payload)
+
+        assert validated.replay_buffer == LLMRolloutBufferSpec()
+        assert validated.to_payload()["replay_buffer"]["kind"] == "llm"
 
     def test_async_rollout_accepts_the_llm_rollout_buffer(self) -> None:
         payload = manifest(
@@ -1090,20 +1118,6 @@ class TestStripMultimodalTowersResolution:
         )
 
         assert resolved_strip(doc) is True
-
-    def test_tower_lora_keeps_the_towers(self) -> None:
-        doc = env_rollout(
-            {"modality": "text"},
-            model="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-            network={
-                "lora_config": {
-                    "target_modules": ["q_proj"],
-                    "tower_target_modules": ["q_proj"],
-                }
-            },
-        )
-
-        assert resolved_strip(doc) is False
 
     def test_image_fields_without_modality_keep_the_towers(self) -> None:
         doc = env_rollout({"screenshot_field": "screenshot"})
@@ -2893,6 +2907,194 @@ class TestExpertLoraReferenceAdapter:
         assert validated.algorithm.use_separate_reference_adapter is True
 
 
+class TestLoraConfigInBothSections:
+    def test_same_moe_lora_in_both_sections_validates(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": {"lora_r": 8}},
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert
+        expected = sorted(SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].parameters)
+        assert validated.algorithm.lora_config.target_parameters == expected
+
+    def test_different_moe_targets_in_the_two_sections_are_rejected(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": {"lora_r": 8}},
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {"lora_r": 8, "target_parameters": []},
+            },
+        )
+
+        with pytest.raises(
+            ValidationError, match=r"algorithm\.lora_config=.* disagrees"
+        ):
+            TrainingManifest.model_validate(doc)
+
+
+class TestAlgorithmOnlyLoraCatalog:
+    @pytest.mark.parametrize(
+        ("hub_id", "lora", "match"),
+        [
+            (
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                {"lora_r": 256},
+                r"LoRA rank 256 .*Qwen2.5-0.5B-Instruct \(128\)",
+            ),
+            (
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                {"target_modules": ["q_projj"]},
+                r"Unknown LoRA target_modules \['q_projj'\]",
+            ),
+            (
+                "Qwen/Qwen3.5-2B",
+                {"target_modules": ["q_proj", "qkv"]},
+                r"\['qkv'\] are tower modules",
+            ),
+            (
+                "openai/gpt-oss-20b",
+                {"target_parameters": ["not.a.path"]},
+                r"Unknown LoRA target_parameters \['not.a.path'\]",
+            ),
+        ],
+    )
+    def test_rejects_a_block_the_network_catalog_would_reject(
+        self, hub_id: str, lora: dict[str, object], match: str
+    ) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": lora},
+            network={"pretrained_model_name_or_path": hub_id},
+        )
+
+        with pytest.raises(ValidationError, match=match):
+            TrainingManifest.model_validate(doc)
+
+
+class TestToPayloadModelFields:
+    def test_model_fields_are_only_in_the_network_section(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 2048,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        # Act
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        # Assert
+        for field in ("pretrained_model_name_or_path", "max_model_len", "lora_config"):
+            assert field not in payload["algorithm"]
+        assert payload["network"]["pretrained_model_name_or_path"] == (
+            "Qwen/Qwen3.5-0.8B"
+        )
+        assert payload["network"]["max_context_length"] == 2048
+        assert payload["network"]["lora_config"]["lora_r"] == 8
+
+    def test_algorithm_only_lora_moves_to_the_network(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": {"lora_r": 8}},
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 2048,
+            },
+        )
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert "lora_config" not in payload["algorithm"]
+        assert payload["network"]["lora_config"]["lora_r"] == 8
+
+    @pytest.mark.parametrize(
+        ("algorithm", "network"),
+        [
+            ({}, {}),
+            ({"lora_config": None}, {}),
+            ({}, {"lora_config": None}),
+            ({"lora_config": None}, {"lora_config": None}),
+        ],
+        ids=["absent", "algorithm-null", "network-null", "both-null"],
+    )
+    def test_an_unset_or_null_lora_trains_the_catalog_default(
+        self, algorithm: dict[str, object], network: dict[str, object]
+    ) -> None:
+        # Arrange
+        hub_id = "openai/gpt-oss-20b"
+        doc = manifest(
+            GRPO,
+            algorithm=algorithm,
+            network={
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 2048,
+                **network,
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+        payload = validated.to_payload()
+
+        # Assert
+        expected = sorted(SUPPORTED_MODEL_INFO[hub_id].parameters)
+        assert validated.algorithm.lora_config.lora_r == 16
+        assert validated.algorithm.lora_config.target_parameters == expected
+        assert payload["network"]["lora_config"]["target_parameters"] == expected
+        assert "lora_config" not in payload["algorithm"]
+
+    def test_a_network_lora_wins_over_an_algorithm_null(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": None},
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 2048,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.lora_config.lora_r == 8
+        assert validated.to_payload()["network"]["lora_config"]["lora_r"] == 8
+
+    def test_payload_revalidates_to_the_same_algorithm(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "max_context_length": 2048,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+        validated = TrainingManifest.model_validate(doc)
+
+        # Act
+        revalidated = TrainingManifest.model_validate(validated.to_payload())
+
+        # Assert
+        assert revalidated.algorithm.lora_config == validated.algorithm.lora_config
+        assert revalidated.algorithm.max_model_len == 2048
+        assert revalidated.algorithm.pretrained_model_name_or_path == (
+            "openai/gpt-oss-20b"
+        )
+
+
 class TestTrainingSpecWeightSyncBackend:
     def test_the_removed_key_is_rejected(self) -> None:
         broken = manifest(GRPO, training={"weight_sync_backend": "nccl"})
@@ -3500,3 +3702,84 @@ class TestAlgorithmHpSchemaBounds:
         validated = TrainingManifest.model_validate(GRPO)
 
         assert validated.algorithm.max_output_tokens is None
+
+
+HPO_MUTATION = {"probabilities": {"no_mut": 0.5, "rl_hp_mut": 0.5}}
+NO_OP_PROBABILITIES = {
+    "no_mut": 1.0,
+    "arch_mut": 0.0,
+    "new_layer": 0.0,
+    "params_mut": 0.0,
+    "act_mut": 0.0,
+    "rl_hp_mut": 0.0,
+}
+
+
+class TestHpoFields:
+    def test_hpo_flag_and_mutation_are_both_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"hpo": True}, mutation=HPO_MUTATION)
+        )
+
+        assert hpo_fields(validated) == ["training.hpo", "mutation"]
+
+    def test_hpo_flag_alone_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"hpo": True})
+        )
+
+        assert hpo_fields(validated) == ["training.hpo"]
+
+    def test_mutating_section_alone_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, mutation=HPO_MUTATION)
+        )
+
+        assert hpo_fields(validated) == ["mutation"]
+
+    def test_rl_hp_selection_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(
+                DQN,
+                mutation={
+                    "probabilities": NO_OP_PROBABILITIES,
+                    "rl_hp_selection": {"lr": {"min": 1e-4, "max": 1e-2}},
+                },
+            )
+        )
+
+        assert hpo_fields(validated) == ["mutation"]
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [None, {}, {"probabilities": NO_OP_PROBABILITIES}],
+        ids=["absent", "empty", "no-op"],
+    )
+    def test_no_hpo_reports_nothing(self, mutation: dict | None) -> None:
+        document = manifest(DQN, training={"hpo": False})
+        if mutation is not None:
+            document["mutation"] = mutation
+
+        validated = TrainingManifest.model_validate(document)
+
+        assert hpo_fields(validated) == []
+
+
+class TestVerdictHpo:
+    def test_hpo_manifest_is_invalid(self) -> None:
+        result = verdict(manifest(DQN, training={"hpo": True}, mutation=HPO_MUTATION))
+
+        assert result["ok"] is False
+        assert [error["path"] for error in result["errors"]] == [
+            "training.hpo",
+            "mutation",
+        ]
+        assert {error["message"] for error in result["errors"]} == {
+            HPO_UNAVAILABLE_MESSAGE
+        }
+
+    def test_manifest_without_hpo_is_valid(self) -> None:
+        result = verdict(DQN)
+
+        assert result["ok"] is True
+        assert "errors" not in result

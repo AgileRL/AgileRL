@@ -88,7 +88,7 @@ On Arena
 --------
 
 Arena launches the ranks for you; there is no ``torchrun``. Size the run in the
-manifest and pick a multi-GPU resource from ``arena resources list``:
+manifest and pick a GPU type and GPUs per node from ``arena resources list``:
 
 .. code-block:: yaml
 
@@ -105,8 +105,7 @@ manifest and pick a multi-GPU resource from ``arena resources list``:
 .. code-block:: bash
 
     arena experiments submit grpo.yaml \
-        --resource-id arena-a100-40gb-4gpu \
-        --num-nodes 2 \
+        --num-gpus 8 --gpu-type h100-80 \
         --project my-project
 
 See :ref:`arena_training` for authentication and job management.

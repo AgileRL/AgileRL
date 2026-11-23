@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Arena capability check and Snowflake GPU-hour usage posts."""
+"""Arena capability check, Snowflake GPU-hour usage posts, and Native App org key claims."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from agilerl.arena.auth import EXTERNAL_USER_ID_HEADER
 from agilerl.arena.client_version import (
     CLIENT_VERSION_HEADER,
     SNOWFLAKE_UPGRADE_COMMAND,
+    is_upgrade_required,
     print_update_notice,
     upgrade_required_message,
 )
@@ -26,6 +27,8 @@ from agilerl.arena.models import __version__
 CAPABILITIES_PATH = "/api/cli/v1/capabilities"
 RUNS_PATH = "/api/cli/v1/snowflake/runs"
 DEPLOYMENTS_PATH = "/api/cli/v1/snowflake/deployments"
+CLAIMS_PATH = "/api/cli/v1/snowflake/claims"
+APP_KEY_ROTATE_PATH = "/api/cli/v1/snowflake/app-keys/rotate"
 USAGE_PATHS = {
     "run": f"{RUNS_PATH}/{{usage_id}}/usage",
     "deployment": f"{DEPLOYMENTS_PATH}/{{usage_id}}/usage",
@@ -36,10 +39,16 @@ USAGE_TIMEOUT_S = 30.0
 RETRY_FIRST_S = 2.0
 RETRY_MAX_S = 60.0
 RETRY_BUDGET_S = 300.0
+# An admin waits on each claim call, so a rate limit is shown rather than waited out.
+CLAIM_RETRY_BUDGET_S = 10.0
 DEFAULT_BASE_URL = "https://arena.agilerl.com"
 # Set only in the head spec of a Native App run; Arena bills such runs through Snowflake.
 CHANNEL_ENV = "ARENA_SNOWFLAKE_CHANNEL"
 NATIVE_APP_CHANNEL = "native_app"
+# Set with CHANNEL_ENV; Arena binds Native App keys to <region>.<locator>.
+REGION_ENV = "ARENA_SNOWFLAKE_REGION"
+# "true" or "false": the app's listing_purchased(), so Arena sees a purchase before its daily sync.
+PURCHASED_ENV = "ARENA_SNOWFLAKE_PURCHASED"
 MISSING_CREDENTIALS = (
     "Snowflake training needs a signed-in account. "
     "Run arena login, or set ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID."
@@ -49,6 +58,10 @@ SNOWFLAKE_DENIED = (
     "Ask AgileRL to enable Snowflake training for your organisation."
 )
 AUTH_REJECTED = "Arena rejected the org key or external user id."
+TRIAL_ENDED = (
+    "The free trial of AgileRL Arena has ended. Purchase the AgileRL Arena "
+    "listing in Snowflake Marketplace to train and serve again."
+)
 OPEN_FAILED = "Could not record the Snowflake run with Arena."
 HEARTBEAT_FAILED = "Could not renew the Snowflake run with Arena."
 RENEWAL_REFUSED = "Arena will not renew this Snowflake run."
@@ -59,6 +72,10 @@ DEPLOYMENT_HEARTBEAT_FAILED = "Could not renew the Snowflake deployment with Are
 DEPLOYMENT_CLOSE_FAILED = (
     "Could not record the end of the Snowflake deployment with Arena."
 )
+CLAIM_START_FAILED = "Could not start connecting this Snowflake account to Arena."
+CLAIM_PROVE_FAILED = "Could not prove this Snowflake install to Arena."
+CLAIM_KEY_FAILED = "Could not collect the Arena org key."
+ROTATE_FAILED = "Could not rotate the Arena org key."
 UPDATE_TRAINER_IMAGE = "then run arena snowflake setup to update the trainer image."
 
 logger = logging.getLogger(__name__)
@@ -66,6 +83,14 @@ logger = logging.getLogger(__name__)
 
 class SnowflakeLicenseError(Exception):
     """Snowflake training cannot start, or the usage post did not land."""
+
+
+class SnowflakeUpgradeRequiredError(SnowflakeLicenseError):
+    """Arena refuses this agilerl-arena release as below its minimum."""
+
+
+class AuthRejectedError(SnowflakeLicenseError):
+    """Arena answered 401 or 403 to the org key or external user id."""
 
 
 class RunRenewalRefusedError(SnowflakeLicenseError):
@@ -77,7 +102,7 @@ class UnknownUsageError(SnowflakeLicenseError):
 
 
 class TrainingDisabledError(SnowflakeLicenseError):
-    """Arena refused a deployment heartbeat because Snowflake training is off."""
+    """Arena refused a deployment heartbeat: Snowflake training is off, or the trial ended."""
 
 
 class DeploymentClosedError(SnowflakeLicenseError):
@@ -86,6 +111,18 @@ class DeploymentClosedError(SnowflakeLicenseError):
 
 class DeploymentRefusedError(SnowflakeLicenseError):
     """Arena answered 400, 403, 404, 409, or 422 to a deployment open."""
+
+
+class ClaimWaitingError(SnowflakeLicenseError):
+    """Arena answered 409 or 429: not visible yet, not linked yet, or too many proven claims."""
+
+
+class ClaimLinkedError(ClaimWaitingError):
+    """Arena answered 409 ``claim_linked`` to a prove: the key can be collected now."""
+
+
+class ClaimClosedError(SnowflakeLicenseError):
+    """Arena answered 403, 404, or 410: the claim was refused, is unknown, expired, or its key was collected."""
 
 
 @dataclass(frozen=True)
@@ -102,22 +139,26 @@ class SnowflakeDeployment:
 
     :param deployment_id: Letters, digits, ``.``, ``_``, ``:`` and ``-``.
     :param snowflake_account: Snowflake account locator.
+    :param snowflake_region: Snowflake region, like ``AWS_EU_WEST_2``.
     :param gpu_count: GPUs the service requests.
     :param gpu_family: Snowflake instance family of the serving pool.
     :param started_at: When the service started, timezone-aware.
     :param model: Model Registry model name.
     :param version: Model Registry version name.
     :param run_id: Run the model was published from, or ``None``.
+    :param purchased: The app's ``listing_purchased()``.
     """
 
     deployment_id: str
     snowflake_account: str
+    snowflake_region: str
     gpu_count: int
     gpu_family: str
     started_at: datetime
     model: str
     version: str
     run_id: str | None
+    purchased: bool
 
 
 def arena_api_hostname(base_url: str) -> str:
@@ -157,6 +198,21 @@ def snowflake_training_enabled(caps: Mapping[str, object]) -> bool:
     return features.get("snowflakeTraining") is True
 
 
+def snowflake_priced_families(caps: Mapping[str, object]) -> frozenset[str] | None:
+    """Snowflake GPU families Arena has a price for, from ``features.snowflakePricedGpuFamilies``.
+
+    :param caps: The ``data`` object from :func:`fetch_capabilities`.
+    :return: Upper-case family names, or ``None`` when Arena does not list them.
+    """
+    features = caps.get("features")
+    if not isinstance(features, dict):
+        return None
+    families = features.get("snowflakePricedGpuFamilies")
+    if not isinstance(families, list):
+        return None
+    return frozenset(str(family).upper() for family in families)
+
+
 def fetch_capabilities(base_url: str, headers: Mapping[str, str]) -> dict[str, object]:
     """GET the capabilities document from the user's machine.
 
@@ -173,7 +229,10 @@ def fetch_capabilities(base_url: str, headers: Mapping[str, str]) -> dict[str, o
     response = _get_capabilities(base_url, headers)
     print_update_notice(response, SNOWFLAKE_UPGRADE_COMMAND)
     if response.status_code == httpx.codes.UPGRADE_REQUIRED:
-        raise SnowflakeLicenseError(upgrade_required_message(response.text))
+        message = upgrade_required_message(response.text)
+        if is_upgrade_required(response.status_code, response.text):
+            raise SnowflakeUpgradeRequiredError(message)
+        raise SnowflakeLicenseError(message)
     return _read_capabilities(response, base_url)
 
 
@@ -191,7 +250,7 @@ def _get_capabilities(base_url: str, headers: Mapping[str, str]) -> httpx.Respon
 def _read_capabilities(response: httpx.Response, base_url: str) -> dict[str, object]:
     origin = base_url.rstrip("/")
     if response.status_code in {401, 403}:
-        raise SnowflakeLicenseError(AUTH_REJECTED)
+        raise AuthRejectedError(AUTH_REJECTED)
     if not response.is_success:
         msg = f"Arena at {origin} returned HTTP {response.status_code}."
         raise SnowflakeLicenseError(msg)
@@ -239,7 +298,8 @@ def open_head_run(
 
     :param job: ``job.json`` fields.
     :param env: Process environment, including the Snowflake secret mounts.
-        :data:`CHANNEL_ENV` adds ``channel`` to the request.
+        :data:`CHANNEL_ENV` adds ``channel``, :data:`REGION_ENV` adds
+        ``snowflakeRegion``, and :data:`PURCHASED_ENV` adds ``purchased``.
     :param started_at: Earliest GPU worker container start.
     :param sleep: Called between retries.
     :return: The signed run token.
@@ -256,9 +316,13 @@ def open_head_run(
         "gpuFamily": gpu_family,
         "startedAt": started_at.isoformat(),
     }
-    channel = env.get(CHANNEL_ENV, "").strip()
-    if channel:
-        payload["channel"] = channel
+    for name, field in ((CHANNEL_ENV, "channel"), (REGION_ENV, "snowflakeRegion")):
+        value = env.get(name, "").strip()
+        if value:
+            payload[field] = value
+    purchased = env.get(PURCHASED_ENV, "").strip()
+    if purchased in {"true", "false"}:
+        payload["purchased"] = purchased == "true"
     response = _send_with_retries(
         "POST",
         base_url,
@@ -297,6 +361,9 @@ def heartbeat_snowflake_run(
         sleep,
         HEARTBEAT_FAILED,
     )
+    if snowflake_trial_ended(response):
+        msg = f"{RENEWAL_REFUSED} {TRIAL_ENDED}"
+        raise RunRenewalRefusedError(msg)
     if response.status_code == 409 or snowflake_training_denied(response):
         msg = f"{RENEWAL_REFUSED} Arena answered {response.status_code}."
         raise RunRenewalRefusedError(msg)
@@ -420,12 +487,14 @@ def open_snowflake_deployment(
     payload: dict[str, object] = {
         "deploymentId": deployment.deployment_id,
         "snowflakeAccount": deployment.snowflake_account,
+        "snowflakeRegion": deployment.snowflake_region,
         "gpuCount": deployment.gpu_count,
         "gpuFamily": deployment.gpu_family,
         "startedAt": deployment.started_at.astimezone(timezone.utc).isoformat(),
         "channel": NATIVE_APP_CHANNEL,
         "model": deployment.model,
         "version": deployment.version,
+        "purchased": deployment.purchased,
     }
     if deployment.run_id is not None:
         payload["runId"] = deployment.run_id
@@ -440,6 +509,8 @@ def open_snowflake_deployment(
     )
     if snowflake_training_denied(response):
         raise DeploymentRefusedError(SNOWFLAKE_DENIED)
+    if snowflake_trial_ended(response):
+        raise DeploymentRefusedError(TRIAL_ENDED)
     if response.status_code == httpx.codes.FORBIDDEN:
         raise DeploymentRefusedError(AUTH_REJECTED)
     if response.status_code in {400, 404, 409, 422}:
@@ -485,6 +556,8 @@ def heartbeat_snowflake_deployment(
     )
     if snowflake_training_denied(response):
         raise TrainingDisabledError(SNOWFLAKE_DENIED)
+    if snowflake_trial_ended(response):
+        raise TrainingDisabledError(TRIAL_ENDED)
     if response.status_code == httpx.codes.CONFLICT:
         msg = f"Arena has closed deployment {deployment_id}."
         raise DeploymentClosedError(msg)
@@ -536,6 +609,251 @@ def close_snowflake_deployment(
         raise SnowflakeLicenseError(_answered(DEPLOYMENT_CLOSE_FAILED, response))
 
 
+@dataclass(frozen=True)
+class ClaimAccount:
+    """What a Native App install tells Arena about itself: in a claim, and on run opens.
+
+    :param region: ``CURRENT_REGION()``, like ``AWS_EU_WEST_2``.
+    :param account: ``CURRENT_ACCOUNT()``, the account locator.
+    :param account_name: ``CURRENT_ACCOUNT_NAME()``.
+    :param organization_name: ``CURRENT_ORGANIZATION_NAME()``.
+    :param application_name: ``CURRENT_DATABASE()``, the install's name.
+    :param purchased: The app's secure ``listing_purchased()``.
+    """
+
+    region: str
+    account: str
+    account_name: str
+    organization_name: str
+    application_name: str
+    purchased: bool
+
+
+@dataclass(frozen=True)
+class SnowflakeClaim:
+    """A claim Arena started. Prove, link, and key collection all end at ``expires_at``."""
+
+    claim_id: str
+    claim_secret: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class AppKey:
+    """An org key Arena issued to the app.
+
+    :param org_key: The key.
+    :param external_user_id: External user id the key acts for.
+    :param organization_name: Arena organisation, or ``None`` when Arena does not say.
+    :param trial_ends_at: End of the Arena trial, or ``None`` once purchased.
+    """
+
+    org_key: str
+    external_user_id: str
+    organization_name: str | None
+    trial_ends_at: str | None
+
+
+def start_snowflake_claim(
+    account: ClaimAccount, base_url: str, sleep: Callable[[float], None]
+) -> SnowflakeClaim:
+    """POST a new claim; Arena writes its code to the package's ``claims.challenges``.
+
+    :param account: The install's identity.
+    :param base_url: Arena origin.
+    :param sleep: Called between retries.
+    :return: The claim.
+    :raises ClaimWaitingError: Arena cannot see the install yet; nothing was written.
+    :raises SnowflakeLicenseError: Arena refused the claim (the trial ended, or
+        the install lost access), or the POST did not land.
+    """
+    response = _send_with_retries(
+        "POST",
+        base_url,
+        {},
+        CLAIMS_PATH,
+        {
+            "snowflakeRegion": account.region,
+            "snowflakeAccount": account.account,
+            "accountName": account.account_name,
+            "organizationName": account.organization_name,
+            "applicationName": account.application_name,
+            "purchased": account.purchased,
+            "appVersion": __version__,
+        },
+        sleep,
+        CLAIM_START_FAILED,
+        CLAIM_RETRY_BUDGET_S,
+    )
+    if response.status_code == httpx.codes.CONFLICT:
+        raise ClaimWaitingError(_answered(CLAIM_START_FAILED, response))
+    if not response.is_success:
+        raise SnowflakeLicenseError(_answered(CLAIM_START_FAILED, response))
+    data = _data(response, CLAIM_START_FAILED)
+    claim_id, claim_secret, expires_at = (
+        _text_field(data, name, CLAIM_START_FAILED)
+        for name in ("claimId", "claimSecret", "expiresAt")
+    )
+    try:
+        expires = datetime.fromisoformat(expires_at)
+    except ValueError as exc:
+        msg = f"{CLAIM_START_FAILED} The response has no RFC 3339 expiresAt."
+        raise SnowflakeLicenseError(msg) from exc
+    return SnowflakeClaim(claim_id, claim_secret, expires)
+
+
+def prove_snowflake_claim(
+    claim_id: str,
+    claim_secret: str,
+    code: str,
+    base_url: str,
+    sleep: Callable[[float], None],
+) -> str:
+    """POST the code the app read from ``claims.challenges``.
+
+    :param claim_id: Claim id.
+    :param claim_secret: Claim secret from :func:`start_snowflake_claim`.
+    :param code: The claim's code.
+    :param base_url: Arena origin.
+    :param sleep: Called between retries.
+    :return: The signup link for the admin.
+    :raises ClaimLinkedError: The claim is already linked; collect its key.
+    :raises ClaimWaitingError: Arena cannot see the install yet, or the account
+        already holds three proven claims.
+    :raises ClaimClosedError: Arena refused the proof or the claim expired.
+    :raises SnowflakeLicenseError: The POST did not land.
+    """
+    data = _claim_call(
+        claim_id,
+        "prove",
+        {"claimSecret": claim_secret, "code": code},
+        base_url,
+        sleep,
+        CLAIM_PROVE_FAILED,
+    )
+    return _text_field(data, "signupUrl", CLAIM_PROVE_FAILED)
+
+
+def collect_snowflake_claim_key(
+    claim_id: str, claim_secret: str, base_url: str, sleep: Callable[[float], None]
+) -> AppKey:
+    """POST for the org key of a linked claim. Arena issues it once.
+
+    :param claim_id: Claim id.
+    :param claim_secret: Claim secret from :func:`start_snowflake_claim`.
+    :param base_url: Arena origin.
+    :param sleep: Called between retries.
+    :return: The key.
+    :raises ClaimWaitingError: Nobody has linked the claim yet.
+    :raises ClaimClosedError: Arena refused the claim, it expired, or its key
+        was already collected.
+    :raises SnowflakeLicenseError: The POST did not land.
+    """
+    data = _claim_call(
+        claim_id,
+        "key",
+        {"claimSecret": claim_secret},
+        base_url,
+        sleep,
+        CLAIM_KEY_FAILED,
+    )
+    return _app_key(data, CLAIM_KEY_FAILED)
+
+
+def rotate_snowflake_app_key(
+    base_url: str, headers: Mapping[str, str], sleep: Callable[[float], None]
+) -> AppKey:
+    """POST for a new app key. Arena retires the old one 5 minutes after the new one is first used.
+
+    :param base_url: Arena origin.
+    :param headers: Partner headers of the current key.
+    :param sleep: Called between retries.
+    :return: The new key.
+    :raises AuthRejectedError: Arena does not accept the current key for rotation.
+    :raises SnowflakeLicenseError: The POST did not land.
+    """
+    response = _send_with_retries(
+        "POST",
+        base_url,
+        headers,
+        APP_KEY_ROTATE_PATH,
+        {},
+        sleep,
+        ROTATE_FAILED,
+        CLAIM_RETRY_BUDGET_S,
+    )
+    _raise_for_rejection(response)
+    if not response.is_success:
+        raise SnowflakeLicenseError(_answered(ROTATE_FAILED, response))
+    return _app_key(_data(response, ROTATE_FAILED), ROTATE_FAILED)
+
+
+def _claim_call(
+    claim_id: str,
+    step: str,
+    payload: dict[str, object],
+    base_url: str,
+    sleep: Callable[[float], None],
+    failure: str,
+) -> dict[str, object]:
+    response = _send_with_retries(
+        "POST",
+        base_url,
+        {},
+        f"{CLAIMS_PATH}/{quote(claim_id, safe='')}/{step}",
+        payload,
+        sleep,
+        failure,
+        CLAIM_RETRY_BUDGET_S,
+        final_errors=frozenset({"too_many_claims"}),
+    )
+    if response.status_code in {409, 429}:
+        # 429 here is too_many_claims: the account's other proven claims must
+        # be linked or expire first, so this claim waits.
+        if _error_code(response) == "claim_linked":
+            raise ClaimLinkedError(_answered(failure, response))
+        raise ClaimWaitingError(_answered(failure, response))
+    if response.status_code in {403, 404, 410}:
+        raise ClaimClosedError(_answered(failure, response))
+    if not response.is_success:
+        raise SnowflakeLicenseError(_answered(failure, response))
+    return _data(response, failure)
+
+
+def _app_key(data: dict[str, object], failure: str) -> AppKey:
+    org_key = _text_field(data, "orgKey", failure)
+    external_user_id = _text_field(data, "externalUserId", failure)
+    organization = data.get("organizationName")
+    trial_ends = data.get("trialEndsAt")
+    return AppKey(
+        org_key,
+        external_user_id,
+        organization if isinstance(organization, str) else None,
+        trial_ends if isinstance(trial_ends, str) else None,
+    )
+
+
+def _data(response: httpx.Response, failure: str) -> dict[str, object]:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        msg = f"{failure} The response is not JSON."
+        raise SnowflakeLicenseError(msg) from exc
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        msg = f"{failure} The response has no data."
+        raise SnowflakeLicenseError(msg)
+    return data
+
+
+def _text_field(data: dict[str, object], name: str, failure: str) -> str:
+    value = data.get(name)
+    if not isinstance(value, str) or value == "":
+        msg = f"{failure} The response has no {name}."
+        raise SnowflakeLicenseError(msg)
+    return value
+
+
 def snowflake_training_denied(response: httpx.Response) -> bool:
     """Whether a response is Arena's 403 for an org without Snowflake training.
 
@@ -545,13 +863,18 @@ def snowflake_training_denied(response: httpx.Response) -> bool:
     :param response: Arena response.
     :return: True for the flag-off 403.
     """
-    if response.status_code != 403:
-        return False
-    try:
-        body = response.json()
-    except ValueError:
-        return False
-    return isinstance(body, dict) and body.get("error") == "forbidden"
+    return response.status_code == 403 and _error_code(response) == "forbidden"
+
+
+def snowflake_trial_ended(response: httpx.Response) -> bool:
+    """Whether a response is Arena's 403 for an account whose trial ended unpurchased.
+
+    :param response: Arena response.
+    :return: True for 403 ``snowflake_trial_ended``.
+    """
+    return (
+        response.status_code == 403 and _error_code(response) == "snowflake_trial_ended"
+    )
 
 
 def retry_after_seconds(response: httpx.Response) -> float | None:
@@ -584,6 +907,7 @@ def _send_with_retries(
     failure: str,
     retry_budget_s: float = RETRY_BUDGET_S,
     timeout_s: float = USAGE_TIMEOUT_S,
+    final_errors: frozenset[str] = frozenset(),
 ) -> httpx.Response:
     waited = 0.0
     backoff = RETRY_FIRST_S
@@ -597,6 +921,8 @@ def _send_with_retries(
         else:
             status = response.status_code
             if status != 429 and status < 500:
+                return response
+            if _error_code(response) in final_errors:
                 return response
             retry_after = retry_after_seconds(response)
             # A short Retry-After must not undercut the backoff, or a rate-limited
@@ -623,8 +949,19 @@ def _raise_for_outdated_image(response: httpx.Response) -> None:
 def _raise_for_rejection(response: httpx.Response) -> None:
     if snowflake_training_denied(response):
         raise SnowflakeLicenseError(SNOWFLAKE_DENIED)
+    if snowflake_trial_ended(response):
+        raise SnowflakeLicenseError(TRIAL_ENDED)
     if response.status_code in {401, 403}:
-        raise SnowflakeLicenseError(AUTH_REJECTED)
+        raise AuthRejectedError(AUTH_REJECTED)
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    code = body.get("error") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
 
 
 def _answered(failure: str, response: httpx.Response) -> str:
@@ -641,17 +978,7 @@ def _answered(failure: str, response: httpx.Response) -> str:
 def _run_token(response: httpx.Response, failure: str) -> str:
     if not response.is_success:
         raise SnowflakeLicenseError(_answered(failure, response))
-    try:
-        body = response.json()
-    except ValueError as exc:
-        msg = f"{failure} The response is not JSON."
-        raise SnowflakeLicenseError(msg) from exc
-    data = body.get("data") if isinstance(body, dict) else None
-    token = data.get("runToken") if isinstance(data, dict) else None
-    if not isinstance(token, str) or token == "":
-        msg = f"{failure} The response has no runToken."
-        raise SnowflakeLicenseError(msg)
-    return token
+    return _text_field(_data(response, failure), "runToken", failure)
 
 
 def _head_credentials(env: Mapping[str, str]) -> tuple[str, str, str, str]:

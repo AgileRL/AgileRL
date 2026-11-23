@@ -58,6 +58,7 @@ from agilerl.arena.memory.trainer_residency import (
     trainer_allocator_slack,
     trainer_base_bytes,
 )
+from agilerl.arena.memory.training_host import process_host_components
 from agilerl.arena.memory.training_warnings import training_warnings
 from agilerl.arena.models.fsdp import (
     FSDP_MEMORY_FIELDS,
@@ -101,6 +102,26 @@ def estimate_training(
     :raises ValueError: When checkpointing or an FSDP memory field is unset,
         or when an MoE model sets ``ep < tp``.
     """
+    return shared_training_estimate(model, device, settings, orchestrated).detached()
+
+
+def shared_training_estimate(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    orchestrated: bool = False,
+) -> PhaseBreakdown:
+    """:func:`estimate_training`'s cached breakdown, not a copy. Do not write to it.
+
+    :param model: Training-side model spec.
+    :param device: Training GPU.
+    :param settings: Training settings, with checkpointing and every FSDP
+        memory field set.
+    :param orchestrated: Charge the per-process job overhead.
+    :return: The breakdown every caller with these inputs shares.
+    :raises ValueError: When checkpointing or an FSDP memory field is unset,
+        or when an MoE model sets ``ep < tp``.
+    """
     fsdp = settings.fsdp
     if fsdp is not None and fsdp.ep < fsdp.tp and model.arch.is_moe:
         msg = (
@@ -123,7 +144,9 @@ def estimate_training(
             "before the estimate."
         )
         raise ValueError(msg)
-    return training_breakdown(model, device, settings, orchestrated)
+    return _cached_training_breakdown(
+        model, device, TrainingSettingsKey.of(settings), orchestrated
+    )
 
 
 def estimate_run(config: RunConfig) -> RunEstimate:
@@ -212,10 +235,9 @@ def _fsdp_lora_placement(
     """
     tp = training_tensor_parallel(arch, fsdp)
     rank, scope = settings.lora_rank, settings.lora_target_scope
-    tower = settings.tower_lora_targets
-    per_rank, _ = lora_tensor_placement(arch, rank, scope, packed, None, tp, tower)
+    per_rank, _ = lora_tensor_placement(arch, rank, scope, packed, None, tp)
     repl, shard = lora_tensor_placement(
-        arch, rank, scope, packed, PARAM_PERSISTENCE_THRESHOLD, tp, tower
+        arch, rank, scope, packed, PARAM_PERSISTENCE_THRESHOLD, tp
     )
     return per_rank, repl, shard
 
@@ -231,8 +253,7 @@ def adapter_state(
     reference keeps FSDP's persistence split: small matrices replicated in
     ``param_dtype``, the rest sharded in fp32. Expert LoRA under EP splits
     across the EP group only, outside FSDP. Tensor parallel keeps ``1/tp``
-    of every LoRA factor its plan splits on each rank. Tower LoRA adds the
-    tower and connector adapters its targets name to every resident adapter.
+    of every LoRA factor its plan splits on each rank.
 
     :param arch: Decoder geometry.
     :param settings: Training settings (rank, scope, FSDP).
@@ -250,9 +271,6 @@ def adapter_state(
     per_adapter = lora_formulas.lora_param_count(
         arch, rank, settings.lora_target_scope
     ) + lora_formulas.packed_lora_param_count(arch, rank, dense_packed)
-    per_adapter += lora_formulas.tower_lora_param_count(
-        arch, rank, settings.tower_lora_targets
-    )
     n_trained = settings.n_trained_adapters
     n_frozen = settings.n_resident_adapters - n_trained
     head = arch.hidden_size + 1 if settings.uses_critic else 0
@@ -340,7 +358,6 @@ class ActivationPeak:
     loss_hidden: float
     lora_casts: float
     lora_dropout: float
-    tower_lora: float
     nograd_pixels: float
     balance_peak: float
     tp_head_gather: int
@@ -568,7 +585,6 @@ class ActivationTerms:
     nograd_pixels: float
     balance_pixels: float
     loss_lora_casts: float
-    tower_lora: float
 
 
 @dataclass(frozen=True)
@@ -586,30 +602,15 @@ class BindingInstant:
 
 
 def _vision_activation_terms(
-    arch: ModelArch,
-    settings: TrainingSettings,
-    adapters: AdapterState,
-    act_bytes: float,
-    live_rows: int,
-) -> tuple[float, float, float]:
-    """Tower LoRA activations, no-grad vision row copies, and balanced segment rows."""
+    arch: ModelArch, settings: TrainingSettings
+) -> tuple[float, float]:
+    """No-grad vision row copies and balanced segment rows."""
     if not settings.images_per_row:
-        return 0, 0, 0
+        return 0, 0
     rows, cols = vision.vision_patch_grid(
         arch, settings.image_width, settings.image_height
     )
     row_pixels = settings.images_per_row * vision.vision_pixel_bytes(arch, rows * cols)
-    tower_lora = (
-        vision.vision_tower_lora_bytes(
-            arch,
-            live_rows * settings.images_per_row * rows * cols,
-            act_bytes,
-            adapters.compute_bytes,
-            settings.lora_dropout > 0,
-        )
-        if settings.vision_tower_lora
-        else 0
-    )
     # The no-grad pass copies each chunk's vision rows one chunk ahead.
     nograd_pixels = (
         2 * settings.micro_batch_size * row_pixels if settings.has_nograd_pass else 0
@@ -620,7 +621,7 @@ def _vision_activation_terms(
         if settings.segmented_rows
         else 0
     )
-    return tower_lora, nograd_pixels, balance_pixels
+    return nograd_pixels, balance_pixels
 
 
 def _logit_terms(
@@ -785,9 +786,7 @@ def _activation_terms(
     nograd_pass, nograd_hidden = _nograd_pass_terms(
         arch, settings, act_bytes, block_seq, unfused_mamba_scan, tp, routed_split
     )
-    tower_lora, nograd_pixels, balance_pixels = _vision_activation_terms(
-        arch, settings, adapters, act_bytes, live_rows
-    )
+    nograd_pixels, balance_pixels = _vision_activation_terms(arch, settings)
     return ActivationTerms(
         saved=0 if settings.activation_offload else stored,
         offloaded=stored if settings.activation_offload else 0,
@@ -813,7 +812,6 @@ def _activation_terms(
         loss_lora_casts=(
             stored_lora_cast_bytes(arch, settings, block_seq, tp) if casts_apply else 0
         ),
-        tower_lora=tower_lora,
     )
 
 
@@ -838,7 +836,6 @@ def _binding_instant(
         + terms.lora_dropout
         + terms.split_lora
         + terms.routed_chunks
-        + terms.tower_lora
         + terms.ep_exchange
     )
     loss_peak = (
@@ -848,7 +845,6 @@ def _binding_instant(
         + terms.saved_collectives
         + terms.loss_hidden
         + terms.loss_lora_casts
-        + terms.tower_lora
         + terms.logits
     )
     # Block transients are freed before the head scores the final hidden state.
@@ -978,7 +974,6 @@ def activation_peak(
         loss_hidden=terms.loss_hidden,
         lora_casts=terms.lora_casts,
         lora_dropout=terms.lora_dropout,
-        tower_lora=terms.tower_lora,
         nograd_pixels=terms.nograd_pixels,
         balance_peak=terms.balance_pixels,
         tp_head_gather=terms.tp_head_gather,
@@ -1011,7 +1006,7 @@ def training_host_components(
     image_pixels = vision.vision_pixel_bytes(arch, rows * cols)
     vision_cache = (
         images * vision.vision_feature_cache_bytes(arch, rows * cols, act_bytes)
-        if arch.vision_feature_cache and not settings.vision_tower_lora
+        if arch.vision_feature_cache
         else 0
     )
     staging = vision.vision_row_staging_bytes(settings, image_pixels)
@@ -1064,33 +1059,6 @@ def training_host_components(
             n_bytes=int(prefetched),
             detail={"images": images, "patches_per_image": rows * cols},
             note="The next update's tokens, masks and fp32 pixels while this one learns.",
-        ),
-    )
-
-
-def _process_host_components(
-    offloaded_activations: float,
-    offloaded_params: float,
-) -> tuple[MemoryComponent, ...]:
-    """The trainer process's runtime and the tensors it offloads."""
-    return (
-        MemoryComponent(
-            key="trainer_process",
-            label="Trainer process",
-            n_bytes=formulas.TRAINER_PROCESS_HOST_BYTES,
-            note="Python, torch and the CUDA runtime.",
-        ),
-        MemoryComponent(
-            key="activation_offload",
-            label="Offloaded activations (pinned)",
-            n_bytes=int(offloaded_activations),
-            note="Tensors one micro-batch's forward saves for backward.",
-        ),
-        MemoryComponent(
-            key="parameter_offload",
-            label="Offloaded FSDP shard (pinned)",
-            n_bytes=int(offloaded_params),
-            note="Sharded parameters CPUOffloadPolicy keeps on host.",
         ),
     )
 
@@ -1150,7 +1118,6 @@ def _activation_workspace_components(
                 "loss_hidden_state": int(peak.loss_hidden),
                 "lora_fp32_input_casts": int(peak.lora_casts),
                 "lora_dropout": int(peak.lora_dropout),
-                "vision_tower_lora": int(peak.tower_lora),
                 "nograd_vision_rows": int(peak.nograd_pixels),
                 "backward_grads": int(adapters.grads),
                 "step_grads": int(adapters.step_grads),
@@ -1421,15 +1388,39 @@ def training_breakdown(
     ).detached()
 
 
-@lru_cache(maxsize=256)
+# ~12 KiB per entry; 2048 keeps a machine group's probes for its other RAM sizes.
+@lru_cache(maxsize=2048)
 def _cached_training_breakdown(
     model: ModelSpec,
     device: DeviceSpec,
     key: TrainingSettingsKey,
     orchestrated: bool,
 ) -> PhaseBreakdown:
-    """:func:`training_breakdown`, computed once per model, device, settings and overhead."""
-    settings = key.settings
+    """:func:`training_breakdown`, computed once per model, device, settings and overhead.
+
+    Host RAM sets only ``host_usable_bytes``, so every RAM size shares the
+    breakdown computed without it.
+    """
+    if device.host_bytes_per_gpu is not None:
+        hostless = _cached_training_breakdown(
+            model,
+            device.model_copy(update={"host_bytes_per_gpu": None}),
+            key,
+            orchestrated,
+        )
+        return hostless.model_copy(
+            update={"host_usable_bytes": device.host_bytes_per_gpu}
+        )
+    return _hostless_training_breakdown(model, device, key.settings, orchestrated)
+
+
+def _hostless_training_breakdown(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    orchestrated: bool,
+) -> PhaseBreakdown:
+    """:func:`training_breakdown` on a device without a host RAM budget."""
     arch = model.arch
     counts = formulas.param_counts(arch, model.n_params)
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
@@ -1489,7 +1480,7 @@ def _cached_training_breakdown(
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
         warnings=tuple(warnings),
-        host=_process_host_components(peak.offloaded, offloaded_params)
+        host=process_host_components(peak.offloaded, offloaded_params)
         + training_host_components(arch, settings, adapters, rollout, act_bytes),
         host_usable_bytes=device.host_bytes_per_gpu,
     )

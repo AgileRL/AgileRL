@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -18,15 +19,21 @@ from typing_extensions import Self
 from agilerl.arena.auth import (
     EXTERNAL_USER_ID_HEADER,
     ArenaOAuth2,
-    is_oauth_access_token_valid,
     load_credentials,
     oauth_access_token_expires_at,
+    oauth_token_claims,
+    stored_issuer,
     validate_partner_credentials,
 )
-from agilerl.arena.client_version import CLIENT_VERSION_HEADER, print_update_notice
+from agilerl.arena.client_version import (
+    CLIENT_VERSION_HEADER,
+    is_upgrade_required,
+    print_update_notice,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaClientUpgradeRequiredError,
     ArenaConfigError,
     ArenaInferenceError,
     ArenaTrainingError,
@@ -38,21 +45,20 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_binding,
 )
-from agilerl.arena.memory.manifest import (
-    explicit_colocated_rollout,
-    validated_run_manifest,
-)
 from agilerl.arena.models import (
+    MANIFEST_REGISTRY,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
     __version__,
 )
-from agilerl.arena.models.model_info import (
-    STATUS_PREVIEW,
-    SUPPORTED_MODEL_INFO,
+from agilerl.arena.models.manifest import (
+    explicit_colocated_rollout,
+    validated_run_manifest,
 )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
+from agilerl.arena.models.verdict import HPO_UNAVAILABLE_MESSAGE, hpo_fields
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
@@ -149,6 +155,87 @@ def _idempotency_headers(key: str | None) -> dict[str, str]:
     return {"Idempotency-Key": stripped}
 
 
+def _environment_is_rollout(
+    document: dict[str, Any], environment: dict[str, Any]
+) -> bool:
+    """Return whether validation treats this environment as a rollout.
+
+    :param document: Manifest document that holds the algorithm section.
+    :param environment: The document's environment mapping.
+    :return: True when ``env_type`` is rollout, or omitted and the algorithm's is.
+    """
+    if "env_type" in environment:
+        return environment["env_type"] == "rollout"
+    algorithm = document.get("algorithm")
+    name = algorithm.get("name") if isinstance(algorithm, dict) else None
+    if not isinstance(name, str):
+        return False
+    try:
+        spec_cls = MANIFEST_REGISTRY.get(name)
+    except KeyError:
+        # get_validated reports an unknown algorithm name.
+        return False
+    return spec_cls.env_type == "rollout"
+
+
+def _with_reward_file_path(
+    manifest: str | Path | dict[str, Any],
+    reward_file: str | os.PathLike[str] | bytes | None,
+) -> str | Path | dict[str, Any]:
+    """Return a manifest whose rollout rubric path names ``reward_file``.
+
+    :param manifest: Training manifest as a YAML/JSON file path or a dict.
+    :param reward_file: The reward module being uploaded, or None.
+    :return: The manifest with an omitted rollout rubric path set to the upload
+        basename (``reward.py`` for bytes). An omitted ``env_type`` is the
+        algorithm's. ``manifest`` itself when there is no reward file.
+    :raises ArenaValidationError: When the manifest is not a mapping, or its
+        rubric path names a different file than ``reward_file``.
+    """
+    if reward_file is None:
+        return manifest
+    document = copy.deepcopy(TrainingManifest.load(manifest))
+    if not isinstance(document, dict):
+        msg = f"The manifest must be a mapping, not {type(document).__name__}."
+        raise ArenaValidationError(
+            msg,
+            sdk_hint="Pass a manifest whose top level is a mapping of sections.",
+            cli_hint="Use a manifest file whose top level is a mapping of sections.",
+        )
+    environment = document.get("environment")
+    if not isinstance(environment, dict):
+        return document
+    field = next(
+        (
+            name
+            for name in ("rubric_file_path", "reward_file_path")
+            if environment.get(name) is not None
+        ),
+        None,
+    )
+    if isinstance(reward_file, bytes):
+        upload_name = "reward.py"
+    else:
+        upload_name = Path(os.fspath(reward_file)).name
+    if field is None:
+        if _environment_is_rollout(document, environment):
+            environment["rubric_file_path"] = upload_name
+        return document
+    manifest_name = Path(str(environment[field])).name
+    # Raw bytes carry no filename to compare, so the manifest's name stands.
+    if not isinstance(reward_file, bytes) and manifest_name != upload_name:
+        msg = (
+            f"environment.{field} names {manifest_name!r} but the reward file "
+            f"is {upload_name!r}."
+        )
+        raise ArenaValidationError(
+            msg,
+            sdk_hint=f"Drop environment.{field} or pass the file it names as reward_file.",
+            cli_hint=f"Drop environment.{field} or pass the file it names to --reward-file.",
+        )
+    return document
+
+
 def _check_writable_target(path: Path) -> None:
     """Ensure *path* can be created as a new file, making parent dirs as needed.
 
@@ -170,6 +257,22 @@ def _check_writable_target(path: Path) -> None:
         msg = f"Cannot write to {path}: {parent} is not a directory."
         raise NotADirectoryError(msg)
     parent.mkdir(parents=True, exist_ok=True)
+
+
+def _response_error(
+    error_cls: type[ArenaAPIError], raw: str, status_code: int
+) -> ArenaAPIError:
+    """Build the error for a non-2xx Arena response.
+
+    :param error_cls: Error class for this path.
+    :param raw: Response body.
+    :param status_code: HTTP status.
+    :return: :class:`ArenaClientUpgradeRequiredError` when Arena refuses this
+        release, otherwise ``error_cls``.
+    """
+    if is_upgrade_required(status_code, raw):
+        error_cls = ArenaClientUpgradeRequiredError
+    return error_cls.from_response_body(raw, status_code=status_code)
 
 
 class ArenaClient:
@@ -210,6 +313,8 @@ class ArenaClient:
     """
 
     BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # Set by configure(base_url=...), e.g. ``arena --base-url``; beats ARENA_BASE_URL.
+    _BASE_URL_OVERRIDE: ClassVar[str | None] = None
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
@@ -229,12 +334,13 @@ class ArenaClient:
         }
     )
 
+    _SUBMIT_PATH: ClassVar[str] = "/api/cli/v1/experiments/jobs/submit"
+    # True sends every submit as multipart, even without a reward file.
+    _SUBMIT_MULTIPART: ClassVar[bool] = False
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
         "/api/cli/v1/environments/validate": ArenaValidationError,
-        "/api/cli/v1/environments/profile": ArenaValidationError,
         "/api/cli/v1/datasets/create": ArenaValidationError,
-        "/api/cli/v1/experiments/jobs/submit": ArenaTrainingError,
     }
 
     def __init__(
@@ -248,7 +354,10 @@ class ArenaClient:
         verbose: bool = True,
     ) -> None:
 
-        self._base_url = (os.environ.get("ARENA_BASE_URL") or self.BASE_URL).rstrip("/")
+        # An explicit configure(base_url=...) wins, then ARENA_BASE_URL, then the default.
+        self._base_url = (
+            self._BASE_URL_OVERRIDE or os.environ.get("ARENA_BASE_URL") or self.BASE_URL
+        ).rstrip("/")
         self._request_timeout = request_timeout
         self._upload_timeout = upload_timeout
 
@@ -260,6 +369,7 @@ class ArenaClient:
         validate_partner_credentials(self._org_key, self._external_user_id)
         self._auth = ArenaOAuth2()
         self._tokens = _TokenStore()
+        self._saved_login_issuer: str | None = None
         self._verbose = verbose
         self._stream_handler: Callable[[StreamEvent], None] | None = None
         self._cli_capabilities_cache: dict[str, Any] | None = None
@@ -285,6 +395,9 @@ class ArenaClient:
     ) -> type[ArenaClient]:
         """Override default URLs for local development or testing.
 
+        An explicit ``base_url`` / ``keycloak_url`` takes precedence over the
+        ``ARENA_BASE_URL`` / ``ARENA_KEYCLOAK_URL`` environment variables.
+
         Returns the class so calls can be chained with instantiation::
 
             client = ArenaClient.configure(
@@ -294,6 +407,7 @@ class ArenaClient:
         """
         if base_url is not None:
             cls.BASE_URL = base_url
+            cls._BASE_URL_OVERRIDE = base_url
 
         ArenaOAuth2.configure(
             keycloak_url=keycloak_url,
@@ -349,67 +463,46 @@ class ArenaClient:
     ### Authentication ###
     # -------------------------------------------------------------------------
 
-    def login(self, *, timeout: int = 300, force: bool = False) -> None:
-        """Start the device-authorization login flow (or reuse a valid stored session).
+    def login(self, timeout: int = 300) -> None:
+        """Sign in through the browser, then end the previously saved login.
 
-        When *force* is false (default) and an API key is set, device login is
-        skipped. Organisation-key credentials always skip device login.
-        Pass ``force=True`` to run device authorization regardless
-        (useful when the API key is invalid and you want to switch to OAuth).
+        Only one login is kept in ``~/.arena/credentials.json``, so this is also
+        how to switch user or environment. Organisation-key credentials skip it.
+        An API key stays on this client until the browser sign-in succeeds.
 
-        When *force* is false (default), an unexpired OAuth access token or a
-        successful refresh from ``~/.arena/credentials.json`` skips the browser
-        flow. Use *force* to always run device authorization.
-        On success the tokens are persisted to
-        ``~/.arena/credentials.json``.
+        :param timeout: Maximum seconds to wait for browser authorization.
         """
         if self._org_key is not None:
             logger.info("Organisation key in use; device login not required.")
             return
 
-        if self._api_key is not None and not force:
-            logger.info(
-                "API key in use; device login not required. Use --force to override."
+        if self._api_key is not None:
+            logger.warning(
+                "An API key is set (ARENA_API_KEY or api_key); other commands use it "
+                "instead of this login until it is removed."
             )
-            return
 
-        if self._api_key is not None and force:
-            logger.info(
-                "Forcing device login; API key will be ignored for this session."
-            )
-            self._api_key = None
-
-        if not force:
-            if is_oauth_access_token_valid(self._tokens.access_token):
-                logger.info("Access token still valid; skipping device login.")
-                return
-
-            if self._tokens.refresh_token:
-                try:
-                    tokens = self._auth.refresh_access_token(self._tokens.refresh_token)
-                    self._tokens.access_token = tokens["access_token"]
-                    self._tokens.refresh_token = tokens.get(
-                        "refresh_token", self._tokens.refresh_token
-                    )
-                    logger.info(
-                        "Session refreshed from stored credentials; skipping device login."
-                    )
-                    return
-                except ArenaAuthError:
-                    logger.debug(
-                        "Stored refresh token rejected; starting device login.",
-                    )
-
+        previous = load_credentials(ArenaOAuth2.CREDENTIALS_FILE)
         tokens = self._auth.device_login(timeout=timeout)
         self._tokens.access_token = tokens["access_token"]
         self._tokens.refresh_token = tokens.get("refresh_token")
-        logger.info("Authenticated successfully with Arena.")
+        self._api_key = None
+        self._saved_login_issuer = None
+        if previous and previous.get("refresh_token"):
+            self._auth.end_session(previous["refresh_token"], stored_issuer(previous))
+
+        claims = oauth_token_claims(self._tokens.access_token) or {}
+        who = claims.get("email") or claims.get("preferred_username") or "unknown user"
+        logger.info("Logged in to Arena as %s at %s.", who, self._base_url)
 
     def logout(self) -> None:
-        """Clear the current session and remove stored credentials."""
-        if self._tokens.refresh_token:
-            self._auth.revoke(self._tokens.refresh_token)
+        """End the saved login and remove stored credentials."""
+        saved = load_credentials(ArenaOAuth2.CREDENTIALS_FILE)
+        refresh_token = self._tokens.refresh_token or (saved or {}).get("refresh_token")
+        if refresh_token:
+            self._auth.revoke(refresh_token, stored_issuer(saved) if saved else None)
         self._tokens.clear()
+        self._saved_login_issuer = None
         logger.info("Logged out of Arena.")
 
     @property
@@ -458,8 +551,7 @@ class ArenaClient:
 
         :param name: Environment name. If None, list all environments.
         :type name: str | None
-        :param include_arena: Whether to include off-the-shelf Gymnasium/PettingZoo environments
-            available in Arena.
+        :param include_arena: Whether to include the built-in environments available in Arena.
         :type include_arena: bool
         :returns: A nested dictionary keyed by environment name, then version:
 
@@ -531,11 +623,9 @@ class ArenaClient:
         requirements: str | os.PathLike[str] | None = None,
         entrypoint: str | None = None,
         description: str | None = None,
-        multi_agent: bool = False,
-        language_based: bool = False,
         do_rollouts: bool = False,
     ) -> dict[str, Any]:
-        """Validate a custom environment on Arena.
+        """Validate a custom GEM environment on Arena.
 
         When source is provided the environment is uploaded, created, and
         validated in a single step.  When source is None an
@@ -561,11 +651,6 @@ class ArenaClient:
         :type entrypoint: str | None
         :param description: Optional description of the environment. Default is None.
         :type description: str | None
-        :param multi_agent: Whether the environment is multi-agent. Default is False.
-        :type multi_agent: bool
-        :param language_based: Whether the environment follows the GEM API (language-based).
-            Default is False.
-        :type language_based: bool
         :param do_rollouts: Whether to perform environment rollouts during validation. Setting this to True will
             run 100 random episodes and collect additional information such as the average random reward and visualize
             the rendered environment. Default is False.
@@ -587,8 +672,6 @@ class ArenaClient:
                 requirements=requirements,
                 entrypoint=entrypoint,
                 description=description,
-                multi_agent=multi_agent,
-                language_based=language_based,
                 do_rollouts=do_rollouts,
             ).collect()
 
@@ -603,36 +686,6 @@ class ArenaClient:
         return self._open_stream(
             "POST",
             "/api/cli/v1/environments/validate",
-            json=payload,
-            timeout=self._upload_timeout,
-        ).collect()
-
-    def profile_environment(
-        self,
-        *,
-        name: str,
-        version: str | None = None,
-        multi_agent: bool | None = None,
-    ) -> dict[str, Any]:
-        """Profile a validated environment version.
-
-        :param name: Environment name, as specified in Arena.
-        :type name: str
-        :param version: Environment version. Defaults to None, which resolves to the latest version.
-        :type version: str | None
-        :param multi_agent: Override the stored multi-agent flag. Omit it and the
-            server uses the value saved on the environment.
-        :type multi_agent: bool | None
-        """
-        payload: dict[str, Any] = {
-            "name": name,
-            "version": version,
-        }
-        if multi_agent is not None:
-            payload["multi_agent"] = multi_agent
-        return self._open_stream(
-            "POST",
-            "/api/cli/v1/environments/profile",
             json=payload,
             timeout=self._upload_timeout,
         ).collect()
@@ -1137,9 +1190,6 @@ class ArenaClient:
         self,
         algorithm: str,
         *,
-        gym_env: str | None = None,
-        gym_env_version: str | None = None,
-        gym_env_entrypoint: str | None = None,
         dataset_name: str | None = None,
         field: str | None = None,
         pretrained_model_name_or_path: str | None = None,
@@ -1150,13 +1200,6 @@ class ArenaClient:
 
         :param algorithm: Catalog algorithm name.
         :type algorithm: str
-        :param gym_env: Gym environment display name.
-        :type gym_env: str | None
-        :param gym_env_version: Gym environment version. Required with
-            ``gym_env_entrypoint`` (``v1`` and ``1`` are both accepted).
-        :type gym_env_version: str | None
-        :param gym_env_entrypoint: Gym entrypoint.
-        :type gym_env_entrypoint: str | None
         :param dataset_name: Dataset name.
         :type dataset_name: str | None
         :param field: RunSpec section to return (``algorithm``, ``environment``,
@@ -1170,9 +1213,6 @@ class ArenaClient:
         """
         params: dict[str, Any] = {"algorithm": algorithm}
         optional = {
-            "gymEnv": gym_env,
-            "gymEnvVersion": gym_env_version,
-            "gymEnvEntrypoint": gym_env_entrypoint,
             "datasetName": dataset_name,
             "field": field,
             "pretrainedModelNameOrPath": pretrained_model_name_or_path,
@@ -1190,8 +1230,6 @@ class ArenaClient:
         self,
         manifest: str | Path | dict[str, Any],
         *,
-        resource_id: str | int | None = None,
-        num_nodes: int | None = None,
         num_gpus: int | None = None,
         gpu_type: str | None = None,
         project: str | None = None,
@@ -1205,22 +1243,19 @@ class ArenaClient:
         :param manifest: Training manifest as a YAML/JSON file path, raw YAML
             string, or a pre-parsed dict.
         :type manifest: str | Path | dict[str, Any]
-        :param resource_id: Arena cluster type or resource id for the job.
-        :type resource_id: str | int | None
-        :param num_nodes: The number of nodes to use for training.
-        :type num_nodes: int | None
-        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes.
-            Cannot be combined with ``resource_id`` or ``num_nodes``.
+        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes that
+            fit the run's memory estimate.
         :type num_gpus: int | None
         :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
-            Cannot be combined with ``resource_id`` or ``num_nodes``.
         :type gpu_type: str | None
         :param project: The project to submit the experiment to.
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
         :type experiment_name: str | None
         :param reward_file: Python rubric or reward module scoring a rollout job.
-            When set, the request is sent as ``multipart/form-data``.
+            When set, the request is sent as ``multipart/form-data`` and a
+            rollout manifest without ``environment.rubric_file_path`` gets the
+            file's basename (``reward.py`` for bytes).
         :type reward_file: str | os.PathLike[str] | bytes | None
         :param completion: Optional model completion for reward validation.
             When omitted, the server uses the reference answer from the first
@@ -1229,15 +1264,48 @@ class ArenaClient:
         :param idempotency_key: Reuse this key to replay the same submit instead
             of starting another job. The key is org-wide.
         :type idempotency_key: str | None
-        :raises ArenaValidationError: When GPU fields are combined with a node
-            choice, or ``num_gpus`` is below 1.
+        :raises ArenaValidationError: When ``num_gpus`` is below 1, the manifest
+            turns on HPO, or the manifest's rubric path names a different file
+            than ``reward_file``.
         """
-        self._check_resource_request(resource_id, num_nodes, num_gpus, gpu_type)
+        validated, resolved_project = self._checked_submit(
+            manifest, num_gpus, project, reward_file
+        )
+        return self._send_submit(
+            manifest=validated,
+            project=resolved_project,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
+            experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
+            idempotency_key=idempotency_key,
+            extra_parts=[],
+        )
+
+    def _checked_submit(
+        self,
+        manifest: str | Path | dict[str, Any],
+        num_gpus: int | None,
+        project: str | None,
+        reward_file: str | os.PathLike[str] | bytes | None,
+    ) -> tuple[dict[str, Any], str]:
+        """Run every client-side submit check; every submit command calls this first.
+
+        :param manifest: Training manifest as a file path, YAML string or dict.
+        :param num_gpus: Total GPUs requested, or ``None``.
+        :param project: Project name, or ``None`` for the default project.
+        :param reward_file: Reward module the submit uploads, or ``None``. It
+            fills an unset rollout ``environment.rubric_file_path``.
+        :return: The validated manifest payload and the resolved project name.
+        """
+        self._check_num_gpus(num_gpus)
+        manifest = _with_reward_file_path(manifest, reward_file)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
+        self._check_no_hpo(training_manifest)
         self._check_model_status(training_manifest)
         self._check_context_length(training_manifest)
         self._check_rollout_mode(training_manifest)
-        validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
         if not resolved_project:
             msg = "No project specified."
@@ -1246,27 +1314,47 @@ class ArenaClient:
                 sdk_hint="Pass a project name or set a default with ArenaClient.set_default_project().",
                 cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
             )
+        return training_manifest.to_payload(), resolved_project
 
-        if isinstance(resource_id, int):
-            resource_id = str(resource_id)
+    def _send_submit(
+        self,
+        manifest: dict[str, Any],
+        project: str,
+        num_gpus: int | None,
+        gpu_type: str | None,
+        experiment_name: str | None,
+        reward_file: str | os.PathLike[str] | bytes | None,
+        completion: str | None,
+        idempotency_key: str | None,
+        extra_parts: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        """Send a checked submit to ``_SUBMIT_PATH``; every submit command sends through here.
+
+        Takes :meth:`_checked_submit`'s outputs and the other :meth:`submit_experiment`
+        arguments, then:
+
+        :param extra_parts: Multipart parts sent after the public ones.
+        :return: Final result of the submit stream.
+        """
         headers = _idempotency_headers(idempotency_key)
 
-        if reward_file is not None:
-            files = self._build_submit_experiment_multipart(
-                manifest=validated,
-                project=resolved_project,
-                resource_id=resource_id,
-                num_nodes=num_nodes,
-                num_gpus=num_gpus,
-                gpu_type=gpu_type,
-                experiment_name=experiment_name,
-                reward_file=reward_file,
-                completion=completion,
-            )
+        if self._SUBMIT_MULTIPART or reward_file is not None or extra_parts:
+            files: list[tuple[str, Any]] = [
+                *self._build_submit_experiment_multipart(
+                    manifest=manifest,
+                    project=project,
+                    num_gpus=num_gpus,
+                    gpu_type=gpu_type,
+                    experiment_name=experiment_name,
+                    reward_file=reward_file,
+                    completion=completion,
+                ).items(),
+                *extra_parts,
+            ]
             try:
                 return self._open_stream(
                     "POST",
-                    "/api/cli/v1/experiments/jobs/submit",
+                    self._SUBMIT_PATH,
                     files=files,
                     headers=headers,
                     timeout=self._upload_timeout,
@@ -1274,16 +1362,13 @@ class ArenaClient:
             finally:
                 self._close_upload_files(files)
 
-        # The server rejects explicit nulls: project and resource_id are
-        # non-nullable, and the resource defaults (num_nodes, num_gpus,
-        # gpu_type) only apply when the key is absent.
-        payload: dict[str, Any] = {"manifest": validated, "project": resolved_project}
+        # The server rejects explicit nulls, and the resource defaults
+        # (num_gpus, gpu_type) only apply when the key is absent.
+        payload: dict[str, Any] = {"manifest": manifest, "project": project}
         payload.update(
             {
                 key: value
                 for key, value in (
-                    ("resource_id", resource_id),
-                    ("num_nodes", num_nodes),
                     ("num_gpus", num_gpus),
                     ("gpu_type", gpu_type),
                     ("experiment_name", experiment_name),
@@ -1293,46 +1378,44 @@ class ArenaClient:
         )
         return self._open_stream(
             "POST",
-            "/api/cli/v1/experiments/jobs/submit",
+            self._SUBMIT_PATH,
             json=payload,
             headers=headers,
             timeout=self._upload_timeout,
         ).collect()
 
+    def _error_class(self, path: str) -> type[ArenaAPIError]:
+        """Return the error class a failed request to *path* raises."""
+        if path == self._SUBMIT_PATH:
+            return ArenaTrainingError
+        return self._ERROR_MAP.get(path, ArenaAPIError)
+
     @staticmethod
-    def _check_resource_request(
-        resource_id: str | int | None,
-        num_nodes: int | None,
-        num_gpus: int | None,
-        gpu_type: str | None,
-    ) -> None:
-        """Reject a GPU request below 1 GPU or combined with a node choice."""
+    def _check_num_gpus(num_gpus: int | None) -> None:
+        """Reject a GPU request below 1 GPU."""
         if num_gpus is not None and num_gpus < 1:
             msg = "num_gpus must be at least 1."
             raise ArenaValidationError(msg)
-        if (num_gpus is not None or gpu_type is not None) and (
-            resource_id is not None or num_nodes is not None
-        ):
-            msg = (
-                "num_gpus and gpu_type cannot be combined with "
-                "resource_id or num_nodes."
-            )
+
+    @staticmethod
+    def _check_no_hpo(manifest: TrainingManifest) -> None:
+        """Reject a manifest that turns on HPO, which Arena does not run."""
+        fields = hpo_fields(manifest)
+        if fields:
+            msg = f"{', '.join(fields)}: {HPO_UNAVAILABLE_MESSAGE}"
             raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_model_status(manifest: TrainingManifest) -> None:
-        """Warn on a deprecated pretrained model; reject a preview one."""
+        """Reject a deprecated or preview pretrained model."""
         algorithm = manifest.algorithm
         if not isinstance(algorithm, LLMAlgorithmSpec):
             return
         hub_id = algorithm.pretrained_model_name_or_path
         entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
         notice = entry.status_notice if entry else None
-        if entry is None or notice is None:
-            return
-        if entry.status == STATUS_PREVIEW:
+        if notice is not None:
             raise ArenaValidationError(notice)
-        logger.warning(notice)
 
     @staticmethod
     def _check_context_length(manifest: TrainingManifest) -> None:
@@ -1382,8 +1465,6 @@ class ArenaClient:
         *,
         manifest: dict[str, Any],
         project: str | None,
-        resource_id: str | int | None,
-        num_nodes: int | None,
         num_gpus: int | None,
         gpu_type: str | None,
         experiment_name: str | None,
@@ -1394,8 +1475,6 @@ class ArenaClient:
         text_fields: dict[str, str | None] = {
             "manifest": json.dumps(manifest),
             "project": project,
-            "resource_id": str(resource_id) if resource_id is not None else None,
-            "num_nodes": str(num_nodes) if num_nodes is not None else None,
             "num_gpus": str(num_gpus) if num_gpus is not None else None,
             "gpu_type": gpu_type,
             "experiment_name": experiment_name,
@@ -1563,12 +1642,12 @@ class ArenaClient:
         )
 
     def list_resources(self) -> dict[str, Any]:
-        """List compute resource tiers for Arena training jobs.
+        """List the GPU types you can train on.
 
-        Any of the listed resource IDs can be used as the `resource_id` parameter when submitting a training job
-        through `ArenaClient.submit_experiment`.
+        Each ``gpuType`` is a value ``ArenaClient.submit_experiment`` accepts as
+        ``gpu_type``. An older platform returns resource ``tiers`` instead.
 
-        :returns: A dictionary of resource tiers.
+        :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int], "devOnly": bool}]}``.
         :rtype: dict[str, Any]
         """
         return self._request("GET", "/api/cli/v1/resources/list")
@@ -1793,17 +1872,16 @@ class ArenaClient:
             with ``None`` keeps the scope already stored, it does not reset it, and the
             scope cannot be changed after the deployment exists.
         :type memory_scope: MemoryScope | None
-        :param num_gpus: GPUs on an LLM agent's node.
+        :param num_gpus: GPUs on the agent's node.
         :type num_gpus: int | None
-        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``,
-            for LLM agents.
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
         :type gpu_type: str | None
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
         :raises ArenaValidationError: When ``num_gpus`` is below 1 or
             ``memory_scope`` is unknown.
         """
-        self._check_resource_request(None, None, num_gpus, gpu_type)
+        self._check_num_gpus(num_gpus)
         body: dict[str, Any] = {
             "experiment_name": experiment_name,
             "checkpoint": checkpoint,
@@ -2117,8 +2195,6 @@ class ArenaClient:
         requirements: str | os.PathLike[str] | None,
         entrypoint: str | None,
         description: str | None,
-        multi_agent: bool,
-        language_based: bool,
         do_rollouts: bool,
     ) -> NDJsonStream:
         """Upload, create, and validate an environment."""
@@ -2133,8 +2209,8 @@ class ArenaClient:
         data: dict[str, str] = {
             "name": name,
             "version": version,
-            "multi_agent": str(multi_agent).lower(),
-            "language_based": str(language_based).lower(),
+            # The platform defaults language_based to false.
+            "language_based": "true",
             "do_rollouts": str(do_rollouts).lower(),
         }
         if entrypoint:
@@ -2183,6 +2259,11 @@ class ArenaClient:
     def _try_restore_session(self) -> None:
         # Try to restore previously saved authentication credentials.
         creds = load_credentials(ArenaOAuth2.CREDENTIALS_FILE)
+        if creds and self._org_key is None:
+            issuer = stored_issuer(creds)
+            if issuer is not None and issuer.rstrip("/") != self._auth.issuer:
+                self._saved_login_issuer = issuer
+                return
         if creds:
             self._tokens.access_token = creds.get("access_token")
             self._tokens.refresh_token = creds.get("refresh_token")
@@ -2229,6 +2310,11 @@ class ArenaClient:
             return {"Authorization": f"Bearer {credential}"}
 
         msg = "Client has not been authenticated with Arena."
+        if self._saved_login_issuer is not None:
+            msg = (
+                f"The saved Arena login is for {self._saved_login_issuer}, "
+                f"not {self._auth.issuer}."
+            )
         raise ArenaAuthError(
             msg,
             sdk_hint="Call client.login() or provide an API key to the ArenaClient constructor.",
@@ -2380,8 +2466,7 @@ class ArenaClient:
         # Handle non-success responses.
         if not resp.is_success:
             raw = self._read_response_body(resp, stream=stream)
-            error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
-            raise error_cls.from_response_body(raw, status_code=resp.status_code)
+            raise _response_error(self._error_class(path), raw, resp.status_code)
 
         return resp
 
@@ -2500,8 +2585,7 @@ class ArenaClient:
             return None
 
         if not resp.is_success:
-            raw = resp.text
-            raise ArenaAPIError.from_response_body(raw, status_code=resp.status_code)
+            raise _response_error(ArenaAPIError, resp.text, resp.status_code)
 
         try:
             envelope = resp.json()
@@ -2681,7 +2765,7 @@ class ArenaClient:
         **kwargs: Any,
     ) -> NDJsonStream:
         """Send a streaming request and return an :class:`NDJsonStream`."""
-        error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
+        error_cls = self._error_class(path)
         handler = self._stream_handler
         renderer: StreamRichRenderer | None = None
         if handler is None and self._verbose:

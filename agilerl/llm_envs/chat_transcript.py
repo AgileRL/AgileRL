@@ -13,20 +13,24 @@ import os
 import re
 import warnings
 from functools import cache, lru_cache
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
-from agilerl.arena.traces_format import REASONING_KEYS
+from agilerl.arena.traces_format import REASONING_KEYS, WEIGHT
 from agilerl.llm_envs.chat_formats import (
     ChatFormat,
     ToolCallParseStatus,
     frame_repeats_terminator,
 )
+from agilerl.llm_envs.reasoning import REASONING_END_MARKER, REASONING_START_MARKER
 from agilerl.utils.chat_template import (
     feedback_frame_parts,
     special_token_ids,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 TURN_OPENER = {"role": "user", "content": "."}
@@ -35,9 +39,10 @@ TURN_OPENER = {"role": "user", "content": "."}
 def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize one row's OpenAI-style ``messages`` for a chat template.
 
-    Accepts a JSON string or a list. Drops ``None`` fields, joins a list of
-    text content parts into one string, and decodes string tool-call arguments,
-    which HF chat templates expect as a dict. A list is Arrow data, which fills
+    Accepts a JSON string or a list. Drops ``None`` fields and the training
+    ``weight``, which is not message content, joins a list of text content
+    parts into one string, and decodes string tool-call arguments, which HF
+    chat templates expect as a dict. A list is Arrow data, which fills
     every struct key at every depth, so ``None`` is also dropped inside its
     struct arguments; nulls in JSON text are real and kept.
 
@@ -52,7 +57,11 @@ def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     messages = []
     for raw_message in raw:
-        message = {key: item for key, item in raw_message.items() if item is not None}
+        message = {
+            key: item
+            for key, item in raw_message.items()
+            if item is not None and key != WEIGHT
+        }
         if isinstance(message.get("content"), list):
             message["content"] = _joined_text_parts(message["content"], message["role"])
         if "tool_calls" in message:
@@ -173,17 +182,30 @@ def _parsed_json(text: str, label: str) -> Any:  # noqa: ANN401 -- any JSON valu
         raise ValueError(msg) from error
 
 
-def _without_none_keys(value: Any) -> Any:  # noqa: ANN401 -- any nested Arrow value
+def without_none_keys(value: object) -> object:
     """``value`` without ``None`` dict entries at any depth; ``None`` list items are data."""
     if isinstance(value, dict):
         return {
-            key: _without_none_keys(item)
+            key: without_none_keys(item)
             for key, item in value.items()
             if item is not None
         }
     if isinstance(value, list):
-        return [_without_none_keys(item) for item in value]
+        return [without_none_keys(item) for item in value]
     return value
+
+
+def json_cell(value: Any, label: str) -> Any:  # noqa: ANN401 -- any nested cell
+    """A nested traces cell: JSON text decoded, Arrow data without the ``None`` keys it fills.
+
+    :param value: The cell, JSON text or a native nested value.
+    :param label: Column name for the error.
+    :return: The decoded value.
+    :raises ValueError: If a string cell is not valid JSON.
+    """
+    if isinstance(value, str):
+        return _parsed_json(value, f"The {label} column")
+    return without_none_keys(value)
 
 
 def _decoded_tool_call(call: dict[str, Any], from_arrow: bool) -> dict[str, Any]:
@@ -198,7 +220,7 @@ def _decoded_tool_call(call: dict[str, Any], from_arrow: bool) -> dict[str, Any]
     if isinstance(arguments, str):
         arguments = _parsed_json(arguments, label)
     elif from_arrow:
-        arguments = _without_none_keys(arguments)
+        arguments = without_none_keys(arguments)
     if not isinstance(arguments, dict):
         msg = f"{label} must be an object, got {type(arguments).__name__}."
         raise ValueError(msg)
@@ -211,6 +233,7 @@ def encode_chat_transcript(
     tools: list[dict[str, Any]] | None,
     chat_format: ChatFormat | None,
     trained_from: int = 0,
+    skipped: Collection[int] = (),
 ) -> tuple[list[int], list[bool]]:
     """Token ids of a multi-turn conversation, with an assistant mask.
 
@@ -222,14 +245,16 @@ def encode_chat_transcript(
     mask. Each assistant turn runs from where that render leaves the generation
     prompt through its end-of-turn token. A generation prompt that is not a
     prefix of the completed turn is not spliced on. Tool results a format
-    renders inside an assistant turn stay there. Messages after the last
+    renders inside an assistant turn stay there. Two assistant turns in a row
+    are allowed only when the later one is context. Messages after the last
     assistant turn are dropped. Assistant messages' reasoning is moved to the
     key the chat template reads, see :func:`template_reasoning_key`.
     Assistant turns before ``trained_from`` are context: masked out, and their
     tool calls are not checked against the chat format's parser. With
     ``trained_from`` set, the context is the template's render of the messages
     before the first trained turn with the generation prompt, the text a
-    rollout samples that turn after.
+    rollout samples that turn after. Assistant turns at ``skipped`` are context
+    too.
 
     :param tokenizer: Tokenizer whose chat template renders the conversation.
     :param messages: Normalized messages, see :func:`chat_messages`.
@@ -237,9 +262,10 @@ def encode_chat_transcript(
     :param chat_format: The model family's chat format, see
         :func:`~agilerl.llm_envs.chat_formats.detect_chat_format`.
     :param trained_from: Index of the first message whose assistant turns train.
+    :param skipped: Indices of assistant messages that do not train.
     :return: Token ids and, per id, whether it is a trained assistant token.
     :raises ValueError: If the conversation has no prompt or no assistant
-        turn, has back-to-back assistant turns, the template renders an
+        turn, has a trained assistant turn right after another, the template renders an
         assistant turn that does not extend the generation prompt, the chat
         format does not parse a turn's rendered tool calls back to its calls,
         or the trained turn does not start where the generation prompt ends.
@@ -256,11 +282,190 @@ def encode_chat_transcript(
     if assistant_indices[0] == 0:
         msg = "An SFT conversation needs a message before its first assistant turn."
         raise ValueError(msg)
-    if assistant_indices[-1] < trained_from:
+    skipped = set(skipped)
+    trained_indices = [
+        idx for idx in assistant_indices if idx >= trained_from and idx not in skipped
+    ]
+    trained = set(trained_indices)
+    if not trained_indices:
         msg = "An SFT conversation needs an assistant turn to train after its prompt."
         raise ValueError(msg)
+    for previous, idx in pairwise(assistant_indices):
+        if idx == previous + 1 and idx in trained:
+            msg = f"Messages {previous} and {idx} are back-to-back assistant turns."
+            raise ValueError(msg)
 
     render_messages = _messages_for_render(messages, chat_format)
+    spliced = _spliced_turn_ids(
+        tokenizer,
+        render_messages,
+        messages,
+        assistant_indices,
+        trained,
+        render_kwargs,
+        chat_format,
+        tools,
+    )
+    kept = assistant_indices[-1] + 1
+    canonical = _render(tokenizer, render_messages[:kept], False, render_kwargs)
+    if spliced is not None and _decodes_template(tokenizer, spliced[0], canonical):
+        ids, mask = spliced
+    else:
+        ids, mask = _assemble_from_template(
+            tokenizer,
+            render_messages[:kept],
+            messages[:kept],
+            canonical,
+            render_kwargs,
+            chat_format,
+            tools,
+            trained,
+        )
+    if trained_from == 0:
+        return ids, mask
+    return _after_prompt_render(
+        tokenizer, render_messages[: trained_indices[0]], ids, mask, render_kwargs
+    )
+
+
+def _render_kwargs(
+    tools: list[dict[str, Any]] | None, chat_template_kwargs: dict[str, Any] | None
+) -> dict[str, Any]:
+    """``apply_chat_template`` kwargs: ``chat_template_kwargs`` plus ``tools`` when there are any."""
+    kwargs = dict(chat_template_kwargs or {})
+    if tools:
+        kwargs["tools"] = tools
+    return kwargs
+
+
+def render_chat_prompt(
+    tokenizer: PreTrainedTokenizerBase,
+    messages: str | list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    chat_format: ChatFormat | None,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> str:
+    """Chat-template text of OpenAI-style ``messages``, ending in the generation prompt.
+
+    This is the context SFT trains the next assistant turn after, see
+    ``trained_from`` in :func:`encode_chat_transcript`. Messages are normalized
+    by :func:`chat_messages`, reasoning moves to the key the template reads,
+    past tool calls are written the way the chat format parses them, and tool
+    results are named after the call they answer.
+
+    :param tokenizer: Tokenizer whose chat template renders the prompt.
+    :param messages: The messages, as JSON text or a list.
+    :param tools: Tool schemas offered on the turn; ``None`` or empty for none.
+    :param chat_format: The model family's chat format, which writes past tool calls.
+    :param chat_template_kwargs: Extra ``apply_chat_template`` kwargs.
+    :return: The prompt text the model samples its next turn after.
+    :raises ValueError: If there are no messages or the last is an assistant turn.
+    """
+    reasoning_key = template_reasoning_key(tokenizer)
+    normalized = [
+        _with_reasoning_key(message, reasoning_key)
+        for message in chat_messages(messages)
+    ]
+    if not normalized or normalized[-1]["role"] == "assistant":
+        msg = "A chat prompt needs messages and must not end with an assistant turn."
+        raise ValueError(msg)
+    rendered = _messages_for_render(normalized, chat_format)
+    last = max(
+        (
+            idx
+            for idx, message in enumerate(normalized)
+            if message["role"] == "assistant"
+        ),
+        default=None,
+    )
+    if last is not None:
+        rendered[last + 1 :] = _named_tool_results(
+            normalized[last], rendered[last + 1 :]
+        )
+    return _render(
+        tokenizer, rendered, True, _render_kwargs(tools, chat_template_kwargs)
+    )
+
+
+def assistant_turn_text(
+    tokenizer: PreTrainedTokenizerBase,
+    message: dict[str, Any],
+    tools: list[dict[str, Any]] | None,
+    chat_format: ChatFormat | None,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> str:
+    """One assistant turn as the model samples it: reasoning, content and tool calls.
+
+    Includes a reasoning opener the generation prompt prefills, keeps special
+    tokens inside the turn, and drops its end-of-turn token. A template that
+    reads no reasoning key gets no reasoning.
+
+    :param tokenizer: Tokenizer whose chat template renders the turn.
+    :param message: A normalized assistant message, see :func:`chat_messages`.
+    :param tools: Tool schemas offered on the turn, or ``None``.
+    :param chat_format: The model family's chat format, which writes tool calls.
+    :param chat_template_kwargs: Extra ``apply_chat_template`` kwargs.
+    :return: The turn's text.
+    """
+    render_kwargs = _render_kwargs(tools, chat_template_kwargs)
+    turn = _written_tool_calls(
+        _with_reasoning_key(message, template_reasoning_key(tokenizer)), chat_format
+    )
+    special_ids = special_token_ids(tokenizer)
+    scaffold = _turn_scaffold(tokenizer, render_kwargs, special_ids)
+    turn_ids = _assistant_turn_ids(
+        tokenizer, turn, render_kwargs, special_ids, scaffold
+    )
+    # Keep special tokens inside the turn (tool-call and channel markers); drop its end-of-turn token.
+    text = tokenizer.decode(turn_ids[:-1], skip_special_tokens=False)
+    if not isinstance(text, str):
+        msg = "tokenizer.decode must return a string"
+        raise TypeError(msg)
+    opener = _prefilled_opener(
+        tokenizer,
+        turn,
+        render_kwargs,
+        scaffold[0],
+        _generation_addition(tokenizer, render_kwargs),
+    )
+    return (opener + text).strip()
+
+
+def _prefilled_opener(
+    tokenizer: PreTrainedTokenizerBase,
+    message: dict[str, Any],
+    render_kwargs: dict[str, Any],
+    prompt: str,
+    addition: str,
+) -> str:
+    """The open reasoning block the generation prompt prefills and ``message``'s render continues, else ``""``.
+
+    :param prompt: Render of :data:`TURN_OPENER` with the generation prompt.
+    :param addition: The text the generation prompt adds to ``prompt``.
+    """
+    at = addition.rfind(REASONING_START_MARKER)
+    if at < 0 or REASONING_END_MARKER in addition[at:]:
+        return ""
+    rendered = _render(tokenizer, [TURN_OPENER, message], False, render_kwargs)
+    shared = len(os.path.commonprefix([prompt, rendered]))
+    return prompt[len(prompt) - len(addition) + at : shared]
+
+
+def _spliced_turn_ids(
+    tokenizer: PreTrainedTokenizerBase,
+    render_messages: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    assistant_indices: list[int],
+    trained_indices: Collection[int],
+    render_kwargs: dict[str, Any],
+    chat_format: ChatFormat | None,
+    tools: list[dict[str, Any]] | None,
+) -> tuple[list[int], list[bool]] | None:
+    """Ids and assistant mask built turn by turn: the prompt render, then each turn and the feedback before it.
+
+    :return: The ids and mask, or ``None`` when a context turn follows another
+        with no feedback between them to splice.
+    """
     prompt = _render(
         tokenizer, render_messages[: assistant_indices[0]], True, render_kwargs
     )
@@ -268,13 +473,13 @@ def encode_chat_transcript(
     mask = [False] * len(ids)
     special_ids = special_token_ids(tokenizer)
     scaffold = _turn_scaffold(tokenizer, render_kwargs, special_ids)
-    previous = None
-    for idx in assistant_indices:
+    for previous, idx in zip(
+        [None, *assistant_indices], assistant_indices, strict=False
+    ):
         if previous is not None:
             between = render_messages[previous + 1 : idx]
             if not between:
-                msg = f"Messages {previous} and {idx} are back-to-back assistant turns."
-                raise ValueError(msg)
+                return None
             feedback = _feedback_ids(tokenizer, between, render_kwargs, chat_format)
             if len(feedback) > 1 and frame_repeats_terminator(
                 ids[-1], feedback[0], special_ids, chat_format
@@ -285,31 +490,12 @@ def encode_chat_transcript(
         turn = _assistant_turn_ids(
             tokenizer, render_messages[idx], render_kwargs, special_ids, scaffold
         )
-        trained = idx >= trained_from
+        trained = idx in trained_indices
         if trained:
             _check_tool_calls_parse(messages[idx], turn, tools, chat_format)
         ids += turn
         mask += [trained] * len(turn)
-        previous = idx
-    kept = assistant_indices[-1] + 1
-    canonical = _render(tokenizer, render_messages[:kept], False, render_kwargs)
-    if not _decodes_template(tokenizer, ids, canonical):
-        ids, mask = _assemble_from_template(
-            tokenizer,
-            render_messages[:kept],
-            messages[:kept],
-            canonical,
-            render_kwargs,
-            chat_format,
-            tools,
-            trained_from,
-        )
-    if trained_from == 0:
-        return ids, mask
-    first_trained = next(idx for idx in assistant_indices if idx >= trained_from)
-    return _after_prompt_render(
-        tokenizer, render_messages[:first_trained], ids, mask, render_kwargs
-    )
+    return ids, mask
 
 
 def _after_prompt_render(
@@ -437,6 +623,21 @@ def _payload_at(
     return pos
 
 
+def generation_prompt_addition(
+    tokenizer: PreTrainedTokenizerBase,
+    tools: list[dict[str, Any]] | None,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> str:
+    """Text ``add_generation_prompt`` appends after one user message.
+
+    :param tokenizer: Tokenizer whose chat template renders the prompt.
+    :param tools: Tool schemas offered on the turn, or ``None``.
+    :param chat_template_kwargs: Extra ``apply_chat_template`` kwargs.
+    :return: The generation prompt's text.
+    """
+    return _generation_addition(tokenizer, _render_kwargs(tools, chat_template_kwargs))
+
+
 def _generation_addition(
     tokenizer: PreTrainedTokenizerBase, render_kwargs: dict[str, Any]
 ) -> str:
@@ -520,7 +721,7 @@ def _assemble_from_template(
     render_kwargs: dict[str, Any],
     chat_format: ChatFormat | None,
     tools: list[dict[str, Any]] | None,
-    trained_from: int,
+    trained_indices: Collection[int],
 ) -> tuple[list[int], list[bool]]:
     """Ids of ``canonical``, the template render, with an assistant mask.
 
@@ -530,7 +731,7 @@ def _assemble_from_template(
 
     :param render_messages: Messages as passed to the template.
     :param messages: The same turns, still carrying ``tool_calls`` for the parse check.
-    :param trained_from: Index of the first message whose assistant turns train.
+    :param trained_indices: Indices of the assistant messages that train.
     :return: Token ids and the assistant mask.
     """
     addition = _generation_addition(tokenizer, render_kwargs)
@@ -589,7 +790,7 @@ def _assemble_from_template(
         turn_ids = tokenizer.encode(kept, add_special_tokens=False)
         if needs_eos:
             turn_ids.append(tokenizer.eos_token_id)
-        trained = idx >= trained_from
+        trained = idx in trained_indices
         if trained:
             _check_tool_calls_parse(messages[idx], turn_ids, tools, chat_format)
         ids += turn_ids

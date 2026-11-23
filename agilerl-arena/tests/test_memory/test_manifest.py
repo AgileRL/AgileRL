@@ -25,7 +25,6 @@ from agilerl.arena.memory.manifest import (
     parse_gram_per_gpu,
     training_settings_from_manifest,
     unsupported_gpu_reason,
-    validated_run_manifest,
 )
 from agilerl.arena.memory.manifest import (
     estimate_manifest as _estimate_manifest,
@@ -39,7 +38,7 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.attention import FAMILY_ATTN_IMPLEMENTATIONS
 from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, MiB, ModelArch
 from agilerl.arena.models.fsdp import FSDPConfig, parallel_layout_pins
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 
 TINY_CONFIG = json.loads(
@@ -686,35 +685,6 @@ class TestImageInputs:
 
         assert (settings.images_per_row, settings.image_width) == (3, 1280)
 
-    def test_tower_target_modules_train_the_vision_tower(self):
-        trained = screenshots()
-        trained["network"]["lora_config"] = {
-            "target_modules": ["q_proj"],
-            "tower_target_modules": ["qkv"],
-        }
-
-        settings = training_settings_from_manifest(trained)
-        text = training_settings_from_manifest(screenshots())
-
-        assert settings.tower_lora_targets == frozenset({"qkv"})
-        assert settings.vision_tower_lora
-        assert text.tower_lora_targets == frozenset()
-        assert not text.vision_tower_lora
-
-    def test_tower_lora_keeps_adapter_sync(self):
-        trained = screenshots()
-        trained["network"]["lora_config"] = {
-            "target_modules": ["q_proj"],
-            "tower_target_modules": ["qkv"],
-        }
-
-        training = training_settings_from_manifest(trained)
-        generation = generation_settings_from_manifest(trained)
-
-        assert training.merged_lora_sync is False
-        assert generation.merged_lora_sync is False
-        assert training_settings_from_manifest(screenshots()).merged_lora_sync
-
     def test_text_environment_has_no_images(self):
         settings = training_settings_from_manifest(GRPO)
 
@@ -1291,8 +1261,8 @@ class TestDeviceFromResourceClass:
         assert gb300.name == "NVIDIA GB300"
         assert b300.name == "NVIDIA B300"
         assert gb300.total_gib == 279
-        assert b300.total_gib == 288
-        assert (gb300.cc_major, gb300.cc_minor) == (10, 0)
+        assert b300.total_gib == 269
+        assert (gb300.cc_major, gb300.cc_minor) == (10, 3)
         assert gb300.bf16_tflops == 2500
         assert gb300.memory_gb_per_second == 8000
         assert gb300.nvlink is True
@@ -1304,13 +1274,69 @@ class TestDeviceFromResourceClass:
         assert info.name == "NVIDIA B300"
         assert b200.name == "NVIDIA B200"
         assert info is not b200
-        assert info.total_gib == 288
-        assert (info.cc_major, info.cc_minor) == (10, 0)
+        assert info.total_gib == 269
+        assert (info.cc_major, info.cc_minor) == (10, 3)
         assert info.bf16_tflops == 2250
         assert info.memory_gb_per_second == 8000
         assert info.all_reduce_gb_per_second == 700
         assert info.all_reduce_latency_us == 10
         assert info.nvlink is True
+
+    @pytest.mark.parametrize(
+        ("node_label", "name"),
+        [
+            ("NVIDIA-B200", "NVIDIA B200"),
+            ("NVIDIA-B200-SHARED", "NVIDIA B200"),
+            ("NVIDIA-B300", "NVIDIA B300"),
+            ("NVIDIA-B300-SXM6-AC", "NVIDIA B300"),
+            ("NVIDIA-B300-SXM6-AC-SHARED", "NVIDIA B300"),
+            ("NVIDIA-GB300", "NVIDIA GB300"),
+            ("NVIDIA-GB300-SHARED", "NVIDIA GB300"),
+        ],
+    )
+    def test_gpu_operator_node_labels_resolve(self, node_label, name):
+        assert lookup_gpu(node_label).name == name
+
+    @pytest.mark.parametrize(
+        ("gpu_type", "total_gib", "capability", "bf16_tflops"),
+        [
+            ("NVIDIA-B200", 180, (10, 0), 2250),
+            ("NVIDIA-B300", 269, (10, 3), 2250),
+            ("NVIDIA-GB300", 279, (10, 3), 2500),
+        ],
+    )
+    def test_blackwell_datacenter_specs(
+        self, gpu_type, total_gib, capability, bf16_tflops
+    ):
+        info = lookup_gpu(gpu_type)
+
+        assert info.total_gib == total_gib
+        assert (info.cc_major, info.cc_minor) == capability
+        assert info.bf16_tflops == bf16_tflops
+        assert info.memory_gb_per_second == 8000
+        assert info.all_reduce_gb_per_second == 700
+        assert info.all_reduce_latency_us == 10
+        assert info.nvlink is True
+
+    @pytest.mark.parametrize(
+        ("node_label", "total_gib"),
+        [("NVIDIA-B200", 180), ("NVIDIA-B300", 269), ("NVIDIA-GB300", 279)],
+    )
+    def test_blackwell_node_label_sizes_without_gram_per_gpu(
+        self, node_label, total_gib
+    ):
+        device = device_spec_from_resource_class(
+            {"name": "blackwell", "gpu_type": node_label, "num_gpus": 4}
+        )
+
+        assert device.total_bytes == int(total_gib * GiB)
+
+    def test_b300_physical_gram_does_not_raise_the_usable_size(self):
+        device = gpu_device_spec("NVIDIA-B300-SXM6-AC", 288)
+
+        assert device.name == "NVIDIA B300"
+        assert device.total_bytes == 269 * GiB
+        assert device.compute_capability == (10, 3)
 
     def test_rtx6000_type_strings_hit_the_training_row(self):
         pro = lookup_gpu("NVIDIA RTX PRO 6000 Blackwell Server Edition")
@@ -1651,17 +1677,19 @@ class TestRunConfig:
         # one trainer GPU. NIXL double-buffers all 40 KiB of merged weights on
         # the trainer and holds them once on the engine. nccl_reshard has no
         # misc weights: the trainer stages the MLP block (3 x 2048) beside one
-        # fp32 copy of its largest weight, and the engine holds no bucket.
-        # Both sides hold the refit's NCCL groups.
+        # fp32 copy of its largest weight, plus a PACK slot of the full 32x64
+        # weight. The engine's measured groups swap their 2 GiB slot for it.
         merged = 2 * 2 * (4 * 32 * 32 + 3 * 32 * 64)
         assert reshard.training.merged_lora_sync is True
         assert reshard.generation.merged_lora_sync is True
         assert training_bytes(nixl, "lora_send_buffer") == 2 * merged
         assert generation_bytes(nixl, "lora_receive_buffer") == merged
         assert training_bytes(reshard, "lora_send_buffer") == (
-            2 * 3 * 2048 + 4 * 2048 + 2 * device.nccl_group_bytes
+            2 * 3 * 2048 + 4 * 2048 + 2 * 32 * 64 + 2 * device.nccl_group_bytes
         )
-        assert generation_bytes(reshard, "lora_receive_buffer") == 4300 * MiB
+        assert generation_bytes(reshard, "lora_receive_buffer") == (
+            4300 * MiB - 2 * GiB + 2 * 32 * 64
+        )
 
     def test_nccl_reshard_splits_for_the_sized_engine_width(self):
         # Arrange
@@ -1679,7 +1707,7 @@ class TestRunConfig:
         assert config.training.nccl_reshard_engine_tensor_parallel == 2
         assert config.generation.nccl_reshard_trainer_shards == 1
         assert generation_bytes(config, "lora_receive_buffer") == (
-            2 * 3 * 2 * 32 * 32 + 4300 * MiB
+            2 * 3 * 2 * 32 * 32 + 4300 * MiB - 2 * GiB + 2 * 32 * 64
         )
 
     def test_nccl_reshard_without_an_engine_config_reshards_into_one_gpu(self):

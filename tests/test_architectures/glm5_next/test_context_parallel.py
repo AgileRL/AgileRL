@@ -32,7 +32,7 @@ from agilerl.architectures.glm5_next.patches import (
     causal_sdpa_attention_forward,
 )
 from agilerl.architectures.glm5_next.tensor_parallel import (
-    GLM5_NEXT_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as GLM5_NEXT_TENSOR_PARALLEL_PLAN,
 )
 from agilerl.distributed import fsdp_blocks
 from agilerl.distributed.context_parallel import gdn as context_parallel_gdn

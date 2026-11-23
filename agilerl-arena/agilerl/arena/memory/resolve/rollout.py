@@ -1,57 +1,15 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Whether a Ray run generates on async rollout engines, how many it starts, its cycle size, whether it drafts, how it syncs LoRA and its LoRA streams."""
+"""A Ray run's rollout cycle size, whether it drafts, how it syncs LoRA and its LoRA streams."""
 
 from __future__ import annotations
 
 import math
-from typing import Any, Literal
+from typing import Any
 
-from agilerl.arena.models.algorithms.base import AlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import (
-    RolloutLLMSpec,
     drafting_rejected_sampling,
 )
-
-
-def async_rollout_algorithm(algorithm: type[AlgorithmSpec]) -> bool:
-    """Whether Ray runs this algorithm on async rollout engines.
-
-    Ray runs every algorithm that generates its own rollouts async and ignores
-    ``training.rollout_mode``. The other env type fails in Ray either way.
-
-    :param algorithm: The manifest's algorithm spec class.
-    :return: ``True`` for the rollout LLM algorithms.
-    """
-    return issubclass(algorithm, RolloutLLMSpec)
-
-
-def run_rollout_engines(
-    async_rollout: bool, configured: int | Literal["auto"]
-) -> int | Literal["auto"]:
-    """Rollout engines per member a Ray run starts: an async ``0`` is ``auto``.
-
-    :param async_rollout: :func:`async_rollout_algorithm` of the run.
-    :param configured: ``training.rollout_engines_per_agent`` as written.
-    :return: ``configured``, or ``auto`` for an async run that leaves it 0.
-    """
-    if async_rollout and not configured:
-        return "auto"
-    return configured
-
-
-def rollout_engines_blocker(
-    async_rollout: bool, configured: int | Literal["auto"]
-) -> str | None:
-    """Why a run cannot start the configured rollout engines, or ``None``.
-
-    :param async_rollout: :func:`async_rollout_algorithm` of the run.
-    :param configured: ``training.rollout_engines_per_agent`` as written.
-    :return: The error for engines on a run that does not generate, or ``None``.
-    """
-    if async_rollout or configured == 0:
-        return None
-    return f"rollout_engines_per_agent={configured} requires async rollout."
 
 
 def default_rollout_batch_size(batch_size: int, trainers: int, engines: int) -> int:
@@ -69,21 +27,6 @@ def default_rollout_batch_size(batch_size: int, trainers: int, engines: int) -> 
     return math.ceil(batch_size / multiple) * multiple
 
 
-def apply_run_rollout_mode(training: dict[str, Any], async_rollout: bool) -> None:
-    """Set a raw training section's rollout mode and engines as Ray runs them.
-
-    :param training: The manifest's ``training`` section, edited in place.
-    :param async_rollout: :func:`async_rollout_algorithm` of the run.
-    """
-    if not async_rollout:
-        training.pop("rollout_mode", None)
-        return
-    training["rollout_mode"] = "async"
-    training["rollout_engines_per_agent"] = run_rollout_engines(
-        True, training.get("rollout_engines_per_agent", 0)
-    )
-
-
 MULTI_TURN_SPECULATIVE_CONFIG: dict[str, Any] = {
     "method": "ngram",
     "num_speculative_tokens": 4,
@@ -92,9 +35,21 @@ MULTI_TURN_SPECULATIVE_CONFIG: dict[str, Any] = {
 }
 """vLLM ``speculative_config`` a drafting rollout engine starts with by default."""
 
+NGRAM_DRAFT_MAX_DECODE_TOKENS = 512
+"""Widest full decode step default drafting allows.
+
+vLLM 0.32 captures uniform decode steps up to 512 tokens by default and
+1024 on data-center Blackwell. Its start-up rejection sampler profiles one
+draft per sequence, so default drafting stays within 512 on every GPU.
+"""
+
 
 def drafts_by_default(
-    multi_turn: bool, hybrid_ssm: bool, min_p: float, logit_bias: bool
+    multi_turn: bool,
+    hybrid_ssm: bool,
+    min_p: float,
+    logit_bias: bool,
+    max_num_seqs: int,
 ) -> bool:
     """Whether a rollout engine drafts with n-gram lookup when ``speculative_config`` is omitted.
 
@@ -104,19 +59,29 @@ def drafts_by_default(
     n-gram drafts. Hybrid recurrent-state models decode without drafting,
     since vLLM must roll their state back past rejected drafts. vLLM rejects
     every request that sets :func:`drafting_rejected_sampling` on a drafting
-    engine.
+    engine. A drafting decode step runs every draft token of every sequence.
+    Default drafting stays within :data:`NGRAM_DRAFT_MAX_DECODE_TOKENS`:
+    vLLM 0.32 captures that width by default and 1024 on data-center
+    Blackwell, and its start-up profile runs the rejection sampler with one
+    draft per sequence.
 
     :param multi_turn: An episode can run more than one turn.
     :param hybrid_ssm: The model has Mamba or linear-attention layers.
     :param min_p: The algorithm's ``min_p``.
     :param logit_bias: Rollout requests carry a ``logit_bias``.
+    :param max_num_seqs: Sequences the engine decodes at once.
     :return: ``True`` for a multi-turn engine on an attention-only model
-        whose requests set neither ``min_p`` nor ``logit_bias``.
+        whose requests set neither ``min_p`` nor ``logit_bias`` and whose
+        full drafting decode step fits :data:`NGRAM_DRAFT_MAX_DECODE_TOKENS`.
     """
+    step_tokens = max_num_seqs * (
+        1 + MULTI_TURN_SPECULATIVE_CONFIG["num_speculative_tokens"]
+    )
     return (
         multi_turn
         and not hybrid_ssm
         and not drafting_rejected_sampling(min_p, logit_bias)
+        and step_tokens <= NGRAM_DRAFT_MAX_DECODE_TOKENS
     )
 
 
@@ -163,7 +128,6 @@ def checkpoint_quantized(config: dict[str, Any]) -> bool:
 def merged_lora_sync_blockers(
     quantization: str | None,
     quantized_checkpoint: bool,
-    tower_lora: bool,
     mtp_drafting: bool,
 ) -> list[str]:
     """Why a rollout engine cannot serve merged LoRA weights with LoRA off.
@@ -172,26 +136,21 @@ def merged_lora_sync_blockers(
     merged weights. vLLM quantizes weights at load, both for the
     ``quantization`` engine argument and for a checkpoint that ships a
     quantization config, so such an engine cannot take merged bf16 tensors
-    and keeps serving the adapter. vLLM keys cached vision-encoder outputs by
-    LoRA name only, so an engine with tower LoRA keeps serving the adapter
-    too. Merged sync does not update MTP draft weights, so an engine that
-    drafts with MTP keeps serving the adapter.
+    and keeps serving the adapter. Merged sync does not update MTP draft
+    weights, so an engine that drafts with MTP keeps serving the adapter.
 
     :param quantization: ``vllm_config.quantization``.
     :param quantized_checkpoint: :func:`checkpoint_quantized` of the engine's checkpoint.
-    :param tower_lora: Whether the adapter targets vision-tower modules.
     :param mtp_drafting: :func:`drafts_with_mtp` of the engine's ``speculative_config``.
     :return: One reason per blocker, naming the manifest field that sets it;
-        empty for an unquantized engine on an unquantized checkpoint, without
-        tower LoRA or MTP drafting.
+        empty for an unquantized engine on an unquantized checkpoint without
+        MTP drafting.
     """
     blockers = []
     if quantization is not None and quantization.lower() != "none":
         blockers.append(f"vllm_config.quantization is {quantization!r}")
     if quantized_checkpoint:
         blockers.append("the checkpoint's config.json ships a quantization config")
-    if tower_lora:
-        blockers.append("lora_config.tower_target_modules targets the vision tower")
     if mtp_drafting:
         blockers.append("vllm_engine_args.speculative_config drafts with MTP")
     return blockers

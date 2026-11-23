@@ -16,7 +16,7 @@ import sys
 import tempfile
 import textwrap
 import warnings
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from io import BufferedWriter
@@ -40,14 +40,15 @@ from torch.optim.lr_scheduler import LambdaLR
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
     FAMILY_RUNTIME_CONFIGS,
+    ModelRuntimeConfig,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
+    trainer_model_class,
 )
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
 from agilerl.architectures.vllm_language import (
     apply_multimodal_engine_kwargs,
-    apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
 )
 from agilerl.arena.memory.resolve.attention import (
@@ -1255,31 +1256,14 @@ def _language_model_linear_leaf_names(model: nn.Module, prefix: str) -> list[str
     return sorted(names - {"lm_head"})
 
 
-def _anchored_lora_target_regex(
-    language_names: list[str],
-    tower_names: list[str],
-    prefix: str,
-    skipped_towers: list[str],
-) -> str:
-    """PEFT regex: *language_names* under *prefix*, *tower_names* everywhere else.
+def _anchored_lora_target_regex(language_names: list[str], prefix: str) -> str:
+    """PEFT regex matching *language_names* under *prefix*.
 
-    Tower names inside a *skipped_towers* module do not match. PEFT matches a
-    string ``target_modules`` with ``re.fullmatch`` on each ``named_modules`` key.
+    PEFT matches a string ``target_modules`` with ``re.fullmatch`` on each
+    ``named_modules`` key.
     """
-    prefix_esc = re.escape(prefix)
-    patterns = []
-    if language_names:
-        alts = "|".join(re.escape(name) for name in language_names)
-        patterns.append(rf"{prefix_esc}\.(?:.*\.)?(?:{alts})")
-    if tower_names:
-        alts = "|".join(re.escape(name) for name in tower_names)
-        skip = ""
-        if skipped_towers:
-            # ``.+`` keeps lora_target_module_names from reading these as targets.
-            skipped = "|".join(re.escape(name) for name in skipped_towers)
-            skip = rf"(?!(?:.+\.)?(?:{skipped})\.)"
-        patterns.append(rf"(?!{prefix_esc}\.){skip}(?:.*\.)?(?:{alts})")
-    return "|".join(f"(?:{pattern})" for pattern in patterns)
+    alts = "|".join(re.escape(name) for name in language_names)
+    return rf"{re.escape(prefix)}\.(?:.*\.)?(?:{alts})"
 
 
 def lora_target_module_names(
@@ -1405,7 +1389,7 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
         if new_targets != rewriteable:
             updates["target_modules"] = new_targets
             if dropped:
-                logger.info(
+                logger.warning(
                     "Dropped Mamba-incompatible LoRA target_modules %s",
                     dropped,
                 )
@@ -1423,7 +1407,7 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
             kept_params.append(str(param))
         if dropped_params:
             updates["target_parameters"] = kept_params or None
-            logger.info(
+            logger.warning(
                 "Dropped Mamba-incompatible LoRA target_parameters %s",
                 dropped_params,
             )
@@ -1475,15 +1459,12 @@ def _exclude_family_lora_modules(
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
-    tower_target_modules: list[str] | None = None,
-    skipped_tower_modules: list[str] | None = None,
 ) -> LoraConfig:
     """Rewrite ``LoraConfig.target_modules`` so PEFT wraps exactly the intended modules.
 
     On a VL model, named targets and ``all-linear`` land only under the
-    language model; ``tower_target_modules`` names the tower and connector
-    modules to adapt outside it, except inside ``skipped_tower_modules``. A
-    regex ``target_modules`` is kept as given.
+    language model, so the towers stay frozen. A regex ``target_modules`` is
+    kept as given when every module it matches is under the language model.
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
@@ -1497,35 +1478,32 @@ def adapt_lora_config_for_model(
     :type model: nn.Module
     :param lora_config: Trainer LoRA config.
     :type lora_config: LoraConfig
-    :param tower_target_modules: Tower and connector module names to adapt, or None.
-    :type tower_target_modules: list[str] | None
-    :param skipped_tower_modules: Tower and connector modules the vLLM engine
-        leaves unbuilt, so they get no LoRA; or None.
-    :type skipped_tower_modules: list[str] | None
     :return: The config with resolved targets.
     :rtype: LoraConfig
-    :raises ValueError: If tower targets are set on a text-only model or with a
-        regex ``target_modules``, or a target group matches no module.
+    :raises ValueError: If the targets match no language-model module, or a
+        regex matches a module outside the language model.
     """
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
     lora_config = _exclude_family_lora_modules(model, lora_config)
     prefix = language_model_prefix(model)
-    tower_names = sorted(set(tower_target_modules or ()))
     if prefix is None:
-        if tower_names:
-            msg = (
-                f"tower_target_modules {tower_names} need a multimodal model; "
-                f"{type(model).__name__} has no language_model"
-            )
-            raise ValueError(msg)
         return lora_config
     raw_targets = lora_config.target_modules
+    exclude_modules = list(lora_config.exclude_modules or [])
     if isinstance(raw_targets, str) and raw_targets != "all-linear":
-        if tower_names:
+        outside = [
+            key
+            for key in list_peft_matched_module_keys(
+                model, raw_targets, exclude_modules=exclude_modules
+            )
+            if key != prefix and not key.startswith(f"{prefix}.")
+        ]
+        if outside:
             msg = (
-                "tower_target_modules cannot be combined with a regex "
-                f"target_modules ({raw_targets!r}); name both as module lists"
+                f"LoRA target_modules regex {raw_targets!r} matches modules "
+                f"outside {prefix!r}, e.g. {outside[:3]}; the towers stay "
+                "frozen, so LoRA targets the language model only"
             )
             raise ValueError(msg)
         return lora_config
@@ -1533,42 +1511,20 @@ def adapt_lora_config_for_model(
         language_names = _language_model_linear_leaf_names(model, prefix)
     else:
         language_names = sorted(set(raw_targets or ()))
-    if not language_names and not tower_names:
+    if not language_names:
         return lora_config
 
-    skipped_towers = sorted(set(skipped_tower_modules or ()))
-    exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
-    groups = (
-        (
-            "under",
-            language_names,
-            _anchored_lora_target_regex(language_names, [], prefix, []),
-        ),
-        (
-            "outside",
-            tower_names,
-            _anchored_lora_target_regex([], tower_names, prefix, skipped_towers),
-        ),
+    target_spec = _anchored_lora_target_regex(language_names, prefix)
+    matched = list_peft_matched_module_keys(
+        model, target_spec, exclude_modules=exclude_modules
     )
-    matched: list[str] = []
-    for where, names, spec in groups:
-        if not names:
-            continue
-        group_matched = list_peft_matched_module_keys(
-            model, spec, exclude_modules=exclude_modules
+    if not matched:
+        msg = (
+            f"No modules under {prefix!r} match LoRA targets {language_names}; "
+            "language-model linears are "
+            f"{_language_model_linear_leaf_names(model, prefix)}"
         )
-        if not group_matched:
-            msg = (
-                f"No modules {where} {prefix!r} match LoRA targets {names}; "
-                "language-model linears are "
-                f"{_language_model_linear_leaf_names(model, prefix)}"
-            )
-            raise ValueError(msg)
-        matched.extend(group_matched)
-
-    target_spec = _anchored_lora_target_regex(
-        language_names, tower_names, prefix, skipped_towers
-    )
+        raise ValueError(msg)
     logger.info(
         "Anchored LoRA target_modules at %s (%d modules), e.g. %s",
         prefix,
@@ -1585,7 +1541,7 @@ def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
     device = torch.device(f"cuda:{device_index}")
     alloc_gib = torch.cuda.memory_allocated(device) / (1024**3)
     reserved_gib = torch.cuda.memory_reserved(device) / (1024**3)
-    logger.info(
+    logger.debug(
         "%s: CUDA[%s] allocated=%.2f GiB reserved=%.2f GiB",
         label,
         device_index,
@@ -1890,9 +1846,10 @@ def create_model_from_name_or_path(
         logger.info("Trainer attention backend: %s", attn_implementation)
     if attn_implementation == "flex_attention":
         patch_flex_attention_kernel_options()
+    model_class = trainer_model_class(model_name_or_path)
     load_remote_code(
         model_name_or_path,
-        trainer.model_class,
+        model_class,
         model_config.get("trust_remote_code"),
     )
     if add_value_head:
@@ -1901,7 +1858,7 @@ def create_model_from_name_or_path(
             **model_config,
         )
     else:
-        model = trainer.model_class.from_pretrained(
+        model = model_class.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
@@ -3089,7 +3046,6 @@ def build_vllm_llm_init_kwargs(
     max_model_len: int,
     process_index: int = 0,
     lora_rank: int | None = None,
-    tower_lora_target_modules: Collection[str] | None = None,
     strip_multimodal_towers: bool = False,
 ) -> dict[str, Any]:
     """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
@@ -3104,8 +3060,6 @@ def build_vllm_llm_init_kwargs(
     :type process_index: int
     :param lora_rank: Trainer LoRA rank, used to size ``max_lora_rank``.
     :type lora_rank: int | None
-    :param tower_lora_target_modules: ``lora_config.tower_target_modules``; enables tower LoRA.
-    :type tower_lora_target_modules: Collection[str] | None
     :param strip_multimodal_towers: Whether the engine skips the model's towers.
     :type strip_multimodal_towers: bool
     :return: Keyword arguments for ``vllm.LLM``.
@@ -3117,11 +3071,10 @@ def build_vllm_llm_init_kwargs(
         else trainer_model_name_or_path
     )
     try:
-        runtime = family_runtime(vllm_model)
-        family_vllm_kwargs = runtime.vllm.engine_kwargs()
+        runtime: ModelRuntimeConfig | None = family_runtime(vllm_model)
     except OSError:
         runtime = None
-        family_vllm_kwargs = {}
+    family_vllm_kwargs = {} if runtime is None else runtime.vllm.engine_kwargs()
     explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
     batched_tokens = (
         explicit_batched_tokens
@@ -3172,12 +3125,6 @@ def build_vllm_llm_init_kwargs(
         apply_multimodal_engine_kwargs(
             kwargs,
             strip_multimodal_towers=strip_multimodal_towers,
-        )
-        apply_tower_connector_lora_engine_kwargs(
-            kwargs,
-            strip_multimodal_towers=strip_multimodal_towers,
-            runtime=runtime,
-            tower_target_modules=tower_lora_target_modules,
         )
     return kwargs
 

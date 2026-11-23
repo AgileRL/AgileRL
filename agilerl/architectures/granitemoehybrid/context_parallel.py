@@ -31,6 +31,6 @@ def wrap_granitemoehybrid_context_parallel(
     return count
 
 
-GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
+CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
     wrap=wrap_granitemoehybrid_context_parallel,
 )

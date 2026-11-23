@@ -32,11 +32,6 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from agilerl.arena.memory.resolve.fsdp import cpu_offload_blocker
-from agilerl.arena.memory.resolve.rollout import (
-    async_rollout_algorithm,
-    rollout_engines_blocker,
-)
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
@@ -53,11 +48,18 @@ from agilerl.arena.models.hpo import (
     no_op_mutation_probabilities,
     require_mutation_range_inside_field,
 )
+from agilerl.arena.models.manifest_rules import (
+    apply_run_rollout_mode,
+    async_rollout_algorithm,
+    cpu_offload_blocker,
+    rollout_engines_blocker,
+)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import (
     FinetuningNetworkSpec,
     MlpSpec,
     NetworkSpec,
+    check_lora_config_supported,
     default_rollout_vllm_config,
     dump_network_section,
     network_arch_is_resolvable,
@@ -116,7 +118,7 @@ def strips_multimodal_towers(algorithm: LLMAlgorithmSpec, text_only: bool) -> bo
     """Whether the vLLM engine skips the model's vision and audio towers.
 
     True for a vision-language catalog model whose environment sends text only
-    (modality text, or dataset rows), unless tower LoRA trains the towers.
+    (modality text, or dataset rows).
 
     :param algorithm: The run's LLM algorithm spec.
     :param text_only: Whether the environment never sends images.
@@ -126,12 +128,7 @@ def strips_multimodal_towers(algorithm: LLMAlgorithmSpec, text_only: bool) -> bo
         return False
     hub_id = algorithm.pretrained_model_name_or_path
     model = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
-    lora = algorithm.lora_config
-    return (
-        model is not None
-        and "vision" in model.modalities
-        and not (lora is not None and lora.tower_target_modules)
-    )
+    return model is not None and "vision" in model.modalities
 
 
 def _copy_when_unset(
@@ -600,12 +597,8 @@ class TrainingManifest(BaseModel):
                 self.network.max_context_length,
                 source_set=True,
             )
-            _copy_when_unset(
-                self.algorithm,
-                "lora_config",
-                self.network.lora_config,
-                source_set="lora_config" in self.network.model_fields_set,
-            )
+            if "lora_config" in type(self.algorithm).model_fields:
+                self._resolve_lora_config(self.network)
 
         if (
             isinstance(self.algorithm, RolloutLLMSpec)
@@ -647,9 +640,11 @@ class TrainingManifest(BaseModel):
 
     @model_validator(mode="after")
     def _check_async_rollout_buffer(self) -> Self:
-        """Async rollout queues generated groups, so it needs the LLM buffer."""
+        """Async rollout queues generated groups, so it needs the LLM buffer; default it when unset."""
         if not self.training.async_rollout:
             return self
+        if self.replay_buffer is None:
+            self.replay_buffer = LLMRolloutBufferSpec()
         if not isinstance(self.replay_buffer, LLMRolloutBufferSpec):
             got = (
                 type(self.replay_buffer).__name__
@@ -754,21 +749,6 @@ class TrainingManifest(BaseModel):
                 f"need one vocabulary; {student_id} has {student_info.vocab_size} "
                 f"tokens and {model.pretrained_model_name_or_path} has "
                 f"{teacher_info.vocab_size}."
-            )
-            raise ValueError(msg)
-        vllm = self.algorithm.vllm_config
-        if (
-            vllm is None
-            or vllm.tensor_parallel_size is None
-            or not {"training_gpus_per_agent", "rollout_engines_per_agent"}
-            & self.training.model_fields_set
-        ):
-            msg = (
-                "algorithm.teacher.model needs its GPU layout written out, since "
-                "the automatic GPU split does not count teacher engines. Set "
-                "algorithm.vllm_config.tensor_parallel_size and "
-                "training.training_gpus_per_agent or "
-                "training.rollout_engines_per_agent."
             )
             raise ValueError(msg)
         return self
@@ -956,12 +936,10 @@ class TrainingManifest(BaseModel):
                     and "tensor_parallel_size" not in vllm_config.model_fields_set
                 ):
                     vllm_payload.pop("tensor_parallel_size", None)
-        if (
-            isinstance(self.network, FinetuningNetworkSpec)
-            and "lora_config" in self.network.model_fields_set
-            and self.network.lora_config is None
+        if isinstance(self.network, FinetuningNetworkSpec) and isinstance(
+            algorithm, dict
         ):
-            payload.setdefault("network", {})["lora_config"] = None
+            self._move_model_fields_to_network(algorithm)
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
@@ -969,6 +947,39 @@ class TrainingManifest(BaseModel):
             if environment.get("goal_images_field") is None:
                 environment.pop("goal_images_field", None)
         return payload
+
+    def _resolve_lora_config(self, network: FinetuningNetworkSpec) -> None:
+        """Give the algorithm and network one LoRA config, the catalog default when neither sets one.
+
+        A null on either section counts as unset.
+
+        :param network: The manifest's finetuning network section.
+        :type network: FinetuningNetworkSpec
+        """
+        algorithm_lora = self.algorithm.lora_config
+        if algorithm_lora is None:
+            self.algorithm.model_fields_set.discard("lora_config")
+        else:
+            check_lora_config_supported(
+                network.pretrained_model_name_or_path, algorithm_lora
+            )
+            if "lora_config" not in network.model_fields_set:
+                network.lora_config = algorithm_lora
+                return
+        _copy_when_unset(
+            self.algorithm, "lora_config", network.lora_config, source_set=True
+        )
+
+    @staticmethod
+    def _move_model_fields_to_network(algorithm: dict[str, Any]) -> None:
+        """Drop the algorithm's copies of the model, context length and LoRA; ``network`` holds them.
+
+        :param algorithm: The dumped ``algorithm`` section, edited in place.
+        :type algorithm: dict[str, Any]
+        """
+        algorithm.pop("pretrained_model_name_or_path", None)
+        algorithm.pop("max_model_len", None)
+        algorithm.pop("lora_config", None)
 
     def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
         """Omit dumped training defaults that parsers treat as explicit choices.
@@ -991,3 +1002,32 @@ class TrainingManifest(BaseModel):
         ):
             if field not in authored:
                 training.pop(field, None)
+
+
+def async_rollout(manifest: TrainingManifest) -> bool:
+    """Whether the run generates on async rollout engines, as :func:`async_rollout_algorithm` decides."""
+    return async_rollout_algorithm(type(manifest.algorithm))
+
+
+def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
+    """Whether a rollout LLM manifest names ``rollout_mode: colocated``, which only local runs take."""
+    return (
+        async_rollout(manifest)
+        and "rollout_mode" in manifest.training.model_fields_set
+        and manifest.training.rollout_mode == "colocated"
+    )
+
+
+def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
+    """The manifest validated as Ray runs it, from :func:`apply_run_rollout_mode`.
+
+    :param manifest: Training manifest, validated as written.
+    :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
+    :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
+    """
+    run_async = async_rollout(manifest)
+    if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
+        return manifest
+    payload = manifest.to_payload()
+    apply_run_rollout_mode(payload["training"], run_async)
+    return TrainingManifest.model_validate(payload)

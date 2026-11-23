@@ -167,7 +167,11 @@ def _engine_drafts(arch: ModelArch, settings: GenerationSettings) -> bool:
     if settings.speculative_drafting is not None:
         return settings.speculative_drafting
     return drafts_by_default(
-        settings.multi_turn, arch.is_hybrid_ssm, settings.min_p, settings.logit_bias
+        settings.multi_turn,
+        arch.is_hybrid_ssm,
+        settings.min_p,
+        settings.logit_bias,
+        settings.max_num_seqs,
     )
 
 
@@ -365,9 +369,7 @@ def _generation_pools(
     device: DeviceSpec,
 ) -> tuple[int, int, int]:
     """KV pool, start-up pool, and one-sequence demand of the engine bar."""
-    budget = int(settings.gpu_memory_utilization * device.total_bytes)
-    if settings.reserves_prompt_logprobs:
-        budget -= formulas.prompt_logprob_bytes(model.arch)
+    budget = _engine_budget(model, settings, device)
     non_kv = (
         terms["weights"]
         + terms["startup_peak"]
@@ -389,6 +391,39 @@ def _generation_pools(
         tensor_parallel=settings.tensor_parallel_size,
     )
     return kv_pool, startup_pool, full_sequence
+
+
+def _engine_budget(
+    model: ModelSpec, settings: GenerationSettings, device: DeviceSpec
+) -> int:
+    """Bytes vLLM may use on one engine GPU, less the prompt-logprob reserve."""
+    budget = int(settings.gpu_memory_utilization * device.total_bytes)
+    if settings.reserves_prompt_logprobs:
+        budget -= formulas.prompt_logprob_bytes(model.arch)
+    return budget
+
+
+def kv_pool_ceiling(
+    model: ModelSpec, device: DeviceSpec, settings: GenerationSettings
+) -> int:
+    """Largest KV pool the engine can have at any ``max_num_seqs``.
+
+    The budget less weights, CUDA graphs, LoRA slots and engine runtime, which
+    ``max_num_seqs`` does not move. Start-up activations, step buffers and
+    Mamba state only shrink the pool further.
+
+    :param model: Engine-side model spec.
+    :param device: The engine's GPU.
+    :param settings: Generation settings; ``max_num_seqs`` is ignored.
+    :return: The bound in bytes; may be negative.
+    """
+    terms, _, _ = engine_terms(model, settings)
+    return _engine_budget(model, settings, device) - (
+        terms["weights"]
+        + terms["cuda_graphs"]
+        + terms["lora_slots"]
+        + terms["engine_runtime"]
+    )
 
 
 def drop_engine_fast_paths(
@@ -545,23 +580,32 @@ def _lora_receive_buffer_component(
         )
     dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
     if settings.merged_lora_sync and settings.nccl_reshard_trainer_shards is not None:
+        layout = lora_formulas.NcclReshardLayout(
+            settings.nccl_reshard_trainer_shards, settings.tensor_parallel_size
+        )
         bucket = lora_formulas.nccl_reshard_receive_bucket_bytes(
             arch,
             settings.lora_sync_scope,
-            lora_formulas.NcclReshardLayout(
-                settings.nccl_reshard_trainer_shards, settings.tensor_parallel_size
-            ),
+            layout,
             dtype_bytes,
         )
-        # The refit's bulk and misc groups and their transfer buffers: 3.0-4.2
-        # GiB past the misc bucket over merged NIXL on 8x H100 TP 2 engines
-        # (Qwen3.5-2B to Qwen3.8-27B); the largest is charged.
-        refit_groups = 4300 * MiB
+        pack_slot = lora_formulas.nccl_reshard_pack_slot_bytes(
+            arch, settings.lora_sync_scope, layout, dtype_bytes
+        )
+        # Groups and transfer buffers measured 3.0-4.2 GiB past the misc
+        # bucket on 8x H100 TP 2 engines with the default 2 GiB PACK slot,
+        # an ncclMemAlloc outside the caching allocator. The planned slot
+        # replaces that 2 GiB.
+        refit_groups = 4300 * MiB - 2 * GiB + pack_slot
         return MemoryComponent(
             key="lora_receive_buffer",
             label="nccl_reshard misc receive bucket and groups",
             n_bytes=bucket + refit_groups,
-            detail={"misc_bucket": bucket, "refit_groups": refit_groups},
+            detail={
+                "misc_bucket": bucket,
+                "refit_groups": refit_groups,
+                "pack_slot": pack_slot,
+            },
             note=f"{note} Bulk weights reshard into the live weights.",
         )
     if settings.merged_lora_sync:

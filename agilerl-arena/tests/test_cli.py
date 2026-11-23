@@ -69,7 +69,6 @@ def mock_client() -> MagicMock:
             "environment_exists",
             "list_environment_entrypoints",
             "validate_environment",
-            "profile_environment",
             "delete_environment",
             "duplicate_environment_version",
             "submit_experiment",
@@ -152,7 +151,7 @@ class TestCommandConfig:
                 request_timeout=5,
                 upload_timeout=120,
             )
-            build_client(cfg)
+            build_client(cfg, MockArenaClient)
             MockArenaClient.configure.assert_called_once_with(
                 base_url="http://api",
                 keycloak_url="http://kc",
@@ -367,6 +366,20 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "not a registered algorithm" in result.output
 
+    def test_validate_rejects_hpo(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-"],
+            input=(
+                "algorithm: {name: DQN}\n"
+                "environment: {name: CartPole-v1}\n"
+                "training: {hpo: true}\n"
+            ),
+        )
+
+        assert result.exit_code == 1
+        assert "training.hpo: HPO is no longer available in Arena" in result.output
+
     def test_validate_lists_algorithm_aliases_once(self, runner):
         result = runner.invoke(
             main,
@@ -400,7 +413,7 @@ class TestManifestCommands:
             ),
             (
                 "Qwen/Qwen3-4B",
-                "warning: Model Qwen/Qwen3-4B is deprecated and will be removed.",
+                "warning: Model Qwen/Qwen3-4B is deprecated and can no longer be submitted.",
             ),
         ],
     )
@@ -507,7 +520,7 @@ class TestManifestCommands:
         )
 
         assert json.loads(result.output)["warnings"] == [
-            "Model Qwen/Qwen3-4B is deprecated and will be removed."
+            "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
         ]
 
     def test_validate_json_invalid_verdict_has_the_same_keys(self, runner):
@@ -573,20 +586,22 @@ class TestLoginCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["login"])
         assert result.exit_code == 0
-        mock_client.login.assert_called_once_with(timeout=300, force=False)
+        mock_client.login.assert_called_once_with(timeout=300)
         mock_client.close.assert_called_once()
 
-    def test_login_force(self, runner, mock_client):
+    def test_login_rejects_force_flag(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["login", "--force"])
-        assert result.exit_code == 0
-        mock_client.login.assert_called_once_with(timeout=300, force=True)
+        assert result.exit_code == 2
+        assert "No such option" in result.output
+        assert "--force" in result.output
+        mock_client.login.assert_not_called()
 
     def test_login_custom_timeout(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["login", "--timeout", "60"])
         assert result.exit_code == 0
-        mock_client.login.assert_called_once_with(timeout=60, force=False)
+        mock_client.login.assert_called_once_with(timeout=60)
 
 
 class TestLogoutCommand:
@@ -633,48 +648,110 @@ class TestUserCommands:
         assert result.exit_code == 0
 
 
-class TestResourcesCommands:
-    def test_resources_list(self, runner, mock_client):
+class TestResourcesListCommand:
+    def test_prints_one_row_per_gpu_type(self, runner, mock_client):
+        # Arrange
         mock_client.list_resources.return_value = {
-            "tiers": {
-                "medium": {
-                    "name": "arena-medium",
-                    "num_gpus": 4,
-                    "gpu_type": "A100",
-                    "num_cpus": 16,
-                    "ram_gb": 64,
-                    "price_per_node_hour": 10.0,
-                },
-                "small": {
-                    "name": "arena-small",
-                    "num_gpus": 1,
-                    "gpu_type": "T4",
-                    "num_cpus": 4,
-                    "ram_gb": 16,
-                    "price_per_node_hour": 2.5,
-                },
-            }
+            "gpuTypes": [
+                {"gpuType": "h100-80", "gpusPerNode": [1, 4, 8], "devOnly": False},
+                {"gpuType": "l4", "gpusPerNode": [1], "devOnly": False},
+            ]
         }
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["resources", "list"])
-        assert result.exit_code == 0
 
-    def test_resources_list_no_gpu(self, runner, mock_client):
+        # Act
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["resources", "list"])
+
+        # Assert
+        assert result.exit_code == 0
+        assert "GPU type" in result.output
+        assert "GPUs per node" in result.output
+        assert "h100-80" in result.output
+        assert "1, 4, 8" in result.output
+        assert "yes" not in result.output
+
+    def test_marks_dev_only_gpu_types(self, runner, mock_client):
+        mock_client.list_resources.return_value = {
+            "gpuTypes": [
+                {"gpuType": "l4", "gpusPerNode": [1], "devOnly": False},
+                {"gpuType": "b200", "gpusPerNode": [8], "devOnly": True},
+            ]
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["resources", "list"])
+
+        b200_line = next(line for line in result.output.splitlines() if "b200" in line)
+        l4_line = next(line for line in result.output.splitlines() if "l4" in line)
+        assert "Dev only" in result.output
+        assert "yes" in b200_line
+        assert "yes" not in l4_line
+
+    def test_json_emits_the_gpu_types(self, runner, mock_client):
+        gpu_types = [
+            {"gpuType": "h100-80", "gpusPerNode": [1, 8], "devOnly": False},
+        ]
+        mock_client.list_resources.return_value = {"gpuTypes": gpu_types}
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "resources", "list"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.output) == gpu_types
+
+    def test_derives_gpu_types_from_tiers_on_an_older_platform(
+        self, runner, mock_client
+    ):
+        # Arrange
         mock_client.list_resources.return_value = {
             "tiers": {
-                "cpu": {
-                    "name": "arena-cpu",
-                    "num_gpus": 0,
-                    "gpu_type": None,
-                    "num_cpus": 8,
-                    "ram_gb": 32,
-                    "price_per_node_hour": 1.0,
+                "h100-8": {
+                    "name": "a3-highgpu-8g",
+                    "num_gpus": 8,
+                    "gpu_type": "nvidia-h100-80gb",
+                },
+                "h100-1": {
+                    "name": "a3-highgpu-1g",
+                    "num_gpus": 1,
+                    "gpu_type": "nvidia-h100-80gb",
+                },
+                "l4-1": {
+                    "name": "g2-standard-8",
+                    "num_gpus": 1,
+                    "gpu_type": "nvidia-l4",
+                },
+                "cpu": {"name": "n2-standard-8", "num_gpus": 0, "gpu_type": None},
+            }
+        }
+
+        # Act
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "resources", "list"])
+
+        # Assert
+        assert result.exit_code == 0
+        assert json.loads(result.output) == [
+            {"gpuType": "h100-80", "gpusPerNode": [1, 8], "devOnly": False},
+            {"gpuType": "l4", "gpusPerNode": [1], "devOnly": False},
+        ]
+
+    def test_never_prints_tier_names(self, runner, mock_client):
+        mock_client.list_resources.return_value = {
+            "tiers": {
+                "h100-8": {
+                    "name": "a3-highgpu-8g",
+                    "num_gpus": 8,
+                    "gpu_type": "nvidia-h100-80gb",
                 },
             }
         }
+
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["resources", "list"])
+
         assert result.exit_code == 0
+        assert "h100-80" in result.output
+        assert "a3-highgpu-8g" not in result.output
 
 
 class TestEnvListCommand:
@@ -755,8 +832,6 @@ class TestEnvValidateCommand:
             requirements=None,
             entrypoint=None,
             description=None,
-            multi_agent=False,
-            language_based=False,
             do_rollouts=False,
         )
 
@@ -790,57 +865,24 @@ class TestEnvValidateCommand:
         assert "Missing argument" in result.output
         mock_client.validate_environment.assert_not_called()
 
-    def test_validate_multi_agent_with_rollouts(self, runner, mock_client):
+    def test_validate_with_rollouts(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
-                ["env", "validate", "my-env", "--multi-agent", "--do-rollouts"],
+                ["env", "validate", "my-env", "--do-rollouts"],
             )
         assert result.exit_code == 0
         call_kwargs = mock_client.validate_environment.call_args.kwargs
-        assert call_kwargs["multi_agent"] is True
-        assert call_kwargs["language_based"] is False
         assert call_kwargs["do_rollouts"] is True
 
-    def test_validate_language_based(self, runner, mock_client):
+    @pytest.mark.parametrize("flag", ["--multi-agent", "--language-based", "--classic"])
+    def test_rejects_removed_classic_flags(self, runner, mock_client, flag):
         with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["env", "validate", "my-gem-env", "--language-based"],
-            )
-        assert result.exit_code == 0
-        call_kwargs = mock_client.validate_environment.call_args.kwargs
-        assert call_kwargs["language_based"] is True
+            result = runner.invoke(main, ["env", "validate", "my-env", flag])
 
-
-class TestEnvProfileCommand:
-    def test_profile(self, runner, mock_client):
-        mock_client.profile_environment.return_value = {
-            "avg_cpu_per_env": 0.312,
-            "memory_per_env_gb": 0.126,
-            "steps_per_second": 2750.545,
-        }
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["env", "profile", "my-env"])
-        assert result.exit_code == 0
-        mock_client.profile_environment.assert_called_once_with(
-            name="my-env", version=None, multi_agent=None
-        )
-
-    def test_profile_multi_agent(self, runner, mock_client):
-        mock_client.profile_environment.return_value = {"steps_per_second": 1.0}
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["env", "profile", "my-env", "--multi-agent"])
-        assert result.exit_code == 0
-        mock_client.profile_environment.assert_called_once_with(
-            name="my-env", version=None, multi_agent=True
-        )
-
-    def test_profile_none_result(self, runner, mock_client):
-        mock_client.profile_environment.return_value = None
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["env", "profile", "my-env"])
-        assert result.exit_code == 0
+        assert result.exit_code == 2
+        assert f"No such option '{flag}'" in result.output
+        mock_client.validate_environment.assert_not_called()
 
 
 class TestEnvDeleteCommand:
@@ -922,8 +964,6 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id=None,
-            num_nodes=None,
             num_gpus=None,
             gpu_type=None,
             project=None,
@@ -946,10 +986,10 @@ class TestExperimentSubmitCommand:
                     "experiments",
                     "submit",
                     str(manifest),
-                    "--resource-id",
-                    "arena-large",
-                    "--num-nodes",
+                    "--num-gpus",
                     "4",
+                    "--gpu-type",
+                    "l4",
                     "--project",
                     "proj1",
                     "--experiment-name",
@@ -963,10 +1003,8 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id="arena-large",
-            num_nodes=4,
-            num_gpus=None,
-            gpu_type=None,
+            num_gpus=4,
+            gpu_type="l4",
             project="proj1",
             experiment_name="my-exp",
             reward_file=reward,
@@ -1013,8 +1051,6 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id=None,
-            num_nodes=None,
             num_gpus=8,
             gpu_type="h100-80",
             project=None,
@@ -1040,18 +1076,32 @@ class TestExperimentSubmitCommand:
             result = runner.invoke(main, ["experiments", "submit"])
         assert result.exit_code != 0
 
-    def test_help_shows_resource_and_node_defaults(self, runner):
+    def test_help_offers_only_gpu_flags(self, runner):
         result = runner.invoke(main, ["experiments", "submit", "--help"])
 
         help_text = " ".join(result.output.split())
         assert result.exit_code == 0
-        assert "--resource-id" in help_text
-        assert "--num-nodes" in help_text
+        assert "--resource-id" not in help_text
+        assert "--num-nodes" not in help_text
         assert "--num-gpus" in help_text
         assert "--gpu-type" in help_text
-        assert (
-            "Omit every resource flag to let Arena pick the cheapest fit." in help_text
-        )
+        assert "Omit both GPU flags to let Arena pick the cheapest fit." in help_text
+
+    @pytest.mark.parametrize("flag", ["--resource-id", "--num-nodes"])
+    def test_submit_rejects_a_resource_class_flag(
+        self, runner, mock_client, tmp_path, flag
+    ):
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text("x: 1")
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "submit", str(manifest), flag, "2"]
+            )
+
+        assert result.exit_code == 2
+        assert f"No such option '{flag}'" in result.output
+        mock_client.submit_experiment.assert_not_called()
 
     def test_root_json_prints_the_submit_result(self, runner, mock_client, tmp_path):
         manifest = tmp_path / "m.yaml"
@@ -1760,9 +1810,8 @@ class TestAgentDeployCommand:
         assert "--num-gpus" in help_text
         assert "--gpu-type" in help_text
         assert (
-            "``--num-gpus`` and ``--gpu-type`` are for LLM agents. Without them, "
-            "a redeploy keeps the agent's resources and a new deployment uses "
-            "Arena's default."
+            "Without ``--num-gpus`` and ``--gpu-type``, a redeploy keeps the "
+            "agent's resources and a new deployment uses Arena's default."
         ) in help_text
 
     @pytest.mark.parametrize("scope", ["user", "organization"])
@@ -2401,26 +2450,6 @@ class TestGlobalOptions:
     def test_invalid_timeout_rejected(self, runner):
         result = runner.invoke(main, ["--request-timeout", "0", "login"])
         assert result.exit_code != 0
-
-
-class TestFormatProfileMetrics:
-    def test_known_key_gets_human_readable_label(self):
-        from agilerl.arena.cli import _format_profile_metrics
-
-        result = _format_profile_metrics({"avg_cpu_per_env": 45.123456})
-        assert "Avg CPU per Env (%)" in result
-
-    def test_unknown_key_falls_back_to_title_case(self):
-        from agilerl.arena.cli import _format_profile_metrics
-
-        result = _format_profile_metrics({"foo_bar": 1.5})
-        assert "Foo Bar" in result
-
-    def test_float_values_formatted_to_3_decimal_places(self):
-        from agilerl.arena.cli import _format_profile_metrics
-
-        result = _format_profile_metrics({"steps_per_second": 123.456789})
-        assert result["Steps per Second"] == "123.457"
 
 
 class TestAgentSessionsResume:

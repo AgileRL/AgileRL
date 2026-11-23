@@ -5,13 +5,13 @@
 import copy
 
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
-from agilerl.arena.memory.estimator import estimate_generation
+from agilerl.arena.memory.estimator import estimate_generation, generation_can_serve
 from agilerl.arena.memory.generation import KV_MARGIN_BYTES
 from agilerl.arena.memory.manifest import (
     MANIFEST_WEIGHT_VARIANTS,
+    estimate_teacher_generation,
     generation_settings_from_manifest,
     lookup_gpu,
-    validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.engine import (
     _engine_model,
@@ -19,11 +19,12 @@ from agilerl.arena.memory.resolve.engine import (
     resolve_engine_fast_path,
     resolve_engine_tensor_parallel,
     resolve_rollout_engines_per_agent,
+    resolve_teacher_tensor_parallel,
     sequences_held,
     servable_engine_widths,
 )
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 GEMMA_4_E4B = "google/gemma-4-E4B-it"
@@ -329,6 +330,19 @@ class TestResolveEngineTensorParallel:
         assert width == 1
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 1
 
+    def test_a_width_that_fills_the_node_leaves_no_room_for_its_teacher(self) -> None:
+        # Arrange: one trainer leaves eight L4s. A width-4 teacher fills a
+        # 4-GPU node, so the only student width those GPUs divide cannot share it.
+        manifest = opd_teacher_manifest("Qwen/Qwen3.5-9B", {"tensor_parallel_size": 4})
+        l4 = lookup_gpu("NVIDIA L4").device_spec()
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 9, l4, 4)
+
+        # Assert
+        assert width is None
+        assert manifest.algorithm.vllm_config.tensor_parallel_size is None
+
     def test_adapter_sync_prices_the_engine_lora_slot(self) -> None:
         # Arrange: the LoRA slot leaves four TP1 engines fewer resident
         # sequences than two TP2 engines.
@@ -341,6 +355,136 @@ class TestResolveEngineTensorParallel:
         # Assert
         assert width == 2
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
+
+
+def opd_teacher_manifest(
+    teacher: str, teacher_vllm: dict | None = None
+) -> TrainingManifest:
+    """Async OPD on Qwen3.5-2B from ``teacher``, with no GPU layout written."""
+    return validated_run_manifest(
+        TrainingManifest.model_validate(
+            {
+                "algorithm": {
+                    "name": "OPD",
+                    "batch_size": 16,
+                    "max_output_tokens": 512,
+                    "teacher": {
+                        "model": {
+                            "pretrained_model_name_or_path": teacher,
+                            "vllm_config": teacher_vllm or {},
+                        }
+                    },
+                },
+                "environment": {
+                    "env_type": "rollout",
+                    "dataset": "openai/gsm8k",
+                    "reward_file_path": "reward.py",
+                    "prompt_template": {"user_0": "{question}"},
+                },
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                    "max_context_length": 2048,
+                },
+                "training": {"max_steps": 100, "pop_size": 1, "rollout_mode": "async"},
+                "replay_buffer": {"kind": "llm"},
+            }
+        )
+    )
+
+
+class TestResolveTeacherTensorParallel:
+    def test_an_unset_width_is_the_narrowest_that_serves_every_sequence(
+        self,
+    ) -> None:
+        # Arrange: one A100-80 starts a 27B teacher but cannot hold its batch.
+        manifest = opd_teacher_manifest("Qwen/Qwen3.8-27B")
+        a100 = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+        one = estimate_teacher_generation(manifest, a100, 1, 1)
+
+        # Act
+        width = resolve_teacher_tensor_parallel(manifest, a100, 8, 8)
+
+        # Assert
+        assert width == 2
+        assert manifest.algorithm.teacher.model.vllm_config.tensor_parallel_size == 2
+        assert one.fits
+        assert not generation_can_serve(one, KV_MARGIN_BYTES)
+        assert generation_can_serve(
+            estimate_teacher_generation(manifest, a100, 1), KV_MARGIN_BYTES
+        )
+
+    def test_a_teacher_that_never_serves_every_sequence_takes_the_narrowest_fit(
+        self,
+    ) -> None:
+        # Arrange: at 256 sequences a 27B teacher starts at width 2 but holds
+        # them all only at width 4, past what a 4-GPU member leaves it.
+        manifest = opd_teacher_manifest("Qwen/Qwen3.8-27B", {"max_num_seqs": 256})
+        a100 = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        # Act
+        width = resolve_teacher_tensor_parallel(manifest, a100, 4, 8)
+
+        # Assert
+        chosen = estimate_teacher_generation(manifest, a100, 1)
+        assert width == 2
+        assert chosen.fits_with_buffer
+        assert not generation_can_serve(chosen, KV_MARGIN_BYTES)
+        assert not estimate_teacher_generation(manifest, a100, 1, 1).fits_with_buffer
+
+    def test_a_smaller_teacher_takes_fewer_gpus(self) -> None:
+        a100 = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        width = resolve_teacher_tensor_parallel(
+            opd_teacher_manifest("Qwen/Qwen3.5-9B"), a100, 8, 8
+        )
+
+        assert width == 1
+
+    def test_a_written_width_is_kept(self) -> None:
+        manifest = opd_teacher_manifest("Qwen/Qwen3.8-27B", {"tensor_parallel_size": 4})
+
+        width = resolve_teacher_tensor_parallel(
+            manifest, lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec(), 8, 8
+        )
+
+        assert width is None
+        assert manifest.algorithm.teacher.model.vllm_config.tensor_parallel_size == 4
+
+    def test_a_member_spanning_nodes_keeps_a_gpu_for_the_student(self) -> None:
+        # Arrange: a 27B teacher fits an L4 at width 8, a whole node. A 16-GPU
+        # member is two such nodes; that width leaves the student no GPU there.
+        manifest = opd_teacher_manifest("Qwen/Qwen3.8-27B")
+        l4 = lookup_gpu("NVIDIA L4").device_spec()
+
+        # Act
+        width = resolve_teacher_tensor_parallel(manifest, l4, 16, 8)
+
+        # Assert
+        assert width is None
+        assert manifest.algorithm.teacher.model.vllm_config.tensor_parallel_size is None
+        assert estimate_teacher_generation(manifest, l4, 1, 8).fits
+
+    def test_the_widest_width_leaves_a_trainer_and_an_engine(self) -> None:
+        # Arrange: a 27B teacher fits L4s only at width 8, the whole node.
+        manifest = opd_teacher_manifest("Qwen/Qwen3.8-27B")
+        l4 = lookup_gpu("NVIDIA L4").device_spec()
+
+        # Act
+        width = resolve_teacher_tensor_parallel(manifest, l4, 8, 8)
+
+        # Assert
+        assert width is None
+        assert manifest.algorithm.teacher.model.vllm_config.tensor_parallel_size is None
+        assert estimate_teacher_generation(manifest, l4, 1, 8).fits
+
+    def test_a_run_without_a_teacher_model_is_left_unchanged(self) -> None:
+        manifest = qwen35_9b_kept_trainers()
+
+        width = resolve_teacher_tensor_parallel(
+            manifest, lookup_gpu("NVIDIA L4").device_spec(), 8, 8
+        )
+
+        assert width is None
 
 
 class TestServableEngineWidths:

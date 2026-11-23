@@ -7,17 +7,24 @@ from __future__ import annotations
 import copy
 import logging
 import math
+from bisect import bisect_right
 from dataclasses import dataclass, replace
 from functools import lru_cache
+from itertools import product
 from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
-from agilerl.arena.memory.estimator import estimate_training, training_tensor_parallel
+from agilerl.arena.memory.estimator import (
+    shared_training_estimate,
+    training_tensor_parallel,
+)
 from agilerl.arena.memory.formulas import (
     DEFAULT_ROUTED_CHUNK_BYTES,
+    MAX_UNDERPREDICTION,
     ROUTED_CHUNK_MIB_CHOICES,
     checkpointed_blocks,
     moe_collectives_saveable,
+    recommendation_fits,
 )
 from agilerl.arena.memory.resolve.batch import (
     ROW_FILL,
@@ -36,6 +43,7 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     TrainingSettings,
 )
+from agilerl.arena.memory.training_host import fixed_host_bytes
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS, FSDPConfig
@@ -50,31 +58,6 @@ LogNote = tuple[str, tuple[object, ...]]
 CHECKPOINT_STRIDES = (4, 2, 1)
 # Residencies, fewest all-gathers first.
 RESIDENCIES: tuple[Residency, ...] = ("gathered", "reshard")
-
-
-def cpu_offload_blocker(fsdp: FSDPConfig | None, async_rollout: bool) -> str | None:
-    """Why FSDP ``cpu_offload`` cannot run, or ``None`` when it can.
-
-    :param fsdp: The run's FSDP config, or ``None``.
-    :param async_rollout: vLLM generates on rollout engines outside the trainer.
-    :return: A short reason, or ``None`` when full CPU offload is off or served.
-    """
-    if fsdp is None or not fsdp.cpu_offload:
-        return None
-    if fsdp.ep > 1:
-        return (
-            f"fsdp.cpu_offload does not support fsdp.ep={fsdp.ep}: expert LoRA "
-            "adapters, and the experts when ep spans the shard group, stay "
-            "outside FSDP on the EP mesh, so they would stay on CPU. Use "
-            "fsdp.optim_cpu_offload instead."
-        )
-    if not async_rollout:
-        return None
-    return (
-        "fsdp.cpu_offload needs colocated vLLM generation: FSDP2's "
-        "CPUOffloadPolicy keeps parameters on CPU. Use fsdp.optim_cpu_offload "
-        "instead, which keeps parameters on the GPU."
-    )
 
 
 def can_train_data_parallel(fsdp: FSDPConfig) -> bool:
@@ -110,6 +93,19 @@ def gather_cost(residency: Residency | None, costs: LearnCosts) -> float:
         "gathered": costs.reshard_gather_tokens / 2,
         "reshard": costs.reshard_gather_tokens,
     }[residency]
+
+
+def buffer_room(breakdown: PhaseBreakdown) -> float:
+    """Bytes a training breakdown has left inside the underprediction buffer; negative when over.
+
+    :param breakdown: Training breakdown.
+    :return: The smaller of the device's and, when its share is known, the host's room.
+    """
+    kept = 1 - MAX_UNDERPREDICTION
+    room = breakdown.device_usable_bytes * kept - breakdown.total_bytes
+    if breakdown.host_usable_bytes is None:
+        return room
+    return min(room, breakdown.host_usable_bytes * kept - breakdown.host_total_bytes)
 
 
 def learn_cost(
@@ -510,6 +506,28 @@ def resolve_training_memory(
     return plan
 
 
+def lightest_training_memory(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    pins: MemoryPins,
+    mini_batch_rows: int,
+) -> TrainingMemoryPlan:
+    """The plan :func:`resolve_training_memory` falls back to: every memory rung, the most recompute, the smallest micro-batch.
+
+    :param model: Training-side model spec.
+    :param device: Training GPU.
+    :param settings: Training settings, as :func:`resolve_training_memory` reads them.
+    :param pins: Checkpointing and micro-batch values the search keeps.
+    :param mini_batch_rows: Rows one optimizer step covers on one rank.
+    :return: The plan, which may not fit; the caller's own copy.
+    """
+    plan, _, _ = _cached_training_memory(
+        model, device, TrainingSettingsKey.of(settings), pins, mini_batch_rows, True
+    )
+    return plan.detached()
+
+
 # ~23 KiB per entry; 512 holds the plans of ~8 requests.
 @lru_cache(maxsize=512)
 def _cached_training_memory(
@@ -518,9 +536,11 @@ def _cached_training_memory(
     key: TrainingSettingsKey,
     pins: MemoryPins,
     mini_batch_rows: int,
+    lightest_only: bool = False,
 ) -> tuple[TrainingMemoryPlan, bool, tuple[LogNote, ...]]:
     """:func:`resolve_training_memory`'s search, run once per input.
 
+    :param lightest_only: Skip the search and return the lightest plan.
     :return: The chosen plan and ``True``, or the lightest plan and ``False``
         when it is over the GPU, and the log records the search emits.
     """
@@ -537,7 +557,11 @@ def _cached_training_memory(
         fsdp is not None,
     )
     ddp_chunks = _ddp_chunk_candidates(model, settings)
+    expert_lora = settings.lora_packed_target_matrices > 0
     notes: list[LogNote] = []
+
+    def passes_at(unit: int) -> int:
+        return math.ceil(tokens / unit) if packed else mini_batch_rows // unit
 
     def priced(
         on: bool,
@@ -552,9 +576,9 @@ def _cached_training_memory(
                 mini_batch_rows, unit, row_budget
             )
             budget: int | None = unit
-            passes = math.ceil(tokens / unit)
         else:
-            rows, budget, passes = unit, None, mini_batch_rows // unit
+            rows, budget = unit, None
+        passes = passes_at(unit)
         if trial is not None:
             trial = replace(trial, checkpoint_every_n_blocks=stride)
         sized = settings.model_copy(
@@ -574,12 +598,12 @@ def _cached_training_memory(
         chunk_mib = ddp_chunk if trial is None else trial.routed_expert_chunk_mib
         chunks = routed_chunks_per_pass(
             model.arch,
-            settings.lora_packed_target_matrices > 0,
+            expert_lora,
             tokens / passes,
             DTYPE_BYTES[settings.weight_dtype],
             DEFAULT_ROUTED_CHUNK_BYTES if chunk_mib is None else chunk_mib * MiB,
         )
-        breakdown = estimate_training(model, device, sized, orchestrated=True)
+        breakdown = shared_training_estimate(model, device, sized, orchestrated=True)
         return TrainingMemoryPlan(
             gradient_checkpointing=on,
             checkpoint_every_n_blocks=stride,
@@ -609,17 +633,38 @@ def _cached_training_memory(
         trial: FSDPConfig | None,
         ddp_chunk: int | None,
     ) -> TrainingMemoryPlan | None:
-        # The estimate grows with the unit, so the largest fit is a bisection.
-        low, high = 0, len(units) - 1
-        best = None
-        while low <= high:
-            middle = (low + high) // 2
+        # Memory grows with the unit, so the units that fit are a prefix. A
+        # packed mini-batch has thousands of budgets; memory is close to linear
+        # in the unit, so the next probe goes where the spare bytes run out.
+        low = priced(on, stride, residency, trial, ddp_chunk, units[0])
+        if not low.breakdown.fits_with_buffer:
+            return None
+        if len(units) == 1:
+            return low
+        high = priced(on, stride, residency, trial, ddp_chunk, units[-1])
+        if high.breakdown.fits_with_buffer:
+            return high
+        low_index, high_index = 0, len(units) - 1
+        interpolate = True
+        while high_index - low_index > 1:
+            spare, over = buffer_room(low.breakdown), buffer_room(high.breakdown)
+            if interpolate and spare >= 0 > over:
+                crossing = units[low_index] + (
+                    units[high_index] - units[low_index]
+                ) * spare / (spare - over)
+                middle = bisect_right(units, crossing) - 1
+                middle = min(max(middle, low_index + 1), high_index - 1)
+            else:
+                middle = (low_index + high_index) // 2
+            width = high_index - low_index
             plan = priced(on, stride, residency, trial, ddp_chunk, units[middle])
             if plan.breakdown.fits_with_buffer:
-                best, low = plan, middle + 1
+                low, low_index = plan, middle
             else:
-                high = middle - 1
-        return best
+                high, high_index = plan, middle
+            # Bisect after a probe that did not halve the bracket.
+            interpolate = 2 * (high_index - low_index) <= width
+        return low
 
     def placements(
         memory: FSDPConfig | None,
@@ -645,14 +690,41 @@ def _cached_training_memory(
         lightest = priced(on, stride, residency, trial, ddp_chunk, units[0])
         if not lightest.breakdown.fits_with_buffer:
             return None
-        fitting = [
-            plan
-            for on, stride in strides
-            for residency, trial in placements(memory)
-            if (plan := largest_fit(on, stride, residency, trial, ddp_chunk))
-            is not None
+        # No plan costs less than its fewest passes, each with one routed chunk
+        # per MoE layer; ties go to the earlier candidate.
+        fewest_chunks = (
+            model.arch.moe_layers
+            if expert_lora and model.arch.routed_expert_recompute
+            else 0
+        )
+        fewest_passes = passes_at(units[-1])
+        candidates = [
+            (
+                learn_cost(
+                    n_layers,
+                    on,
+                    stride,
+                    fewest_passes,
+                    tokens,
+                    residency,
+                    costs,
+                    fewest_chunks,
+                ),
+                index,
+                (on, stride, residency, trial),
+            )
+            for index, ((on, stride), (residency, trial)) in enumerate(
+                product(strides, placements(memory))
+            )
         ]
-        return min(fitting, key=lambda plan: plan.cost, default=None)
+        best: tuple[float, int, TrainingMemoryPlan] | None = None
+        for bound, index, candidate in sorted(candidates, key=lambda c: c[:2]):
+            if best is not None and (bound, index) >= best[:2]:
+                break
+            plan = largest_fit(*candidate, ddp_chunk)
+            if plan is not None and (best is None or (plan.cost, index) < best[:2]):
+                best = (plan.cost, index, plan)
+        return None if best is None else best[2]
 
     def data_parallel(strides: list[tuple[bool, int]]) -> TrainingMemoryPlan | None:
         for index, chunk in enumerate(ddp_chunks):
@@ -675,12 +747,20 @@ def _cached_training_memory(
                 return plan
         return None
 
-    if fsdp is None:
-        plan = data_parallel(recompute)
-        if plan is not None:
-            return plan, True, tuple(notes)
-        lightest = floor(None, ddp_chunks[-1])
-    else:
+    rungs = [] if fsdp is None else _memory_rungs(model, settings, fsdp)
+
+    def lightest_plan() -> TrainingMemoryPlan:
+        if fsdp is None:
+            return floor(None, ddp_chunks[-1])
+        return floor(rungs[-1][1], None)
+
+    if lightest_only:
+        lightest = lightest_plan()
+        return lightest, lightest.breakdown.fits, ()
+
+    def fastest() -> TrainingMemoryPlan | None:
+        if fsdp is None:
+            return data_parallel(recompute)
         ddp = (
             data_parallel(
                 _recompute_candidates(pins.gradient_checkpointing, None, False)
@@ -688,7 +768,6 @@ def _cached_training_memory(
             if can_train_data_parallel(fsdp)
             else None
         )
-        rungs = _memory_rungs(model, settings, fsdp)
         for index, (resort, memory) in enumerate(rungs):
             if index > 0:
                 notes.append(
@@ -704,10 +783,19 @@ def _cached_training_memory(
             plan = cheapest(recompute, memory, None)
             # A fitting DDP plan beats every FSDP last resort.
             if ddp is not None and (plan is None or ddp.cost <= plan.cost):
-                return ddp, True, tuple(notes)
+                return ddp
             if plan is not None:
-                return plan, True, tuple(notes)
-        lightest = floor(rungs[-1][1], None)
+                return plan
+        return None
+
+    host_bytes = device.host_bytes_per_gpu
+    # Every plan holds these host bytes, so none fits with the buffer when they do not.
+    hopeless = host_bytes is not None and not recommendation_fits(
+        fixed_host_bytes(lightest_plan().breakdown), host_bytes
+    )
+    if not hopeless and (plan := fastest()) is not None:
+        return plan, True, tuple(notes)
+    lightest = lightest_plan()
     if lightest.breakdown.fits:
         notes.append(
             (

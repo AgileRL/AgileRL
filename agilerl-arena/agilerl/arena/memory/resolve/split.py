@@ -35,6 +35,7 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.batch import (
     KV_POOL_FILL,
+    engine_group_size,
     rollout_group_size,
 )
 from agilerl.arena.memory.resolve.decode_costs import (
@@ -56,7 +57,11 @@ from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
     drafts_by_default,
 )
-from agilerl.arena.memory.resolve.sequences import resolve_gpu_memory_utilization
+from agilerl.arena.memory.resolve.sequences import (
+    prompts_per_engine,
+    resolve_gpu_memory_utilization,
+    resolve_max_num_seqs,
+)
 from agilerl.arena.memory.resolve.training import lora_target_scope
 from agilerl.arena.memory.resolve.weight_sync import (
     SyncLink,
@@ -76,6 +81,7 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
+from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
@@ -155,6 +161,8 @@ class SplitWorkload(BaseModel):
     # Groups one learn step trains.
     batch_size: int
     group_size: int
+    # Completions per prompt the engine sizes ``max_num_seqs`` for, at the HPO ceiling.
+    slot_group_size: int
     # Trained groups' worth of rollouts generated per trained group; above 1
     # when tied groups are dropped.
     generated_per_trained: float = 1.0
@@ -208,6 +216,8 @@ class SplitWorkload(BaseModel):
     speculative_drafting: bool | None = None
     # Pinned engine scheduler-step token cap; ``None`` lets the split pick one.
     max_num_batched_tokens: int | None = None
+    # GPUs each engine's separate teacher engine adds; 0 without one.
+    teacher_engine_gpus: int = 0
 
 
 class TrainerCost(NamedTuple):
@@ -242,6 +252,8 @@ class GpuSplit(BaseModel):
     engines: int
     # GPUs per engine (vLLM tensor parallel).
     engine_width: int
+    # GPUs each engine's separate teacher engine adds; 0 without one.
+    teacher_engine_gpus: int = 0
     rollout_batch_size: int
     learn_seconds: float
     # Engine time to generate one learn step's groups.
@@ -257,8 +269,10 @@ class GpuSplit(BaseModel):
 
     @property
     def gpus(self) -> int:
-        """GPUs the trainers and engines occupy."""
-        return self.trainers + self.engines * self.engine_width
+        """GPUs the trainers, engines and their teacher engines occupy."""
+        return self.trainers + self.engines * (
+            self.engine_width + self.teacher_engine_gpus
+        )
 
     @property
     def step_seconds(self) -> float:
@@ -646,7 +660,9 @@ def _generation_seconds(
     so waves are fractional; a multi-turn cycle's last wave waits on its
     slowest episode. Only multi-turn cycles price n-gram drafting;
     single-turn completions share too little with their prompt to accept
-    drafts. An engine serving merged weights reads weights and KV at
+    drafts. The speedup follows the engine's ``max_num_seqs``: a pinned cap,
+    otherwise this engine's prompts times :attr:`SplitWorkload.slot_group_size`.
+    An engine serving merged weights reads weights and KV at
     :func:`merged_engine_speedups` times the fitted bandwidth share.
 
     :param resident: :func:`resident_sequences` of one engine.
@@ -657,7 +673,8 @@ def _generation_seconds(
     kv_per_token = kv_cache_bytes_per_token(arch, model.checkpoint_dtype)
     multi_turn = workload.turns > 1
     context = _mean_context(workload)
-    seqs = math.ceil(rollout_batch_size / engines) * workload.group_size
+    prompts = prompts_per_engine(rollout_batch_size, engines)
+    seqs = prompts * workload.group_size
     slots = min(seqs, resident)
     if slots < 1:
         return math.inf
@@ -672,9 +689,19 @@ def _generation_seconds(
     speedup = 1.0
     decode = waves * episode
     if multi_turn:
+        engine_seqs = resolve_max_num_seqs(
+            workload.max_num_seqs,
+            prompts,
+            workload.slot_group_size,
+            False,
+        )
         drafts = (
             drafts_by_default(
-                multi_turn, arch.is_hybrid_ssm, workload.min_p, workload.logit_bias
+                multi_turn,
+                arch.is_hybrid_ssm,
+                workload.min_p,
+                workload.logit_bias,
+                engine_seqs,
             )
             if workload.speculative_drafting is None
             else workload.speculative_drafting
@@ -924,6 +951,7 @@ def _split_pricer(
             trainers=trainers,
             engines=engines,
             engine_width=engine_width,
+            teacher_engine_gpus=workload.teacher_engine_gpus,
             rollout_batch_size=rollout_batch_size,
             learn_seconds=learn_gpu_seconds * cost.learn_cost_ratio / trainers
             + cost.optimizer_offload_seconds * _optimizer_steps(workload, trainers),
@@ -1009,19 +1037,20 @@ def choose_gpu_split(
     :return: The chosen split, or None when no split fits.
     :raises ValueError: When the device has no peak bf16 or bandwidth figure.
     """
-    if gpus <= engine_width:
+    engine_gpus = engine_width + workload.teacher_engine_gpus
+    if gpus <= engine_gpus:
         return None
     price = _split_pricer(model, device, workload, engine_width, trainer_cost)
     sharding = [
         trainers
-        for trainers in range(1, gpus - engine_width + 1)
+        for trainers in range(1, gpus - engine_gpus + 1)
         if _trainers_shard_batch(workload, trainers)
     ]
     splits = [
         split
-        for engines in range(1, (gpus - 1) // engine_width + 1)
+        for engines in range(1, (gpus - 1) // engine_gpus + 1)
         for trainers in sharding
-        if trainers <= gpus - engines * engine_width
+        if trainers <= gpus - engines * engine_gpus
         and (split := price(trainers, engines)) is not None
     ]
     if not splits:
@@ -1062,6 +1091,7 @@ def split_workload_from_manifest(
     return SplitWorkload(
         batch_size=spec.batch_size,
         group_size=group_size,
+        slot_group_size=engine_group_size(spec, manifest.mutation),
         generated_per_trained=_generated_per_trained(manifest, group_size),
         row_tokens=row_tokens,
         decode_tokens=decode_tokens,
@@ -1094,6 +1124,7 @@ def split_workload_from_manifest(
         logit_bias=rollout_logit_bias(spec),
         speculative_drafting=speculative_drafting(spec),
         max_num_batched_tokens=_pinned_max_num_batched_tokens(spec),
+        teacher_engine_gpus=teacher_engine_gpus(spec),
     )
 
 

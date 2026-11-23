@@ -1,12 +1,14 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""The ``traces`` dataset format: OpenAI Chat Completions messages in TRL prompt-completion rows (torch-free).
+"""The ``traces`` dataset format: OpenAI Chat Completions messages in TRL ``messages`` rows (torch-free).
 
-One row is one model call: ``prompt`` holds the messages the model was given,
-``completion`` the one assistant message it produced, ``tools`` the function
-schemas it could call. The CL loop's conversational ``messages`` rows are the
-same format grouped per conversation. See the Arena docs page on traces datasets.
+A row is a segment: one append-only stretch of a session in ``messages``,
+trained on every assistant message without ``weight: 0``.
+``tools`` holds the function schemas the model could call. An upload may
+instead hold prompt/completion pairs, which the platform converts to
+segments; the validator checks a pair as the segment it becomes. See the
+Arena docs page on traces datasets.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -28,21 +31,21 @@ from pydantic import (
 from typing_extensions import Self
 
 from agilerl.arena.traces_format import (
+    CALL_ID,
+    CALL_IDS,
+    COMPLETION,
+    FINISH_REASON,
+    FINISH_REASONS,
     JSON_TEXT_COLUMNS,
-    METADATA,
+    MESSAGES,
+    PROMPT,
     REASONING_KEYS,
-    REQUIRED_COLUMNS,
-    SCORES,
+    WEIGHT,
+    input_shape,
 )
 
 TRACES_DATASET_FORMAT = "traces"
 """``environment.dataset_format`` and ``arena datasets create --category`` value."""
-
-MESSAGES = "messages"
-"""The TRL conversational column a CL ``sft_rows`` export writes instead of prompt / completion."""
-
-JSON_COLUMNS = (*JSON_TEXT_COLUMNS, MESSAGES, SCORES, METADATA)
-"""Columns read from JSON text as well as nested values."""
 
 MAX_REPORTED_ERRORS = 20
 
@@ -94,20 +97,33 @@ class ToolCall(BaseModel):
     function: ToolCallFunction
 
 
-class SystemMessage(BaseModel):
-    """A ``system`` or ``developer`` instruction message."""
+class _UnweightedMessage(BaseModel):
+    """A message that is never a training target, so it carries no ``weight``."""
 
     model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_weight(cls, data: Any) -> Any:  # noqa: ANN401 -- raw message
+        if isinstance(data, Mapping) and data.get(WEIGHT) is not None:
+            msg = (
+                f"A {data.get('role')} message has weight; only assistant "
+                "messages are weighted."
+            )
+            raise ValueError(msg)
+        return data
+
+
+class SystemMessage(_UnweightedMessage):
+    """A ``system`` or ``developer`` instruction message."""
 
     role: Literal["system", "developer"]
     content: MessageContent
     name: str | None = None
 
 
-class UserMessage(BaseModel):
+class UserMessage(_UnweightedMessage):
     """A ``user`` message."""
-
-    model_config = ConfigDict(extra="ignore")
 
     role: Literal["user"]
     content: MessageContent
@@ -115,7 +131,10 @@ class UserMessage(BaseModel):
 
 
 class AssistantMessage(BaseModel):
-    """An ``assistant`` turn: content, tool calls, or both, with optional reasoning."""
+    """An ``assistant`` turn: content, tool calls, or both, with optional reasoning.
+
+    ``weight`` 0 marks the turn as context, never trained; unset means 1.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -126,6 +145,20 @@ class AssistantMessage(BaseModel):
     thinking: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
+    weight: Literal[0, 1] | None = None
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _weight_is_zero_or_one(cls, weight: object) -> object:
+        if weight is not None and (type(weight) is not int or weight not in (0, 1)):
+            msg = f"weight must be 0 or 1, got {weight!r}."
+            raise ValueError(msg)
+        return weight
+
+    @property
+    def is_target(self) -> bool:
+        """Whether the turn is a training target: ``weight`` is not 0."""
+        return self.weight != 0
 
     @model_validator(mode="after")
     def _says_something(self) -> Self:
@@ -155,14 +188,12 @@ class AssistantMessage(BaseModel):
         )
 
 
-class ToolMessage(BaseModel):
+class ToolMessage(_UnweightedMessage):
     """A ``tool`` result answering one earlier tool call."""
-
-    model_config = ConfigDict(extra="ignore")
 
     role: Literal["tool"]
     tool_call_id: str = Field(min_length=1)
-    content: str
+    content: str | None = None
     name: str | None = None
 
 
@@ -193,7 +224,11 @@ class ToolDefinition(BaseModel):
 
 
 class TraceScore(BaseModel):
-    """A named score on a call: user feedback, or a judge id plus rubric hash."""
+    """A named score on a row: user feedback, or a judge id plus rubric hash.
+
+    ``turn`` is a 0-based index into a segment's assistant messages, for a
+    score on one turn; unset scores the whole row.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -202,6 +237,7 @@ class TraceScore(BaseModel):
     source: str | None = None
     label: str | None = None
     comment: str | None = None
+    turn: int | None = Field(default=None, ge=0)
 
 
 class TracesRowBase(BaseModel):
@@ -211,7 +247,6 @@ class TracesRowBase(BaseModel):
 
     tools: list[ToolDefinition] | None = None
     answer: str | None = None
-    call_id: str | None = None
     session_id: str | None = None
     segment_index: int | None = None
     model_version: str | None = None
@@ -219,7 +254,6 @@ class TracesRowBase(BaseModel):
     base_model: str | None = None
     received_at: datetime | None = None
     scores: list[TraceScore] | None = None
-    finish_reason: str | None = None
     metadata: dict[str, str] | None = None
 
     @model_validator(mode="before")
@@ -228,7 +262,7 @@ class TracesRowBase(BaseModel):
         if not isinstance(data, Mapping):
             return data
         decoded = dict(data)
-        for column in JSON_COLUMNS:
+        for column in JSON_TEXT_COLUMNS:
             value = decoded.get(column)
             if isinstance(value, str):
                 try:
@@ -269,46 +303,133 @@ def _check_conversation(
                 raise ValueError(msg)
 
 
-class TracesRow(TracesRowBase):
-    """One model call: the ``prompt`` it saw and its one-message ``completion``."""
+class TracesSegmentRow(TracesRowBase):
+    """One append-only stretch of a session in ``messages``: a stored traces row.
 
-    prompt: list[Message] = Field(min_length=1)
-    completion: list[AssistantMessage] = Field(min_length=1, max_length=1)
-
-    @model_validator(mode="after")
-    def _check_turns(self) -> Self:
-        if isinstance(self.prompt[-1], AssistantMessage):
-            msg = (
-                "prompt ends with an assistant message; the completion is the "
-                "next assistant turn, so the prompt ends before it."
-            )
-            raise ValueError(msg)
-        tool_names = self._tool_names()
-        _check_conversation(self.prompt, tool_names, "prompt")
-        _check_conversation(self.completion, tool_names, "completion")
-        return self
-
-    @property
-    def completion_message(self) -> AssistantMessage:
-        """The reference assistant turn."""
-        return self.completion[0]
-
-
-class TracesMessagesRow(TracesRowBase):
-    """One conversation in TRL ``messages`` form, trained on every assistant turn."""
+    ``call_ids``, ``finish_reasons``, ``completion_token_ids`` and
+    ``completion_logprobs`` hold one entry per assistant message.
+    An assistant message with ``weight: 0`` is context, not a training
+    target; ``call_ids`` is lineage only.
+    """
 
     messages: list[Message] = Field(min_length=2)
+    call_ids: list[str | None] | None = None
+    finish_reasons: list[str | None] | None = None
+    completion_token_ids: list[list[int] | None] | None = None
+    completion_logprobs: list[list[float] | None] | None = None
 
     @model_validator(mode="after")
     def _check_turns(self) -> Self:
         if isinstance(self.messages[0], AssistantMessage):
             msg = "messages starts with an assistant turn; it needs a prompt first."
             raise ValueError(msg)
-        if not any(isinstance(m, AssistantMessage) for m in self.messages):
+        turns = [
+            index
+            for index, message in enumerate(self.messages)
+            if isinstance(message, AssistantMessage)
+        ]
+        if not turns:
             msg = "messages has no assistant turn to train on."
             raise ValueError(msg)
         _check_conversation(self.messages, self._tool_names(), "messages")
+        for index, message in enumerate(self.messages[: turns[-1]]):
+            if isinstance(message, ToolMessage) and message.content is None:
+                msg = (
+                    f"messages[{index}] is a tool result without content before "
+                    "an assistant turn; training renders its text."
+                )
+                raise ValueError(msg)
+        targets = [self.messages[at].is_target for at in turns]
+        if not any(targets):
+            msg = "every assistant message has weight 0, so none is a training target."
+            raise ValueError(msg)
+        self._check_per_turn_columns(targets)
+        _check_calls_answered(self.messages, turns, targets)
+        for score in self.scores or []:
+            if score.turn is not None and score.turn >= len(turns):
+                msg = (
+                    f"score {score.name!r} is on turn {score.turn}; messages has "
+                    f"{len(turns)} assistant messages."
+                )
+                raise ValueError(msg)
         return self
+
+    def _check_per_turn_columns(self, targets: list[bool]) -> None:
+        """Raise unless the per-turn lists have one entry per assistant message and none is set on a context turn.
+
+        :param targets: Per assistant message, whether it is a training target.
+        """
+        count = len(targets)
+        for column in (
+            "call_ids",
+            "finish_reasons",
+            "completion_token_ids",
+            "completion_logprobs",
+        ):
+            values = getattr(self, column)
+            if values is not None and len(values) != count:
+                msg = (
+                    f"{column} has {len(values)} entries; messages has "
+                    f"{count} assistant messages."
+                )
+                raise ValueError(msg)
+        for position, (ids, logprobs) in enumerate(
+            zip(
+                self.completion_token_ids or [None] * count,
+                self.completion_logprobs or [None] * count,
+                strict=True,
+            )
+        ):
+            if ids is not None and logprobs is not None and len(ids) != len(logprobs):
+                msg = (
+                    f"turn {position} has {len(ids)} completion_token_ids but "
+                    f"{len(logprobs)} completion_logprobs."
+                )
+                raise ValueError(msg)
+            if not targets[position] and (ids is not None or logprobs is not None):
+                msg = (
+                    f"turn {position} is context (weight 0), so its "
+                    "completion_token_ids and completion_logprobs must be null."
+                )
+                raise ValueError(msg)
+
+
+def _check_calls_answered(
+    messages: list[Any], turns: list[int], targets: list[bool]
+) -> None:
+    """Raise unless each assistant message's tool calls are answered before the next one.
+
+    The final assistant message's calls may be unanswered. Two assistant
+    messages in a row are allowed only when the later one is context
+    (``weight: 0``): a target's prompt must not end with an assistant turn.
+
+    :param targets: Per assistant message, whether it is a training target.
+    """
+    for position, (previous, turn) in enumerate(pairwise(turns), start=1):
+        if turn == previous + 1 and targets[position]:
+            msg = (
+                f"messages[{previous}] and messages[{turn}] are back-to-back "
+                f"assistant messages, and messages[{turn}] is a training target, "
+                "so its prompt would end with an assistant turn. Mark it context "
+                "with weight 0."
+            )
+            raise ValueError(msg)
+        answered = {
+            message.tool_call_id
+            for message in messages[previous + 1 : turn]
+            if isinstance(message, ToolMessage)
+        }
+        unanswered = [
+            call.id
+            for call in messages[previous].tool_calls or []
+            if call.id not in answered
+        ]
+        if unanswered:
+            msg = (
+                f"messages[{previous}] calls {unanswered}, which no tool message "
+                f"answers before the next assistant message, messages[{turn}]."
+            )
+            raise ValueError(msg)
 
 
 class TracesValidationError(ValueError):
@@ -324,23 +445,98 @@ class TracesValidationError(ValueError):
         )
 
 
-def row_form(columns: Iterable[str]) -> type[TracesRow | TracesMessagesRow]:
-    """The row model a dataset's columns select: ``prompt``/``completion``, else ``messages``.
+def _pair_messages(value: Any, role: str) -> list[Any]:  # noqa: ANN401 -- a raw pair cell
+    """A pair cell as messages: a list (or its JSON text) as is, one message object in a list, other text as one ``role`` message.
 
-    :param columns: Column names of the dataset.
-    :return: :class:`TracesRow` or :class:`TracesMessagesRow`.
-    :raises ValueError: If the columns name neither form.
+    Text is decoded only when it is the JSON of a message or a non-empty list
+    of messages; other text, JSON such as ``{"query": "x"}``, ``42`` or
+    ``"hi"`` included, is the message's content as it is.
     """
-    names = set(columns)
-    if set(REQUIRED_COLUMNS) <= names:
-        return TracesRow
-    if MESSAGES in names:
-        return TracesMessagesRow
-    msg = (
-        "A traces dataset needs 'prompt' and 'completion' columns, or a "
-        f"'messages' column; got {sorted(names)}."
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = None
+        if not _is_messages(decoded):
+            return [{"role": role, "content": value}]
+        value = decoded
+    return value if isinstance(value, list) else [value]
+
+
+def _is_messages(value: Any) -> bool:  # noqa: ANN401 -- a decoded JSON value
+    """Whether ``value`` is a message object, or a non-empty list of them: mappings with a string ``role``."""
+    items = value if isinstance(value, list) else [value]
+    return bool(items) and all(
+        isinstance(item, Mapping) and isinstance(item.get("role"), str)
+        for item in items
     )
-    raise ValueError(msg)
+
+
+def _is_assistant(message: Any) -> bool:  # noqa: ANN401 -- a raw message
+    return isinstance(message, Mapping) and message.get("role") == "assistant"
+
+
+def pair_as_segment(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The segment a prompt/completion import row becomes: ``messages = prompt + completion``.
+
+    A plain-string ``prompt`` is one user message and a plain-string
+    ``completion`` one assistant message; a ``messages`` column beside the
+    pair, and any ``call_ids`` or ``finish_reasons``, are dropped. The prompt's assistant messages get ``weight: 0``, so
+    they are context; the completion's keep the default weight 1. With a
+    ``call_id``, ``call_ids`` gives it to the completion's assistant messages
+    and null to the prompt's. ``finish_reason`` lands on the completion's last
+    assistant message.
+
+    :param row: A raw row with ``prompt`` and ``completion``.
+    :return: The row with ``messages``, and ``call_ids`` and ``finish_reasons`` when set, in place of the pair columns.
+    """
+    segment = {
+        column: value
+        for column, value in row.items()
+        if column
+        not in (
+            PROMPT,
+            COMPLETION,
+            CALL_ID,
+            CALL_IDS,
+            FINISH_REASON,
+            FINISH_REASONS,
+            MESSAGES,
+        )
+    }
+    prompt = _pair_messages(row[PROMPT], "user")
+    completion = _pair_messages(row[COMPLETION], "assistant")
+    prompt_turns = sum(_is_assistant(message) for message in prompt)
+    completion_turns = sum(_is_assistant(message) for message in completion)
+    segment[MESSAGES] = [
+        {**message, WEIGHT: 0} if _is_assistant(message) else message
+        for message in prompt
+    ] + completion
+    if row.get(CALL_ID) is not None:
+        segment[CALL_IDS] = [None] * prompt_turns + [row[CALL_ID]] * completion_turns
+    if row.get(FINISH_REASON) is not None and completion_turns:
+        segment[FINISH_REASONS] = [None] * (prompt_turns + completion_turns - 1) + [
+            row[FINISH_REASON]
+        ]
+    return segment
+
+
+def _validate_pair(row: Mapping[str, Any]) -> None:
+    """Raise unless a prompt/completion row converts to a valid segment whose completion is an assistant turn."""
+    prompt = _pair_messages(row[PROMPT], "user")
+    if prompt and _is_assistant(prompt[-1]):
+        msg = (
+            "prompt ends with an assistant message; the completion is the next "
+            "assistant turn, so the prompt ends before it."
+        )
+        raise ValueError(msg)
+    if not any(
+        _is_assistant(message)
+        for message in _pair_messages(row[COMPLETION], "assistant")
+    ):
+        msg = "completion holds no assistant message."
+        raise ValueError(msg)
+    TracesSegmentRow.model_validate(pair_as_segment(row))
 
 
 def _error_lines(row_number: int, error: ValidationError) -> str:
@@ -356,8 +552,10 @@ def validate_traces_rows(
 ) -> int:
     """Validate rows against the traces spec.
 
-    Rows are numbered from 1 in file order (the line number of a JSONL file
-    without blank lines).
+    A segment row is checked as stored; a prompt/completion row as the segment
+    the platform converts it to, see :func:`pair_as_segment`. Rows are
+    numbered from 1 in file order (the line number of a JSONL file without
+    blank lines).
 
     :param rows: Raw rows.
     :param source: Name used in the error.
@@ -367,19 +565,21 @@ def validate_traces_rows(
     errors: list[str] = []
     bad = 0
     count = 0
-    model: type[TracesRow | TracesMessagesRow] | None = None
     for count, row in enumerate(rows, start=1):
-        if model is None:
-            try:
-                model = row_form(row.keys())
-            except ValueError as error:
-                raise TracesValidationError(source, [f"row 1: {error}"], 1) from error
+        columns = [column for column, value in row.items() if value is not None]
         try:
-            model.model_validate(row)
-        except ValidationError as error:
+            if input_shape(columns) == "segments":
+                TracesSegmentRow.model_validate(row)
+            else:
+                _validate_pair(row)
+        except ValueError as error:
             bad += 1
             if len(errors) < MAX_REPORTED_ERRORS:
-                errors.append(_error_lines(count, error))
+                errors.append(
+                    _error_lines(count, error)
+                    if isinstance(error, ValidationError)
+                    else f"row {count}: {error}"
+                )
     if count == 0:
         raise TracesValidationError(source, ["the file has no rows"], 1)
     if bad:

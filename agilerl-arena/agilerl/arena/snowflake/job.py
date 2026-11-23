@@ -27,7 +27,7 @@ from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
-from agilerl.arena.snowflake.license import CHANNEL_ENV
+from agilerl.arena.snowflake.license import CHANNEL_ENV, PURCHASED_ENV, REGION_ENV
 from agilerl.arena.snowflake.ports import TrainerPorts, service_endpoints
 from agilerl.arena.snowflake.profile import (
     ARENA_API_INTEGRATION,
@@ -57,6 +57,10 @@ ROLES = ("broker", "head", "worker")
 CONTAINER_NAME = "main"
 # The stage volume mounts @<runs stage>/<run_id> here on every instance.
 RUN_MOUNT = "/arena/run"
+# The snowflake-job image runs as user:users. SPCS mounts a stage volume as
+# root unless the volume names the owner.
+IMAGE_UID = 1000
+IMAGE_GID = 100
 JOB_JSON_PATH = f"{RUN_MOUNT}/job.json"
 # The spec command replaces the image entrypoint, so tini stays PID 1 to
 # forward SIGTERM and reap child processes.
@@ -140,6 +144,8 @@ class SubmitSettings:
     arena_api_integration: str = ARENA_API_INTEGRATION
     service_schema: str | None = None
     channel: str | None = None
+    snowflake_region: str | None = None
+    listing_purchased: bool | None = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -860,7 +866,7 @@ def render_broker_spec(settings: SubmitSettings, run_id: str) -> str:
                     },
                 ],
                 "volumes": [
-                    _stage_volume(settings, run_id),
+                    stage_volume(runs_prefix(settings.runs_stage, run_id)),
                     _block_volume(),
                 ],
             }
@@ -880,17 +886,17 @@ def render_head_spec(settings: SubmitSettings, run_id: str) -> str:
     memory_gib = cpu_memory_gib(settings.head_family)
     container = _ray_container(settings, run_id, memory_gib, None)
     container["secrets"] = arena_container_secrets(settings.secrets_schema)
-    if settings.channel is not None:
-        container["env"] = {**container["env"], CHANNEL_ENV: settings.channel}
+    extra = {CHANNEL_ENV: settings.channel, REGION_ENV: settings.snowflake_region}
+    if settings.listing_purchased is not None:
+        extra[PURCHASED_ENV] = str(settings.listing_purchased).lower()
+    container["env"] |= {k: v for k, v in extra.items() if v is not None}
     return _dump_spec(
         {
             "spec": {
-                "containers": [
-                    container,
-                ],
+                "containers": [container],
                 "endpoints": service_endpoints(None),
                 "volumes": [
-                    _stage_volume(settings, run_id),
+                    stage_volume(runs_prefix(settings.runs_stage, run_id)),
                     _memory_volume(memory_gib),
                 ],
             }
@@ -921,7 +927,7 @@ def render_workers_spec(
                 ],
                 "endpoints": service_endpoints(trainer),
                 "volumes": [
-                    _stage_volume(settings, run_id),
+                    stage_volume(runs_prefix(settings.runs_stage, run_id)),
                     _memory_volume(resources.memory_gib),
                 ],
             }
@@ -1416,11 +1422,18 @@ def _container(
     return container
 
 
-def _stage_volume(settings: SubmitSettings, run_id: str) -> dict[str, object]:
+def stage_volume(prefix: str) -> dict[str, object]:
+    """Stage volume ``run``, writable by the user the image runs as.
+
+    :param prefix: ``@stage/<path>`` to mount.
+    :return: Volume entry for a service specification.
+    """
     return {
         "name": "run",
         "source": "stage",
-        "stageConfig": {"name": runs_prefix(settings.runs_stage, run_id)},
+        "stageConfig": {"name": prefix},
+        "uid": IMAGE_UID,
+        "gid": IMAGE_GID,
     }
 
 
@@ -1434,10 +1447,13 @@ def _memory_volume(memory_gib: int) -> dict[str, object]:
 
 def _block_volume() -> dict[str, object]:
     # size is a volume field. iops and throughput sit under blockConfig.
+    # uid 1000 owns the mount; the image user cannot chmod it.
     return {
         "name": "data",
         "source": "block",
         "size": "1000Gi",
+        "uid": IMAGE_UID,
+        "gid": IMAGE_GID,
         "blockConfig": {"iops": 16000, "throughput": 1000},
     }
 

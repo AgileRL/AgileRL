@@ -16,6 +16,7 @@ from agilerl.arena.snowflake.catalog import (
     event_table_warning,
     existing_integrations,
     existing_pools,
+    family_sized,
     linked_resources,
     load_families,
     object_named,
@@ -54,7 +55,6 @@ from agilerl.arena.snowflake.profile import (
     trainer_image_path,
 )
 from agilerl.arena.snowflake.setup import (
-    family_listed,
     no_gpu_message,
     nodes_for_gpus,
     pool_family_message,
@@ -173,7 +173,7 @@ def set_gpu_cap(session: SnowflakeSession, family: str, max_gpus: int) -> str:
     if spec is None:
         raise ValueError(unsupported_gpu_message(name))
     families = load_families(session)
-    if not family_listed(name, families):
+    if not family_sized(name, families):
         raise ValueError(no_gpu_message(name, families))
     nodes = nodes_for_gpus(max_gpus, spec.gpus)
     profile = remote_profile(session)

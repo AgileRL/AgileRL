@@ -26,6 +26,7 @@ from agilerl.arena.memory.resolve.attention import (
     resolve_attn_implementation,
 )
 from agilerl.arena.memory.resolve.batch import (
+    TrainerSplitError,
     catalog_model,
     engine_group_size,
     per_rank_trajectories,
@@ -38,7 +39,7 @@ from agilerl.arena.memory.resolve.fsdp import (
     MemoryPins,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
-    cpu_offload_blocker,
+    lightest_training_memory,
     resolve_training_memory,
 )
 from agilerl.arena.memory.resolve.lora import (
@@ -57,13 +58,10 @@ from agilerl.arena.memory.resolve.parallel import (
     trains_expert_parallel,
 )
 from agilerl.arena.memory.resolve.rollout import (
-    apply_run_rollout_mode,
-    async_rollout_algorithm,
     checkpoint_quantized,
     default_rollout_batch_size,
     drafts_with_mtp,
     merged_lora_sync_blockers,
-    run_rollout_engines,
 )
 from agilerl.arena.memory.resolve.sequences import (
     prompts_per_engine,
@@ -96,7 +94,16 @@ from agilerl.arena.models.algorithms.rollout_llm import (
     records_sampling_supports,
 )
 from agilerl.arena.models.env import LLMEnvSpec
-from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
+from agilerl.arena.models.manifest import (
+    TrainingManifest,
+    async_rollout,
+    explicit_colocated_rollout,
+    strips_multimodal_towers,
+)
+from agilerl.arena.models.manifest_rules import (
+    cpu_offload_blocker,
+    run_rollout_engines,
+)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
@@ -264,10 +271,8 @@ def llm_spec(manifest: TrainingManifest) -> LLMAlgorithmSpec:
 
 
 def _lora_config(spec: LLMAlgorithmSpec) -> LoraConfigDict:
-    # Training is LoRA-only; an omitted section trains with the LoraConfigDict defaults.
-    if spec.lora_config is not None:
-        return spec.lora_config
-    return LoraConfigDict()
+    # Training is LoRA-only; manifest validation resolves the catalog default.
+    return spec.lora_config or LoraConfigDict()
 
 
 def _reject_trainer_quantization(quantization: str | dict[str, Any] | None) -> None:
@@ -404,7 +409,6 @@ def spec_merged_lora_sync_blockers(spec: LLMAlgorithmSpec) -> list[str]:
     return teacher_blockers + merged_lora_sync_blockers(
         None if spec.vllm_config is None else spec.vllm_config.quantization,
         info is not None and _catalog_checkpoint_quantized(info),
-        bool(_lora_config(spec).tower_target_modules),
         drafts_with_mtp(spec.vllm_engine_args.get("speculative_config")),
     )
 
@@ -470,20 +474,6 @@ def check_fp8_moe_backend_for_device(
     raise ValueError(msg)
 
 
-def async_rollout(manifest: TrainingManifest) -> bool:
-    """Whether the run generates on async rollout engines, as :func:`async_rollout_algorithm` decides."""
-    return async_rollout_algorithm(type(manifest.algorithm))
-
-
-def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
-    """Whether a rollout LLM manifest names ``rollout_mode: colocated``, which only local runs take."""
-    return (
-        async_rollout(manifest)
-        and "rollout_mode" in manifest.training.model_fields_set
-        and manifest.training.rollout_mode == "colocated"
-    )
-
-
 NCCL_RESHARD_DTYPES = frozenset({"bf16", "bfloat16", "fp16", "float16", "half"})
 """Weight dtypes an ``nccl_reshard`` refit moves."""
 
@@ -519,21 +509,6 @@ def configured_rollout_engines(manifest: TrainingManifest) -> int | Literal["aut
     return run_rollout_engines(
         async_rollout(manifest), manifest.training.rollout_engines_per_agent
     )
-
-
-def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
-    """The manifest validated as Ray runs it, from :func:`apply_run_rollout_mode`.
-
-    :param manifest: Training manifest, validated as written.
-    :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
-    :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
-    """
-    run_async = async_rollout(manifest)
-    if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
-        return manifest
-    payload = manifest.to_payload()
-    apply_run_rollout_mode(payload["training"], run_async)
-    return TrainingManifest.model_validate(payload)
 
 
 def _async_engine_prompts(
@@ -780,7 +755,6 @@ def training_settings_from_spec(
         images_per_row=images_per_row,
         image_width=image_width,
         image_height=image_height,
-        tower_lora_targets=frozenset(lora.tower_target_modules or ()),
         segmented_rows=segmented_rows,
         checkpoint_optimizer=checkpoint_optimizer,
         async_rollout=async_rollout,
@@ -926,14 +900,48 @@ def training_plan_model(manifest: TrainingManifest, model: ModelSpec) -> ModelSp
     return catalogued or model
 
 
-def _layout_plan(
+def lightest_training_memory_from_manifest(
     manifest: TrainingManifest,
     model: ModelSpec,
     device: DeviceSpec,
-    adapter_sync: bool,
-    nccl_reshard: bool,
+    adapter_sync: bool = False,
+    nccl_reshard: bool = False,
 ) -> TrainingMemoryPlan:
-    """The plan at the manifest's own ``fsdp`` layout: DDP or FSDP and its speed rungs."""
+    """The plan :func:`training_memory_from_manifest` falls back to at a manifest whose search tries one layout.
+
+    :param manifest: Validated manifest that pins its layout (:func:`manifest_at_layout`).
+    :param model: Training-side model spec.
+    :param device: Training GPU.
+    :param adapter_sync: As in :func:`training_memory_from_manifest`.
+    :param nccl_reshard: As in :func:`training_memory_from_manifest`.
+    :return: :func:`lightest_training_memory` at that layout; it may not fit.
+    :raises TrainerSplitError: When the trainer ranks cannot split at that layout.
+    :raises ValueError: When the manifest's search tries more than one layout.
+    """
+    layouts = parallel_layouts(
+        model.arch,
+        manifest.training.training_gpus_per_agent,
+        device.gpus_per_node,
+        manifest_fsdp(manifest),
+        trains_expert_parallel(manifest),
+        trains_context_parallel(manifest),
+    )
+    if not layouts:
+        msg = "No training layout can run on this model"
+        raise TrainerSplitError(msg)
+    if len(layouts) > 1:
+        msg = f"The manifest's search tries {len(layouts)} layouts, not one"
+        raise ValueError(msg)
+    settings, pins, mini = _layout_inputs(
+        manifest_at_layout(manifest, layouts[0]), adapter_sync, nccl_reshard
+    )
+    return lightest_training_memory(model, device, settings, pins, mini)
+
+
+def _layout_inputs(
+    manifest: TrainingManifest, adapter_sync: bool, nccl_reshard: bool
+) -> tuple[TrainingSettings, MemoryPins, int]:
+    """Settings, pins and per-rank mini-batch rows the search reads at the manifest's own layout."""
     spec = llm_spec(manifest)
     _, per_rank = per_rank_trajectories(spec, manifest.training.training_gpus_per_agent)
     mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
@@ -945,6 +953,18 @@ def _layout_plan(
         adapter_sync=adapter_sync,
         nccl_reshard=nccl_reshard,
     )
+    return settings, pins, mini
+
+
+def _layout_plan(
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    adapter_sync: bool,
+    nccl_reshard: bool,
+) -> TrainingMemoryPlan:
+    """The plan at the manifest's own ``fsdp`` layout: DDP or FSDP and its speed rungs."""
+    settings, pins, mini = _layout_inputs(manifest, adapter_sync, nccl_reshard)
     return resolve_training_memory(model, device, settings, pins, mini)
 
 
@@ -1056,6 +1076,7 @@ def estimate_teacher_generation(
     manifest: TrainingManifest,
     device: DeviceSpec,
     rollout_engines: int | None = None,
+    tensor_parallel_size: int | None = None,
 ) -> PhaseBreakdown | None:
     """Peak memory of a separate teacher model's vLLM engine.
 
@@ -1066,6 +1087,7 @@ def estimate_teacher_generation(
     :param device: The GPU type the teacher engine runs on.
     :param rollout_engines: Engines per member the allocation starts, each with
         one teacher. ``None`` reads the manifest.
+    :param tensor_parallel_size: Teacher engine width to size; ``None`` reads the manifest.
     :return: The teacher engine's breakdown, or ``None`` when no separate model scores.
     """
     spec = manifest.algorithm
@@ -1095,7 +1117,7 @@ def estimate_teacher_generation(
         ),
         weight_dtype=_weight_dtype(vllm.dtype),
         weight_quantization=engine_weight_quantization(vllm.quantization),
-        tensor_parallel_size=teacher.model.gpus,
+        tensor_parallel_size=tensor_parallel_size or teacher.model.gpus,
         concurrent_requests=_async_engine_prompts(manifest, rollout_engines)
         * engine_group_size(spec, manifest.mutation),
     )

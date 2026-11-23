@@ -24,7 +24,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
 )
 
 from agilerl.architectures import install_family_patches
-from agilerl.architectures.nemotron_h.mamba import (
+from agilerl.architectures.nemotron_h.layers import (
     _fused_split_scan,
     patch_nemotron_mamba_packed_sequences,
 )

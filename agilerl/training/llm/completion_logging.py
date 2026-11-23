@@ -26,6 +26,7 @@ import wandb
 
 from agilerl.llm_envs.chat_formats import detect_chat_format
 from agilerl.llm_envs.dataset_env import (
+    SKIPPED_TURNS,
     encode_sft_row,
     fit_preference_pair,
     is_chat_preference_row,
@@ -266,11 +267,17 @@ def _select_sft_prompts(
     sample_size = min(4 * num_prompts, len(dataset))
     indices = random.Random(seed).sample(range(len(dataset)), sample_size)
     tokenizer = inject_chat_template_kwargs(env.tokenizer, env.chat_template_kwargs)
-    chat_format = detect_chat_format(tokenizer)
     selected: list[DatasetPrompt] = []
     for index in indices:
         item = dataset[index]
-        ids, mask = encode_sft_row(tokenizer, item, env.response_column, chat_format)
+        ids, mask = encode_sft_row(
+            tokenizer,
+            item,
+            env.response_column,
+            env.chat_format,
+            env.completion_only_loss,
+            item.get(SKIPPED_TURNS) or (),
+        )
         prompt_len = mask.index(True)
         if prompt_len > max_prompt_tokens:
             continue

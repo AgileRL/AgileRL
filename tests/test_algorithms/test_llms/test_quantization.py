@@ -67,10 +67,10 @@ from tests import TINY_LLM_FIXTURE_PATH
 
 class TestCreateModelFromNameOrPath:
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: types.SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3"),
         )
 
     def test_forwards_quantization_config(self):
@@ -366,10 +366,10 @@ class TestConfigureVllmKwargs:
     """Verify build_vllm_llm_init_kwargs wires VLLMConfig into LLM()."""
 
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: types.SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3"),
         )
 
     def test_default_config_enables_lora(self):

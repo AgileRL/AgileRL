@@ -9,11 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from agilerl.arena.memory.manifest import (
-    lookup_gpu,
-    training_memory_from_manifest,
-    validated_run_manifest,
-)
+from agilerl.arena.memory.manifest import lookup_gpu, training_memory_from_manifest
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.split import (
     GpuSplit,
@@ -21,7 +17,7 @@ from agilerl.arena.memory.resolve.split import (
     choose_gpu_split,
     split_workload_from_manifest,
 )
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 
 LEARN_TOLERANCE = 0.2
 GENERATION_TOLERANCE = 0.15

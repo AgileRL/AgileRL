@@ -9,8 +9,8 @@ import copy
 import hashlib
 import logging
 import re
+from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable, Sequence
-from concurrent.futures import Future
 from contextlib import _GeneratorContextManager, contextmanager
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload
 
@@ -41,6 +41,7 @@ from agilerl.distributed.fsdp_meta import (
     ModelWithTiedWeightKeys,
     build_safetensors_key_files,
     checkpoint_quantization_config,
+    convert_checkpoint_route,
     converter_checkpoint_routes,
     dequantizing_transform_groups,
     init_embed_scale_buffers,
@@ -483,19 +484,35 @@ def _checkpoint_transform_groups(
     """Conversions registered for a module class or model type, under that module path.
 
     Longer paths come first so a nested module's mapping wins over its parent.
-    A quantized checkpoint also gets the quantizer's dequantize conversions.
+    A module whose class name or model type an ancestor already mapped is
+    skipped, as ``from_pretrained`` does. A quantized checkpoint also gets the
+    quantizer's dequantize conversions.
     """
     groups: list[tuple[str, list[WeightTransform]]] = []
+    claimed: dict[str, list[str]] = defaultdict(list)
+
+    def claimed_by_ancestor(identifier: str, name: str) -> bool:
+        return any(
+            path == "" or name.startswith(f"{path}.") for path in claimed[identifier]
+        )
+
     for name, module in model.named_modules():
         config = module_pretrained_config(module)
         if config is None:
             continue
-        model_type = config.model_type
-        conversions = get_checkpoint_conversion_mapping(type(module).__name__)
-        if not conversions and model_type:
-            conversions = get_checkpoint_conversion_mapping(model_type)
+        class_name = type(module).__name__
+        if claimed_by_ancestor(class_name, name):
+            continue
+        conversions = get_checkpoint_conversion_mapping(class_name)
+        if not conversions and config.model_type:
+            if claimed_by_ancestor(config.model_type, name):
+                continue
+            conversions = get_checkpoint_conversion_mapping(config.model_type)
         if not conversions:
             continue
+        claimed[class_name].append(name)
+        if config.model_type:
+            claimed[config.model_type].append(name)
         prefix = checkpoint_key_for_parameter(name) if name else ""
         groups.append((prefix, list(conversions)))
     groups.sort(key=lambda item: len(item[0]), reverse=True)
@@ -630,22 +647,9 @@ def _load_converter_route(
         ]
         local_experts = slice(0, experts.stop - experts.start)
         copies = [(target, (local_experts, *index_slices[1:]), dest, global_dim0)]
-    keys_by_path: dict[str, list[str]] = {}
-    for _, key in sources:
-        keys_by_path.setdefault(key_files[key], []).append(key)
-    tensors: dict[str, torch.Tensor] = {}
-    for path, path_keys in keys_by_path.items():
-        with safe_open(path, framework="pt", device="cpu") as handle:
-            tensors.update((key, handle.get_tensor(key)) for key in path_keys)
-    converter = copy.deepcopy(route.converter)
-    for pattern, key in sources:
-        loaded: Future[torch.Tensor] = Future()
-        loaded.set_result(tensors.pop(key))
-        converter.add_tensor(route.target, key, pattern, loaded)
-    converted = converter.convert(route.target, config=config)
+    converted = convert_checkpoint_route(route, sources, key_files, config)
     for target, index_slices, dest, global_dim0 in copies:
         tensor = converted[target]
-        tensor = tensor[0] if isinstance(tensor, list) else tensor
         source = _take_local_expert_rows(tensor[index_slices], dest, global_dim0)
         _copy_checkpoint_tensor(dest, source, target)
 

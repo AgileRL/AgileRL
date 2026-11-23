@@ -105,6 +105,10 @@ LORA_EXCLUDED_MODULES: Mapping[str, frozenset[str]] = {
     "mimo_v2": frozenset({"q_proj", "k_proj", "v_proj"}),
 }
 
+# Hugging Face model_types whose family sets trust_remote_code=True for vLLM or
+# the trainer, so a run executes Python from the checkpoint's Hub repo.
+REMOTE_CODE_MODEL_TYPES = frozenset({"mimo_v2"})
+
 # Hugging Face model_types of supported models that do not reason by default.
 NON_REASONING_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "qwen2"})
 
@@ -186,8 +190,8 @@ class ModelInfo(BaseModel):
     status: ModelStatus = Field(
         default=STATUS_LIVE,
         description=(
-            "Release status: live, deprecated (submits with a warning), or "
-            "preview (submission rejected)."
+            "Release status: live, deprecated (no longer submittable), or "
+            "preview (not yet submittable)."
         ),
     )
     modalities: tuple[ModelModality, ...] = Field(
@@ -296,21 +300,6 @@ class ModelInfo(BaseModel):
         """
         return "vision" in self.modalities
 
-    @property
-    def tower_lora_modules(self) -> frozenset[str]:
-        """``tower_target_modules`` names: modules outside the language model."""
-        if self.language_model_prefix is None:
-            return frozenset()
-        return frozenset(
-            key
-            for key, group in self.inspected["lora_info"].items()
-            if group[0]["kind"] == "module"
-            and any(
-                not entry.get("scope", "").startswith(self.language_model_prefix)
-                for entry in group
-            )
-        )
-
     @computed_field
     @property
     def parameters(self) -> frozenset[str]:
@@ -347,7 +336,7 @@ class ModelInfo(BaseModel):
         if self.status == STATUS_PREVIEW:
             return f"Model {self.hub_id} is in preview and cannot be submitted yet."
         if self.status == STATUS_DEPRECATED:
-            return f"Model {self.hub_id} is deprecated and will be removed."
+            return f"Model {self.hub_id} is deprecated and can no longer be submitted."
         return None
 
     @computed_field
@@ -560,6 +549,9 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="XiaomiMiMo/MiMo-V2.6-Flash-RL",
             architecture=ARCH_MOE,
+            modalities=("text", "vision"),
+            language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
+            text_lora_modules=frozenset({"o_proj"}) | GATED_MLP_LORA_MODULES,
             rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
         ),
     )

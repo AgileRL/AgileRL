@@ -167,12 +167,6 @@ def main(
 
 @main.command()
 @click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Run browser login even if an API key is set or the stored session is still valid.",
-)
-@click.option(
     "--timeout",
     type=click.IntRange(1),
     default=300,
@@ -182,12 +176,11 @@ def main(
 @click.pass_obj
 def login(
     config: CommandConfig,
-    force: bool,
     timeout: int,
 ) -> None:
-    """Authenticate with Arena."""
+    """Sign in through the browser. Ends the saved login, so it also switches user or environment."""
     with arena_client(config) as client:
-        client.login(timeout=timeout, force=force)
+        client.login(timeout=timeout)
 
 
 @main.command()
@@ -246,13 +239,6 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
 @click.argument("algorithm")
 @click.option("--model", default=None, help="Catalog model id for an LLM algorithm.")
 @click.option("--dataset", default=None, help="Dataset name to fill in.")
-@click.option("--gym-env", default=None, help="Gym environment name to fill in.")
-@click.option(
-    "--gym-env-version",
-    default=None,
-    help="Gym environment version; required with --gym-env-entrypoint.",
-)
-@click.option("--gym-env-entrypoint", default=None, help="Gym entrypoint to fill in.")
 @click.option(
     "--section",
     type=click.Choice(
@@ -275,18 +261,12 @@ def manifest_template(
     algorithm: str,
     model: str | None,
     dataset: str | None,
-    gym_env: str | None,
-    gym_env_version: str | None,
-    gym_env_entrypoint: str | None,
     section: str | None,
 ) -> None:
     """Print Arena's default manifest for ALGORITHM as YAML, ready to edit."""
     with arena_client(config) as client:
         spec = client.get_default_run_spec(
             algorithm,
-            gym_env=gym_env,
-            gym_env_version=gym_env_version,
-            gym_env_entrypoint=gym_env_entrypoint,
             dataset_name=dataset,
             field=section,
             pretrained_model_name_or_path=model,
@@ -335,37 +315,51 @@ def user_credits(
 
 @main.group("resources")
 def resources_group() -> None:
-    """List available training compute tiers."""
+    """List the GPU types you can train on."""
+
+
+def _gpu_types(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the platform's GPU types, derived from resource tiers on an older platform.
+
+    :param data: The ``resources/list`` response.
+    :return: One ``{"gpuType", "gpusPerNode", "devOnly"}`` dict per GPU type.
+    """
+    if "gpuTypes" in data:
+        return data["gpuTypes"]
+    gpus_per_node: dict[str, set[int]] = {}
+    for tier in data.get("tiers", {}).values():
+        if not tier.get("gpu_type") or not tier.get("num_gpus"):
+            continue
+        short_name = tier["gpu_type"].lower().removeprefix("nvidia-").removesuffix("gb")
+        gpus_per_node.setdefault(short_name, set()).add(tier["num_gpus"])
+    return [
+        {"gpuType": gpu_type, "gpusPerNode": sorted(counts), "devOnly": False}
+        for gpu_type, counts in sorted(gpus_per_node.items())
+    ]
 
 
 @resources_group.command("list")
 @click.pass_obj
 def resources_list(config: CommandConfig) -> None:
-    """List resource tiers: ids, specs, and credits per node-hour."""
+    """List the GPU types you can train on and their GPUs per node."""
     with arena_client(config) as client:
-        data = client.list_resources()
-        tiers = data.get("tiers", {})
-        sorted_tiers = sorted(tiers.values(), key=lambda t: t["price_per_node_hour"])
-        emit_result(
-            sorted_tiers,
-            display=lambda tiers: [
-                {
-                    "Resource ID": tier["name"],
-                    "GPUs": f"{tier['num_gpus']}x {tier['gpu_type']}"
-                    if tier.get("gpu_type")
-                    else "—",
-                    "CPUs": tier["num_cpus"],
-                    "RAM (GB)": tier["ram_gb"],
-                    "credits/node-hour": f"{tier['price_per_node_hour']:.2f}",
-                }
-                for tier in tiers
-            ],
-        )
+        gpu_types = _gpu_types(client.list_resources())
+    emit_result(
+        gpu_types,
+        display=lambda rows: [
+            {
+                "GPU type": row["gpuType"],
+                "GPUs per node": ", ".join(str(n) for n in row["gpusPerNode"]),
+                "Dev only": "yes" if row.get("devOnly") else "",
+            }
+            for row in rows
+        ],
+    )
 
 
 @main.group("env")
 def env() -> None:
-    """Manage your custom Gym / PettingZoo / GEM environments."""
+    """Manage your custom GEM environments."""
 
 
 @env.command("list")
@@ -383,7 +377,7 @@ def env_list(
     name: str | None,
     include_arena: bool,
 ) -> None:
-    """List all available environments in Arena, and whether they have been validated and profiled."""
+    """List all available environments in Arena, and whether they have been validated."""
     with arena_client(config) as client:
         emit_result(client.list_environments(name=name, include_arena=include_arena))
 
@@ -450,13 +444,6 @@ def env_entrypoints(
     default=None,
     help="Optional description of the environment.",
 )
-@click.option("--multi-agent/--single-agent", default=False, show_default=True)
-@click.option(
-    "--language-based/--classic",
-    default=False,
-    show_default=True,
-    help="Environment follows the GEM API.",
-)
 @click.option("--do-rollouts/--no-do-rollouts", default=False, show_default=True)
 @click.pass_obj
 def env_validate(
@@ -468,11 +455,9 @@ def env_validate(
     requirements: Path | None,
     entrypoint: str | None,
     description: str | None,
-    multi_agent: bool,
-    language_based: bool,
     do_rollouts: bool,
 ) -> None:
-    """Validate an environment on Arena.
+    """Validate a GEM environment on Arena.
 
     Pass NAME to validate an already-registered environment.  Pass --source
     to register and validate in one step.  NAME is always required and is never
@@ -487,56 +472,9 @@ def env_validate(
             requirements=requirements,
             entrypoint=entrypoint,
             description=description,
-            multi_agent=multi_agent,
-            language_based=language_based,
             do_rollouts=do_rollouts,
         )
     emit_json_result(result)
-
-
-_PROFILE_METRIC_LABELS: dict[str, str] = {
-    "avg_cpu_per_env": "Avg CPU per Env (%)",
-    "memory_per_env_gb": "Memory per Env (GB)",
-    "peak_cpu_per_env": "Peak CPU per Env (%)",
-    "steps_per_second": "Steps per Second",
-}
-
-
-def _format_profile_metrics(raw: dict[str, float]) -> dict[str, str]:
-    """Transform raw profiling metric keys into human-readable labels with formatted values."""
-    formatted: dict[str, str] = {}
-    for key, value in raw.items():
-        label = _PROFILE_METRIC_LABELS.get(key, key.replace("_", " ").title())
-        formatted[label] = f"{value:.3f}"
-    return formatted
-
-
-@env.command("profile")
-@click.argument("name")
-@click.option("--version", default=None, show_default=True)
-@click.option(
-    "--multi-agent/--single-agent",
-    "multi_agent",
-    default=None,
-    help="Override the stored multi-agent flag. Omit it to use the saved value.",
-)
-@click.pass_obj
-def env_profile(
-    config: CommandConfig,
-    name: str,
-    version: str | None,
-    multi_agent: bool | None,
-) -> None:
-    """Profile a validated environment in Arena and get its resource requirements."""
-    with arena_client(config) as client:
-        result = client.profile_environment(
-            name=name, version=version, multi_agent=multi_agent
-        )
-        if result:
-            emit_result(
-                _format_profile_metrics(result),
-                columns=["Metric", "Estimate"],
-            )
 
 
 @env.command("delete")
@@ -627,30 +565,12 @@ def experiment() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
-    "--resource-id",
-    type=str,
-    default=None,
-    help=(
-        "Arena cluster type to submit the experiment to. Omit every resource "
-        "flag to let Arena pick the cheapest fit."
-    ),
-)
-@click.option(
-    "--num-nodes",
-    type=int,
-    default=None,
-    help=(
-        "Number of nodes to use for the experiment. Omit every resource flag "
-        "to let Arena pick the cheapest fit."
-    ),
-)
-@click.option(
     "--num-gpus",
     type=click.IntRange(min=1),
     default=None,
     help=(
-        "Total GPUs. Arena uses the fewest nodes. Not combinable with "
-        "--resource-id or --num-nodes."
+        "Total GPUs. Arena uses the fewest nodes that fit the run's memory "
+        "estimate. Omit both GPU flags to let Arena pick the cheapest fit."
     ),
 )
 @click.option(
@@ -658,8 +578,8 @@ def experiment() -> None:
     type=str,
     default=None,
     help=(
-        "Short GPU name such as h100-80, b200 or l4. Not combinable with "
-        "--resource-id or --num-nodes."
+        "Short GPU name such as h100-80, b200 or l4. Omit both GPU flags to "
+        "let Arena pick the cheapest fit."
     ),
 )
 @click.option(
@@ -700,8 +620,6 @@ def experiment() -> None:
 def experiment_submit(
     config: CommandConfig,
     manifest: Path,
-    resource_id: str | None,
-    num_nodes: int | None,
     num_gpus: int | None,
     gpu_type: str | None,
     project: str | None,
@@ -714,8 +632,6 @@ def experiment_submit(
     with arena_client(config) as client:
         result = client.submit_experiment(
             manifest=manifest,
-            resource_id=resource_id,
-            num_nodes=num_nodes,
             num_gpus=num_gpus,
             gpu_type=gpu_type,
             project=project,
@@ -1072,8 +988,8 @@ def agent_deploy(
     A deployment's memory scope is fixed once it exists, so ``--memory-scope``
     only takes effect on the first deploy.
 
-    ``--num-gpus`` and ``--gpu-type`` are for LLM agents. Without them, a redeploy
-    keeps the agent's resources and a new deployment uses Arena's default.
+    Without ``--num-gpus`` and ``--gpu-type``, a redeploy keeps the agent's
+    resources and a new deployment uses Arena's default.
     """
     with arena_client(config) as client:
         result = client.deploy_agent(

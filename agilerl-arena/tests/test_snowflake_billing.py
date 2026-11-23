@@ -41,9 +41,10 @@ IN_LIST = re.compile(r"^hour_start_ms IN \(([\d, ]+)\)$")
 BEFORE = re.compile(r"^attempted_at < TO_TIMESTAMP_TZ\((\d+), 3\)$")
 SET_TIME = re.compile(r"(\w+) = (COALESCE\(\w+, )?TO_TIMESTAMP_TZ\((\d+), 3\)")
 SET_TEXT = re.compile(r"(\w+) = '((?:[^']|'')*)'")
-INSERT_ITEM = re.compile(
-    r"^INSERT INTO app_state\.usage_items \(kind, usage_id, opened_at, service_name\) "
-    r"VALUES \('(\w+)', '([^']*)', CURRENT_TIMESTAMP\(\), '([^']*)'\)$"
+MERGE_ITEM = re.compile(
+    r"^MERGE INTO app_state\.usage_items AS t USING \(SELECT '([^']*)' AS "
+    r"service_name\) AS s .* VALUES \('deployment', '([^']*)', "
+    r"TO_TIMESTAMP_TZ\((\d+), 3\), s\.service_name\)$"
 )
 MERGE_VALUES = re.compile(r"FROM VALUES (.*?)\) AS s ")
 MERGE_OWNER = re.compile(r"ON t\.kind = '([^']*)' AND t\.usage_id = '([^']*)'")
@@ -64,7 +65,9 @@ def unknown(kind: str, usage_id: str) -> SnowflakeUsage:
 
 def matches(row: dict[str, object], where: str) -> bool:
     for term in where.split(" AND "):
-        if equals := EQUALS.match(term):
+        if term.startswith("(") and term.endswith(")"):
+            ok = any(matches(row, option) for option in term[1:-1].split(" OR "))
+        elif equals := EQUALS.match(term):
             ok = row[equals.group(1)] == equals.group(2)
         elif is_null := IS_NULL.match(term):
             ok = (row[is_null.group(1)] is None) != bool(is_null.group(2))
@@ -183,12 +186,28 @@ class BillingSession:
             return Result(
                 [Row(**{k.upper(): v for k, v in r.items()}) for r in self.served]
             )
-        if statement == "SELECT CURRENT_ACCOUNT() AS ACCOUNT":
-            return Result([Row(ACCOUNT="AB12345")])
-        if insert := INSERT_ITEM.match(statement):
-            kind, usage_id, service = insert.groups()
-            self.add_item(usage_id, NOW_MS, kind, service_name=service)
-            return Result([])
+        if statement == (
+            "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+            "app_code.listing_purchased() AS PURCHASED"
+        ):
+            return Result(
+                [Row(ACCOUNT="AB12345", REGION="AWS_EU_WEST_2", PURCHASED=True)]
+            )
+        if merge := MERGE_ITEM.match(statement):
+            service, usage_id, opened_ms = merge.groups()
+            open_rows = [
+                row
+                for row in self.items
+                if row["kind"] == "deployment"
+                and row["service_name"] == service
+                and row["closed_at"] is None
+                and row["settled_at"] is None
+            ]
+            if not open_rows:
+                self.add_item(
+                    usage_id, int(opened_ms), "deployment", service_name=service
+                )
+            return Result([Row(**{"number of rows inserted": int(not open_rows)})])
         where_match = WHERE.search(statement)
         assert where_match is not None, statement
         where = where_match.group(1)
@@ -203,6 +222,14 @@ class BillingSession:
                         SERVICE_NAME=r["service_name"],
                         FIRST_SEEN_AT=r["first_seen_at"],
                     )
+                    for r in sorted(selected, key=lambda r: int(str(r["opened_at"])))
+                ]
+            )
+        if statement.startswith("SELECT usage_id, DATE_PART(EPOCH_MILLISECOND, "):
+            assert statement.endswith(" ORDER BY opened_at")
+            return Result(
+                [
+                    Row(USAGE_ID=r["usage_id"], OPENED_MS=r["opened_at"])
                     for r in sorted(selected, key=lambda r: int(str(r["opened_at"])))
                 ]
             )
@@ -624,7 +651,7 @@ class TestReconcile:
 
         # Assert
         assert summary == (
-            "items: 2, settled: 1, events: 2, failed: 0, missing: 0, stale: 0, "
+            "items: 2, settled: 1, events: 2, failed: 0, missing: 0, skipped: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert [item["settled_at"] for item in session.items] == [NOW_MS, None]
@@ -687,7 +714,7 @@ class TestReconcile:
 
         # Assert
         assert first == (
-            "items: 2, settled: 0, events: 0, failed: 1, missing: 0, stale: 0, "
+            "items: 2, settled: 0, events: 0, failed: 1, missing: 0, skipped: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert reads == ["arena-down", RUN_ID, "arena-down"]
@@ -734,7 +761,7 @@ class TestReconcile:
 
         # Assert
         assert summary == (
-            "items: 1, settled: 0, events: 0, failed: 0, missing: 1, stale: 0, "
+            "items: 1, settled: 0, events: 0, failed: 0, missing: 1, skipped: 0, stale: 0, "
             "unconfirmed: 0"
         )
         [item] = session.items
@@ -762,7 +789,7 @@ class TestReconcile:
 
         # Assert
         assert reads_within_a_day == 0
-        assert "missing: 0" in within_a_day
+        assert "missing: 0, skipped: 1" in within_a_day
         assert len(reads) == 1
         assert item["last_checked_at"] == checked_ms + DAY_MS
         assert item["first_404_at"] == checked_ms
@@ -870,11 +897,11 @@ class TestReconcile:
 
         # Assert
         assert first == (
-            "items: 1, settled: 0, events: 0, failed: 1, missing: 0, stale: 0, "
+            "items: 1, settled: 0, events: 0, failed: 1, missing: 0, skipped: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert later == (
-            "items: 1, settled: 1, events: 0, failed: 0, missing: 0, stale: 0, "
+            "items: 1, settled: 1, events: 0, failed: 0, missing: 0, skipped: 0, stale: 0, "
             "unconfirmed: 1"
         )
         assert session.events == []
@@ -897,7 +924,7 @@ class TestReconcile:
 
         # Assert
         assert summary == (
-            "items: 2, settled: 1, events: 1, failed: 1, missing: 0, stale: 0, "
+            "items: 2, settled: 1, events: 1, failed: 1, missing: 0, skipped: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert json.loads(session.events[0]["objects"]) == [RUN_ID]

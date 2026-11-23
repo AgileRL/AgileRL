@@ -36,6 +36,7 @@ from agilerl.arena.memory.resources import (
     gpus_required,
     searches_gpu_split,
     split_manifest,
+    teacher_sized_manifest,
     tier_sync_link,
 )
 from agilerl.arena.memory.solver import CannotSolve
@@ -131,11 +132,17 @@ def with_model(base, model):
     return doc
 
 
+def without_expert_lora(doc):
+    """Train no packed-expert LoRA, the layouts these MoE cases were sized for."""
+    doc["network"]["lora_config"] = {"target_parameters": []}
+    return doc
+
+
 def moe_unset_layout():
     """Qwen3.6-35B-A3B at 32k tokens with the split and engine width omitted."""
     doc = unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
     doc["network"]["max_context_length"] = 32768
-    return doc
+    return without_expert_lora(doc)
 
 
 def tiny_model():
@@ -464,7 +471,146 @@ class TestSplitManifest:
             split_manifest(manifest, 8, device)
 
 
+def unpinned_teacher_manifest(teacher):
+    """Async OPD on Qwen3.5-2B from ``teacher``, with no GPU layout written."""
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {
+                "name": "OPD",
+                "batch_size": 16,
+                "max_output_tokens": 512,
+                "teacher": {"model": {"pretrained_model_name_or_path": teacher}},
+            },
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                "max_context_length": 2048,
+            },
+            "training": {"max_steps": 100, "pop_size": 1, "rollout_mode": "async"},
+            "replay_buffer": {"kind": "llm"},
+        }
+    )
+
+
+class TestTeacherSizedManifest:
+    def test_an_unset_teacher_width_is_sized_on_a_copy(self):
+        # Arrange
+        manifest = unpinned_teacher_manifest("Qwen/Qwen3.8-27B")
+        a100 = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        # Act
+        sized = teacher_sized_manifest(manifest, a100, 8, 8)
+
+        # Assert
+        assert sized.algorithm.teacher.model.vllm_config.tensor_parallel_size == 2
+        assert manifest.algorithm.teacher.model.vllm_config.tensor_parallel_size is None
+
+    def test_a_run_without_a_teacher_model_is_returned_as_is(self):
+        manifest = manifest_with(MANIFEST, rollout_engines_per_agent=1)
+
+        sized = teacher_sized_manifest(
+            manifest, lookup_gpu("NVIDIA L4").device_spec(), 8, 8
+        )
+
+        assert sized is manifest
+
+    def test_a_teacher_with_no_width_that_fits_is_returned_as_is(self):
+        # Arrange: two GPUs leave no teacher width beside one trainer and one
+        # student engine.
+        manifest = unpinned_teacher_manifest("Qwen/Qwen3.8-27B")
+
+        # Act
+        sized = teacher_sized_manifest(
+            manifest, lookup_gpu("NVIDIA L4").device_spec(), 2, 8
+        )
+
+        # Assert
+        assert sized is manifest
+        assert manifest.algorithm.teacher.model.vllm_config.tensor_parallel_size is None
+
+
 class TestCheckTiers:
+    def test_a_rollout_bundle_wider_than_a_node_does_not_fit(self):
+        # Arrange: width 4 plus a width-2 teacher is 6 GPUs. Two 4-GPU nodes
+        # have them, and one node cannot hold the bundle.
+        manifest = teacher_manifest(
+            "Qwen/Qwen3.5-9B", teacher_width=2, rollout_engines_per_agent=1
+        )
+        manifest.algorithm.vllm_config.tensor_parallel_size = 4
+        tiers = [
+            {
+                **tier("a100-4x", "NVIDIA A100-SXM4-80GB", 4, 8.0),
+                "gpus_per_node": 4,
+                "node_counts": [2],
+            }
+        ]
+
+        # Act
+        (check,) = check_tiers(
+            tiers, manifest, catalog_model(manifest.algorithm), builder()
+        )
+
+        # Assert
+        assert not check.fits
+        assert check.reason == "rollout bundle of 6 GPUs exceeds 4 GPUs on one node"
+
+    def test_an_engine_wider_than_a_node_does_not_fit(self):
+        # Arrange: a width-8 engine on 4-GPU nodes; no node can hold it.
+        manifest = teacher_manifest(
+            "Qwen/Qwen3.5-9B", teacher_width=2, rollout_engines_per_agent=1
+        )
+        manifest.algorithm.vllm_config.tensor_parallel_size = 8
+        tiers = [
+            {
+                **tier("a100-4x", "NVIDIA A100-SXM4-80GB", 4, 8.0),
+                "gpus_per_node": 4,
+                "node_counts": [3],
+            }
+        ]
+
+        # Act
+        (check,) = check_tiers(
+            tiers, manifest, catalog_model(manifest.algorithm), builder()
+        )
+
+        # Assert
+        assert not check.fits
+        assert (
+            check.reason == "engine tensor_parallel_size 8 exceeds 4 GPUs on one node"
+        )
+
+    def test_a_teacher_model_without_a_layout_gets_a_split_that_fits(self):
+        # Arrange: no student width, trainer or engine count, or teacher width.
+        manifest = unpinned_teacher_manifest("Qwen/Qwen3.8-27B")
+
+        # Act
+        (check,) = check_tiers(
+            [tier("a100-8x", "NVIDIA A100-SXM4-80GB", 8, 8.0)],
+            manifest,
+            catalog_model(manifest.algorithm),
+            builder(),
+        )
+
+        # Assert
+        assert check.fits, check.reason
+        assert check.teacher_engine_tensor_parallel == 2
+        per_engine = check.engine_tensor_parallel + check.teacher_engine_tensor_parallel
+        assert check.trainers + check.engines * per_engine <= 8
+
+    def test_a_run_without_a_teacher_model_reports_no_teacher_width(self):
+        manifest = manifest_with(MANIFEST, rollout_engines_per_agent=1)
+
+        (check,) = check_tiers(
+            [tier("l4-8x", "NVIDIA L4", 8, 8.0)], manifest, tiny_model(), builder()
+        )
+
+        assert check.teacher_engine_tensor_parallel is None
+
     def test_a_teacher_too_big_for_its_gpu_rules_the_tier_out(self):
         # Arrange: a 27B teacher's bf16 weights alone exceed one L4.
         manifest = teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=1)
@@ -1216,8 +1362,10 @@ class TestCheckTiers:
     def test_a_pinned_layout_off_the_nodes_is_priced_under_an_open_count(self):
         # Arrange: up to 15 trainers on two 8-GPU nodes; pinned ep=5 groups
         # straddle the nodes past 8 of them.
-        doc = unset_split(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+        doc = without_expert_lora(
+            unset_split(
+                with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+            )
         )
         doc["algorithm"]["fsdp"] = {"ep": 5}
         doc["algorithm"]["batch_size"] = 40
@@ -1240,8 +1388,10 @@ class TestCheckTiers:
     ):
         # Arrange: nothing fits, so every layout is priced. Up to 15 trainers
         # on two 8-GPU nodes; ep=5 sits on one node at 5 trainers only.
-        doc = unset_split(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+        doc = without_expert_lora(
+            unset_split(
+                with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+            )
         )
         doc["algorithm"]["batch_size"] = 40
         manifest = TrainingManifest.model_validate(doc)
@@ -1419,6 +1569,28 @@ class TestTierCheckFailure:
         assert not check.fits
         assert check.failure == FailureKind.HOST_MEMORY
         assert check.host_limited is True
+
+    def test_host_short_of_the_layout_free_bytes_prices_one_layout(self, built_layouts):
+        # Arrange: 60 GiB nodes leave 6.5 GiB per GPU. The trainer process and
+        # the adapter snapshot fit that only without the buffer.
+        build, seen = built_layouts
+        manifest = TrainingManifest.model_validate(moe_unset_layout())
+        tight = {
+            **tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 1.0),
+            "gpus_per_node": 8,
+            "ram_gb": 60,
+        }
+
+        # Act
+        (check,) = check_tiers(
+            [tight], manifest, catalog_model(manifest.algorithm), build
+        )
+
+        # Assert
+        assert not check.fits
+        assert check.failure == FailureKind.HOST_MEMORY
+        assert check.layout == ParallelLayout()
+        assert seen == {(8, 1, 1, 1)}
 
     def test_no_gpu_is_other(self):
         manifest = TrainingManifest.model_validate(MANIFEST)
