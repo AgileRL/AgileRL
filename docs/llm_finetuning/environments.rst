@@ -324,6 +324,9 @@ whose ``__init__`` takes ``judge`` is built with the run's shared client:
 - Training logs ``judge_calls``, ``judge_parse_failure_rate`` and
   ``judge_mean_latency_s``.
 
+For an end-to-end walkthrough on Arena, from storing the key to reading the judge's
+notes, see :ref:`tutorial_arena_grpo_llm_judge`.
+
 Scoring a group together (RULER)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -375,6 +378,8 @@ judge the whole group in one call:
   reward. Held-out evaluation episodes get no group score.
 - On async rollouts, a judge call that still fails after the SDK's retries fails
   that group's episode tasks, which drops the group; repeated failures stop the run.
+
+:ref:`tutorial_arena_grpo_llm_judge` ends with a RULER variant of its GSM8K run.
 
 Supervised (SFT / DPO)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

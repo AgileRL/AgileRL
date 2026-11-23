@@ -5,18 +5,24 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from functools import lru_cache
+from functools import lru_cache, partial
 from itertools import product
 from math import lcm
+from typing import TypeVar
 
+from agilerl.arena.memory.formulas import (
+    checkpointed_blocks,
+    routed_expert_params_per_layer,
+)
 from agilerl.arena.memory.resolve.batch import TrainerSplitError
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
 )
-from agilerl.arena.memory.specs import ModelArch
+from agilerl.arena.memory.specs import DTYPE_BYTES, ModelArch
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvSpec
@@ -29,6 +35,8 @@ from agilerl.arena.models.fsdp import (
 from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
 from agilerl.arena.models.manifest_rules import cpu_offload_blocker
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
+
+Plan = TypeVar("Plan")
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,14 @@ def _degrees(n_gpus: int, node: int, ranks_fixed: bool) -> list[int]:
     if ranks_fixed:
         return [degree for degree in range(2, widest + 1) if n_gpus % degree == 0]
     return list(range(2, widest + 1))
+
+
+def _expert_degrees(n_gpus: int, node: int, ranks_fixed: bool) -> list[int]:
+    """Expert-parallel degrees: :func:`_degrees`, then whole numbers of nodes up to ``n_gpus``."""
+    spanning = range(2 * node, n_gpus + 1, node)
+    return _degrees(n_gpus, node, ranks_fixed) + [
+        degree for degree in spanning if not ranks_fixed or n_gpus % degree == 0
+    ]
 
 
 def layout_runs(n_gpus: int, layout: ParallelLayout, ranks_fixed: bool) -> bool:
@@ -105,10 +121,11 @@ def parallel_layouts(
     only offered for a MoE the trainer shards over experts, at degrees that
     divide its experts; context parallel only where the trainer splits the
     model's sequences; tensor parallel only for a family with a training plan.
-    Each degree must split the model's heads. Searched expert groups and
-    tensor x context groups stay within one node (:func:`off_node_reason`);
-    under an open count the split drops trainer counts where they straddle
-    nodes. A searched MoE layout keeps ``ep >= tp``, and a set
+    Each degree must split the model's heads. Searched tensor x context
+    groups stay within one node, and searched expert groups within one node
+    or across whole nodes (:func:`off_node_reason`), the latter after every
+    layout on one node; under an open count the split drops trainer counts
+    where they straddle nodes. A searched MoE layout keeps ``ep >= tp``, and a set
     ``cpu_offload`` keeps the degrees it runs at.
 
     :param arch: Model architecture.
@@ -156,6 +173,7 @@ def _cached_layouts(
         pins,
         pinned,
         _degrees(n_gpus, node, ranks_fixed),
+        _expert_degrees(n_gpus, node, ranks_fixed),
         expert_parallel,
         context_parallel,
     )
@@ -184,7 +202,11 @@ def _cached_layouts(
     candidates = [pinned]
     if "shard_group_size" not in pins and node < n_gpus:
         candidates.append(replace(pinned, shard_group_size=node))
-    candidates += sorted(searched, key=lambda layout: _search_rank(layout, pinned))
+    # An expert group across nodes is tried only after every layout on one node.
+    candidates += sorted(
+        searched,
+        key=lambda layout: (layout.ep > node, _search_rank(layout, pinned)),
+    )
     return tuple(
         layout
         for layout in dict.fromkeys(candidates)
@@ -197,6 +219,7 @@ def _axis_values(
     pins: frozenset[str],
     pinned: ParallelLayout,
     degrees: list[int],
+    expert_degrees: list[int],
     expert_parallel: bool,
     context_parallel: bool,
 ) -> tuple[list[int], list[int], list[int]]:
@@ -204,7 +227,7 @@ def _axis_values(
     n_experts = arch.n_experts if arch.is_moe and arch.n_experts else 0
     ep_values = [pinned.ep]
     if "ep" not in pins and expert_parallel and n_experts:
-        ep_values += [degree for degree in degrees if n_experts % degree == 0]
+        ep_values += [degree for degree in expert_degrees if n_experts % degree == 0]
     cp_values = [pinned.cp]
     if "cp" not in pins and context_parallel:
         cp_values += degrees
@@ -235,7 +258,9 @@ def off_node_reason(
     nodes. A searched group wider than the node never fits on it. Past one
     node of trainers, a searched group whose size does not divide the node
     crosses into the next one; under an open count that turns on the trainer
-    count the split picks, so only the width is checked.
+    count the split picks, so only the width is checked. A searched expert
+    group of whole nodes may span them: it sends routed tokens between
+    nodes in place of expert weights (:func:`cross_node_expert_bytes`).
 
     :param layout: Tensor, expert, and context parallel, and the shard group.
     :param pinned: The manifest's own layout (:func:`pinned_layout`).
@@ -250,6 +275,8 @@ def off_node_reason(
     if (layout.tp, layout.cp) != (pinned.tp, pinned.cp):
         groups.append(("tensor x context parallel", layout.tp * layout.cp))
     for axis, size in groups:
+        if axis == "expert parallel" and size % node == 0:
+            continue
         if size > node:
             return f"{axis} group of {size} GPUs is wider than a {node}-GPU node"
         if ranks_fixed and n_gpus > node and node % size:
@@ -382,40 +409,179 @@ def manifest_at_layout(
     return trial
 
 
+def cross_node_expert_bytes(
+    arch: ModelArch,
+    plan: TrainingMemoryPlan,
+    layout: ParallelLayout,
+    trainers: int,
+    node: int,
+) -> float:
+    """Routed-expert bytes one node sends the others in one optimizer step: weight gathers or routed tokens.
+
+    An expert-FSDP group spread over nodes gathers each rank's expert pieces
+    from the other nodes every forward, and again every backward when
+    weights reshard after forward. An expert-parallel group wider than a
+    node sends each routed row at ``expert_width`` there and back in forward
+    and in backward, and again in the checkpoint recompute unless the plan
+    saved those collectives. Each tensor-parallel rank routes its share of
+    those rows.
+    Traffic every layout of the same tensor and context parallel shares,
+    dense weights and gradients, is left out.
+
+    :param arch: Model architecture.
+    :param plan: The trainer plan at ``layout``.
+    :param layout: Tensor, expert, and context parallel, and the shard group.
+    :param trainers: Trainer ranks, filling whole nodes from the first.
+    :param node: GPUs on one node.
+    :return: Bytes; zero on one node, on a dense model and under DDP.
+    """
+    fsdp = plan.fsdp
+    if fsdp is None or not arch.is_moe or trainers <= node:
+        return 0.0
+    byte = DTYPE_BYTES[plan.settings.weight_dtype]
+    weights = 0.0
+    shard = layout.shard_group_size or trainers
+    # The trainer mesh puts expert parallel innermost, so an expert-FSDP group's
+    # ranks are ``ep`` apart.
+    pieces = shard // layout.ep
+    if pieces > 1 and shard > node:
+        on_node = max(node // layout.ep, 1)
+        piece = (
+            arch.moe_layers
+            * routed_expert_params_per_layer(arch)
+            * byte
+            / (layout.ep * pieces)
+        )
+        micro_batch = (
+            plan.micro_batch_tokens_per_gpu
+            or plan.micro_batch_size_per_gpu * plan.settings.max_model_len
+        )
+        gathers = 1 if fsdp.reshard_after_forward is False else 2
+        weights = (
+            gathers
+            * math.ceil(plan.tokens / micro_batch)
+            * (node / on_node)
+            * (pieces - on_node)
+            * piece
+        )
+    tokens = 0.0
+    if layout.ep > node:
+        # Saving the collectives makes the recompute reuse them.
+        checkpointed_share = (
+            checkpointed_blocks(
+                arch.n_layers,
+                plan.gradient_checkpointing,
+                plan.checkpoint_every_n_blocks,
+            )
+            / arch.n_layers
+        )
+        recomputed = 0.0 if fsdp.save_moe_collectives is True else checkpointed_share
+        # Dispatch and combine in forward and in backward, plus the recompute.
+        exchanges = 4 + 2 * recomputed
+        # ``plan.tokens`` is the data-parallel shard, replicated across tensor parallel.
+        tokens = (
+            node
+            * plan.tokens
+            / (layout.cp * layout.tp)
+            * (arch.n_experts_per_tok or 1)
+            * arch.expert_width
+            * byte
+            * arch.moe_layers
+            * exchanges
+            * (layout.ep - node)
+            / layout.ep
+        )
+    return weights + tokens
+
+
+def least_cross_node_plan(
+    layouts: Iterable[ParallelLayout],
+    plan_at: Callable[[ParallelLayout], Plan | None],
+    moved: Callable[[ParallelLayout, Plan], float],
+) -> Plan | None:
+    """The first layout's plan, or a higher expert degree's when it moves fewer bytes between nodes.
+
+    The first layout ``plan_at`` gives a plan for wins unless its plan moves
+    routed-expert bytes between nodes. Then each later layout that differs
+    only in a higher expert-parallel degree is priced, and the one moving the
+    fewest bytes wins; the earlier wins a tie.
+
+    :param layouts: Layouts in the order to try them.
+    :param plan_at: A layout's plan, or ``None`` when it does not fit.
+    :param moved: Bytes a layout's plan moves between nodes
+        (:func:`cross_node_expert_bytes`).
+    :return: The chosen plan, or ``None`` when no layout fits.
+    """
+    first: ParallelLayout | None = None
+    best: Plan | None = None
+    least = 0.0
+    for layout in layouts:
+        if first is not None and not (
+            layout.ep > first.ep and replace(layout, ep=first.ep) == first
+        ):
+            continue
+        plan = plan_at(layout)
+        if plan is None:
+            continue
+        traffic = moved(layout, plan)
+        if first is None:
+            if traffic == 0:
+                return plan
+            first, best, least = layout, plan, traffic
+        elif traffic < least:
+            best, least = plan, traffic
+    return best
+
+
 def first_fitting_plan(
     layouts: list[ParallelLayout],
     price: Callable[[ParallelLayout], TrainingMemoryPlan],
+    moved: Callable[[ParallelLayout, TrainingMemoryPlan], float],
 ) -> TrainingMemoryPlan:
-    """Least parallel layout whose plan fits with the underprediction buffer.
+    """Least parallel layout whose plan fits with the underprediction buffer, by :func:`least_cross_node_plan`.
 
     A layout over the GPU or one the trainer ranks cannot split is skipped.
-    The first plan that fits with the buffer wins. When none do, the first
-    plan that fits without it is returned.
+    Plans that fit with the buffer are searched first. When none do, the
+    plans that fit without it are.
 
     :param layouts: Layouts in the order to try them.
     :param price: Prices one layout.
+    :param moved: Bytes a layout's plan moves between nodes.
     :return: The chosen plan.
     :raises TrainingMemoryUnfitError: When no layout fits one GPU.
     :raises TrainerSplitError: When no layout splits across the trainer ranks.
     """
-    bare: TrainingMemoryPlan | None = None
+    priced: dict[ParallelLayout, TrainingMemoryPlan | None] = {}
     last_unfit: TrainingMemoryUnfitError | None = None
     last_split: TrainerSplitError | None = None
-    for layout in layouts:
-        try:
-            plan = price(layout)
-        except TrainingMemoryUnfitError as err:
-            last_unfit = err
-            continue
-        except TrainerSplitError as err:
-            last_split = err
-            continue
-        if plan.breakdown.fits_with_buffer:
-            return plan
-        if bare is None and plan.breakdown.fits:
-            bare = plan
-    if bare is not None:
-        return bare
+
+    def plan_at(
+        layout: ParallelLayout, require_buffer: bool
+    ) -> TrainingMemoryPlan | None:
+        nonlocal last_unfit, last_split
+        if layout not in priced:
+            try:
+                priced[layout] = price(layout)
+            except TrainingMemoryUnfitError as err:
+                last_unfit = err
+                priced[layout] = None
+            except TrainerSplitError as err:
+                last_split = err
+                priced[layout] = None
+        plan = priced[layout]
+        if plan is None:
+            return None
+        fits = (
+            plan.breakdown.fits_with_buffer if require_buffer else plan.breakdown.fits
+        )
+        return plan if fits else None
+
+    for require_buffer in (True, False):
+        found = least_cross_node_plan(
+            layouts, partial(plan_at, require_buffer=require_buffer), moved
+        )
+        if found is not None:
+            return found
     if last_unfit is not None:
         raise last_unfit
     if last_split is not None:
