@@ -6,8 +6,7 @@
 This module imports only the standard library. Importing it still runs the
 ``agilerl.arena`` package init, which loads the pydantic manifest models but
 not torch; a reader without ``agilerl-arena`` installed can copy this file. It lives in ``agilerl-arena``, which ``agilerl``
-depends on, so the standalone CLI, the inference pod and the snapshot export
-read one definition.
+depends on, so every reader and writer of the format shares one definition.
 """
 
 from __future__ import annotations
