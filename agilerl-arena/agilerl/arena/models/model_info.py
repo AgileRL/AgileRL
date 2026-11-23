@@ -105,6 +105,10 @@ LORA_EXCLUDED_MODULES: Mapping[str, frozenset[str]] = {
     "mimo_v2": frozenset({"q_proj", "k_proj", "v_proj"}),
 }
 
+# Hugging Face model_types whose family sets trust_remote_code=True for vLLM or
+# the trainer, so a run executes Python from the checkpoint's Hub repo.
+REMOTE_CODE_MODEL_TYPES = frozenset({"mimo_v2"})
+
 # Hugging Face model_types of supported models that do not reason by default.
 NON_REASONING_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "qwen2"})
 

@@ -174,6 +174,22 @@ integrations and pools after an upgrade, since setup never drops them:
 unpublishing spend GPU credits or drop work, so they need `app_admin`.
 `export_model` writes outside the app, so it needs `app_admin` too.
 
+### Models
+
+`submit` trains only models in the Arena catalog (`arena models supported`).
+Snowflake does not let a Native App run code from outside its package, so
+`submit` refuses a model whose family loads Python from its Hugging Face repo
+(`trust_remote_code=True` for vLLM or the trainer). In the catalog that is
+`XiaomiMiMo/MiMo-V2.6-Flash-RL`. The model types are listed in
+`REMOTE_CODE_MODEL_TYPES` in `agilerl/arena/models/model_info.py`. The policy and
+an OPD `teacher.model` are both checked. `submit` also refuses
+`algorithm.vllm_engine_args.trust_remote_code: true`, because the rollout
+engine forwards that flag to vLLM, which then loads the repo's `auto_map`
+modules. `false` does not let a remote-code family through. These checks run
+before the app runs any SQL or starts anything. These models still train on
+Arena, with the `arena` CLI, and on BYOC. The reward file is the buyer's own
+code and is not checked.
+
 ## Keep your model
 
 Uninstalling the app drops `@app_state.runs` and the Model Registry models in
