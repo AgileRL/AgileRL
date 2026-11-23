@@ -335,6 +335,7 @@ class ArenaClient:
     )
 
     _SUBMIT_PATH: ClassVar[str] = "/api/cli/v1/experiments/jobs/submit"
+    _QUOTE_PATH: ClassVar[str] = "/api/cli/v1/experiments/jobs/quote"
     # True sends every submit as multipart, even without a reward file.
     _SUBMIT_MULTIPART: ClassVar[bool] = False
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
@@ -1289,6 +1290,7 @@ class ArenaClient:
             manifest, num_gpus, project, reward_file
         )
         return self._send_submit(
+            path=self._SUBMIT_PATH,
             manifest=validated,
             project=resolved_project,
             num_gpus=num_gpus,
@@ -1297,6 +1299,48 @@ class ArenaClient:
             reward_file=reward_file,
             completion=completion,
             idempotency_key=idempotency_key,
+            extra_parts=[],
+        )
+
+    def quote_experiment(
+        self,
+        manifest: str | Path | dict[str, Any],
+        *,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
+        project: str | None = None,
+        experiment_name: str | None = None,
+        reward_file: str | os.PathLike[str] | bytes | None = None,
+        completion: str | None = None,
+    ) -> dict[str, Any]:
+        """Price an experiment without starting it.
+
+        Arena runs the submit checks and picks the class exactly as
+        :meth:`submit_experiment` would, then stops before creating anything.
+
+        Arguments match :meth:`submit_experiment`.
+
+        :returns: ``resource_id``, ``resource_name``, ``gpu_type``, ``num_gpus``,
+            ``num_nodes``, ``hourly_cost`` (credits per hour), ``max_steps``,
+            ``step_seconds``, ``estimated_hours`` and ``estimated_cost``. The
+            last two are ``None`` when Arena has no duration estimate.
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: With status 404 from an Arena server that
+            cannot price a run before it starts.
+        """
+        validated, resolved_project = self._checked_submit(
+            manifest, num_gpus, project, reward_file
+        )
+        return self._send_submit(
+            path=self._QUOTE_PATH,
+            manifest=validated,
+            project=resolved_project,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
+            experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
+            idempotency_key=None,
             extra_parts=[],
         )
 
@@ -1335,6 +1379,7 @@ class ArenaClient:
 
     def _send_submit(
         self,
+        path: str,
         manifest: dict[str, Any],
         project: str,
         num_gpus: int | None,
@@ -1345,11 +1390,12 @@ class ArenaClient:
         idempotency_key: str | None,
         extra_parts: list[tuple[str, Any]],
     ) -> dict[str, Any]:
-        """Send a checked submit to ``_SUBMIT_PATH``; every submit command sends through here.
+        """Send a checked submit to *path*; every submit and quote sends through here.
 
         Takes :meth:`_checked_submit`'s outputs and the other :meth:`submit_experiment`
         arguments, then:
 
+        :param path: ``_SUBMIT_PATH``, or ``_QUOTE_PATH`` to price the run.
         :param extra_parts: Multipart parts sent after the public ones.
         :return: Final result of the submit stream.
         """
@@ -1371,7 +1417,7 @@ class ArenaClient:
             try:
                 return self._open_stream(
                     "POST",
-                    self._SUBMIT_PATH,
+                    path,
                     files=files,
                     headers=headers,
                     timeout=self._upload_timeout,
@@ -1395,7 +1441,7 @@ class ArenaClient:
         )
         return self._open_stream(
             "POST",
-            self._SUBMIT_PATH,
+            path,
             json=payload,
             headers=headers,
             timeout=self._upload_timeout,
@@ -1403,7 +1449,7 @@ class ArenaClient:
 
     def _error_class(self, path: str) -> type[ArenaAPIError]:
         """Return the error class a failed request to *path* raises."""
-        if path == self._SUBMIT_PATH:
+        if path in (self._SUBMIT_PATH, self._QUOTE_PATH):
             return ArenaTrainingError
         return self._ERROR_MAP.get(path, ArenaAPIError)
 

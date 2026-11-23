@@ -48,6 +48,7 @@ from agilerl.arena.output import (
     supports_interactive_selection,
 )
 from agilerl.arena.snowflake.cli import snowflake_group
+from agilerl.arena.submit_quote import confirm_submit_price
 
 ArenaError.enable_cli_mode()
 
@@ -638,6 +639,13 @@ def experiment() -> None:
     default=None,
     help="Reuse this key to replay the same submit instead of starting another job.",
 )
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Submit without asking to confirm the price.",
+)
 @click.pass_obj
 def experiment_submit(
     config: CommandConfig,
@@ -649,9 +657,26 @@ def experiment_submit(
     reward_file: Path | None,
     completion: str | None,
     idempotency_key: str | None,
+    yes: bool,
 ) -> None:
-    """Submit an experiment from a manifest."""
+    """Submit an experiment from a manifest.
+
+    Prints the hardware, hourly rate and estimated total first, then asks to
+    go on. --yes skips the question, and so does a pipe or a file on stdin.
+    Redirected stdout still asks.
+    """
     with arena_client(config) as client:
+        confirm_submit_price(
+            client,
+            yes,
+            manifest=manifest,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
+            project=project,
+            experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
+        )
         result = client.submit_experiment(
             manifest=manifest,
             num_gpus=num_gpus,
