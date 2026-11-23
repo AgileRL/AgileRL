@@ -42,6 +42,7 @@ from agilerl.arena.memory.resources import (
 from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_cli import (
     MANIFEST,
     NO_TIER_FITS,
@@ -1271,7 +1272,8 @@ class TestCheckTiers:
         self, monkeypatch, built_layouts
     ):
         # Arrange: nothing fits, so every layout is priced. Two 8-GPU nodes
-        # hold groups of 8; two 4-GPU nodes hold groups that divide 4.
+        # hold groups of 8; two 4-GPU nodes hold groups that divide 4, and
+        # expert groups of both whole nodes.
         manifest = TrainingManifest.model_validate(
             unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
         )
@@ -1296,7 +1298,7 @@ class TestCheckTiers:
         # Assert
         on_four = {(tp, ep, cp) for node, tp, ep, cp in seen if node == 4}
         on_eight = {(tp, ep, cp) for node, tp, ep, cp in seen if node == 8}
-        assert {ep for _, ep, _ in on_four} == {1, 2, 4}
+        assert {ep for _, ep, _ in on_four} == {1, 2, 4, 8}
         assert {tp * cp for tp, _, cp in on_four} == {1, 2, 4}
         assert (1, 8, 1) in on_eight
         assert (1, 1, 8) in on_eight
@@ -1809,3 +1811,186 @@ def flat_estimate(peak: int, usable: int) -> RunEstimate:
         device_usable_bytes=usable,
     )
     return RunEstimate(training=training, generation=generation)
+
+
+DEEPSEEK = "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+
+def deepseek_kept_counts() -> TrainingManifest:
+    """DeepSeek-V4-Flash GRPO with expert LoRA: 16 trainers and one engine at TP 4, layout unset."""
+    doc = with_model(MANIFEST, DEEPSEEK)
+    doc["algorithm"].update(batch_size=32, group_size=4, max_output_tokens=128)
+    doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
+    doc["network"].update(
+        max_context_length=1024,
+        lora_config={
+            "lora_r": 16,
+            "lora_alpha": 32,
+            "target_parameters": ["mlp.experts.gate_up_proj", "mlp.experts.down_proj"],
+        },
+    )
+    doc["training"]["training_gpus_per_agent"] = 16
+    return TrainingManifest.model_validate(doc)
+
+
+def catalogue_builder(hub_id: str):
+    """``build_config`` for a catalogued model, as the memory CLI builds it."""
+    model_config = SUPPORTED_MODEL_INFO[hub_id].config
+    n_params = SUPPORTED_MODEL_INFO[hub_id].num_params
+    return lambda laid_out, device, width, engines, adapter_sync, nccl_reshard: (
+        run_config_from_manifest(
+            laid_out,
+            device,
+            model_config,
+            n_params=n_params,
+            tensor_parallel_size=width,
+            rollout_engines=engines,
+            adapter_sync=adapter_sync,
+            nccl_reshard=nccl_reshard,
+        )
+    )
+
+
+class TestCheckTiersCrossNodeExperts:
+    def test_a_lock_gathering_experts_across_nodes_gives_way_to_whole_experts(self):
+        # Arrange: 16 trainers on two of three 8-H100 nodes. EP 4 is the
+        # first layout that fits and gathers expert pieces from the other
+        # node; EP 16 holds every expert once.
+        manifest = deepseek_kept_counts()
+        tiers = [
+            {
+                **tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 30.0),
+                "num_cpus": 200,
+                "ram_gb": 1800,
+                "node_counts": [3],
+            }
+        ]
+
+        # Act
+        (check,) = check_tiers(
+            tiers,
+            manifest,
+            catalog_model(manifest.algorithm),
+            catalogue_builder(DEEPSEEK),
+        )
+
+        # Assert
+        assert check.fits
+        assert check.num_nodes == 3
+        assert check.layout == ParallelLayout(ep=16)
+        assert check.cross_node_expert_bytes > 0
+
+    def test_mixed_node_sizes_try_expert_parallel_before_context_parallel(
+        self, monkeypatch
+    ):
+        # Arrange: a 4-GPU tier beside an 8-GPU tier. EP 8 sits on the 8-GPU
+        # node and would span the 4-GPU node; CP 2 also fits.
+        manifest = deepseek_kept_counts()
+        tiers = [node_tier("h100-4x", 4, 1.0), node_tier("h100-8x", 8, 2.0)]
+        tried: list[tuple[str, ParallelLayout | None]] = []
+
+        def fits(name: str, layout: ParallelLayout | None) -> bool:
+            return name == "h100-8x" and layout == ParallelLayout(ep=8)
+
+        monkeypatch.setattr(resources_module, "_price", record_price(tried, fits))
+
+        # Act
+        checks = check_tiers(
+            tiers,
+            manifest,
+            catalog_model(manifest.algorithm),
+            catalogue_builder(DEEPSEEK),
+        )
+
+        # Assert
+        steps = resources_module._search_steps(manifest, tiers)
+        assert steps.index(ParallelLayout(ep=8)) < steps.index(ParallelLayout(cp=2))
+        chosen = next(check for check in checks if check.fits)
+        assert chosen.tier["name"] == "h100-8x"
+        assert chosen.layout == ParallelLayout(ep=8)
+        assert ParallelLayout(cp=2) not in [layout for _, layout in tried]
+
+    def test_a_smaller_node_keeps_context_parallel_ahead_of_a_spanning_expert_group(
+        self, monkeypatch
+    ):
+        # Arrange: EP 8 spans the 4-GPU node. CP 2 fits there; EP 8 does not
+        # fit on the 8-GPU node.
+        manifest = deepseek_kept_counts()
+        tiers = [node_tier("h100-4x", 4, 1.0), node_tier("h100-8x", 8, 2.0)]
+        tried: list[tuple[str, ParallelLayout | None]] = []
+
+        def fits(name: str, layout: ParallelLayout | None) -> bool:
+            return name == "h100-4x" and layout == ParallelLayout(cp=2)
+
+        monkeypatch.setattr(resources_module, "_price", record_price(tried, fits))
+
+        # Act
+        checks = check_tiers(
+            tiers,
+            manifest,
+            catalog_model(manifest.algorithm),
+            catalogue_builder(DEEPSEEK),
+        )
+
+        # Assert
+        chosen = next(check for check in checks if check.fits)
+        assert chosen.tier["name"] == "h100-4x"
+        assert chosen.layout == ParallelLayout(cp=2)
+        on_node = tried.index(("h100-4x", ParallelLayout(cp=2)))
+        spanning = ("h100-4x", ParallelLayout(ep=8))
+        if spanning in tried:
+            assert tried.index(spanning) > on_node
+
+    def test_a_spanning_expert_group_is_priced_after_on_node_layouts_miss(
+        self, monkeypatch
+    ):
+        # Arrange: one 8-GPU node. EP 16 spans it. CP 2 misses, then EP 16 fits.
+        manifest = deepseek_kept_counts()
+        tiers = [node_tier("h100-8x", 8, 2.0)]
+        tried: list[tuple[str, ParallelLayout | None]] = []
+
+        def fits(name: str, layout: ParallelLayout | None) -> bool:
+            return name == "h100-8x" and layout == ParallelLayout(ep=16)
+
+        monkeypatch.setattr(resources_module, "_price", record_price(tried, fits))
+
+        # Act
+        (check,) = check_tiers(
+            tiers,
+            manifest,
+            catalog_model(manifest.algorithm),
+            catalogue_builder(DEEPSEEK),
+        )
+
+        # Assert
+        assert check.layout == ParallelLayout(ep=16)
+        assert tried.index(("h100-8x", ParallelLayout(cp=2))) < tried.index(
+            ("h100-8x", ParallelLayout(ep=16))
+        )
+
+
+def node_tier(name: str, node_gpus: int, price: float) -> dict:
+    """One H100 tier of ``node_gpus`` whose node counts hold 16 trainers."""
+    return {
+        **tier(name, "NVIDIA H100 80GB HBM3", node_gpus, price),
+        "num_cpus": 200,
+        "ram_gb": 1800,
+        "node_counts": [16 // node_gpus],
+    }
+
+
+def record_price(tried, fits):
+    """``_price`` that records ``(tier, layout)`` and fits where ``fits`` says so."""
+
+    def price(tier, _manifest, _model, _build_config, layout, num_nodes, _cache):
+        tried.append((tier["name"], layout))
+        ok = fits(tier["name"], layout)
+        return resources_module.TierCheck(
+            tier,
+            None if ok else "over budget",
+            num_nodes=num_nodes,
+            layout=layout if isinstance(layout, ParallelLayout) else None,
+            failure=None if ok else FailureKind.GPU_MEMORY,
+        )
+
+    return price
