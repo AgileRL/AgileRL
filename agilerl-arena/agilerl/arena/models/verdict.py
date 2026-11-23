@@ -31,7 +31,8 @@ EXIT_INVALID = 1
 EXIT_FAILED = 2
 
 HPO_UNAVAILABLE_MESSAGE = (
-    "HPO is no longer available in Arena; remove it from the manifest."
+    "HPO and populations aren't available for LLM training on Arena. "
+    "Remove training.hpo and the mutation section, and set training.pop_size to 1."
 )
 
 
@@ -131,11 +132,14 @@ def model_warnings(manifest: TrainingManifest) -> list[str]:
 
 
 def hpo_fields(manifest: TrainingManifest) -> list[str]:
-    """List the manifest fields that turn on HPO, which Arena does not run.
+    """List the manifest fields that turn on HPO, or a population for an LLM, which Arena does not run.
+
+    A mutation section that mutates nothing is allowed: ``arena manifest
+    template`` prints one.
 
     :param manifest: A validated manifest.
     :type manifest: TrainingManifest
-    :returns: ``training.hpo`` and/or ``mutation``, or an empty list.
+    :returns: Any of ``training.hpo``, ``mutation`` and ``training.pop_size``.
     :rtype: list[str]
     """
     fields = ["training.hpo"] if manifest.training.hpo else []
@@ -145,6 +149,11 @@ def hpo_fields(manifest: TrainingManifest) -> list[str]:
         or mutation.probabilities != no_op_mutation_probabilities()
     ):
         fields.append("mutation")
+    if (
+        isinstance(manifest.algorithm, LLMAlgorithmSpec)
+        and manifest.training.pop_size > 1
+    ):
+        fields.append("training.pop_size")
     return fields
 
 
