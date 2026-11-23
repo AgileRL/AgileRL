@@ -40,6 +40,7 @@ from agilerl.arena.output import (
     emit_session_transcript,
     handle_error,
     select_row,
+    stdin_is_a_terminal,
     supports_interactive_selection,
 )
 from agilerl.arena.stream import CheckEvent, ErrorEvent, LogEvent, StatusEvent
@@ -811,6 +812,34 @@ class TestSelectRow:
         assert list(first.columns[0]._cells).index("[cyan]▸[/cyan]") == 0
         second = _last_rendered([DOWN, DOWN, ENTER])
         assert list(second.columns[0]._cells).index("[cyan]▸[/cyan]") == 2
+
+
+class TestStdinIsATerminal:
+    @patch("agilerl.arena.output.sys")
+    def test_true_for_a_terminal(self, mock_sys):
+        mock_sys.stdin.isatty.return_value = True
+        assert stdin_is_a_terminal() is True
+
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_stdin_is_piped(self, mock_sys):
+        mock_sys.stdin.isatty.return_value = False
+        assert stdin_is_a_terminal() is False
+
+    @patch("agilerl.arena.output.console")
+    @patch("agilerl.arena.output.sys")
+    def test_true_when_stdout_is_redirected(self, mock_sys, mock_console):
+        mock_sys.stdin.isatty.return_value = True
+        mock_console.is_terminal = False
+        assert stdin_is_a_terminal() is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [ValueError("I/O operation on closed file"), AttributeError("isatty")],
+    )
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_stdin_cannot_be_checked(self, mock_sys, error):
+        mock_sys.stdin.isatty.side_effect = error
+        assert stdin_is_a_terminal() is False
 
 
 class TestSupportsInteractiveSelection:

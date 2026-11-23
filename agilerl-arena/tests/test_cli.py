@@ -24,10 +24,11 @@ from agilerl.arena.cli import (
     main,
 )
 from agilerl.arena.config import CommandConfig, build_client
-from agilerl.arena.exceptions import ArenaAPIError
+from agilerl.arena.exceptions import ArenaAPIError, ArenaTrainingError
 from agilerl.arena.inference import SessionDetail, SessionInfo, SessionMessage
 from agilerl.arena.inference.cache import load_active_session, save_active_session
 from agilerl.arena.models.model_info import STATUS_PREVIEW, SUPPORTED_MODEL_INFO
+from agilerl.arena.output import supports_interactive_selection
 
 
 def _llm_manifest(model: str) -> str:
@@ -72,6 +73,7 @@ def mock_client() -> MagicMock:
             "delete_environment",
             "duplicate_environment_version",
             "submit_experiment",
+            "quote_experiment",
             "list_experiments",
             "resume_experiment",
             "stop_experiment",
@@ -946,7 +948,25 @@ class TestEnvDuplicateCommand:
         )
 
 
+SUBMIT_QUOTE = {
+    "resource_id": "h100-80-8x",
+    "resource_name": "NVIDIA H100 80GB x8",
+    "gpu_type": "h100-80",
+    "num_gpus": 8,
+    "num_nodes": 1,
+    "hourly_cost": 25.6,
+    "max_steps": 1000,
+    "step_seconds": 36.0,
+    "estimated_hours": 11.25,
+    "estimated_cost": 288.0,
+}
+
+
 class TestExperimentSubmitCommand:
+    @pytest.fixture(autouse=True)
+    def quoted(self, mock_client):
+        mock_client.quote_experiment.return_value = dict(SUBMIT_QUOTE)
+
     def test_submit_help_still_requires_a_reward_file(self, runner):
         result = runner.invoke(main, ["experiments", "submit", "--help"])
         help_text = " ".join(result.output.split())
@@ -1114,7 +1134,7 @@ class TestExperimentSubmitCommand:
             )
 
         assert result.exit_code == 0
-        assert json.loads(result.output) == {"job_id": 3}
+        assert json.loads(result.stdout) == {"job_id": 3}
 
     def test_arena_json_env_var_turns_json_on(self, runner, mock_client, tmp_path):
         manifest = tmp_path / "m.yaml"
@@ -1128,7 +1148,7 @@ class TestExperimentSubmitCommand:
                 env={"ARENA_JSON": "1"},
             )
 
-        assert json.loads(result.output) == {"job_id": 3}
+        assert json.loads(result.stdout) == {"job_id": 3}
 
     def test_without_json_submit_prints_no_result_document(
         self, runner, mock_client, tmp_path
@@ -1141,6 +1161,164 @@ class TestExperimentSubmitCommand:
             result = runner.invoke(main, ["experiments", "submit", str(manifest)])
 
         assert "job_id" not in result.output
+
+
+class TestExperimentSubmitPricePreview:
+    @pytest.fixture
+    def manifest(self, tmp_path):
+        path = tmp_path / "m.yaml"
+        path.write_text("algorithm: {name: GRPO}\n")
+        return path
+
+    @pytest.fixture(autouse=True)
+    def quoted(self, mock_client):
+        mock_client.quote_experiment.return_value = dict(SUBMIT_QUOTE)
+        mock_client.submit_experiment.return_value = {"job_id": 3}
+
+    @staticmethod
+    def interactive(answer: bool = True):
+        return patch(
+            "agilerl.arena.submit_quote.stdin_is_a_terminal", return_value=answer
+        )
+
+    def test_prints_hardware_rate_and_total_before_submitting(
+        self, runner, mock_client, manifest
+    ):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "experiments",
+                    "submit",
+                    str(manifest),
+                    "--num-gpus",
+                    "8",
+                    "--gpu-type",
+                    "h100-80",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert (
+            "Hardware:        8x h100-80 on 1 node (NVIDIA H100 80GB x8, h100-80-8x)"
+            in result.stderr
+        )
+        assert "Hourly rate:     $25.60 per hour" in result.stderr
+        assert (
+            "Estimated total: $288.00 for about 11.2 h (1,000 steps)" in result.stderr
+        )
+        mock_client.quote_experiment.assert_called_once_with(
+            manifest=manifest,
+            num_gpus=8,
+            gpu_type="h100-80",
+            project=None,
+            experiment_name=None,
+            reward_file=None,
+            completion=None,
+        )
+        mock_client.submit_experiment.assert_called_once()
+
+    def test_says_when_there_is_no_duration_estimate(
+        self, runner, mock_client, manifest
+    ):
+        mock_client.quote_experiment.return_value = {
+            **SUBMIT_QUOTE,
+            "max_steps": None,
+            "estimated_hours": None,
+            "estimated_cost": None,
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
+
+        assert result.exit_code == 0
+        assert "Hourly rate:     $25.60 per hour" in result.stderr
+        assert "Estimated total: no duration estimate" in result.stderr
+
+    def test_declining_stops_before_anything_is_billed(
+        self, runner, mock_client, manifest
+    ):
+        # Arrange
+        # cli.click.confirm is click.confirm; keep the real function.
+        real_confirm = click.confirm
+
+        def confirm_with_stdout_captured(*args, **kwargs):
+            assert supports_interactive_selection() is False
+            return real_confirm(*args, **kwargs)
+
+        # Act
+        with (
+            _patched_arena_client(mock_client),
+            self.interactive(),
+            patch(
+                "agilerl.arena.cli.click.confirm",
+                side_effect=confirm_with_stdout_captured,
+            ),
+        ):
+            result = runner.invoke(
+                main, ["experiments", "submit", str(manifest)], input="n\n"
+            )
+
+        # Assert
+        assert result.exit_code == 1
+        assert "Submit and start billing?" in result.stderr
+        mock_client.submit_experiment.assert_not_called()
+
+    def test_accepting_submits(self, runner, mock_client, manifest):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main, ["experiments", "submit", str(manifest)], input="y\n"
+            )
+
+        assert result.exit_code == 0
+        mock_client.submit_experiment.assert_called_once()
+
+    @pytest.mark.parametrize("flag", ["--yes", "-y"])
+    def test_yes_submits_without_asking(self, runner, mock_client, manifest, flag):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(main, ["experiments", "submit", str(manifest), flag])
+
+        assert result.exit_code == 0
+        assert "Hourly rate:" in result.stderr
+        assert "Submit and start billing?" not in result.stderr
+        mock_client.submit_experiment.assert_called_once()
+
+    def test_non_interactive_prints_and_submits_without_asking(
+        self, runner, mock_client, manifest
+    ):
+        with _patched_arena_client(mock_client), self.interactive(answer=False):
+            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
+
+        assert result.exit_code == 0
+        assert "Hourly rate:" in result.stderr
+        assert "Submit and start billing?" not in result.stderr
+        mock_client.submit_experiment.assert_called_once()
+
+    def test_server_without_quotes_submits_as_before(
+        self, runner, mock_client, manifest
+    ):
+        mock_client.quote_experiment.side_effect = ArenaAPIError(
+            "Not Found", status_code=404
+        )
+
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
+
+        assert result.exit_code == 0
+        assert "cannot price a run before it starts" in result.stderr
+        mock_client.submit_experiment.assert_called_once()
+
+    def test_a_rejected_quote_stops_the_submit(self, runner, mock_client, manifest):
+        mock_client.quote_experiment.side_effect = ArenaTrainingError(
+            "No resource class has enough GPU memory for this run.", status_code=400
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
+
+        assert result.exit_code == 1
+        assert "enough GPU memory" in result.output
+        mock_client.submit_experiment.assert_not_called()
 
 
 class TestDatasetsListCommand:
