@@ -15,6 +15,7 @@ episodes together; :class:`LLMGroupJudgeRubric` is RULER, a judge comparing them
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import random
@@ -50,11 +51,14 @@ class TurnAction:
         tool-call turn keeps the decoded text; the env received the parsed
         calls.
     :param completion: The whole turn, reasoning and its markers included.
+    :param response: The turn's text after its reasoning ends, or the whole
+        turn when it did not reason.
     :param tool_calls: Tool calls parsed from the turn; empty on a text env.
     """
 
     message: str
     completion: str
+    response: str
     tool_calls: list[ParsedToolCall] = field(default_factory=list)
 
 
@@ -130,11 +134,14 @@ def reward_fn_to_rubric(
 ) -> Rubric:
     """Wrap a reward function called as ``completion``, ``answer``, and ``question``.
 
-    One scorer, one scalar reward. Parameter order does not matter. For
-    per-criterion metrics, write OpenEnv ``Rubric`` subclasses and compose
-    them (assign children as attributes so they auto-register).
+    ``completion`` is the whole turn, reasoning and its markers included. A
+    function that also takes ``response`` (or ``**kwargs``) gets the text after
+    the reasoning ends. One scorer, one scalar reward. Parameter order does not
+    matter. For per-criterion metrics, write OpenEnv ``Rubric`` subclasses and
+    compose them (assign children as attributes so they auto-register).
 
-    :param fn: Scorer called with completion, answer, and question by name.
+    :param fn: Scorer called by name with completion, answer, question and,
+        when it takes one, response.
     :param name: Component name for metrics; defaults to ``fn.__name__`` when valid.
     :returns: An OpenEnv ``Rubric`` instance.
     """
@@ -153,15 +160,20 @@ class RewardFnRubric(Rubric):
         self._fn = fn
         fn_name = getattr(fn, "__name__", "")
         self.component_name = name or (fn_name if fn_name.isidentifier() else "fn")
+        self._takes_response = any(
+            param.name == "response" or param.kind is param.VAR_KEYWORD
+            for param in inspect.signature(fn).parameters.values()
+        )
 
     def forward(self, action: TurnAction, observation: TurnObservation) -> float:
-        return float(
-            self._fn(
-                completion=action.message,
-                answer=observation.answer,
-                question=observation.question,
-            )
-        )
+        kwargs = {
+            "completion": action.completion,
+            "answer": observation.answer,
+            "question": observation.question,
+        }
+        if self._takes_response:
+            kwargs["response"] = action.response
+        return float(self._fn(**kwargs))
 
 
 class EnvReward(Rubric):

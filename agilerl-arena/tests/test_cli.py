@@ -380,6 +380,36 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "training.hpo: HPO is no longer available in Arena" in result.output
 
+    @pytest.mark.parametrize(
+        ("extra", "error"),
+        [
+            (
+                "algorithm: {name: GRPO, batch_size: 6}\n",
+                "algorithm.batch_size: must be a power of 2 between 1 and 1024.",
+            ),
+            (
+                "algorithm: {name: GRPO}\nreplay_buffer: {kind: classic}\n",
+                "replay_buffer.kind: llm",
+            ),
+            (
+                "algorithm: {name: GRPO}\ntraining: {rollout_mode: colocated}\n",
+                "training.rollout_mode: colocated runs only locally",
+            ),
+        ],
+        ids=["batch-size", "classic-buffer", "colocated"],
+    )
+    def test_validate_rejects_what_submit_rejects(self, runner, extra, error):
+        manifest = extra + (
+            "environment: {env_type: rollout, entrypoint: 'envs:MyEnv'}\n"
+            "network: {pretrained_model_name_or_path: Qwen/Qwen3.5-0.8B, "
+            "max_context_length: 1024}\n"
+        )
+
+        result = runner.invoke(main, ["manifest", "validate", "-"], input=manifest)
+
+        assert result.exit_code == 1
+        assert error in " ".join(result.output.split())
+
     def test_validate_lists_algorithm_aliases_once(self, runner):
         result = runner.invoke(
             main,

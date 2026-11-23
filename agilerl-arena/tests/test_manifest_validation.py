@@ -1632,7 +1632,10 @@ class TestCli:
         )
 
     def test_reads_a_manifest_from_stdin(self, tmp_path) -> None:
-        result = self._run("validate", "-", "--json", stdin=json.dumps(GRPO))
+        document = manifest(GRPO, network={"max_context_length": 1024})
+
+        result = self._run("validate", "-", "--json", stdin=json.dumps(document))
+
         assert result.returncode == 0
         assert json.loads(result.stdout)["ok"] is True
 

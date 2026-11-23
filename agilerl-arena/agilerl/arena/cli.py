@@ -218,14 +218,13 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
         click.echo(f"could not read {manifest}: {err}", err=True)
         sys.exit(manifest_verdict.EXIT_FAILED)
 
-    result = manifest_verdict.verdict(document)
+    result = manifest_verdict.verdict(document, submit=True)
     if as_json or json_output_enabled():
         click.echo(json.dumps(result))
         return
     if not result["ok"]:
         for error in result["errors"]:
-            where = f"{error['path']}: " if error["path"] else ""
-            click.echo(f"{where}{error['message']}", err=True)
+            click.echo(manifest_verdict.describe(error), err=True)
         sys.exit(manifest_verdict.EXIT_INVALID)
     for warning in result["warnings"]:
         click.echo(f"warning: {warning}", err=True)

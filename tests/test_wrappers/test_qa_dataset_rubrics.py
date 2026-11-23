@@ -24,7 +24,7 @@ from agilerl.llm_envs.rubrics import (
 
 def _turn(env_reward: float = 0.0) -> tuple[TurnAction, TurnObservation]:
     return (
-        TurnAction(message="done", completion="<think>r</think>done"),
+        TurnAction(message="done", completion="<think>r</think>done", response="done"),
         TurnObservation(
             env_reward=env_reward,
             env_ran=True,
@@ -147,7 +147,7 @@ def test_qa_dataset_empty_rows_raises() -> None:
 
 
 class TestRewardFnToRubric:
-    def test_calls_fn_with_message_answer_question(self) -> None:
+    def test_calls_fn_with_the_whole_turn_answer_and_question(self) -> None:
         seen: list[tuple] = []
 
         def fn(completion, answer, question):
@@ -159,7 +159,7 @@ class TestRewardFnToRubric:
         score = reward_fn_to_rubric(fn)(action, observation)
 
         assert score == 0.5
-        assert seen == [("done", "a", "q")]
+        assert seen == [("<think>r</think>done", "a", "q")]
 
     def test_binds_arguments_by_name(self) -> None:
         seen: list[tuple] = []
@@ -173,7 +173,33 @@ class TestRewardFnToRubric:
         score = reward_fn_to_rubric(fn)(action, observation)
 
         assert score == 0.25
-        assert seen == [("q", "a", "done")]
+        assert seen == [("q", "a", "<think>r</think>done")]
+
+    def test_passes_the_post_reasoning_response_to_a_fn_that_takes_it(self) -> None:
+        seen: list[tuple] = []
+
+        def fn(completion, answer, question, response):
+            seen.append((completion, response))
+            return 1.0
+
+        action, observation = _turn()
+
+        reward_fn_to_rubric(fn)(action, observation)
+
+        assert seen == [("<think>r</think>done", "done")]
+
+    def test_passes_response_through_var_keyword(self) -> None:
+        seen: list[dict] = []
+
+        def fn(completion, **kwargs):
+            seen.append(kwargs)
+            return 1.0
+
+        action, observation = _turn()
+
+        reward_fn_to_rubric(fn)(action, observation)
+
+        assert seen == [{"answer": "a", "question": "q", "response": "done"}]
 
     def test_names_the_component_after_the_fn(self) -> None:
         def accuracy(completion, answer, question):

@@ -1485,7 +1485,7 @@ class TestLLMEnvSpecRollout:
             call.kwargs["rubric"] for call in mock_rollout_cls.local.call_args_list
         )
         assert first is not second
-        action = TurnAction(message="x", completion="x")
+        action = TurnAction(message="x", completion="x", response="x")
         observation = TurnObservation(
             env_reward=1.0, env_ran=True, done=True, turn_index=0, prompt="p"
         )

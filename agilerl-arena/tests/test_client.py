@@ -1739,6 +1739,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         mock_stream = _mock_ndjson_stream({"job_id": 1})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
@@ -1778,6 +1779,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 3})
         )
@@ -1793,6 +1795,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
@@ -1830,6 +1833,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         api_key_client._open_stream = MagicMock()
 
         with (
@@ -1851,6 +1855,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = payload
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         reward_path = tmp_path / "reward.py"
         reward_path.write_text(
             "def reward(question, answer, completion):\n    return 1.0\n",
@@ -1887,6 +1892,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 5})
         )
@@ -1912,6 +1918,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
@@ -1933,6 +1940,7 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm.batch_size = 64
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
@@ -2007,6 +2015,35 @@ class TestExperimentMethods:
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()
 
+    def test_submit_experiment_rejects_a_batch_size_that_is_not_a_power_of_2(
+        self, api_key_client
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["algorithm"]["batch_size"] = 6
+
+        # Act / Assert
+        with pytest.raises(
+            ArenaValidationError,
+            match=re.escape(
+                "algorithm.batch_size: must be a power of 2 between 1 and 1024."
+            ),
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_rejects_a_classic_replay_buffer(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["replay_buffer"] = {"kind": "classic"}
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=r"replay_buffer\.kind: llm"):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
     @pytest.mark.parametrize(
         ("hub_id", "context_length"),
         [
@@ -2038,7 +2075,7 @@ class TestExperimentMethods:
                 "Qwen/Qwen3.5-0.8B",
                 512,
                 (
-                    "network.max_context_length must be a power of 2 between 1024 "
+                    "network.max_context_length: must be a power of 2 between 1024 "
                     "and 262144. Allowed: 1024, 2048, 4096, 8192, 16384, 32768, "
                     "65536, 131072, 262144"
                 ),
@@ -2047,7 +2084,7 @@ class TestExperimentMethods:
                 "Qwen/Qwen3.5-0.8B",
                 3000,
                 (
-                    "network.max_context_length must be a power of 2 between 1024 "
+                    "network.max_context_length: must be a power of 2 between 1024 "
                     "and 262144. Allowed: 1024,"
                 ),
             ),
@@ -2093,7 +2130,7 @@ class TestExperimentMethods:
         manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
         manifest["network"]["max_context_length"] = 65536
         message = (
-            "network.max_context_length must be a power of 2 between 1024 "
+            "network.max_context_length: must be a power of 2 between 1024 "
             "and 40960, or 40960. Allowed: 1024, 2048, 4096, 8192, 16384, "
             "32768, 40960"
         )
@@ -2115,7 +2152,7 @@ class TestExperimentMethods:
         # Act / Assert
         with pytest.raises(
             ArenaValidationError,
-            match=re.escape("network.max_context_length must be 512. Allowed: 512"),
+            match=re.escape("network.max_context_length: must be 512. Allowed: 512"),
         ):
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()

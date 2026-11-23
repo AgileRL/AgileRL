@@ -47,18 +47,18 @@ from agilerl.arena.inference.cache import (
 )
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
-    FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
     __version__,
 )
-from agilerl.arena.models.manifest import (
-    explicit_colocated_rollout,
-    validated_run_manifest,
-)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
-from agilerl.arena.models.verdict import HPO_UNAVAILABLE_MESSAGE, hpo_fields
+from agilerl.arena.models.verdict import (
+    HPO_UNAVAILABLE_MESSAGE,
+    describe,
+    hpo_fields,
+    submit_errors,
+)
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
@@ -1321,8 +1321,7 @@ class ArenaClient:
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_no_hpo(training_manifest)
         self._check_model_status(training_manifest)
-        self._check_context_length(training_manifest)
-        self._check_rollout_mode(training_manifest)
+        self._check_submit_rules(training_manifest)
         resolved_project = self._resolve_project(project)
         if not resolved_project:
             msg = "No project specified."
@@ -1435,47 +1434,11 @@ class ArenaClient:
             raise ArenaValidationError(notice)
 
     @staticmethod
-    def _check_context_length(manifest: TrainingManifest) -> None:
-        """Reject an LLM ``max_context_length`` outside Arena's catalog options.
-
-        Arena allows powers of 2 from 1024 up to the model's context window,
-        plus the window itself; a window below 1024 is the only option.
-        """
-        network = manifest.network
-        if not isinstance(manifest.algorithm, LLMAlgorithmSpec) or not isinstance(
-            network, FinetuningNetworkSpec
-        ):
-            return
-        entry = SUPPORTED_MODEL_INFO.get(network.pretrained_model_name_or_path)
-        if entry is None:
-            return
-        catalog_max = entry.max_context_length
-        floor = 1024
-        if catalog_max < floor:
-            options = [catalog_max]
-            requirement = f"must be {catalog_max}"
-        else:
-            options = [floor << n for n in range((catalog_max // floor).bit_length())]
-            requirement = f"must be a power of 2 between {floor} and {catalog_max}"
-            if options[-1] != catalog_max:
-                options.append(catalog_max)
-                requirement += f", or {catalog_max}"
-        if network.max_context_length in options:
-            return
-        allowed = ", ".join(str(option) for option in options)
-        msg = f"network.max_context_length {requirement}. Allowed: {allowed}"
-        raise ArenaValidationError(msg)
-
-    @staticmethod
-    def _check_rollout_mode(manifest: TrainingManifest) -> None:
-        """Reject a rollout LLM job that cannot run async, as Arena runs it."""
-        if explicit_colocated_rollout(manifest):
-            msg = (
-                "rollout_mode: colocated runs only locally; Arena runs rollout "
-                "LLM jobs async. Set rollout_mode: async or drop the key."
-            )
-            raise ArenaValidationError(msg)
-        validated_run_manifest(manifest)
+    def _check_submit_rules(manifest: TrainingManifest) -> None:
+        """Reject what Arena refuses on submit that the manifest schema allows."""
+        failures = submit_errors(manifest)
+        if failures:
+            raise ArenaValidationError("\n".join(describe(f) for f in failures))
 
     @staticmethod
     def _build_submit_experiment_multipart(

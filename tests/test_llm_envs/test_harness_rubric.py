@@ -24,6 +24,7 @@ from agilerl.llm_envs.rubrics import (
     LLMJudgeRubric,
     TurnAction,
     TurnObservation,
+    reward_fn_to_rubric,
 )
 
 
@@ -532,6 +533,62 @@ class TestRolloutHarnessRubric:
     def test_rejects_a_callable_rubric(self) -> None:
         with pytest.raises(TypeError, match="reward_fn_to_rubric"):
             make_harness(CountingEnv(), lambda c, a, q: 1.0)  # type: ignore[arg-type]
+
+
+class TestRolloutHarnessRewardFnInputs:
+    @pytest.mark.parametrize("include_reasoning", [False, True])
+    def test_reward_fn_gets_the_whole_turn_and_the_post_reasoning_response(
+        self, include_reasoning: bool
+    ) -> None:
+        # Arrange
+        seen: list[tuple[str, str, str]] = []
+
+        def reward_fn(completion, answer, question, response):
+            seen.append((completion, response, answer))
+            return 1.0
+
+        harness = RolloutHarness.from_dataset(
+            [{"question": "2+2?", "answer": "4"}],
+            reward_fn_to_rubric(reward_fn),
+            ChrTokenizer(),
+            prompt_builder=lambda row: f"user {row['question']}",
+            apply_chat_template=False,
+            include_reasoning=include_reasoning,
+        )
+        prompt, _ = harness.reset()
+
+        # Act
+        step_text(harness, prompt, "<think>r</think>\n<answer>4</answer>")
+
+        # Assert
+        assert seen == [
+            ("<think>r</think>\n<answer>4</answer>", "<answer>4</answer>", "4")
+        ]
+        harness.close()
+
+    def test_reward_fn_without_response_gets_the_whole_turn(self) -> None:
+        # Arrange
+        seen: list[str] = []
+
+        def reward_fn(completion, answer, question):
+            seen.append(completion)
+            return 1.0
+
+        harness = RolloutHarness.from_dataset(
+            [{"question": "2+2?", "answer": "4"}],
+            reward_fn_to_rubric(reward_fn),
+            ChrTokenizer(),
+            prompt_builder=lambda row: f"user {row['question']}",
+            apply_chat_template=False,
+        )
+        prompt, _ = harness.reset()
+
+        # Act
+        step_text(harness, prompt, "<think>r</think>\n<answer>4</answer>")
+
+        # Assert
+        assert seen == ["<think>r</think>\n<answer>4</answer>"]
+        harness.close()
 
 
 class TestLLMJudgeRubricNotes:

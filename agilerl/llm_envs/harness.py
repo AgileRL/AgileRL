@@ -1475,6 +1475,7 @@ class RolloutHarness(RestartPromptMixin):
         action = TurnAction(
             message=turn.message,
             completion=self._turn_completion,
+            response=self._turn_text,
             tool_calls=turn.calls,
         )
         self._rubric_transcript.append(

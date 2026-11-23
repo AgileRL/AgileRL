@@ -686,7 +686,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description=(
             "Conversation template, keyed 'role_index' (system_0, user_1, ...) "
-            "so ordering is explicit. Values may interpolate dataset columns. "
+            "so ordering is explicit. Values may use {question} and {answer}, "
+            "filled from the mapped columns; other braces are literal. "
             "Required for a rollout over dataset rows, except traces."
         ),
     )
@@ -738,11 +739,12 @@ class LLMEnvSpec(EnvSpecBase):
     include_reasoning: bool | None = Field(
         default=None,
         description=(
-            "Send the env or reward function each turn's reasoning with its "
-            "markers, not only the text after the reasoning ends. Unset sends "
-            "it to a reward file over dataset rows and not to an env that "
-            "runs the action. A Rubric class reads the whole turn from "
-            "TurnAction.completion either way."
+            "Send the env each turn's reasoning with its markers, not only "
+            "the text after the reasoning ends; a Rubric class reads that text "
+            "as TurnAction.message. Unset sends it over dataset rows and not "
+            "to an env that runs the action. A reward function gets the whole "
+            "turn as completion and the text after the reasoning as response "
+            "either way."
         ),
     )
     train_test_split: float | None = Field(

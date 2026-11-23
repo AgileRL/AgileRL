@@ -223,7 +223,8 @@ Without one, the env's own reward is used.
 
 A rubric is an OpenEnv ``Rubric`` called with a
 :class:`~agilerl.llm_envs.rubrics.TurnAction` (``message`` the env got after
-``action_processor``, ``completion`` with reasoning, parsed ``tool_calls``) and a
+``action_processor``, ``completion`` with reasoning, ``response`` after it,
+parsed ``tool_calls``) and a
 :class:`~agilerl.llm_envs.rubrics.TurnObservation` (``env_reward``,
 ``env_ran``, ``done``, ``prompt``, ``question`` / ``answer`` when the env sends
 them). :class:`~agilerl.llm_envs.rubrics.EnvReward` brings the env's reward in as
@@ -485,9 +486,11 @@ These are the names this package reads:
    * - ``include_reasoning``
      - ``None``
      - Send each turn's reasoning, with the model's markers (``</think>``,
-       Gemma 4 channels, gpt-oss harmony channels), to the reward or env.
-       Unset sends it to a ``rubric_file_path`` reward and sends an
-       ``entrypoint`` / ``env_url`` env only the text after the reasoning.
+       Gemma 4 channels, gpt-oss harmony channels), to the env and to
+       ``TurnAction.message``. Unset sends it over dataset rows and sends an
+       ``entrypoint`` / ``env_url`` env only the text after the reasoning. A
+       reward function gets the whole turn as ``completion`` either way (see
+       :ref:`arena_reward_inputs`).
    * - ``entrypoint``
      - ``None``
      - The env to build: a registry id, or ``module:Class`` /

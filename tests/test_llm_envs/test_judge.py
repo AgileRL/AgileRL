@@ -299,7 +299,7 @@ class TestDrainJudgeStats:
         client = JudgeClient(LOCAL, ScriptedLLM(reply="no verdict here"))
         judge_module.JUDGE_CLIENTS[LOCAL] = client
         rubric = LLMJudgeRubric(client, "Be polite.")
-        action = TurnAction(message="hi", completion="hi")
+        action = TurnAction(message="hi", completion="hi", response="hi")
 
         # Act
         asyncio.run(rubric(action, last_turn(TRANSCRIPT)))
@@ -363,7 +363,10 @@ class TestLLMJudgeRubric:
         rubric = LLMJudgeRubric(JudgeClient(LOCAL, inner), "Be polite.")
 
         score = asyncio.run(
-            rubric(TurnAction(message="hi", completion="hi"), last_turn(TRANSCRIPT))
+            rubric(
+                TurnAction(message="hi", completion="hi", response="hi"),
+                last_turn(TRANSCRIPT),
+            )
         )
 
         assert score == pytest.approx(0.8)
@@ -378,7 +381,10 @@ class TestLLMJudgeRubric:
         )
 
         asyncio.run(
-            rubric(TurnAction(message="hi", completion="hi"), last_turn(TRANSCRIPT))
+            rubric(
+                TurnAction(message="hi", completion="hi", response="hi"),
+                last_turn(TRANSCRIPT),
+            )
         )
 
         assert "ASSISTANT: <think>greet</think>hi" in inner.prompts[0]
@@ -389,7 +395,7 @@ class TestLLMJudgeRubric:
 
         score = asyncio.run(
             rubric(
-                TurnAction(message="hi", completion="hi"),
+                TurnAction(message="hi", completion="hi", response="hi"),
                 last_turn(TRANSCRIPT, done=False),
             )
         )
@@ -405,7 +411,7 @@ class TestLLMJudgeRubric:
 
         score = asyncio.run(
             rubric(
-                TurnAction(message="hi", completion="hi"),
+                TurnAction(message="hi", completion="hi", response="hi"),
                 last_turn(TRANSCRIPT, done=False),
             )
         )
@@ -418,7 +424,10 @@ class TestLLMJudgeRubric:
         )
 
         score = asyncio.run(
-            rubric(TurnAction(message="hi", completion="hi"), last_turn(TRANSCRIPT))
+            rubric(
+                TurnAction(message="hi", completion="hi", response="hi"),
+                last_turn(TRANSCRIPT),
+            )
         )
 
         assert score == 1.0
@@ -430,7 +439,10 @@ class TestLLMJudgeRubric:
         )
 
         score = asyncio.run(
-            rubric(TurnAction(message="hi", completion="hi"), last_turn(TRANSCRIPT))
+            rubric(
+                TurnAction(message="hi", completion="hi", response="hi"),
+                last_turn(TRANSCRIPT),
+            )
         )
 
         assert score == 0.0

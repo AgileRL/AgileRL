@@ -59,6 +59,42 @@ class TestEscapeNonFormatBraces:
         assert result.format(question="q") == 'return {"result": {"answer": 1}} for q'
 
 
+class TestMakeConversationTemplate:
+    def test_role_is_the_key_prefix_in_key_order(self) -> None:
+        template = {"system_prompt": "Be brief.", "user_prompt": "{question}"}
+
+        assert env_utils.make_conversation_template(template) == [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "{question}"},
+        ]
+
+    def test_indexed_keys_follow_their_index_not_their_order(self) -> None:
+        template = {"assistant_2": "<think>", "system_0": "S", "user_1": "U"}
+
+        roles = [
+            message["role"]
+            for message in env_utils.make_conversation_template(template)
+        ]
+
+        assert roles == ["system", "user", "assistant"]
+
+    def test_index_is_numeric(self) -> None:
+        template = {"user_10": "B", "user_9": "A"}
+
+        contents = [
+            m["content"] for m in env_utils.make_conversation_template(template)
+        ]
+
+        assert contents == ["A", "B"]
+
+    def test_only_question_and_answer_are_placeholders(self) -> None:
+        template = {"user_0": '{question} as JSON: {"n": {other}}'}
+
+        content = env_utils.make_conversation_template(template)[0]["content"]
+
+        assert content.format(question="Q", answer="A") == 'Q as JSON: {"n": {other}}'
+
+
 class TestParseEntrypoint:
     def test_rejects_missing_colon(self):
         with pytest.raises(ValueError, match="Invalid entrypoint format"):
