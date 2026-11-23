@@ -28,6 +28,8 @@ from agilerl.arena.memory.resolve.fsdp import (
 )
 from agilerl.arena.memory.resolve.parallel import (
     ParallelLayout,
+    cross_node_expert_bytes,
+    least_cross_node_plan,
     manifest_at_layout,
     manifest_fsdp,
     off_node_reason,
@@ -404,7 +406,9 @@ def resolve_run_memory(
 
     Layouts are tried from least parallel to most (:func:`parallel_layouts`):
     the first with a split that fits with the underprediction buffer wins,
-    else the first that fits at all. A layout stays fixed across its trainer
+    else the first that fits at all, unless a higher expert degree moves
+    fewer routed-expert bytes between nodes at its split
+    (:func:`least_cross_node_plan`). A layout stays fixed across its trainer
     counts, each priced with its own :func:`training_memory_from_manifest`
     plan; a count where a group the search raised over the manifest's own
     degrees straddles nodes is skipped (:func:`off_node_reason`). An omitted
@@ -458,11 +462,20 @@ def resolve_run_memory(
         if layout is None
         else [layout]
     )
-    placed = [manifest_at_layout(manifest, searched) for searched in layouts]
+    placed = {searched: manifest_at_layout(manifest, searched) for searched in layouts}
+    node = device.gpus_per_node or member_gpus
+
+    def moved(searched: ParallelLayout, plan: RunMemoryPlan) -> float:
+        trainers = member_gpus if plan.split is None else plan.split.trainers
+        return cross_node_expert_bytes(
+            model.arch, plan.training, searched, trainers, node
+        )
+
     for require_buffer in (True, False):
-        for trial in placed:
-            plan = _plan_at_layout(
-                trial,
+        found = least_cross_node_plan(
+            placed,
+            lambda searched, buffer=require_buffer: _plan_at_layout(
+                placed[searched],
                 pinned_layout(fsdp),
                 model,
                 device,
@@ -470,12 +483,21 @@ def resolve_run_memory(
                 engine_widths,
                 sync_link,
                 cache,
-                require_buffer,
-            )
-            if plan is not None:
-                return plan
+                buffer,
+            ),
+            moved,
+        )
+        if found is not None:
+            return found
     raise _no_split_error(
-        manifest, placed, model, device, member_gpus, engine_widths, sync_link, cache
+        manifest,
+        list(placed.values()),
+        model,
+        device,
+        member_gpus,
+        engine_widths,
+        sync_link,
+        cache,
     )
 
 
@@ -729,7 +751,9 @@ def kept_split_memory(
     Layouts for that trainer count are tried from least parallel to most, as
     :func:`training_memory_from_manifest` tries them; the first where a
     :func:`weight_sync_modes` mode's plan fits with the
-    underprediction buffer wins, else the first where one fits at all. When
+    underprediction buffer wins, else the first where one fits at all,
+    unless a higher expert degree moves fewer routed-expert bytes between
+    nodes (:func:`least_cross_node_plan`). When
     rollout is async and ``sync_link`` is set, each mode that fits there is
     priced at those counts by :func:`price_gpu_split`, with the engine width
     the run resolves for that mode, and picked as a searched split is
@@ -755,14 +779,27 @@ def kept_split_memory(
         trains_expert_parallel(manifest),
         trains_context_parallel(manifest),
     )
-    placed = [manifest_at_layout(manifest, layout) for layout in layouts]
+    placed = {layout: manifest_at_layout(manifest, layout) for layout in layouts}
+    trainers = manifest.training.training_gpus_per_agent
+    node = device.gpus_per_node or total_gpus
     for require_buffer in (True, False):
-        for trial in placed:
-            plan = _kept_plan_at_layout(
-                trial, model, device, total_gpus, sync_link, cache, require_buffer
-            )
-            if plan is not None:
-                return plan
+        found = least_cross_node_plan(
+            placed,
+            lambda layout, buffer=require_buffer: _kept_plan_at_layout(
+                placed[layout],
+                model,
+                device,
+                total_gpus,
+                sync_link,
+                cache,
+                buffer,
+            ),
+            lambda layout, plan: cross_node_expert_bytes(
+                model.arch, plan.training, layout, trainers, node
+            ),
+        )
+        if found is not None:
+            return found
     return None
 
 
