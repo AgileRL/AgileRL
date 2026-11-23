@@ -236,19 +236,28 @@ def _with_reward_file_path(
     return document
 
 
-def _check_writable_target(path: Path) -> None:
-    """Ensure *path* can be created as a new file, making parent dirs as needed.
+def _check_writable_target(path: Path, overwrite: bool) -> None:
+    """Ensure *path* can be written as a file, making parent dirs as needed.
 
     :param path: The intended destination file.
     :type path: Path
-    :raises FileExistsError: If something already exists at *path*.
+    :param overwrite: Allow replacing an existing file at *path*.
+    :type overwrite: bool
+    :raises FileExistsError: If a directory exists at *path*, or a file does and
+        *overwrite* is False.
     :raises NotADirectoryError: If the parent path exists but is not a directory.
     """
-    if path.exists():
-        kind = "directory" if path.is_dir() else "file"
+    if path.is_dir():
         msg = (
-            f"Cannot write to {path}: a {kind} of that name already exists. "
-            f"Remove it, or choose a different output path."
+            f"Cannot write to {path}: a directory of that name already exists. "
+            f"Choose a different output path."
+        )
+        raise FileExistsError(msg)
+    if path.exists() and not overwrite:
+        msg = (
+            f"Cannot write to {path}: a file of that name already exists. "
+            f"Remove it, choose a different output path, or pass --overwrite "
+            f"(overwrite=True in the SDK) to replace it."
         )
         raise FileExistsError(msg)
 
@@ -1675,6 +1684,7 @@ class ArenaClient:
         output_path: str | os.PathLike[str] | None = None,
         metrics: list[str] | None = None,
         project: str | None = None,
+        overwrite: bool = False,
     ) -> Path:
         """Download experiment metrics to a local file.
 
@@ -1688,9 +1698,12 @@ class ArenaClient:
         :type metrics: list[str] | None
         :param project: Project name; defaults to the saved default project.
         :type project: str | None
+        :param overwrite: Replace the file at the resolved output path if it exists.
+        :type overwrite: bool
         :returns: The path to the written file.
         :rtype: Path
-        :raises FileExistsError: If the resolved output path already exists.
+        :raises FileExistsError: If the resolved output path is a directory, or
+            is an existing file and ``overwrite`` is False.
         :raises NotADirectoryError: If the parent path exists but is not a directory.
         """
         path = (
@@ -1702,7 +1715,7 @@ class ArenaClient:
         # content-disposition, so it can only be checked after the download.
         resolve_after_download = path.is_dir()
         if not resolve_after_download:
-            _check_writable_target(path)
+            _check_writable_target(path, overwrite)
 
         payload, content_type, disposition = self.preview_experiment_metrics_csv(
             experiment_name,
@@ -1717,7 +1730,7 @@ class ArenaClient:
         if resolve_after_download:
             filename = extract_filename(disposition) or f"{experiment_name}_metrics.csv"
             path = path / filename
-            _check_writable_target(path)
+            _check_writable_target(path, overwrite)
 
         path.write_bytes(payload)
         logger.info("Metrics saved to %s", path)
