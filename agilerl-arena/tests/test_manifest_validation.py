@@ -3764,6 +3764,35 @@ class TestHpoFields:
 
         assert hpo_fields(validated) == []
 
+    def test_llm_population_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(GRPO, training={"pop_size": 2})
+        )
+
+        assert hpo_fields(validated) == ["training.pop_size"]
+
+    def test_llm_hpo_mutation_and_population_are_all_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(GRPO, training={"hpo": True, "pop_size": 2}, mutation=HPO_MUTATION)
+        )
+
+        assert hpo_fields(validated) == [
+            "training.hpo",
+            "mutation",
+            "training.pop_size",
+        ]
+
+    def test_llm_single_agent_with_no_op_mutation_reports_nothing(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(
+                GRPO,
+                training={"hpo": False, "pop_size": 1},
+                mutation={"probabilities": NO_OP_PROBABILITIES, "rl_hp_selection": {}},
+            )
+        )
+
+        assert hpo_fields(validated) == []
+
 
 class TestVerdictHpo:
     def test_hpo_manifest_is_invalid(self) -> None:
@@ -3783,3 +3812,18 @@ class TestVerdictHpo:
 
         assert result["ok"] is True
         assert "errors" not in result
+
+    def test_llm_population_is_invalid(self) -> None:
+        result = verdict(manifest(GRPO, training={"pop_size": 2}))
+
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": "training.pop_size",
+                "message": HPO_UNAVAILABLE_MESSAGE,
+                "kind": "hpo_unavailable",
+            }
+        ]
+        assert "HPO and populations aren't available for LLM training on Arena" in (
+            HPO_UNAVAILABLE_MESSAGE
+        )

@@ -380,7 +380,30 @@ class TestManifestCommands:
         )
 
         assert result.exit_code == 1
-        assert "training.hpo: HPO is no longer available in Arena" in result.output
+        assert (
+            "training.hpo: HPO and populations aren't available for LLM training"
+            in result.output
+        )
+
+    def test_validate_rejects_an_llm_population(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-"],
+            input=(
+                "algorithm: {name: GRPO, group_size: 4, batch_size: 2}\n"
+                "environment: {env_type: rollout, dataset: openai/gsm8k, "
+                "reward_file_path: reward.py, prompt_template: {user_0: '{question}'}}\n"
+                "network: {pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct, "
+                "max_context_length: 512}\n"
+                "training: {max_steps: 100, pop_size: 2}\n"
+            ),
+        )
+
+        assert result.exit_code == 1
+        assert (
+            "training.pop_size: HPO and populations aren't available for LLM training"
+            in result.output
+        )
 
     def test_validate_lists_algorithm_aliases_once(self, runner):
         result = runner.invoke(
