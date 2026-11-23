@@ -243,7 +243,7 @@ Download them as in the GSM8K tutorial:
 
 .. code-block:: bash
 
-   arena experiments metrics gsm8k-judge-v1 --output-file metrics.csv
+   arena experiments metrics gsm8k-judge-v1 --output-file metrics.csv --overwrite
 
 To see *why* the judge scored a completion, open the experiment in the Arena web app and go
 to its **Completions** view. For a run with a judge, each completion has a **Judge notes**

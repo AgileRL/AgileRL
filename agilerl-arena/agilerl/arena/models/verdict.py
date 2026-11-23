@@ -12,9 +12,17 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from agilerl.arena.models import LLMAlgorithmSpec, __version__
+from agilerl.arena.models import (
+    FinetuningNetworkSpec,
+    LLMAlgorithmSpec,
+    __version__,
+)
 from agilerl.arena.models.hpo import no_op_mutation_probabilities
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import (
+    TrainingManifest,
+    explicit_colocated_rollout,
+    validated_run_manifest,
+)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.registry import did_you_mean
 
@@ -46,6 +54,16 @@ def loc_to_path(loc: tuple[Any, ...]) -> str:
             continue
         parts.append(text)
     return ".".join(parts)
+
+
+def describe(error: dict[str, str]) -> str:
+    """Render one error record as ``path: message``, or the message alone without a path.
+
+    :param error: A record from :func:`errors` or :func:`submit_errors`.
+    :type error: dict[str, str]
+    :rtype: str
+    """
+    return f"{error['path']}: {error['message']}" if error["path"] else error["message"]
 
 
 def errors(err: ValidationError | ValueError) -> list[dict[str, str]]:
@@ -130,11 +148,122 @@ def hpo_fields(manifest: TrainingManifest) -> list[str]:
     return fields
 
 
-def verdict(document: dict[str, Any]) -> dict[str, Any]:
+def not_allowed(path: str, requirement: str, options: list[int]) -> dict[str, str]:
+    """An error record for a value outside a fixed list of options, worded as Arena words it."""
+    allowed = ", ".join(str(option) for option in options)
+    return {
+        "path": path,
+        "message": f"must be {requirement}. Allowed: {allowed}",
+        "kind": "not_allowed",
+    }
+
+
+def batch_size_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Arena takes an ``algorithm.batch_size`` that is a power of 2 from 1 to 1024.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    maximum = 1024
+    options = [1 << n for n in range(maximum.bit_length())]
+    if manifest.algorithm.batch_size in options:
+        return []
+    requirement = f"a power of 2 between 1 and {maximum}"
+    return [not_allowed("algorithm.batch_size", requirement, options)]
+
+
+def context_length_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Arena takes an LLM ``max_context_length`` from the catalog model's options.
+
+    The options are the powers of 2 from 1024 up to the model's context window,
+    plus the window itself; a window below 1024 is the only option.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    network = manifest.network
+    if not isinstance(manifest.algorithm, LLMAlgorithmSpec) or not isinstance(
+        network, FinetuningNetworkSpec
+    ):
+        return []
+    entry = SUPPORTED_MODEL_INFO.get(network.pretrained_model_name_or_path)
+    if entry is None:
+        return []
+    catalog_max = entry.max_context_length
+    floor = 1024
+    if catalog_max < floor:
+        options = [catalog_max]
+        requirement = f"{catalog_max}"
+    else:
+        options = [floor << n for n in range((catalog_max // floor).bit_length())]
+        requirement = f"a power of 2 between {floor} and {catalog_max}"
+        if options[-1] != catalog_max:
+            options.append(catalog_max)
+            requirement += f", or {catalog_max}"
+    if network.max_context_length in options:
+        return []
+    return [not_allowed("network.max_context_length", requirement, options)]
+
+
+def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Arena runs every rollout LLM job async; check the manifest as that run.
+
+    Async rollout needs the LLM replay buffer, so a manifest that names another
+    buffer, or ``rollout_mode: colocated``, fails here and not in the schema.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: The error records, or an empty list.
+    :rtype: list[dict[str, str]]
+    """
+    if explicit_colocated_rollout(manifest):
+        return [
+            {
+                "path": "training.rollout_mode",
+                "message": (
+                    "colocated runs only locally; Arena runs rollout LLM jobs "
+                    "async. Set rollout_mode: async or drop the key."
+                ),
+                "kind": "colocated_rollout",
+            }
+        ]
+    try:
+        validated_run_manifest(manifest)
+    except ValidationError as err:
+        return errors(err)
+    return []
+
+
+def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """What Arena refuses on submit that the manifest schema allows.
+
+    ``arena experiments submit`` stops on these before it uploads, and
+    ``arena manifest validate`` reports them.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: The error records, or an empty list.
+    :rtype: list[dict[str, str]]
+    """
+    return [
+        *batch_size_errors(manifest),
+        *context_length_errors(manifest),
+        *run_errors(manifest),
+    ]
+
+
+def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
     """Validate *document* and report the outcome as one JSON-safe record.
 
     :param document: The raw manifest document.
     :type document: dict[str, Any]
+    :param submit: Also report :func:`submit_errors`, as ``arena manifest
+        validate`` does. Arena validates a stored run without them.
+    :type submit: bool
     :returns: The verdict.
     :rtype: dict[str, Any]
     """
@@ -151,6 +280,8 @@ def verdict(document: dict[str, Any]) -> dict[str, Any]:
             }
             for field in hpo_fields(manifest)
         ]
+        if submit:
+            failures += submit_errors(manifest)
         if not failures:
             return {
                 "ok": True,
@@ -171,10 +302,12 @@ __all__ = [
     "EXIT_INVALID",
     "EXIT_OK",
     "HPO_UNAVAILABLE_MESSAGE",
+    "describe",
     "errors",
     "hpo_fields",
     "loc_to_path",
     "model_warnings",
     "read_manifest",
+    "submit_errors",
     "verdict",
 ]

@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 
+from agilerl.arena.cli import main
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.stream import NDJsonStream
 
@@ -48,6 +50,17 @@ class TestDocsExampleManifests:
         )
 
         assert result == {"job_id": 1}
+
+    def test_gsm8k_example_validates_as_written(self):
+        manifest = EXAMPLES_DIR / "gsm8k_grpo.yaml"
+
+        result = CliRunner().invoke(
+            main, ["manifest", "validate", "--json", str(manifest)]
+        )
+
+        verdict = json.loads(result.output)
+        assert verdict["ok"] is True
+        assert verdict["warnings"] == []
 
     def test_gsm8k_example_targets_registered_dataset(self, client):
         manifest = EXAMPLES_DIR / "gsm8k_grpo.yaml"

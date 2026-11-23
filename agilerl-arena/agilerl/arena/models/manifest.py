@@ -651,7 +651,10 @@ class TrainingManifest(BaseModel):
                 if self.replay_buffer is not None
                 else None
             )
-            msg = f"Async rollout requires an LLMRolloutBufferSpec, got {got}"
+            msg = (
+                "Async rollout requires the LLM replay buffer "
+                f"(replay_buffer.kind: llm, an LLMRolloutBufferSpec), got {got}"
+            )
             raise ValueError(msg)
         return self
 
