@@ -23,15 +23,6 @@ sys.path.insert(
 )
 
 from agilerl.arena.auth import ArenaOAuth2
-from agilerl.arena.memory import (
-    estimator,
-    formulas,
-    fsdp_gather,
-    lora_formulas,
-    lora_placement,
-    manifest,
-)
-from agilerl.arena.memory.resolve import batch, engine, fsdp, parallel
 from agilerl.arena.models import model_info
 
 # The Native App modules import Snowpark, which only the snowflake extra installs.
@@ -46,26 +37,6 @@ if (
         "test_snowflake_app_manifest.py",
         "test_snowflake_app_runs.py",
     ]
-
-# Bounded memo caches of the memory planner. Each assumes the bundled configs,
-# the catalog and module constants stay fixed for the process.
-PLANNER_CACHES = (
-    model_info._pickled_config,
-    batch.catalog_model_spec,
-    engine._engine_model,
-    formulas.param_counts,
-    fsdp_gather.prefetch_window_params,
-    fsdp_gather.fsdp_gather_pool_params,
-    fsdp_gather.fsdp_gathered_params,
-    formulas.layer_block_kinds,
-    lora_formulas.lora_param_count,
-    lora_placement.lora_tensor_placement,
-    lora_formulas._merged_lora_sync_tensor_bytes,
-    estimator._cached_training_breakdown,
-    fsdp._cached_training_memory,
-    parallel._cached_layouts,
-    manifest._catalog_checkpoint_quantized,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -92,17 +63,15 @@ def _detach_arena_rich_handler() -> None:
 
 
 @pytest.fixture(autouse=True)
-def empty_planner_caches():
-    """Start and end each test with empty planner caches.
+def empty_catalog_config_cache():
+    """Start and end each test with an empty catalog config cache.
 
-    Tests patch bundled configs, catalog entries and module constants, which
-    the cache keys do not cover.
+    Tests patch bundled configs and catalog entries, which the cache key does
+    not cover.
     """
-    for cache in PLANNER_CACHES:
-        cache.cache_clear()
+    model_info._pickled_config.cache_clear()
     yield
-    for cache in PLANNER_CACHES:
-        cache.cache_clear()
+    model_info._pickled_config.cache_clear()
 
 
 @pytest.fixture(autouse=True)

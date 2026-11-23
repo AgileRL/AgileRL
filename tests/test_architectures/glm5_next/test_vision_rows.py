@@ -24,8 +24,6 @@ from agilerl.architectures.glm5_next import vision
 from agilerl.architectures.glm5_next.vision import install_glm5_next_vision
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.architectures.vision_rows import ACCEPTS_VISION_ROWS, packed_patches
-from agilerl.arena.memory.specs import ModelArch
-from agilerl.arena.memory.vision import vision_patch_grid
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.helper_functions import load_without_llm_dependencies
 
@@ -145,7 +143,11 @@ class TestGlm5NextImageProcessorResize:
         )
 
         processor = Glm5NextImageProcessor
-        arch = ModelArch.from_hf_config(
+        model_arch = pytest.importorskip("agilerl_memory.specs").ModelArch
+        vision_patch_grid = pytest.importorskip(
+            "agilerl_memory.vision"
+        ).vision_patch_grid
+        arch = model_arch.from_hf_config(
             SUPPORTED_MODEL_INFO["zai-org/GLM-5.3-Flash"].config
         )
         # 112 squared is the 16-token floor; 2800 x 2240 fills the 8000-token cap.

@@ -155,5 +155,5 @@ Or in the ``algorithm`` section of a training manifest:
     FSDP2 collectives.
 
 The memory estimator picks the micro-batch, and the run picks the engine's
-``max_num_seqs``. To find the longest context that fits, use
-:ref:`arena memory solve<llm_memory_estimate>`.
+``max_num_seqs``. To check a context length fits, use
+:ref:`arena memory estimate<llm_memory_estimate>`.

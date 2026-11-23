@@ -15,7 +15,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.arena.memory.resolve.moe import resolve_moe_lora_recompute
+from agilerl.arena.llm_runtime import resolve_moe_lora_recompute
 from agilerl.lora.fused import patch_lora_for_fused_forward
 from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.lora.moe.grouped_gemm import grouped_linear

@@ -871,9 +871,11 @@ Snowflake's; "on request" means ask your Snowflake account team.
      - 40 GB
      - on request
 
-Submit runs the manifest through the memory estimator for each family and
-stops when the GPUs cannot hold it. ``arena memory estimate`` runs the same
-check on your machine.
+Submit asks Arena's memory estimate for each family and stops when the GPUs
+cannot hold it, so submit without ``--gpu-family`` needs Arena credentials
+(``arena login``, ``--api-key``, or ``--org-key`` with ``--external-user-id``).
+With ``--gpu-family`` and no credentials, the family is used unchecked.
+``arena memory estimate`` runs the same check.
 
 Common errors
 -------------

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -12,7 +13,6 @@ from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
-from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
@@ -181,7 +181,9 @@ class LLMBuilder(AlgorithmBuilder):
         algo_cls = cls.algo_class(spec)
         kwargs["fsdp_config"] = spec.fsdp
         if "micro_batch_size_per_gpu" not in kwargs and is_distributed():
-            kwargs["micro_batch_size_per_gpu"] = resolve_micro_batch_size_per_gpu(
+            # Optional: sizes an omitted micro-batch. Not installed with the public wheel.
+            batch = importlib.import_module("agilerl_memory.resolve.batch")
+            kwargs["micro_batch_size_per_gpu"] = batch.resolve_micro_batch_size_per_gpu(
                 spec, get_world_size()
             )
         kwargs = constructor_kwargs(algo_cls, kwargs)

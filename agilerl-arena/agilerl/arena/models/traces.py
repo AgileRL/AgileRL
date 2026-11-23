@@ -5,8 +5,10 @@
 
 A row is a segment: one append-only stretch of a session in ``messages``,
 trained on every assistant message without ``weight: 0``.
-``tools`` holds the function schemas the model could call. See the Arena
-docs page on traces datasets.
+``tools`` holds the function schemas the model could call. An upload may
+instead hold prompt/completion pairs, which the platform converts to
+segments; the validator checks a pair as the segment it becomes. See the
+Arena docs page on traces datasets.
 """
 
 from __future__ import annotations
@@ -29,9 +31,17 @@ from pydantic import (
 from typing_extensions import Self
 
 from agilerl.arena.traces_format import (
+    CALL_ID,
+    CALL_IDS,
+    COMPLETION,
+    FINISH_REASON,
+    FINISH_REASONS,
     JSON_TEXT_COLUMNS,
+    MESSAGES,
+    PROMPT,
     REASONING_KEYS,
     WEIGHT,
+    input_shape,
 )
 
 TRACES_DATASET_FORMAT = "traces"
@@ -435,6 +445,100 @@ class TracesValidationError(ValueError):
         )
 
 
+def _pair_messages(value: Any, role: str) -> list[Any]:  # noqa: ANN401 -- a raw pair cell
+    """A pair cell as messages: a list (or its JSON text) as is, one message object in a list, other text as one ``role`` message.
+
+    Text is decoded only when it is the JSON of a message or a non-empty list
+    of messages; other text, JSON such as ``{"query": "x"}``, ``42`` or
+    ``"hi"`` included, is the message's content as it is.
+    """
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = None
+        if not _is_messages(decoded):
+            return [{"role": role, "content": value}]
+        value = decoded
+    return value if isinstance(value, list) else [value]
+
+
+def _is_messages(value: Any) -> bool:  # noqa: ANN401 -- a decoded JSON value
+    """Whether ``value`` is a message object, or a non-empty list of them: mappings with a string ``role``."""
+    items = value if isinstance(value, list) else [value]
+    return bool(items) and all(
+        isinstance(item, Mapping) and isinstance(item.get("role"), str)
+        for item in items
+    )
+
+
+def _is_assistant(message: Any) -> bool:  # noqa: ANN401 -- a raw message
+    return isinstance(message, Mapping) and message.get("role") == "assistant"
+
+
+def pair_as_segment(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The segment a prompt/completion import row becomes: ``messages = prompt + completion``.
+
+    A plain-string ``prompt`` is one user message and a plain-string
+    ``completion`` one assistant message; a ``messages`` column beside the
+    pair, and any ``call_ids`` or ``finish_reasons``, are dropped. The prompt's assistant messages get ``weight: 0``, so
+    they are context; the completion's keep the default weight 1. With a
+    ``call_id``, ``call_ids`` gives it to the completion's assistant messages
+    and null to the prompt's. ``finish_reason`` lands on the completion's last
+    assistant message.
+
+    :param row: A raw row with ``prompt`` and ``completion``.
+    :return: The row with ``messages``, and ``call_ids`` and ``finish_reasons`` when set, in place of the pair columns.
+    """
+    segment = {
+        column: value
+        for column, value in row.items()
+        if column
+        not in (
+            PROMPT,
+            COMPLETION,
+            CALL_ID,
+            CALL_IDS,
+            FINISH_REASON,
+            FINISH_REASONS,
+            MESSAGES,
+        )
+    }
+    prompt = _pair_messages(row[PROMPT], "user")
+    completion = _pair_messages(row[COMPLETION], "assistant")
+    prompt_turns = sum(_is_assistant(message) for message in prompt)
+    completion_turns = sum(_is_assistant(message) for message in completion)
+    segment[MESSAGES] = [
+        {**message, WEIGHT: 0} if _is_assistant(message) else message
+        for message in prompt
+    ] + completion
+    if row.get(CALL_ID) is not None:
+        segment[CALL_IDS] = [None] * prompt_turns + [row[CALL_ID]] * completion_turns
+    if row.get(FINISH_REASON) is not None and completion_turns:
+        segment[FINISH_REASONS] = [None] * (prompt_turns + completion_turns - 1) + [
+            row[FINISH_REASON]
+        ]
+    return segment
+
+
+def _validate_pair(row: Mapping[str, Any]) -> None:
+    """Raise unless a prompt/completion row converts to a valid segment whose completion is an assistant turn."""
+    prompt = _pair_messages(row[PROMPT], "user")
+    if prompt and _is_assistant(prompt[-1]):
+        msg = (
+            "prompt ends with an assistant message; the completion is the next "
+            "assistant turn, so the prompt ends before it."
+        )
+        raise ValueError(msg)
+    if not any(
+        _is_assistant(message)
+        for message in _pair_messages(row[COMPLETION], "assistant")
+    ):
+        msg = "completion holds no assistant message."
+        raise ValueError(msg)
+    TracesSegmentRow.model_validate(pair_as_segment(row))
+
+
 def _error_lines(row_number: int, error: ValidationError) -> str:
     details = "; ".join(
         f"{'.'.join(str(part) for part in item['loc']) or 'row'}: {item['msg']}"
@@ -443,22 +547,15 @@ def _error_lines(row_number: int, error: ValidationError) -> str:
     return f"row {row_number}: {details}"
 
 
-def _row_error(row_number: int, row: Mapping[str, Any]) -> str | None:
-    """Why row ``row_number`` breaks the spec, or ``None`` if it is a valid segment."""
-    try:
-        TracesSegmentRow.model_validate(row)
-    except ValidationError as error:
-        return _error_lines(row_number, error)
-    return None
-
-
 def validate_traces_rows(
     rows: Iterable[Mapping[str, Any]], source: str = "dataset"
 ) -> int:
     """Validate rows against the traces spec.
 
-    Rows are numbered from 1 in file order (the line number of a JSONL file
-    without blank lines).
+    A segment row is checked as stored; a prompt/completion row as the segment
+    the platform converts it to, see :func:`pair_as_segment`. Rows are
+    numbered from 1 in file order (the line number of a JSONL file without
+    blank lines).
 
     :param rows: Raw rows.
     :param source: Name used in the error.
@@ -469,11 +566,20 @@ def validate_traces_rows(
     bad = 0
     count = 0
     for count, row in enumerate(rows, start=1):
-        error = _row_error(count, row)
-        if error is not None:
+        columns = [column for column, value in row.items() if value is not None]
+        try:
+            if input_shape(columns) == "segments":
+                TracesSegmentRow.model_validate(row)
+            else:
+                _validate_pair(row)
+        except ValueError as error:
             bad += 1
             if len(errors) < MAX_REPORTED_ERRORS:
-                errors.append(error)
+                errors.append(
+                    _error_lines(count, error)
+                    if isinstance(error, ValidationError)
+                    else f"row {count}: {error}"
+                )
     if count == 0:
         raise TracesValidationError(source, ["the file has no rows"], 1)
     if bad:
@@ -545,7 +651,7 @@ def iter_traces_file(path: str | Path) -> Iterator[Mapping[str, Any]]:
 
 
 def validate_traces_file(path: str | Path) -> int:
-    """Validate a local traces file as stored rows (segments).
+    """Validate a local traces file before upload.
 
     :param path: JSONL file, parquet file, or folder of parquet shards.
     :return: Number of rows checked.

@@ -340,10 +340,13 @@ def capabilities(priced: list[str] | None) -> httpx.Response:
     return reply(200, {"ok": True, "data": {"schemaVersion": 1, "features": features}})
 
 
+FITS = reply(200, {"exit_code": 0, "report": {"fits": True}})
+
+
 class TestSubmit:
     @pytest.fixture(autouse=True)
     def priced_arena(self, arena: Arena) -> Arena:
-        arena.replies = [capabilities(["GPU_NV_S"])]
+        arena.replies = [capabilities(["GPU_NV_S"]), FITS]
         return arena
 
     def test_starts_the_cli_services_on_the_app_pools_and_secrets(self) -> None:
@@ -582,7 +585,7 @@ class TestSubmit:
         self, priced_arena: Arena
     ) -> None:
         # Arrange
-        priced_arena.replies = [capabilities(None)]
+        priced_arena.replies = [capabilities(None), FITS]
         session = submit_session()
 
         # Act
@@ -598,7 +601,7 @@ class TestSubmit:
         self, priced_arena: Arena
     ) -> None:
         # Arrange
-        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"])]
+        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"]), FITS]
         region = [
             Row(name="GPU_NV_S", gpu_count=1),
             Row(name="GPU_R6K_G1_48", gpu_count=2),
@@ -628,7 +631,7 @@ class TestSubmit:
         self, priced_arena: Arena
     ) -> None:
         # Arrange
-        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"])]
+        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"]), FITS]
         region = [
             Row(name="GPU_NV_S", gpu_count=1),
             Row(name="GPU_R6K_G1_48", gpu_count=1),
@@ -668,16 +671,22 @@ class TestSubmit:
 
         assert executes(session) == []
 
-    def test_reads_the_prices_with_the_partner_key(self, priced_arena: Arena) -> None:
+    def test_reads_prices_and_sizes_the_manifest_with_the_partner_key(
+        self, priced_arena: Arena
+    ) -> None:
         # Act
         submit(
             submit_session(), SFT, 1, "source_table", "prompts", None, None, None, None
         )
 
         # Assert
-        [call] = priced_arena.calls
-        assert call["url"] == "https://arena.test/api/cli/v1/capabilities"
-        assert call["headers"]["Authorization"] == "Bearer arena_org_key-1"
+        prices, estimate = priced_arena.calls
+        assert prices["url"] == "https://arena.test/api/cli/v1/capabilities"
+        assert estimate["url"] == "https://arena.test/api/cli/v1/memory/estimate"
+        assert estimate["json"]["num_gpus"] == 1
+        assert {call["headers"]["Authorization"] for call in priced_arena.calls} == {
+            "Bearer arena_org_key-1"
+        }
 
     def test_starts_the_run_during_an_unpurchased_trial(self) -> None:
         session = submit_session(install=listing_trial(6.9))
@@ -1543,7 +1552,7 @@ class TestExportModel:
 class TestRunProcedureStatements:
     def test_no_run_procedure_runs_use(self, arena: Arena) -> None:
         # Arrange
-        arena.replies = [capabilities(["GPU_NV_S"]), deployment_opened()]
+        arena.replies = [capabilities(["GPU_NV_S"]), FITS, deployment_opened()]
         running = Row(name=f"{STEM}_HEAD", status="RUNNING")
         run_session = AppSession(
             [

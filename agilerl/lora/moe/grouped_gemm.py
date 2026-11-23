@@ -18,7 +18,7 @@ from torch.autograd.function import once_differentiable
 from torch.distributed.tensor import DTensor
 from torch.utils._python_dispatch import _disable_current_modes
 
-from agilerl.arena.memory.resolve.moe import (
+from agilerl.arena.llm_runtime import (
     ExpertGemmBackend,
     expert_gemm_backend,
     padded_expert_lora_rank,

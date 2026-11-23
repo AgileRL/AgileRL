@@ -24,7 +24,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, distribute_ten
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 
-from agilerl.arena.memory.resolve.attention import (
+from agilerl.arena.llm_runtime import (
     CONTEXT_PARALLEL_ATTN_IMPLEMENTATIONS,
     context_parallel_blocker,
 )

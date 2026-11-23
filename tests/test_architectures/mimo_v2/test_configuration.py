@@ -17,7 +17,6 @@ from agilerl.architectures.mimo_v2.configuration import (
     flash_config_fields,
 )
 from agilerl.architectures.mimo_v2.modeling import MiMoV2ForConditionalGeneration
-from agilerl.arena.memory.specs import ModelArch
 from tests.test_architectures.mimo_v2.checkpoint_helpers import tiny_hub_config
 
 
@@ -135,11 +134,12 @@ class TestMiMoV2ConfigFromPretrained:
 
     def test_memory_estimator_reads_the_native_config(self, tmp_path):
         # Arrange
+        model_arch = pytest.importorskip("agilerl_memory.specs").ModelArch
         (tmp_path / "config.json").write_text(json.dumps(tiny_hub_config()))
         config = AutoConfig.from_pretrained(tmp_path)
 
         # Act
-        arch = ModelArch.from_hf_config(config.to_dict())
+        arch = model_arch.from_hf_config(config.to_dict())
 
         # Assert
         assert (arch.vision_min_patches, arch.vision_max_patches) == (4, 64)

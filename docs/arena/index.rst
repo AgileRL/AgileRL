@@ -402,8 +402,7 @@ the algorithm, environment, training parameters, and evolutionary HPO settings. 
 and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrainer` and training jobs in Arena.
 
 For an LLM manifest, check the GPU before you submit. ``arena memory estimate``
-prints the training and generation bars against the card; ``arena memory solve``
-finds the longest context the run fits, given the rest of the manifest.
+prints the training and generation bars against the card.
 See :ref:`llm_memory_estimate`.
 
 Here is an example manifest for fine-tuning ``Qwen/Qwen3.5-0.8B`` with GRPO on GSM8K:

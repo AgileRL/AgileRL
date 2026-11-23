@@ -1362,9 +1362,7 @@ class TestValidateEnvironmentParams:
         assert payload["version"] == "v2"
         assert payload["entrypoint"] == "my_env:make"
 
-    def test_create_sends_a_single_agent_language_based_env(
-        self, api_key_client, tmp_path
-    ):
+    def test_create_sends_a_language_based_env(self, api_key_client, tmp_path):
         # Arrange
         archive = tmp_path / "env.tar.gz"
         archive.write_bytes(b"fake")
@@ -1377,7 +1375,7 @@ class TestValidateEnvironmentParams:
         # Assert
         data = api_key_client._open_stream.call_args[1]["data"]
         assert data["language_based"] == "true"
-        assert data["multi_agent"] == "false"
+        assert "multi_agent" not in data
 
     def test_create_forwards_entrypoint(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
@@ -2478,7 +2476,7 @@ class TestDownloadExperimentMetrics:
         assert result == Path("exp1_metrics.csv")
         assert result.read_bytes() == b"csv-data"
         api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
-            "exp1", preview_rows=50_000, metrics=None, project=None
+            "exp1", preview_rows=50_000, metrics=None
         )
 
     def test_output_path_as_directory(self, api_key_client, tmp_path):
@@ -2550,19 +2548,7 @@ class TestDownloadExperimentMetrics:
         )
         api_key_client.download_experiment_metrics("exp1", metrics=["loss"])
         api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
-            "exp1", preview_rows=50_000, metrics=["loss"], project=None
-        )
-
-    def test_project_forwarded(self, api_key_client, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        api_key_client.preview_experiment_metrics_csv = MagicMock(
-            return_value=(b"data", "text/csv", None)
-        )
-
-        api_key_client.download_experiment_metrics("exp1", project="llm-work")
-
-        api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
-            "exp1", preview_rows=50_000, metrics=None, project="llm-work"
+            "exp1", preview_rows=50_000, metrics=["loss"]
         )
 
     def test_rejects_non_csv_response(self, api_key_client, tmp_path, monkeypatch):
@@ -3324,27 +3310,6 @@ class TestGetDefaultRunSpec:
             params={"algorithm": "GRPO", "datasetName": "countdown"},
         )
         assert result == spec
-
-    def test_env_query_params(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"algorithm": {}})
-
-        api_key_client.get_default_run_spec(
-            "LLMPPO",
-            env_name="ticket-sim",
-            env_version="v1",
-            env_entrypoint="ticket_sim:TicketEnv",
-        )
-
-        api_key_client._request.assert_called_once_with(
-            "GET",
-            "/api/cli/v1/experiments/run-spec/default",
-            params={
-                "algorithm": "LLMPPO",
-                "gymEnv": "ticket-sim",
-                "gymEnvVersion": "v1",
-                "gymEnvEntrypoint": "ticket_sim:TicketEnv",
-            },
-        )
 
     def test_omits_unset_optional_params(self, api_key_client):
         api_key_client._request = MagicMock(return_value={})

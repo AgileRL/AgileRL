@@ -89,8 +89,7 @@ compilation error on CUDA is raised, not hidden.
 How many positions go in each chunk (``chunk_rows``) is chosen automatically from
 the vocabulary size, so that one ``(chunk_rows, V)`` slab stays near a fixed
 memory budget (256 MiB of fp32 logits): models with bigger vocabularies get fewer rows
-per chunk, smaller ones more
-(:func:`~agilerl.arena.memory.resolve.chunk.resolve_chunk_rows`).
+per chunk, smaller ones more.
 
 Precision
 ---------

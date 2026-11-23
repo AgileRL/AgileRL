@@ -73,7 +73,7 @@ from agilerl.architectures.mimo_v2.tensor_parallel import (
 from agilerl.architectures.mimo_v2.tensor_parallel import (
     apply_mimo_v2_tensor_parallel,
 )
-from agilerl.arena.memory.resolve.attention import (
+from agilerl.arena.llm_runtime import (
     context_parallel_blocker,
     resolve_attn_implementation,
 )

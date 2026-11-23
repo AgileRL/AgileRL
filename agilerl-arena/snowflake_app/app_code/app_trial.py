@@ -11,6 +11,7 @@ which puts them on the path side by side.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import sys
 from datetime import timedelta
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 # Snowflake writes procedure logs to the event table from the root logger; the
 # CLI's console handler would keep agilerl.arena records on stderr instead.
+# Loading the console first installs that handler now, so it is removed here
+# rather than added by a later import.
+importlib.import_module("agilerl.arena._console")
 ARENA_LOGGER = logging.getLogger("agilerl.arena")
 ARENA_LOGGER.handlers.clear()
 ARENA_LOGGER.propagate = True

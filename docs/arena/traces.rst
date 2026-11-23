@@ -115,13 +115,25 @@ either. Snapshot ``segments.parquet`` files always use JSON text, and store
 Importing prompt/completion pairs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-An upload or Hugging Face import may use ``prompt`` and ``completion``
-columns. Arena converts each row to a segment on import:
-``messages = prompt + completion``. Only the completion trains: the
-prompt's assistant messages get ``weight: 0``.
-
-The trainer reads only segments: it drops a prompt/completion row with a
-warning, and rejects a split with no segment.
+An upload may instead hold one model call per row: ``prompt`` (a list of
+messages, or a string as one user message) and ``completion`` (one assistant
+message, a list of messages, or a string as one assistant message), with
+optional ``call_id`` and ``finish_reason``. A string cell is read as JSON
+only when it holds a message or a list of messages; any other text,
+``{"query": "x"}``, ``42`` or ``"hi"`` included, is the message's content as
+it is. A
+``prompt`` ending with an assistant message is invalid: the completion is the
+next assistant turn. A file with both ``prompt`` and
+``completion`` is read as pairs, and a ``messages`` column beside them (a raw
+recorder dump's request) is ignored. Arena converts each pair to the segment
+``messages = prompt + completion`` on import. Only the completion trains: the
+prompt's assistant messages get ``weight: 0``. With a ``call_id``,
+``call_ids`` gives it to the completion's assistant messages and null to the
+prompt's; any ``call_ids`` or ``finish_reasons`` already on a pair row are
+dropped. Rows that are prefixes of a longer row are merged
+into it, so a per-call dump becomes the real conversation and no turn trains
+twice. The trainer reads only segments: it drops a pair with a warning, and
+rejects a split with no segment.
 
 Messages
 ^^^^^^^^
@@ -262,11 +274,11 @@ Uploading
 The file is JSONL (``.jsonl``, ``.ndjson`` or ``.json`` holding one object per
 line), a parquet file or a folder of parquet shards, in segment rows or
 prompt/completion pairs. The CLI (and
-:meth:`~agilerl.arena.client.ArenaClient.create_dataset`) uploads the file as
-it is; Arena converts those pairs and checks the rows. To check a file of
-segment rows locally, use
-:func:`agilerl.arena.models.traces.validate_traces_file`, which lists bad rows
-by number, counting from 1. Parquet checks need ``pyarrow``.
+:meth:`~agilerl.arena.client.ArenaClient.create_dataset`) checks every row
+against this page, a pair as the segment it becomes, before uploading the
+file as it is and lists bad rows by number, counting from
+1. Parquet checks need ``pyarrow``. Validate without uploading with
+:func:`agilerl.arena.models.traces.validate_traces_file`.
 
 Storage
 -------

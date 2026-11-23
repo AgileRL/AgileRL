@@ -6,7 +6,8 @@
 This module imports only the standard library. Importing it still runs the
 ``agilerl.arena`` package init, which loads the pydantic manifest models but
 not torch; a reader without ``agilerl-arena`` installed can copy this file. It lives in ``agilerl-arena``, which ``agilerl``
-depends on, so every reader and writer of the format shares one definition.
+depends on, so the standalone CLI, the inference pod and the snapshot export
+read one definition.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar, get_args, get_type_hints
+from typing import TYPE_CHECKING, Any, TypeVar, get_args, get_type_hints
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 __all__ = [
     "ANSWER",
@@ -35,6 +39,7 @@ __all__ = [
     "MESSAGES",
     "METADATA",
     "MODEL_VERSION",
+    "PAIR_COLUMNS",
     "PROMPT",
     "REASONING_KEYS",
     "RECEIVED_AT",
@@ -55,6 +60,7 @@ __all__ = [
     "SnapshotFile",
     "SnapshotManifest",
     "TimeRange",
+    "input_shape",
     "manifest_json",
     "read_manifest",
     "write_manifest",
@@ -108,6 +114,8 @@ TRACE_COLUMNS = (
 """Every column of a stored traces row (a segment), in the spec's order."""
 
 REQUIRED_COLUMNS = (MESSAGES,)
+PAIR_COLUMNS = (PROMPT, COMPLETION)
+"""Columns of the prompt/completion import shape, which the platform converts to segments."""
 
 JSON_TEXT_COLUMNS = (
     MESSAGES,
@@ -119,7 +127,7 @@ JSON_TEXT_COLUMNS = (
     COMPLETION_LOGPROBS,
     METADATA,
 )
-"""Nested columns, which a Parquet file may hold as JSON text or native values; readers accept either."""
+"""Nested columns, which a Parquet file may hold as JSON text or native values; readers accept either. The import shape's prompt and completion may be JSON text too."""
 
 SCORE_FIELDS = ("name", "value", "source", "label", "comment", "turn")
 """Keys of one entry in a row's ``scores`` list; ``turn`` indexes the segment's assistant messages."""
@@ -132,6 +140,27 @@ REASONING_KEYS = ("reasoning_content", "thinking", "reasoning")
 
 MANIFEST_FILE = "manifest.json"
 SNAPSHOT_SEGMENTS_FILE = "segments.parquet"
+
+
+def input_shape(columns: Iterable[str]) -> str:
+    """The shape of an uploaded row: ``prompt_completion`` with both pair columns, else ``segments`` with ``messages``.
+
+    A raw recorder dump carries a ``messages`` column beside its pairs; it is ignored.
+
+    :param columns: The row's non-null column names.
+    :return: ``"prompt_completion"`` or ``"segments"``.
+    :raises ValueError: If the columns name neither shape.
+    """
+    names = set(columns)
+    if set(PAIR_COLUMNS) <= names:
+        return "prompt_completion"
+    if MESSAGES in names:
+        return "segments"
+    msg = (
+        "A traces row needs a 'messages' column, or 'prompt' and 'completion' "
+        f"columns to import; got {sorted(names)}."
+    )
+    raise ValueError(msg)
 
 
 @dataclass(frozen=True)

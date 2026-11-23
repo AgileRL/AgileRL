@@ -21,6 +21,7 @@ from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
 from agilerl.arena.cli_agent import register_deployment_commands
 from agilerl.arena.cli_datasets import datasets_group
 from agilerl.arena.cli_manifest import handle_help_option
+from agilerl.arena.cli_memory import memory_group
 from agilerl.arena.cli_secrets import secrets_group
 from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
@@ -33,7 +34,6 @@ from agilerl.arena.inference.cache import (
     save_active_agent,
     save_active_session,
 )
-from agilerl.arena.memory.cli import memory_group
 from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
@@ -240,22 +240,6 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
 @click.option("--model", default=None, help="Catalog model id for an LLM algorithm.")
 @click.option("--dataset", default=None, help="Dataset name to fill in.")
 @click.option(
-    "--env",
-    "env_name",
-    default=None,
-    help="Arena environment name to fill in, from `arena env list`.",
-)
-@click.option(
-    "--env-version",
-    default=None,
-    help="Environment version; required with --env-entrypoint. Omit for the latest.",
-)
-@click.option(
-    "--env-entrypoint",
-    default=None,
-    help="Entrypoint to fill in, from `arena env entrypoints`.",
-)
-@click.option(
     "--section",
     type=click.Choice(
         [
@@ -277,18 +261,12 @@ def manifest_template(
     algorithm: str,
     model: str | None,
     dataset: str | None,
-    env_name: str | None,
-    env_version: str | None,
-    env_entrypoint: str | None,
     section: str | None,
 ) -> None:
     """Print Arena's default manifest for ALGORITHM as YAML, ready to edit."""
     with arena_client(config) as client:
         spec = client.get_default_run_spec(
             algorithm,
-            env_name=env_name,
-            env_version=env_version,
-            env_entrypoint=env_entrypoint,
             dataset_name=dataset,
             field=section,
             pretrained_model_name_or_path=model,
@@ -779,11 +757,6 @@ def experiment_checkpoints(
     show_default=True,
     help="When CSV is returned, preview this many rows in a rich table.",
 )
-@click.option(
-    "--project",
-    default=None,
-    help="Project the experiment is in (defaults to the default project in ~/.arena/config.json).",
-)
 @click.pass_obj
 def experiment_metrics(
     config: CommandConfig,
@@ -791,7 +764,6 @@ def experiment_metrics(
     metrics: tuple[str, ...],
     output_file: Path | None,
     preview_rows: int,
-    project: str | None,
 ) -> None:
     """Download metrics for an experiment by name."""
     with arena_client(config) as client:
@@ -800,7 +772,6 @@ def experiment_metrics(
             experiment_name=experiment_name,
             output_path=output_file,
             metrics=metrics_list,
-            project=project,
         )
 
         # Preview the metrics if requested
@@ -809,7 +780,6 @@ def experiment_metrics(
                 experiment_name=experiment_name,
                 preview_rows=preview_rows,
                 metrics=metrics_list,
-                project=project,
             )
             if (preview_ct or "").startswith("text/csv"):
                 emit_csv_preview(preview_payload, max_rows=preview_rows)

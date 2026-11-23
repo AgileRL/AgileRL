@@ -63,16 +63,10 @@ arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
 
 # An unset engine width or max_num_seqs is resolved from the node's GPUs:
 arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4" --num-gpus 4
-
-# Longest context the training run fits on an L4:
-arena memory solve max_model_len path/to/manifest.yaml --gpu "NVIDIA L4"
 ```
 
 `estimate` is a pre-submission gate (exit 0 fits, 3 over budget, 2 usage error).
-`solve` holds the rest of the manifest fixed and returns the largest
-`max_model_len` that fits. For a model outside the Arena catalog, install
-`agilerl-arena[hub]` or pass `--config path/to/config.json`.
-See `agilerl/arena/memory/README.md`.
+Arena runs it for models in its catalog, so it needs `arena login`.
 
 ### 5) Submit a training manifest
 

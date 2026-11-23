@@ -32,7 +32,6 @@ from agilerl.arena.snowflake.job import (
     in_schema,
     job_services_sql,
     log_text,
-    manifest_fits,
     qualified_table,
     role_states,
     service_event_logs_sql,
@@ -54,6 +53,7 @@ from agilerl.arena.snowflake.license import (
 from agilerl.arena.snowflake.profile import (
     NO_IMAGE,
     AccountProfile,
+    GpuPool,
     checked_job_connection,
     gpu_pool_name,
     job_connection_name,
@@ -73,6 +73,7 @@ from agilerl.arena.snowflake.setup_cli import (
     setup,
     teardown_command,
 )
+from agilerl.arena.snowflake.sizing import manifest_fits
 from agilerl.arena.snowflake.source import (
     QuerySource,
     SnowflakeRow,
@@ -80,6 +81,11 @@ from agilerl.arena.snowflake.source import (
     TableSource,
 )
 from agilerl.arena.upgrade import offer_upgrade
+
+NO_ARENA_CREDENTIALS = (
+    "Arena sizes the manifest's GPU memory and needs Arena credentials: run "
+    "`arena login`, or pass --api-key, or --org-key with --external-user-id."
+)
 
 
 @click.group("snowflake")
@@ -375,12 +381,14 @@ def _submit_settings(
             (*profile.external_access_integrations, *external_access_integrations)
         )
     )
-    family = choose_gpu_family(
-        profile.pools.gpu,
-        gpus,
-        gpu_family,
-        lambda pool: manifest_fits(manifest, pool, gpus),
-    )
+    arena = _arena_headers()
+
+    def fits(pool: GpuPool) -> bool:
+        if arena is None:
+            raise ValueError(NO_ARENA_CREDENTIALS)
+        return manifest_fits(manifest, pool, gpus, *arena)
+
+    family = choose_gpu_family(profile.pools.gpu, gpus, gpu_family, fits)
     pool = profile.pools.gpu[family]
     return SubmitSettings(
         image=image,

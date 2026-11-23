@@ -30,6 +30,13 @@ from agilerl.arena.client_version import (
     is_upgrade_required,
     print_update_notice,
 )
+from agilerl.arena.estimator_api import (
+    MEMORY_ESTIMATE_PATH,
+    MEMORY_ESTIMATE_TIMEOUT_S,
+    MemoryEstimate,
+    memory_estimate_body,
+    parse_memory_estimate,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -57,7 +64,7 @@ from agilerl.arena.models.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
 from agilerl.arena.models.verdict import HPO_UNAVAILABLE_MESSAGE, hpo_fields
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
@@ -993,7 +1000,7 @@ class ArenaClient:
         file: str | os.PathLike[str] | bytes | None,
         column_mapping: str | dict[str, Any] | None,
     ) -> None:
-        """Check a traces upload's arguments; Arena converts and checks its rows."""
+        """Check a traces upload against the spec; its columns take no mapping."""
         if isinstance(column_mapping, str):
             column_mapping = column_mapping.strip()
         if column_mapping not in (None, {}, "", "{}"):
@@ -1007,15 +1014,11 @@ class ArenaClient:
             raise ArenaValidationError(msg)
         if file is None:
             return
-        path = Path(os.fspath(file)).expanduser()
-        if not path.is_dir() and path.suffix.lower() not in (
-            ".parquet",
-            ".jsonl",
-            ".ndjson",
-            ".json",
-        ):
-            msg = f"A traces dataset is JSONL or parquet; got {path.name!r}."
-            raise ArenaValidationError(msg)
+        try:
+            rows = validate_traces_file(Path(os.fspath(file)).expanduser())
+        except ValueError as error:
+            raise ArenaValidationError(str(error)) from error
+        logger.info("Traces file %s: %d valid rows.", os.fspath(file), rows)
 
     @staticmethod
     def _content_type_for_upload_path(path: Path) -> str:
@@ -1186,6 +1189,33 @@ class ArenaClient:
             json={"model_name": model_name},
         )
 
+    def estimate_memory(
+        self,
+        manifest: dict[str, Any],
+        gpu: str | None = None,
+        device_gb: float | None = None,
+        num_gpus: int | None = None,
+        gpus_per_node: int | None = None,
+    ) -> MemoryEstimate:
+        """Size a training manifest's GPU memory on one device.
+
+        :param manifest: The raw manifest document.
+        :param gpu: GPU type from ``arena resources list``, or a GPU name.
+        :param device_gb: GPU memory in GiB; overrides the GPU's when both are set.
+        :param num_gpus: GPUs in the allocation, for the engine layout the run picks.
+        :param gpus_per_node: GPUs on one node; ``None`` puts all ``num_gpus`` on one.
+        :return: The exit code (0 fits, 3 over budget, 2 usage error) and report.
+        """
+        data = self._request(
+            "POST",
+            MEMORY_ESTIMATE_PATH,
+            json=memory_estimate_body(
+                manifest, gpu, device_gb, num_gpus, gpus_per_node
+            ),
+            timeout=MEMORY_ESTIMATE_TIMEOUT_S,
+        )
+        return parse_memory_estimate(data, httpx.codes.OK)
+
     # -------------------------------------------------------------------------
     ### Training Jobs ###
     # -------------------------------------------------------------------------
@@ -1194,9 +1224,6 @@ class ArenaClient:
         self,
         algorithm: str,
         *,
-        env_name: str | None = None,
-        env_version: str | None = None,
-        env_entrypoint: str | None = None,
         dataset_name: str | None = None,
         field: str | None = None,
         pretrained_model_name_or_path: str | None = None,
@@ -1207,13 +1234,6 @@ class ArenaClient:
 
         :param algorithm: Catalog algorithm name.
         :type algorithm: str
-        :param env_name: Arena environment name.
-        :type env_name: str | None
-        :param env_version: Environment version. Required with ``env_entrypoint``
-            (``v1`` and ``1`` are both accepted).
-        :type env_version: str | None
-        :param env_entrypoint: Environment entrypoint.
-        :type env_entrypoint: str | None
         :param dataset_name: Dataset name.
         :type dataset_name: str | None
         :param field: RunSpec section to return (``algorithm``, ``environment``,
@@ -1227,9 +1247,6 @@ class ArenaClient:
         """
         params: dict[str, Any] = {"algorithm": algorithm}
         optional = {
-            "gymEnv": env_name,
-            "gymEnvVersion": env_version,
-            "gymEnvEntrypoint": env_entrypoint,
             "datasetName": dataset_name,
             "field": field,
             "pretrainedModelNameOrPath": pretrained_model_name_or_path,
@@ -1674,7 +1691,6 @@ class ArenaClient:
         experiment_name: str,
         output_path: str | os.PathLike[str] | None = None,
         metrics: list[str] | None = None,
-        project: str | None = None,
     ) -> Path:
         """Download experiment metrics to a local file.
 
@@ -1686,8 +1702,6 @@ class ArenaClient:
         :type output_path: str | os.PathLike[str] | None
         :param metrics: The metrics to download. If None, download all metrics.
         :type metrics: list[str] | None
-        :param project: Project name; defaults to the saved default project.
-        :type project: str | None
         :returns: The path to the written file.
         :rtype: Path
         :raises FileExistsError: If the resolved output path already exists.
@@ -1708,7 +1722,6 @@ class ArenaClient:
             experiment_name,
             preview_rows=50_000,
             metrics=metrics,
-            project=project,
         )
         if not (content_type or "").startswith("text/csv"):
             body_preview = payload.decode("utf-8", errors="replace")[:500]
@@ -2230,8 +2243,7 @@ class ArenaClient:
         data: dict[str, str] = {
             "name": name,
             "version": version,
-            # The platform requires multi_agent and defaults language_based to false.
-            "multi_agent": "false",
+            # The platform defaults language_based to false.
             "language_based": "true",
             "do_rollouts": str(do_rollouts).lower(),
         }

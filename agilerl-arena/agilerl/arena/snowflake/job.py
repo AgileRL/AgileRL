@@ -13,21 +13,22 @@ import shutil
 import tempfile
 import warnings
 from collections.abc import Callable, Mapping
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from io import StringIO
 from pathlib import Path
 from typing import TypedDict
 
 import yaml
 
-from agilerl.arena.memory import cli as memory_cli
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
-from agilerl.arena.snowflake.license import CHANNEL_ENV, PURCHASED_ENV, REGION_ENV
+from agilerl.arena.snowflake.license import (
+    CHANNEL_ENV,
+    PURCHASED_ENV,
+    REGION_ENV,
+)
 from agilerl.arena.snowflake.ports import TrainerPorts, service_endpoints
 from agilerl.arena.snowflake.profile import (
     ARENA_API_INTEGRATION,
@@ -398,34 +399,6 @@ def trainer_ports(manifest: TrainingManifest, worker_gpus: int) -> TrainerPorts:
     ):
         engines = worker_gpus
     return TrainerPorts(agents=training.pop_size, engines_per_agent=max(1, engines))
-
-
-def manifest_fits(manifest_path: Path, pool: GpuPool, gpus: int) -> bool:
-    """Whether the memory estimator says the manifest fits the run's GPUs.
-
-    :param manifest_path: Training manifest.
-    :param pool: The family's pool, for per-GPU memory and GPUs per node.
-    :param gpus: GPUs for the whole run, a multiple of ``pool.gpus_per_node``.
-        The trainer lays the run out on ``gpus // pool.gpus_per_node`` nodes.
-    :return: Whether both phases fit with the underprediction buffer.
-    :raises ValueError: The estimator cannot size the manifest.
-    """
-    stdout = StringIO()
-    stderr = StringIO()
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        code = memory_cli.main(
-            str(manifest_path),
-            device_gb=float(pool.gpu_memory_gib),
-            num_gpus=gpus,
-            gpus_per_node=pool.gpus_per_node,
-            as_json=True,
-        )
-    if code == memory_cli.EXIT_OK:
-        return True
-    if code == memory_cli.EXIT_OVER_BUDGET:
-        return False
-    detail = stderr.getvalue().strip() or stdout.getvalue().strip()
-    raise ValueError(detail or "the memory estimator could not size this manifest")
 
 
 def choose_gpu_family(

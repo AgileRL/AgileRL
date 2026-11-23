@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
+from agilerl.arena.llm_runtime import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.lora.fused import ROUTING_STATE, uniform_routed_adapter
 from agilerl.lora.moe.grouped_gemm import (
     add_grouped_linear,

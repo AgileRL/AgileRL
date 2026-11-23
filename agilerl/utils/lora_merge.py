@@ -56,7 +56,7 @@ from transformers.utils import (
 )
 
 from agilerl.architectures import trainer_model_class
-from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
+from agilerl.arena.llm_runtime import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.distributed import (
     gather_params,
     is_main_process,

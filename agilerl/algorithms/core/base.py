@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import gc
+import importlib
 import inspect
 import io
 import logging
@@ -29,6 +30,7 @@ from functools import partial
 from importlib.metadata import version
 from itertools import chain
 from pathlib import Path
+from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -57,6 +59,23 @@ if HAS_LIGER_KERNEL:
     from liger_kernel.transformers import _apply_liger_kernel_to_instance
 
     from agilerl.architectures.liger_rope import pin_triton_rope
+from agilerl.arena.llm_runtime import (
+    ROW_FILL,
+    MiB,
+    resolve_chunk_rows,
+    resolve_mini_batch_size,
+    sequence_packing_blocker,
+)
+
+if TYPE_CHECKING:
+    from agilerl_memory.resolve.fsdp import TrainingMemoryPlan
+    from agilerl_memory.specs import (
+        Algorithm,
+        DeviceSpec,
+        ModelSpec,
+        TrainingSettings,
+    )
+
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
@@ -83,31 +102,6 @@ from agilerl.algorithms.core.sequence_layout import (
 )
 from agilerl.architectures import install_family_patches
 from agilerl.architectures.vllm_language import nested_language_config
-from agilerl.arena.memory.manifest import ALGORITHM_NAMES
-from agilerl.arena.memory.resolve.batch import ROW_FILL, resolve_mini_batch_size
-from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
-from agilerl.arena.memory.resolve.fsdp import (
-    MemoryPins,
-    TrainingMemoryPlan,
-    TrainingMemoryUnfitError,
-    resolve_training_memory,
-)
-from agilerl.arena.memory.resolve.packing import sequence_packing_blocker
-from agilerl.arena.memory.resolve.training import (
-    liger_kernel_arch,
-    lora_target_scope,
-    packed_moe_dispatch,
-    sampling_support_width,
-)
-from agilerl.arena.memory.specs import (
-    Algorithm,
-    DeviceSpec,
-    MiB,
-    ModelArch,
-    ModelSpec,
-    TrainingSettings,
-    WeightDtype,
-)
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
 from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS
@@ -2819,6 +2813,28 @@ def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     return out
 
 
+def _training_memory() -> SimpleNamespace:
+    """Load the training-memory search. The public wheel does not install it."""
+    fsdp = importlib.import_module("agilerl_memory.resolve.fsdp")
+    training = importlib.import_module("agilerl_memory.resolve.training")
+    specs = importlib.import_module("agilerl_memory.specs")
+    manifest = importlib.import_module("agilerl_memory.manifest")
+    return SimpleNamespace(
+        MemoryPins=fsdp.MemoryPins,
+        TrainingMemoryUnfitError=fsdp.TrainingMemoryUnfitError,
+        resolve_training_memory=fsdp.resolve_training_memory,
+        liger_kernel_arch=training.liger_kernel_arch,
+        lora_target_scope=training.lora_target_scope,
+        packed_moe_dispatch=training.packed_moe_dispatch,
+        sampling_support_width=training.sampling_support_width,
+        DeviceSpec=specs.DeviceSpec,
+        ModelArch=specs.ModelArch,
+        ModelSpec=specs.ModelSpec,
+        TrainingSettings=specs.TrainingSettings,
+        algorithm_names=manifest.ALGORITHM_NAMES,
+    )
+
+
 def training_device_spec(
     device: DeviceType,
     vllm_config: VLLMConfig | None = None,
@@ -2831,10 +2847,11 @@ def training_device_spec(
     :param colocated: Whether vLLM runs in the trainer process.
     :return: Device spec for the memory estimate.
     """
+    device_spec_cls = _training_memory().DeviceSpec
     properties = torch.cuda.get_device_properties(torch.device(device))
     # Trainer ranks on this node, as torchrun and the Ray workers set it.
     local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
-    device_spec = DeviceSpec(
+    device_spec = device_spec_cls(
         total_bytes=properties.total_memory,
         name=properties.name,
         compute_capability=(properties.major, properties.minor),
@@ -6532,6 +6549,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: tuple[bool, FSDPConfig | None, int | None]
         :raises TrainingMemoryUnfitError: When nothing fits one GPU.
         """
+        memory = _training_memory()
         picked = None
         unfit = None
         if get_rank() == 0:
@@ -6542,7 +6560,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     plan.fsdp,
                     plan.routed_expert_chunk_mib,
                 )
-            except TrainingMemoryUnfitError as error:
+            except memory.TrainingMemoryUnfitError as error:
                 unfit = error
         # Other ranks wait in the broadcast, so rank 0 sends its failure too.
         picked, reason = broadcast_object_list(
@@ -6563,16 +6581,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: TrainingMemoryPlan
         :raises TrainingMemoryUnfitError: When nothing fits one GPU.
         """
+        memory = _training_memory()
         model, settings = self._training_estimate_inputs(
-            ALGORITHM_NAMES[self.algo],
+            memory.algorithm_names[self.algo],
             self.beta,
         )
         device = self._training_device_spec()
-        plan = resolve_training_memory(
+        plan = memory.resolve_training_memory(
             model,
             device,
             settings.model_copy(update={"fsdp": config}),
-            MemoryPins(
+            memory.MemoryPins(
                 gradient_checkpointing=self.gradient_checkpointing,
                 micro_batch_size_per_gpu=self.micro_batch_size_per_gpu,
                 micro_batch_tokens_per_gpu=self._micro_batch_token_budget(),
@@ -6601,7 +6620,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Model spec and training settings.
         :rtype: tuple[ModelSpec, TrainingSettings]
         """
-        weight_dtypes: dict[torch.dtype, WeightDtype] = {
+        memory = _training_memory()
+        weight_dtypes: dict[torch.dtype, str] = {
             torch.float32: "fp32",
             torch.bfloat16: "bf16",
             torch.float16: "fp16",
@@ -6617,7 +6637,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Images, segments, checkpoint snapshots and async rollout are not
         # known before the first batch; they size as absent.
         target_parameters = self.lora_config.target_parameters
-        settings = TrainingSettings(
+        settings = memory.TrainingSettings(
             algorithm=algorithm,
             group_size=self.group_size,
             trajectories_per_update=self.batch_size_per_process * dp_size,
@@ -6626,17 +6646,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             micro_batch_tokens=self._micro_batch_token_budget(),
             gradient_checkpointing=self.gradient_checkpointing,
             lora_rank=self.lora_config.r,
-            lora_target_scope=lora_target_scope(target_modules),
+            lora_target_scope=memory.lora_target_scope(target_modules),
             lora_dropout=self.lora_config.lora_dropout,
             lora_packed_target_matrices=len(set(target_parameters or ())),
-            packed_moe_dispatch=packed_moe_dispatch(
+            packed_moe_dispatch=memory.packed_moe_dispatch(
                 target_parameters, materializes_expert_lora(self.actor)
             ),
             beta=beta,
             use_separate_reference_adapter=self.use_separate_reference_adapter,
             weight_dtype=weight_dtypes[self._get_lm_head().weight.dtype],
             activation_offload=self.activation_offload,
-            sampling_support_width=sampling_support_width(
+            sampling_support_width=memory.sampling_support_width(
                 records_supports, self.top_k or 0
             ),
             n_training_gpus=n_training_gpus,
@@ -6655,10 +6675,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model_config = PretrainedConfig.get_config_dict(
             self.pretrained_model_name_or_path
         )[0]
-        model = ModelSpec(
+        model = memory.ModelSpec(
             model_id=self.pretrained_model_name_or_path,
-            arch=liger_kernel_arch(
-                ModelArch.from_hf_config(model_config),
+            arch=memory.liger_kernel_arch(
+                memory.ModelArch.from_hf_config(model_config),
                 has_liger_layer_kernels(self.actor),
             ),
         )

@@ -18,7 +18,7 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
+from agilerl.arena.llm_runtime import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.distributed.expert_parallel.dispatch import (
     SAVED_COLLECTIVE_SCOPE,
     AllToAllCtx,

@@ -14,7 +14,6 @@ from agilerl.architectures.runtime import (
     TensorParallelPlan,
     import_attribute,
 )
-from agilerl.arena.memory.config_fields import VISION_RESIZE_BY_MODEL_TYPE
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 FAMILY_PARAMS = [pytest.param(family, id=family.name) for family in FAMILIES]
@@ -68,5 +67,8 @@ class TestArenaAgreement:
             for family in FAMILIES
             for model_type in family.model_types.multimodal
         }
+        resize_by_type = pytest.importorskip(
+            "agilerl_memory.config_fields"
+        ).VISION_RESIZE_BY_MODEL_TYPE
 
-        assert set(VISION_RESIZE_BY_MODEL_TYPE) - multimodal == set()
+        assert set(resize_by_type) - multimodal == set()

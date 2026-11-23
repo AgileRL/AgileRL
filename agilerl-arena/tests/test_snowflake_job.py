@@ -37,7 +37,6 @@ from agilerl.arena.snowflake.job import (
     job_state,
     load_manifest,
     log_text,
-    manifest_fits,
     new_run_id,
     node_resources,
     qualified_table,
@@ -1561,43 +1560,6 @@ class TestChooseGpuFamily:
             choose_gpu_family({}, 2, None, _rejects)
 
         assert "Run arena snowflake setup again." in str(raised.value)
-
-
-class TestManifestFits:
-    def test_a_manifest_within_the_gpu_memory_fits(self, tmp_path: Path) -> None:
-        pool = _gpu("GPU_NV_SL", 1, 80, 8)
-
-        assert manifest_fits(_write(tmp_path, _sft()), pool, 1) is True
-
-    def test_a_manifest_over_the_gpu_memory_does_not_fit(self, tmp_path: Path) -> None:
-        pool = _gpu("GPU_NV_S", 1, 1, 8)
-
-        assert manifest_fits(_write(tmp_path, _sft()), pool, 1) is False
-
-    def test_the_estimate_lays_the_run_out_on_the_family_nodes(
-        self, tmp_path: Path
-    ) -> None:
-        # Arrange: eight ranks on one node hold more NCCL buffers per GPU than
-        # eight one-GPU nodes, which tips a 4 GiB card over the buffer.
-        manifest = _write(tmp_path, _sft())
-        one_node = _gpu("GPU_NV_L", 8, 4, 16)
-        eight_nodes = _gpu("GPU_NV_S", 1, 4, 8)
-
-        # Act
-        on_one_node = manifest_fits(manifest, one_node, 8)
-        on_eight_nodes = manifest_fits(manifest, eight_nodes, 8)
-
-        # Assert
-        assert (on_one_node, on_eight_nodes) == (False, True)
-
-    def test_an_invalid_manifest_raises_the_estimator_message(
-        self, tmp_path: Path
-    ) -> None:
-        path = tmp_path / "manifest.yaml"
-        path.write_text("algorithm: [\n", encoding="utf-8")
-
-        with pytest.raises(ValueError, match="could not validate"):
-            manifest_fits(path, _gpu("GPU_NV_S", 1, 24, 8), 1)
 
 
 class TestSubmitServices:

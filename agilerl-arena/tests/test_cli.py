@@ -1276,31 +1276,6 @@ class TestManifestTemplateCommand:
 
         assert json.loads(result.output) == spec
 
-    def test_forwards_the_env(self, runner, mock_client):
-        mock_client.get_default_run_spec.return_value = {"algorithm": {}}
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                [
-                    "manifest",
-                    "template",
-                    "LLMPPO",
-                    "--env",
-                    "ticket-sim",
-                    "--env-version",
-                    "v1",
-                    "--env-entrypoint",
-                    "ticket_sim:TicketEnv",
-                ],
-            )
-
-        assert result.exit_code == 0
-        kwargs = mock_client.get_default_run_spec.call_args.kwargs
-        assert kwargs["env_name"] == "ticket-sim"
-        assert kwargs["env_version"] == "v1"
-        assert kwargs["env_entrypoint"] == "ticket_sim:TicketEnv"
-
     def test_rejects_an_unknown_section(self, runner):
         result = runner.invoke(
             main, ["manifest", "template", "GRPO", "--section", "nope"]
@@ -1623,7 +1598,6 @@ class TestExperimentMetricsCommand:
             experiment_name="my-exp",
             output_path=None,
             metrics=None,
-            project=None,
         )
 
     def test_metrics_no_preview(self, runner, mock_client, tmp_path):
@@ -1663,34 +1637,6 @@ class TestExperimentMetricsCommand:
             experiment_name="my-exp",
             output_path=None,
             metrics=["loss", "reward"],
-            project=None,
-        )
-
-    def test_metrics_forwards_the_project(self, runner, mock_client, tmp_path):
-        target = tmp_path / "metrics.csv"
-        target.write_text("step,loss\n1,0.1\n")
-        mock_client.download_experiment_metrics.return_value = target
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                [
-                    "experiments",
-                    "metrics",
-                    "my-exp",
-                    "--project",
-                    "llm-work",
-                    "--preview-rows",
-                    "0",
-                ],
-            )
-
-        assert result.exit_code == 0
-        mock_client.download_experiment_metrics.assert_called_once_with(
-            experiment_name="my-exp",
-            output_path=None,
-            metrics=None,
-            project="llm-work",
         )
 
     def test_metrics_non_csv_content_type(self, runner, mock_client, tmp_path):

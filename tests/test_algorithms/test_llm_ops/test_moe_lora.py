@@ -20,8 +20,10 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 from agilerl import HAS_LIGER_KERNEL
-from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
-from agilerl.arena.memory.resolve.moe import expert_gemm_backend
+from agilerl.arena.llm_runtime import (
+    DEFAULT_ROUTED_CHUNK_BYTES,
+    expert_gemm_backend,
+)
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import full_shape_views
 from agilerl.lora.fused import (

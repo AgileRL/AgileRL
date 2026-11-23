@@ -26,8 +26,6 @@ from agilerl.architectures.mimo_v2.processing import (
     MiMoV2Processor,
     smart_resize,
 )
-from agilerl.arena.memory.specs import ModelArch
-from agilerl.arena.memory.vision import vision_patch_grid
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_architectures.mimo_v2.checkpoint_helpers import tiny_hub_config
 
@@ -89,7 +87,11 @@ class TestSmartResize:
         config = SUPPORTED_MODEL_INFO["XiaomiMiMo/MiMo-V2.6-Flash-RL"].config
         bounds = config["processor_config"]
         patch = bounds["patch_size"]
-        arch = ModelArch.from_hf_config(config)
+        model_arch = pytest.importorskip("agilerl_memory.specs").ModelArch
+        vision_patch_grid = pytest.importorskip(
+            "agilerl_memory.vision"
+        ).vision_patch_grid
+        arch = model_arch.from_hf_config(config)
         sides = [8, 31, 33, 100, 457, 1280, 2048, 4097, 6000]
         sizes = [(w, h) for w in sides for h in sides if max(w, h) / min(w, h) <= 200]
 

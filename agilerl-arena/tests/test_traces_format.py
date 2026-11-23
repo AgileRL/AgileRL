@@ -15,6 +15,7 @@ import pytest
 from agilerl.arena.traces_format import (
     JSON_TEXT_COLUMNS,
     MANIFEST_FIELDS,
+    PAIR_COLUMNS,
     REQUIRED_COLUMNS,
     REQUIRED_MANIFEST_FIELDS,
     SNAPSHOT_SEGMENTS_FILE,
@@ -23,6 +24,7 @@ from agilerl.arena.traces_format import (
     SnapshotFile,
     SnapshotManifest,
     TimeRange,
+    input_shape,
     manifest_json,
     read_manifest,
     write_manifest,
@@ -49,9 +51,20 @@ MANIFEST = SnapshotManifest(
 )
 
 
-class TestColumnNames:
+class TestInputShape:
+    def test_pairs_win_over_a_raw_messages_column(self) -> None:
+        assert input_shape(["messages", "prompt", "completion"]) == "prompt_completion"
+
+    def test_messages_without_a_completion_are_segments(self) -> None:
+        assert input_shape(["messages", "prompt", "tools"]) == "segments"
+
+    def test_rejects_neither_shape(self) -> None:
+        with pytest.raises(ValueError, match="needs a 'messages' column"):
+            input_shape(["prompt", "answer"])
+
     def test_names_the_column_sets(self) -> None:
         assert REQUIRED_COLUMNS == ("messages",)
+        assert PAIR_COLUMNS == ("prompt", "completion")
         assert JSON_TEXT_COLUMNS == (
             "messages",
             "tools",

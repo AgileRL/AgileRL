@@ -23,11 +23,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only `arena memory` needs this, to read a model's config.json and safetensors
-# index from the Hub when the Arena catalog and --config do not cover it.
-hub = [
-    "huggingface-hub>=0.30",
-]
 # Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 on s390x.
 # Setup's registry login calls SnowflakeRestful._token_request, tested on 4.8.
 snowflake = [

@@ -39,7 +39,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.arena.memory.resolve.sequences import (
+from agilerl.arena.llm_runtime import (
     COLOCATED_MAX_NUM_SEQS,
     OMITTED_GPU_MEMORY_UTILIZATION,
 )

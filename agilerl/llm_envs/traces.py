@@ -35,6 +35,7 @@ from agilerl.arena.traces_format import (
     SCORES,
     TOOLS,
     WEIGHT,
+    input_shape,
 )
 from agilerl.llm_envs.chat_formats import ChatFormat
 from agilerl.llm_envs.chat_transcript import (
@@ -400,14 +401,16 @@ def check_traces_split(dataset: Dataset, label: str) -> Dataset:
 
 def _segment_error(row: Mapping[str, Any], number: int) -> str | None:
     """Why row ``number`` of a split is not a traces segment, or ``None`` if it is one."""
-    if row.get(PROMPT) is not None and row.get(COMPLETION) is not None:
+    try:
+        shape = input_shape(c for c, value in row.items() if value is not None)
+    except ValueError:
+        return f"row {number}: has no messages column."
+    if shape == "prompt_completion":
         return (
             f"row {number}: a prompt/completion pair, not a messages segment. "
             "Upload it as an Arena traces dataset, which converts pairs to "
             "segments on import."
         )
-    if row.get(MESSAGES) is None:
-        return f"row {number}: has no messages column."
     trained = {
         column: without_none_keys(row[column])
         for column in TRAINED_COLUMNS

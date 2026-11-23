@@ -51,12 +51,12 @@ from agilerl.architectures.vllm_language import (
     apply_multimodal_engine_kwargs,
     nested_language_config,
 )
-from agilerl.arena.memory.resolve.attention import (
+from agilerl.arena.llm_runtime import (
     FAMILY_ATTN_IMPLEMENTATIONS,
     KERNEL_RULE_MODEL_TYPES,
     resolve_attn_implementation,
+    resolve_max_lora_rank,
 )
-from agilerl.arena.memory.resolve.lora import resolve_max_lora_rank
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
 from agilerl.distributed.fsdp_meta import (
     checkpoint_quantization_config,
@@ -1623,7 +1623,7 @@ def trainer_attn_implementation(model_name_or_path: str, cuda: bool) -> str:
 
     ``ATTN_IMPLEMENTATION`` or ``AGILERL_ATTN_IMPLEMENTATION`` in the
     environment overrides the rule for an operator. Otherwise
-    :func:`~agilerl.arena.memory.resolve.attention.resolve_attn_implementation`
+    :func:`~agilerl.arena.llm_runtime.resolve_attn_implementation`
     decides from the model family and the device.
 
     :param model_name_or_path: Checkpoint id or local path.

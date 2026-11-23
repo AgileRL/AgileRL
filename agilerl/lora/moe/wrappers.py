@@ -11,7 +11,7 @@ from typing import Any
 import torch
 from peft.tuners.lora.layer import ParamWrapper
 
-from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
+from agilerl.arena.llm_runtime import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.lora.moe.adapters import (
     adapters_in_routing,
     expert_counts,

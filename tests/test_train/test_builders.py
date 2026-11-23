@@ -3,7 +3,8 @@
 
 """The builder layer: how a contract spec becomes a live algorithm."""
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,7 +16,6 @@ from agilerl.algorithms.core import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
-from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
@@ -471,6 +471,9 @@ class TestLLMBuildGuards:
         assert built["fsdp_config"] == FSDPConfig()
 
     def test_distributed_omitted_micro_batch_is_rank_trajectories(self, monkeypatch):
+        resolve = pytest.importorskip(
+            "agilerl_memory.resolve.batch"
+        ).resolve_micro_batch_size_per_gpu
         monkeypatch.setattr(llm_builder, "is_distributed", lambda: True)
         monkeypatch.setattr(llm_builder, "get_world_size", lambda: 2)
         spec = GRPOSpec(
@@ -480,10 +483,29 @@ class TestLLMBuildGuards:
         )
         built = _build_llm_with_dummy_algo(spec, monkeypatch)
 
-        assert built["micro_batch_size_per_gpu"] == resolve_micro_batch_size_per_gpu(
-            spec, 2
-        )
+        assert built["micro_batch_size_per_gpu"] == resolve(spec, 2)
         assert built["micro_batch_size_per_gpu"] == 8
+
+    def test_distributed_omitted_micro_batch_asks_the_memory_package(self, monkeypatch):
+        batch = ModuleType("agilerl_memory.resolve.batch")
+        batch.resolve_micro_batch_size_per_gpu = lambda _spec, _gpus: 5
+        for name in ("agilerl_memory", "agilerl_memory.resolve"):
+            if name not in sys.modules:
+                parent = ModuleType(name)
+                parent.__path__ = []
+                monkeypatch.setitem(sys.modules, name, parent)
+        monkeypatch.setitem(sys.modules, "agilerl_memory.resolve.batch", batch)
+        monkeypatch.setattr(llm_builder, "is_distributed", lambda: True)
+        monkeypatch.setattr(llm_builder, "get_world_size", lambda: 2)
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            batch_size=8,
+        )
+
+        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+
+        assert built["micro_batch_size_per_gpu"] == 5
 
     def test_cpu_omitted_micro_batch_stays_unset(self, monkeypatch):
         spec = GRPOSpec(

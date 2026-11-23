@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from torch.distributed.tensor import DTensor
 
-from agilerl.arena.memory.resolve.mamba import mamba_scan_is_unfused
+from agilerl.arena.llm_runtime import mamba_scan_is_unfused
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     packed_layout,

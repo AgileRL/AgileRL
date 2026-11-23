@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from agilerl.llm_envs.reasoning import (
     REASONING_END_MARKER,
-    REASONING_START_MARKER,
     SUBSEQUENCE_NOT_FOUND,
     find_token_subsequence,
 )
@@ -61,7 +60,6 @@ GEMMA_STRING_DELIM = '<|"|>'
 XML_FUNCTION_RE = re.compile(r"<function=([^>]+)>")
 XML_PARAMETER_RE = re.compile(r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
 HARMONY_RECIPIENT_RE = re.compile(r"to=([^\s<]+)")
-HARMONY_CHANNEL_RE = re.compile(r"<\|channel\|>(\w+)")
 HARMONY_FUNCTION_PREFIX = "functions."
 DSML = "\uff5cDSML\uff5c"
 # Block names vLLM's DeepSeek-V4 parser accepts; ``tool_calls`` is the one the encoder writes.
@@ -255,29 +253,6 @@ class ChatFormat(ABC):
             return 0
         return at + len(self.reasoning_end_ids)
 
-    def reasoning_text(self, token_ids: list[int]) -> str | None:
-        """Reasoning written before the answer, or ``None`` when the turn did not reason.
-
-        :param token_ids: One generation's token IDs.
-        :return: The reasoning without special tokens or think tags.
-        """
-        start = self.answer_start(token_ids)
-        if not start:
-            return None
-        text = self._decode(token_ids[:start], skip_special_tokens=True)
-        reasoning = text.removeprefix(REASONING_START_MARKER).removesuffix(
-            REASONING_END_MARKER
-        )
-        return reasoning.strip() or None
-
-    def visible_text(self, token_ids: list[int]) -> str:
-        """Text the turn shows the user: what follows the reasoning close, else the whole generation.
-
-        :param token_ids: One generation's token IDs, or the content IDs before its tool calls.
-        :return: The text, special tokens removed.
-        """
-        return action_text(self._tokenizer.decode, token_ids, self)
-
     def format_tool_results(self, _messages: list[dict[str, str]], /) -> str | None:
         """Tool results in this format's own blocks, or ``None`` to frame them with the chat template.
 
@@ -328,18 +303,11 @@ class ChatFormat(ABC):
         :return: Content IDs and one entry per call block, malformed ones included.
         """
 
-    def _decode(
-        self,
-        token_ids: list[int],
-        strip: bool = True,
-        skip_special_tokens: bool = False,
-    ) -> str:
-        """Decode IDs to text, keeping special tokens inside the segment unless skipped."""
+    def _decode(self, token_ids: list[int], strip: bool = True) -> str:
+        """Decode IDs to text, keeping special tokens inside the segment."""
         if not token_ids:
             return ""
-        text = self._tokenizer.decode(
-            token_ids, skip_special_tokens=skip_special_tokens
-        )
+        text = self._tokenizer.decode(token_ids, skip_special_tokens=False)
         if not isinstance(text, str):
             msg = "decode() of one sequence returns str"
             raise TypeError(msg)
@@ -556,14 +524,6 @@ class Gemma4Format(ChatFormat):
         RESPONSE_END,
     )
     OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (REASONING_END,)
-    REASONING_CHANNEL = "thought"
-
-    def reasoning_text(self, token_ids: list[int]) -> str | None:
-        """The thought channel's text without its channel name."""
-        reasoning = super().reasoning_text(token_ids)
-        if reasoning is None:
-            return None
-        return reasoning.removeprefix(self.REASONING_CHANNEL).strip() or None
 
     def extract_tool_calls(
         self, token_ids: list[int], _tools: list[Any] | None = None, /
@@ -634,54 +594,6 @@ class HarmonyFormat(ChatFormat):
             for token in (self.BLOCK_END, self.CALL_END, self.RETURN)
             if token in self._ids
         )
-
-    def reasoning_text(self, token_ids: list[int]) -> str | None:
-        """The analysis channel's messages, or ``None`` when the turn wrote none."""
-        analysis = [
-            body
-            for channel, _, body in self._messages(token_ids)
-            if channel == "analysis"
-        ]
-        return "\n".join(analysis) or None
-
-    def visible_text(self, token_ids: list[int]) -> str:
-        """The final channel's message, else commentary preambles addressed to no function."""
-        messages = self._messages(token_ids)
-        final = [body for channel, _, body in messages if channel == "final"]
-        if final:
-            return "\n".join(final)
-        return "\n".join(
-            body
-            for channel, recipient, body in messages
-            if channel == "commentary" and recipient is None
-        )
-
-    def _messages(self, token_ids: list[int]) -> list[tuple[str, str | None, str]]:
-        """Each message before the first ``<|return|>``: its channel, recipient and text."""
-        start_id = self._ids[self.BLOCK_START]
-        message_id = self._ids[self.MESSAGE]
-        returned = _find(token_ids, self._ids.get(self.RETURN))
-        ids = token_ids if returned == -1 else token_ids[:returned]
-        messages = []
-        index = 0
-        while (message_at := _find(ids, message_id, index)) != -1:
-            ends = [
-                _find(ids, stop, message_at + 1)
-                for stop in (start_id, *self._message_end_ids)
-            ]
-            body_end = min((end for end in ends if end != -1), default=len(ids))
-            header = self._decode(ids[index:message_at])
-            channel = HARMONY_CHANNEL_RE.search(header)
-            recipient = HARMONY_RECIPIENT_RE.search(header)
-            messages.append(
-                (
-                    channel.group(1) if channel else "",
-                    recipient.group(1) if recipient else None,
-                    self._decode(ids[message_at + 1 : body_end]),
-                )
-            )
-            index = body_end
-        return messages
 
     def format_tool_results(self, messages: list[dict[str, str]], /) -> str | None:
         """One ``functions.name`` commentary block per result, then the assistant header.

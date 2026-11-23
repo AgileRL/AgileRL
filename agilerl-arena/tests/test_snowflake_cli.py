@@ -87,13 +87,21 @@ def _invoke(args: list[str], manifest: Path | None = None):
     return CliRunner().invoke(main, args)
 
 
+ARENA = ("https://arena.test", {"Authorization": "Bearer arena_key_1"})
+
+
 @pytest.fixture(autouse=True)
-def _accept_every_family(monkeypatch: pytest.MonkeyPatch) -> None:
+def _accept_every_family(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
     """Submit tests that do not care about fit never call the estimator."""
     monkeypatch.setattr(
         "agilerl.arena.snowflake.cli.manifest_fits",
-        lambda manifest, pool, gpus: True,
+        lambda manifest, pool, gpus, base_url, headers: True,
     )
+    if getattr(request.cls, "__name__", "") == "TestSubmitLicense":
+        return
+    monkeypatch.setattr("agilerl.arena.snowflake.cli._arena_headers", lambda: ARENA)
 
 
 @pytest.fixture(autouse=True)
@@ -872,7 +880,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         monkeypatch.setattr(
             "agilerl.arena.snowflake.cli.manifest_fits",
-            lambda manifest_path, pool, gpus: False,
+            lambda manifest_path, pool, gpus, base_url, headers: False,
         )
         session = Closable()
         monkeypatch.setattr(
@@ -921,7 +929,9 @@ class TestSubmitProfile:
 
         monkeypatch.setattr(
             "agilerl.arena.snowflake.cli.manifest_fits",
-            lambda manifest_path, pool, gpus: pool.gpu_memory_gib >= 40,
+            lambda manifest_path, pool, gpus, base_url, headers: (
+                pool.gpu_memory_gib >= 40
+            ),
         )
         monkeypatch.setattr("agilerl.arena.snowflake.cli.submit_job", fake_submit)
         monkeypatch.setattr(
@@ -945,8 +955,10 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         seen: list[tuple[GpuPool, int]] = []
 
-        def fits(path: Path, pool: GpuPool, gpus: int) -> bool:
-            seen.append((pool, gpus))
+        def fits(
+            path: Path, pool: GpuPool, gpus: int, base_url: str, headers: dict
+        ) -> bool:
+            seen.append((pool, gpus, base_url, headers))
             return True
 
         monkeypatch.setattr("agilerl.arena.snowflake.cli.manifest_fits", fits)
@@ -966,7 +978,7 @@ class TestSubmitProfile:
 
         # Assert
         assert result.exit_code == 0, result.output
-        assert seen == [(GpuPool("arena_gpu_GPU_NV_S", 2, 1, 24), 8)]
+        assert seen == [(GpuPool("arena_gpu_GPU_NV_S", 2, 1, 24), 8, *ARENA)]
 
     def test_a_named_family_the_estimator_cannot_size_still_submits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -977,7 +989,9 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         seen: list[SubmitSettings] = []
 
-        def unsized(path: Path, pool: GpuPool, gpus: int) -> bool:
+        def unsized(
+            path: Path, pool: GpuPool, gpus: int, base_url: str, headers: dict
+        ) -> bool:
             msg = "no architecture for this model"
             raise ValueError(msg)
 
@@ -1423,6 +1437,37 @@ class TestSubmitLicense:
             "agilerl.arena.snowflake.cli.open_session", lambda name: session
         )
         calls = _install_http(monkeypatch, AssertionError("no Arena call"))
+        args = ["--source-table", "arena.training.prompts", "--gpu-family", "GPU_NV_S"]
+
+        # Act
+        with pytest.warns(UserWarning, match="GPU_NV_S is used unchecked"):
+            result = _invoke(TestSubmitCommand()._options(args), manifest)
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert any(
+            statement.startswith("EXECUTE JOB SERVICE")
+            for statement in session.statements
+        )
+
+    def test_no_local_credentials_cannot_pick_a_family(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text(SFT_MANIFEST, encoding="utf-8")
+        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
+        for name in ("ARENA_ORG_KEY", "ARENA_EXTERNAL_USER_ID", "ARENA_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(
+            "agilerl.arena.snowflake.cli.load_credentials", lambda path=None: None
+        )
+        session = _Recording()
+        monkeypatch.setattr(
+            "agilerl.arena.snowflake.cli.open_session", lambda name: session
+        )
+        calls = _install_http(monkeypatch, AssertionError("no Arena call"))
 
         # Act
         result = _invoke(
@@ -1431,10 +1476,10 @@ class TestSubmitLicense:
         )
 
         # Assert
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1
+        assert "needs Arena credentials: run `arena login`" in result.output
         assert calls == []
-        assert "arena login" not in result.output
-        assert any(
+        assert not any(
             statement.startswith("EXECUTE JOB SERVICE")
             for statement in session.statements
         )

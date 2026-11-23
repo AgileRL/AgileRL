@@ -101,11 +101,6 @@ from agilerl.algorithms.core.registry import (
     RLParameter,
 )
 from agilerl.algorithms.grpo import GRPO
-from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
-from agilerl.arena.memory.manifest import ALGORITHM_NAMES
-from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
-from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.distributed import FSDPConfig, build_parallel_mesh
@@ -156,6 +151,25 @@ from tests.test_utils.test_fsdp_routed_expert_chunks import tiny_hybrid_moe_with
 
 pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
+
+
+def _bind_memory() -> None:
+    """Import the estimator. Tests that size a plan skip when it is not installed."""
+    pytest.importorskip("agilerl_memory")
+    global estimate_training, MAX_UNDERPREDICTION, ALGORITHM_NAMES
+    global TrainingMemoryUnfitError, DeviceSpec
+    import agilerl_memory.estimator as estimator
+    import agilerl_memory.formulas as formulas
+    import agilerl_memory.manifest as manifest
+    import agilerl_memory.resolve.fsdp as fsdp
+    import agilerl_memory.specs as specs
+
+    estimate_training = estimator.estimate_training
+    MAX_UNDERPREDICTION = formulas.MAX_UNDERPREDICTION
+    ALGORITHM_NAMES = manifest.ALGORITHM_NAMES
+    TrainingMemoryUnfitError = fsdp.TrainingMemoryUnfitError
+    DeviceSpec = specs.DeviceSpec
+
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from peft import LoraConfig
@@ -2706,6 +2720,7 @@ def estimate_gib(
     agent, chunk_mib: int, optim_cpu_offload: bool, activation_offload: bool = False
 ) -> float:
     """Training estimate of ``agent`` at an EP-8 placement, in GiB."""
+    _bind_memory()
     model, settings = agent._training_estimate_inputs(
         ALGORITHM_NAMES[agent.algo], agent.beta
     )
@@ -2732,6 +2747,7 @@ def estimate_gib(
 
 def with_buffer_gib(peak_gib: float) -> float:
     """Smallest budget at which ``peak_gib`` fits with the underprediction buffer."""
+    _bind_memory()
     return peak_gib / (1 - MAX_UNDERPREDICTION)
 
 
@@ -2783,6 +2799,14 @@ class TestLLMAlgorithmLossUnitsPerRow:
 
 
 class TestLLMAlgorithmResolveFsdpConfig:
+    @pytest.fixture(autouse=True)
+    def _estimator(self, request: pytest.FixtureRequest) -> None:
+        if request.node.name.startswith("test_off_cuda"):
+            return
+        if request.node.name == "test_set_values_are_kept":
+            return
+        _bind_memory()
+
     def test_set_values_are_kept(self, moe_ppo, monkeypatch):
         config = FSDPConfig(
             ep=8,
@@ -3065,6 +3089,10 @@ class TestLLMAlgorithmResolveFsdpConfig:
 
 
 class TestLLMAlgorithmTrainingEstimateInputs:
+    @pytest.fixture(autouse=True)
+    def _estimator(self) -> None:
+        _bind_memory()
+
     def test_rows_default_to_the_context_length(self, moe_ppo):
         _, settings = moe_ppo._training_estimate_inputs(
             ALGORITHM_NAMES[moe_ppo.algo], 0.0
@@ -3282,6 +3310,10 @@ def vwa_super_vl(monkeypatch, tmp_path):
 
 
 class TestLLMAlgorithmResolveFsdpConfigVwa:
+    @pytest.fixture(autouse=True)
+    def _estimator(self) -> None:
+        _bind_memory()
+
     @pytest.mark.parametrize(
         ("name", "cuda_gib"),
         [("NVIDIA A100-SXM4-80GB", 79.15), ("NVIDIA H100 80GB HBM3", 79.11)],
@@ -3323,6 +3355,10 @@ class TestLLMAlgorithmResolveFsdpConfigVwa:
 
 
 class TestLLMAlgorithmTrainingDeviceSpec:
+    @pytest.fixture(autouse=True)
+    def _estimator(self) -> None:
+        _bind_memory()
+
     def test_budget_keeps_a_share_of_the_cuda_capacity_free(self, moe_ppo, monkeypatch):
         patch_cuda_device(moe_ppo, monkeypatch, 80 * 2**30)
 

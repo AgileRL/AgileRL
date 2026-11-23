@@ -102,9 +102,6 @@ from agilerl.architectures.runtime import (
     import_attribute,
     runtime_configs_by_model_type,
 )
-from agilerl.arena.memory import formulas
-from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
-from agilerl.arena.memory.specs import TENSOR_PARALLEL_MODEL_TYPES, ModelArch
 from agilerl.arena.models.model_info import (
     LORA_EXCLUDED_MODULES,
     REASONING_PARSERS,
@@ -492,7 +489,11 @@ class TestFamilyMaxNumBatchedTokens:
             if runtime.vllm.max_num_batched_tokens is not None
         }
 
-        assert catalog == FAMILY_MAX_NUM_BATCHED_TOKENS
+        expected = pytest.importorskip(
+            "agilerl_memory.manifest"
+        ).FAMILY_MAX_NUM_BATCHED_TOKENS
+
+        assert catalog == expected
 
 
 class TestFamilyTensorParallelPlans:
@@ -503,7 +504,11 @@ class TestFamilyTensorParallelPlans:
             if runtime.tensor_parallel_plan is not None
         )
 
-        assert catalog == TENSOR_PARALLEL_MODEL_TYPES
+        expected = pytest.importorskip(
+            "agilerl_memory.specs"
+        ).TENSOR_PARALLEL_MODEL_TYPES
+
+        assert catalog == expected
 
     @pytest.mark.multi_rank
     @pytest.mark.parametrize(
@@ -514,7 +519,9 @@ class TestFamilyTensorParallelPlans:
     ) -> None:
         # Arrange
         info = SUPPORTED_MODEL_INFO[model_id]
-        arch = ModelArch.from_hf_config(info.config)
+        formulas = pytest.importorskip("agilerl_memory.formulas")
+        model_arch = pytest.importorskip("agilerl_memory.specs").ModelArch
+        arch = model_arch.from_hf_config(info.config)
         expected = formulas.tensor_parallel_params(
             formulas.param_counts(arch, info.num_params), arch, tensor_parallel
         )

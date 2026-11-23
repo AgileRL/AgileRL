@@ -23,8 +23,6 @@ from agilerl.algorithms.core.sequence_layout import (
     PaddedSequence,
     position_ids_from_mask,
 )
-from agilerl.arena.memory import formulas
-from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.context_parallel import (
@@ -1031,7 +1029,13 @@ class TestContextParallelShardLen:
             PAD_TOKEN_ID, cp, SimpleNamespace(), 0, round_to
         )
         ids = torch.ones(1, seq_len, dtype=torch.long)
-        arch = ModelArch.from_hf_config(
+
+        # Act
+        with layout.prepare_forward(ids, torch.ones_like(ids)) as fwd:
+            trainer_width = fwd.kwargs["input_ids"].shape[1]
+        formulas = pytest.importorskip("agilerl_memory.formulas")
+        model_arch = pytest.importorskip("agilerl_memory.specs").ModelArch
+        arch = model_arch.from_hf_config(
             SUPPORTED_MODEL_INFO["Qwen/Qwen3-1.7B"].config
         ).model_copy(
             update={
@@ -1040,10 +1044,6 @@ class TestContextParallelShardLen:
                 "n_mamba_layers": int(gated_delta),
             }
         )
-
-        # Act
-        with layout.prepare_forward(ids, torch.ones_like(ids)) as fwd:
-            trainer_width = fwd.kwargs["input_ids"].shape[1]
         estimate_width = formulas.context_parallel_shard_len(arch, seq_len, cp)
 
         # Assert

@@ -68,7 +68,6 @@ from agilerl.arena.snowflake.job import (
     choose_gpu_family,
     load_manifest,
     lowered,
-    manifest_fits,
     new_run_id,
     runs_prefix,
     submit_job,
@@ -128,6 +127,7 @@ from agilerl.arena.snowflake.setup_sql import (
     pool_statements,
     string_literal,
 )
+from agilerl.arena.snowflake.sizing import manifest_fits
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
 
 if TYPE_CHECKING:
@@ -582,12 +582,14 @@ def submit(
         refuse_remote_code(load_manifest(job_manifest))
         refuse_ended_trial(session)
         profile = app_setup(session)
-        pools = run_pools(session, profile, gpu_family)
+        # Rotate a due key first, so the run's head reads the rotated key.
+        partner = rotate_if_due(session, arena_partner())
+        pools = run_pools(session, profile, gpu_family, partner)
         family = choose_gpu_family(
             pools,
             gpus,
             gpu_family,
-            lambda pool: manifest_fits(job_manifest, pool, gpus),
+            lambda pool: manifest_fits(job_manifest, pool, gpus, *partner),
         )
         settings = submit_settings(
             profile,
@@ -624,21 +626,22 @@ def submit(
 
 
 def run_pools(
-    session: SnowflakeSession, profile: AccountProfile, gpu_family: str | None
+    session: SnowflakeSession,
+    profile: AccountProfile,
+    gpu_family: str | None,
+    partner: tuple[str, dict[str, str]],
 ) -> dict[str, GpuPool]:
     """GPU pools a new run may use: priced by Arena and sized for this region.
-
-    Rotates a due Arena key first, so the run's head reads the rotated key.
 
     :param session: Procedure session.
     :param profile: The app's ``setup.json``.
     :param gpu_family: Family the caller named, or ``None``.
+    :param partner: Arena origin and partner headers.
     :return: The pools, keyed by family.
     :raises ValueError: No pool, or not the named one, has a price and the GPUs
         the app sized.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
-    partner = rotate_if_due(session, arena_partner())
     priced = priced_pools(profile.pools.gpu, gpu_family, partner)
     return sized_pools(priced, load_families(session), gpu_family)
 
