@@ -57,7 +57,7 @@ from agilerl.arena.models.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.verdict import HPO_UNAVAILABLE_MESSAGE, hpo_fields
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
@@ -993,7 +993,7 @@ class ArenaClient:
         file: str | os.PathLike[str] | bytes | None,
         column_mapping: str | dict[str, Any] | None,
     ) -> None:
-        """Check a traces upload against the spec; its columns take no mapping."""
+        """Check a traces upload's arguments; Arena converts and checks its rows."""
         if isinstance(column_mapping, str):
             column_mapping = column_mapping.strip()
         if column_mapping not in (None, {}, "", "{}"):
@@ -1007,11 +1007,15 @@ class ArenaClient:
             raise ArenaValidationError(msg)
         if file is None:
             return
-        try:
-            rows = validate_traces_file(Path(os.fspath(file)).expanduser())
-        except ValueError as error:
-            raise ArenaValidationError(str(error)) from error
-        logger.info("Traces file %s: %d valid rows.", os.fspath(file), rows)
+        path = Path(os.fspath(file)).expanduser()
+        if not path.is_dir() and path.suffix.lower() not in (
+            ".parquet",
+            ".jsonl",
+            ".ndjson",
+            ".json",
+        ):
+            msg = f"A traces dataset is JSONL or parquet; got {path.name!r}."
+            raise ArenaValidationError(msg)
 
     @staticmethod
     def _content_type_for_upload_path(path: Path) -> str:
