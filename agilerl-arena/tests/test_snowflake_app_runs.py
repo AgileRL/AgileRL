@@ -26,11 +26,13 @@ from snowflake_app.app_code.arena_app import (
     export_model,
     logs,
     publish,
+    refuse_remote_code,
     status,
     submit,
     unpublish,
 )
 
+from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.snowflake import license as license_mod
 from agilerl.arena.snowflake.license import SnowflakeLicenseError
 from tests.test_snowflake_license import Arena, reply
@@ -69,6 +71,60 @@ SFT = yaml.safe_dump(
         "training": {"max_steps": 2},
     }
 )
+MIMO = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
+REWARD = "def reward(completion, **row):\n    return 1.0\n"
+
+
+def grpo_manifest(hub_id: str) -> str:
+    """A GRPO rollout over source rows that trains ``hub_id``."""
+    return yaml.safe_dump(
+        {
+            "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+            "environment": {
+                "env_type": "rollout",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 128,
+            },
+            "training": {"max_steps": 2},
+        }
+    )
+
+
+def engine_args_manifest(hub_id: str, trust_remote_code: bool) -> str:
+    """``grpo_manifest`` with ``vllm_engine_args.trust_remote_code`` set."""
+    document = yaml.safe_load(grpo_manifest(hub_id))
+    document["algorithm"]["vllm_engine_args"] = {"trust_remote_code": trust_remote_code}
+    return yaml.safe_dump(document)
+
+
+def opd_manifest(teacher_id: str) -> TrainingManifest:
+    """An OPD run of Qwen2.5-0.5B scored by ``teacher_id``."""
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {
+                "name": "OPD",
+                "batch_size": 2,
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {"model": {"pretrained_model_name_or_path": teacher_id}},
+            },
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+            },
+            "training": {"max_steps": 100, "rollout_engines_per_agent": 1},
+        }
+    )
+
+
 # An owner's-rights procedure runs in its own schema, the versioned app_code.
 CURRENT = Row(DATABASE_NAME="ARENA_APP", SCHEMA_NAME="APP_CODE")
 Route = tuple[Callable[[str], bool], list[Row]]
@@ -401,29 +457,15 @@ class TestSubmit:
         assert f"@app_state.runs/{run_id}/job.json" in session.file.puts
 
     def test_stages_the_reward_file_beside_the_manifest(self) -> None:
-        manifest = yaml.safe_dump(
-            {
-                "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
-                "environment": {
-                    "env_type": "rollout",
-                    "prompt_template": {"user_0": "{question}"},
-                },
-                "network": {
-                    "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
-                    "max_context_length": 128,
-                },
-                "training": {"max_steps": 2},
-            }
-        )
-        reward = "def reward(completion, **row):\n    return 1.0\n"
+        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B")
         session = submit_session()
 
         text = submit(
-            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", reward, None, None
+            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", REWARD, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
-        assert session.file.puts[f"@app_state.runs/{run_id}/reward.py"] == reward
+        assert session.file.puts[f"@app_state.runs/{run_id}/reward.py"] == REWARD
         job = json.loads(session.file.puts[f"@app_state.runs/{run_id}/job.json"])
         assert job["reward_file"] is True
         assert job["source"]["sql"] == "SELECT * FROM reference('SOURCE_VIEW', 'gsm8k')"
@@ -678,6 +720,129 @@ class TestSubmit:
 
         assert text.startswith("run_id: arena-")
         assert len(executes(session)) == 3
+
+    def test_refuses_a_model_that_runs_remote_code_before_any_sql(self) -> None:
+        # Arrange
+        session = submit_session()
+
+        # Act
+        with pytest.raises(
+            ValueError, match="not available in the Snowflake app"
+        ) as exc:
+            submit(
+                session,
+                grpo_manifest(MIMO),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        # Assert
+        assert str(exc.value).startswith(f"{MIMO} is not available")
+        assert str(exc.value).endswith("Nothing was started.")
+        assert session.statements == []
+        assert session.file.puts == {}
+
+    def test_refuses_a_model_outside_the_catalog(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(
+            ValueError, match="acme/custom-model is not in the Arena model catalog"
+        ):
+            submit(
+                session,
+                grpo_manifest("acme/custom-model"),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        assert session.statements == []
+
+    def test_refuses_trust_remote_code_in_the_engine_args_before_any_sql(
+        self,
+    ) -> None:
+        # Arrange
+        session = submit_session()
+        manifest = engine_args_manifest("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", True)
+
+        # Act
+        with pytest.raises(
+            ValueError,
+            match=r"vllm_engine_args\.trust_remote_code is not available",
+        ):
+            submit(
+                session, manifest, 1, "SOURCE_VIEW", "gsm8k", None, REWARD, None, None
+            )
+
+        # Assert
+        assert session.statements == []
+        assert session.file.puts == {}
+
+    def test_engine_args_trust_remote_code_false_still_refuses_mimo(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(ValueError, match=f"{MIMO} is not available"):
+            submit(
+                session,
+                engine_args_manifest(MIMO, False),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        assert session.statements == []
+        assert session.file.puts == {}
+
+
+class TestRefuseRemoteCode:
+    def test_accepts_a_catalog_teacher_without_remote_code(self) -> None:
+        refuse_remote_code(opd_manifest("Qwen/Qwen3-4B"))
+
+    def test_accepts_trust_remote_code_false_on_a_catalog_model(self) -> None:
+        manifest = opd_manifest("Qwen/Qwen3-4B")
+        manifest.algorithm.vllm_engine_args["trust_remote_code"] = False
+
+        refuse_remote_code(manifest)
+
+    def test_refuses_a_teacher_whose_family_runs_remote_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            "snowflake_app.app_code.arena_app.REMOTE_CODE_MODEL_TYPES",
+            frozenset({"qwen3"}),
+        )
+        manifest = opd_manifest("Qwen/Qwen3-4B")
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="Qwen/Qwen3-4B is not available in the Snowflake app"
+        ):
+            refuse_remote_code(manifest)
+
+    def test_leaves_a_classic_rl_manifest_to_submit_validation(self) -> None:
+        manifest = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+                "training": {"max_steps": 2},
+            }
+        )
+
+        refuse_remote_code(manifest)
 
 
 class TestStatus:

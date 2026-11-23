@@ -45,6 +45,12 @@ from app_keys import (
 )
 from app_trial import refuse_ended_trial
 
+from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.opd import OPDSpec
+from agilerl.arena.models.model_info import (
+    REMOTE_CODE_MODEL_TYPES,
+    SUPPORTED_MODEL_INFO,
+)
 from agilerl.arena.snowflake.account import blocking_services, shrink_message
 from agilerl.arena.snowflake.catalog import (
     PoolState,
@@ -60,6 +66,7 @@ from agilerl.arena.snowflake.job import (
     SubmitSettings,
     cancel_run,
     choose_gpu_family,
+    load_manifest,
     lowered,
     manifest_fits,
     new_run_id,
@@ -124,6 +131,7 @@ from agilerl.arena.snowflake.setup_sql import (
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
 
 if TYPE_CHECKING:
+    from agilerl.arena.models.manifest import TrainingManifest
     from agilerl.arena.snowflake.catalog import GpuFamily
 
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
@@ -543,8 +551,9 @@ def submit(
         from, or ``None``.
     :return: The run id, the service names, and any manifest warnings.
     :raises ValueError: An argument is out of range, the source is not a bound
-        reference, the pools are not set, Arena has no price for the family,
-        or the manifest cannot run on them.
+        reference, a model is outside the catalog or runs remote code, the
+        pools are not set, Arena has no price for the family, or the manifest
+        cannot run on them.
     :raises PermissionError: The trial has ended and the listing is not purchased.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
@@ -555,12 +564,6 @@ def submit(
         msg = "checkpoint_steps must be at least 1.\nNothing was started."
         raise ValueError(msg)
     source = reference_source(source_reference, source_alias)
-    refuse_ended_trial(session)
-    profile = app_setup(session)
-    # Before any service starts, so a new run's head reads the rotated key.
-    partner = rotate_if_due(session, arena_partner())
-    priced = priced_pools(profile.pools.gpu, gpu_family, partner)
-    pools = sized_pools(priced, load_families(session), gpu_family)
     with (
         tempfile.TemporaryDirectory() as tmp,
         warnings.catch_warnings(record=True) as caught,
@@ -576,6 +579,10 @@ def submit(
         job_manifest = write_job_manifest(
             submitted, source, reward_path is not None, directory
         )
+        refuse_remote_code(load_manifest(job_manifest))
+        refuse_ended_trial(session)
+        profile = app_setup(session)
+        pools = run_pools(session, profile, gpu_family)
         family = choose_gpu_family(
             pools,
             gpus,
@@ -614,6 +621,26 @@ def submit(
         if issubclass(item.category, UserWarning)
     )
     return "\n".join(lines)
+
+
+def run_pools(
+    session: SnowflakeSession, profile: AccountProfile, gpu_family: str | None
+) -> dict[str, GpuPool]:
+    """GPU pools a new run may use: priced by Arena and sized for this region.
+
+    Rotates a due Arena key first, so the run's head reads the rotated key.
+
+    :param session: Procedure session.
+    :param profile: The app's ``setup.json``.
+    :param gpu_family: Family the caller named, or ``None``.
+    :return: The pools, keyed by family.
+    :raises ValueError: No pool, or not the named one, has a price and the GPUs
+        the app sized.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    partner = rotate_if_due(session, arena_partner())
+    priced = priced_pools(profile.pools.gpu, gpu_family, partner)
+    return sized_pools(priced, load_families(session), gpu_family)
 
 
 def priced_pools(
@@ -733,6 +760,53 @@ def submit_settings(
         snowflake_region=install.region,
         listing_purchased=install.purchased,
     )
+
+
+def refuse_remote_code(manifest: TrainingManifest) -> None:
+    """Refuse a model whose run would execute code from outside the app package.
+
+    Snowflake does not let a Native App run code from outside its package. A
+    model outside the catalog is refused too, since the app cannot read its
+    config before the run starts.
+
+    :param manifest: The run's manifest.
+    :raises ValueError: ``vllm_engine_args.trust_remote_code`` is true, or the
+        policy or teacher model is outside the catalog or its family loads
+        Python from its Hugging Face repo.
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, LLMAlgorithmSpec):
+        return
+    if algorithm.vllm_engine_args.get("trust_remote_code"):
+        msg = (
+            "algorithm.vllm_engine_args.trust_remote_code is not available in "
+            "the Snowflake app. It runs code from the model's Hugging Face "
+            "repository, and Snowflake does not allow a Native App to run code "
+            "from outside its package. Remove it from the manifest.\n"
+            "Nothing was started."
+        )
+        raise ValueError(msg)
+    hub_ids = [algorithm.pretrained_model_name_or_path]
+    if isinstance(algorithm, OPDSpec) and algorithm.teacher.model is not None:
+        hub_ids.append(algorithm.teacher.model.pretrained_model_name_or_path)
+    for hub_id in hub_ids:
+        info = SUPPORTED_MODEL_INFO.get(hub_id)
+        if info is None:
+            msg = (
+                f"{hub_id} is not in the Arena model catalog, so the Snowflake "
+                "app cannot check that it runs without outside code. Pick a "
+                "model from 'arena models supported'.\nNothing was started."
+            )
+            raise ValueError(msg)
+        if info.model_type in REMOTE_CODE_MODEL_TYPES:
+            msg = (
+                f"{hub_id} is not available in the Snowflake app. It runs code "
+                "from its Hugging Face repository, and Snowflake does not allow "
+                "a Native App to run code from outside its package. Train it on "
+                "Arena or with the arena CLI, or pick another model from "
+                "'arena models supported'.\nNothing was started."
+            )
+            raise ValueError(msg)
 
 
 def reference_source(reference: str | None, alias: str | None) -> QuerySource | None:
