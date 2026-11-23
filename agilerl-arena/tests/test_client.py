@@ -1718,9 +1718,34 @@ class TestArenaClientSubmitExperimentHpo:
 
         with pytest.raises(
             ArenaValidationError,
-            match=r"training\.hpo, mutation: HPO is no longer available in Arena",
+            match=r"training\.hpo, mutation: HPO and populations aren't available",
         ):
             api_key_client.submit_experiment(manifest=_hpo_manifest(), project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_llm_population_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        manifest = {
+            "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 1024,
+            },
+            "training": {"max_steps": 100, "pop_size": 2},
+        }
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"training\.pop_size: HPO and populations aren't available",
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
 
         api_key_client._open_stream.assert_not_called()
 
