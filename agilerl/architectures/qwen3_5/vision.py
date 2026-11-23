@@ -9,7 +9,8 @@ native forward reads flat patches with ``image_grid_thw`` and
 The patch unfolds the rows and, for given 2-D ``position_ids``, builds
 ``[text, t, h, w]`` positions for every packed document at once. The text row
 keeps document isolation and the GatedDeltaNet ``seq_idx`` the packed
-forward derives from it.
+forward derives from it. A context-parallel forward builds them on the full
+rows and keeps this rank's shard.
 """
 
 from __future__ import annotations
@@ -122,6 +123,9 @@ def _accept_vision_rows(forward: Callable[..., Any]) -> Callable[..., Any]:
         pixel_values: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> object:
+        # Import cycle: agilerl.distributed imports agilerl.architectures, whose catalog imports this module.
+        from agilerl.distributed.context_parallel.vision import IMAGE_TOKEN_SHARD
+
         if pixel_values is not None and pixel_values.dim() == 4:
             if input_ids is None:
                 msg = "Vision-row pixel_values need input_ids to place the images"
@@ -132,7 +136,16 @@ def _accept_vision_rows(forward: Callable[..., Any]) -> Callable[..., Any]:
             kwargs["mm_token_type_ids"] = (
                 input_ids == self.config.image_token_id
             ).int()
-            if position_ids is not None and position_ids.dim() == 2:
+            shard = IMAGE_TOKEN_SHARD.get()
+            if shard is not None:
+                # M-RoPE reads each row start as a document start, so it needs full rows.
+                position_ids = shard.shard(
+                    mrope_position_ids(
+                        self, shard.input_ids, shard.position_ids, image_grid_thw
+                    ),
+                    seq_dim=2,
+                )
+            elif position_ids is not None and position_ids.dim() == 2:
                 position_ids = mrope_position_ids(
                     self, input_ids, position_ids, image_grid_thw
                 )
@@ -178,7 +191,10 @@ def patch_qwen_vision_rows(model: str) -> None:
         )
         return
     install_vision_rows(
-        model_cls, "forward", _accept_vision_rows, vision_filler_features
+        model_cls,
+        "forward",
+        _accept_vision_rows,
+        vision_filler_features,
     )
 
 

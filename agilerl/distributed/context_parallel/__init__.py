@@ -11,7 +11,8 @@ all-to-alls to head shards in
 projected states to ``[B, L, D/cp]`` in
 :mod:`agilerl.distributed.context_parallel.mamba`. Gated DeltaNet keeps the
 sequence shard and passes recurrent state through flash-linear-attention in
-:mod:`agilerl.distributed.context_parallel.gdn`.
+:mod:`agilerl.distributed.context_parallel.gdn`. A forward with images
+publishes its full rows in :mod:`agilerl.distributed.context_parallel.vision`.
 :mod:`agilerl.distributed.context_parallel.mixer` runs both through the family
 plans. Mesh views live in :mod:`agilerl.distributed.mesh`.
 """
@@ -42,9 +43,15 @@ from agilerl.distributed.context_parallel.ulysses import (
     ulysses_checkpoint_context_fn,
     update_ulysses_params,
 )
+from agilerl.distributed.context_parallel.vision import (
+    IMAGE_TOKEN_SHARD,
+    ImageTokenShard,
+)
 
 __all__ = [
+    "IMAGE_TOKEN_SHARD",
     "ULYSSES_PARAMS",
+    "ImageTokenShard",
     "MixerInProjBypass",
     "PublishedUlyssesParams",
     "all_to_all_hidden_to_seq",

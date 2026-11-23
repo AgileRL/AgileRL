@@ -531,7 +531,8 @@ class TestTrainsContextParallel:
             ("Qwen/Qwen2.5-0.5B-Instruct", None, True),
             ("Qwen/Qwen3.5-0.8B", None, True),
             ("Qwen/Qwen3.5-0.8B", {**ROLLOUT_ENV, "modality": "text"}, True),
-            ("Qwen/Qwen3.5-0.8B", ROLLOUT_ENV, False),
+            ("Qwen/Qwen3.5-0.8B", ROLLOUT_ENV, True),
+            ("Qwen/Qwen3.5-0.8B", {**ROLLOUT_ENV, "modality": "vision"}, True),
             ("local/uncatalogued-model", None, False),
         ],
         ids=[
@@ -539,10 +540,11 @@ class TestTrainsContextParallel:
             "vl-on-a-dataset",
             "vl-on-a-text-env",
             "vl-on-an-env-of-unknown-modality",
+            "vl-on-an-image-env",
             "uncatalogued",
         ],
     )
-    def test_a_vision_language_model_needs_its_towers_stripped(
+    def test_a_rollout_run_splits_with_or_without_images(
         self, hub_id, environment, expected
     ):
         # Arrange
@@ -554,6 +556,13 @@ class TestTrainsContextParallel:
 
         # Act / Assert
         assert trains_context_parallel(manifest) is expected
+
+    def test_a_vision_language_model_off_rollout_is_false(self):
+        doc = copy.deepcopy(SFT_MANIFEST)
+        doc["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-0.8B"
+        manifest = TrainingManifest.model_validate(doc)
+
+        assert trains_context_parallel(manifest) is False
 
     def test_an_algorithm_without_a_model_is_false(self):
         manifest = TrainingManifest.model_validate(

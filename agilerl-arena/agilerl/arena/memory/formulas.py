@@ -1244,6 +1244,16 @@ def prompt_logprob_bytes(arch: ModelArch) -> int:
 # Non-torch device memory a one-rank trainer holds beyond the CUDA context
 # and job overhead. Multi-rank trainers charge :func:`agilerl.arena.memory.nccl.trainer_nccl_bytes`.
 TRAINER_LIB_OVERHEAD_BYTES = 436 * MiB
+# Non-torch device memory a gated-delta-net trainer holds under context
+# parallel beyond its NCCL groups. Measured on L4 Qwen3.5 at CP 2 and 4.
+CONTEXT_PARALLEL_GATED_DELTA_BYTES = 576 * MiB
+
+
+def context_parallel_gated_delta_bytes(arch: ModelArch, cp: int) -> int:
+    """Non-torch device bytes a gated-delta-net trainer rank adds under context parallel."""
+    if cp > 1 and arch.mamba_gated_delta and arch.n_mamba_layers > 0:
+        return CONTEXT_PARALLEL_GATED_DELTA_BYTES
+    return 0
 
 
 def _lora_dropout_mixer_width(

@@ -1,12 +1,13 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""One CISPO learn step under cp x tp x ep, checked against a same-world FSDP reference."""
+"""One CISPO or LLM-PPO learn step under cp x tp x ep, checked against a same-world FSDP reference."""
 
 from __future__ import annotations
 
 import gc
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -18,13 +19,33 @@ from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
 from agilerl.algorithms.cispo import CISPO
+from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.mesh import MeshAxisName
+from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.parallel_helpers import plain
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps
 
 SEQ = 8
 GROUP = 2
 SEED = 0
+IMAGE_SEQ = 72
+# Image runs of the two image-row layouts: one across each CP shard start
+# (column 36 under flash, 64 once flex rounds the frame to 128), and two in the
+# first shard. Each completion starts after its row's last image.
+IMAGE_STARTS = ((34, 62), (1, 10))
+COMPLETION_STARTS = (66, 14)
+TEXT_COMPLETION_START = 20
+
+
+@dataclass(frozen=True)
+class ImageCase:
+    """Image token id and the pixel layout of one image in a family's tiny model."""
+
+    image_token_id: int
+    grid: tuple[int, int]
+    patch_dim: int
+    tokens_per_image: int
 
 
 @dataclass(frozen=True)
@@ -33,10 +54,13 @@ class FamilyCase:
 
     ``probes`` returns weights the plan shards; keys starting ``experts.`` split
     on ``ep``, the rest on ``tp``. ``meshes`` holds ``(world, cp, tp, ep)``.
+    A string ``target_modules`` is a PEFT full-match regex. ``images`` gives the
+    first half of the batch rows images, so the last data rank of a mesh with
+    ``dp_shard > 1`` learns on text only.
     """
 
     model: Callable[[], nn.Module]
-    target_modules: tuple[str, ...]
+    target_modules: tuple[str, ...] | str
     target_parameters: tuple[str, ...]
     probes: Callable[[nn.Module], dict[str, torch.Tensor]]
     param_dtype: str
@@ -44,15 +68,34 @@ class FamilyCase:
     rtol: float
     meshes: tuple[tuple[int, int, int, int], ...]
     strip_towers: bool = False
+    images: ImageCase | None = None
+
+
+@dataclass(frozen=True)
+class LearnBatch:
+    """Rows of one learn and the vision rows of their images, in row order."""
+
+    token_ids: list[torch.Tensor]
+    masks: list[torch.Tensor]
+    rewards: torch.Tensor
+    pixel_values: torch.Tensor | None = None
+    image_counts: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
 class LearnResult:
-    """Rank 0's exported LoRA before and after one step, and the pre-clip grad norm."""
+    """Rank 0's exported LoRA before and after one step, and this rank's step stats.
+
+    ``tower_rows`` counts rows into the vision tower's first submodule, one per
+    image on Gemma 4; ``images`` is this rank's image count.
+    """
 
     before: dict[str, torch.Tensor]
     after: dict[str, torch.Tensor]
     grad_norm: float
+    critic_grad_norm: float | None
+    tower_rows: int
+    images: int
 
 
 def linear_weight(module: nn.Linear | LoraLinear) -> nn.Parameter:
@@ -67,31 +110,54 @@ def expert_weight(experts: nn.Module, name: str) -> torch.Tensor:
     return getattr(experts, name)
 
 
-def global_batch(
-    prompts: int,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+def global_batch(prompts: int, images: ImageCase | None) -> LearnBatch:
     generator = torch.Generator().manual_seed(SEED)
     rows = prompts * GROUP
-    token_ids = [
-        torch.randint(1, 28, (1, SEQ), generator=generator, dtype=torch.long)
-        for _ in range(rows)
-    ]
-    masks = [torch.ones(1, SEQ - 1, dtype=torch.bool) for _ in range(rows)]
     rewards = torch.tensor([1.0, 0.0] * prompts, dtype=torch.float32)
-    return token_ids, masks, rewards
+    if images is None:
+        token_ids = [
+            torch.randint(1, 28, (1, SEQ), generator=generator, dtype=torch.long)
+            for _ in range(rows)
+        ]
+        masks = [torch.ones(1, SEQ - 1, dtype=torch.bool) for _ in range(rows)]
+        return LearnBatch(token_ids, masks, rewards)
+    token_ids, masks, counts = [], [], []
+    for row in range(rows):
+        starts, completion = (), TEXT_COMPLETION_START
+        if row < rows // 2:
+            starts = IMAGE_STARTS[row % 2]
+            completion = COMPLETION_STARTS[row % 2]
+        ids = torch.randint(1, 28, (1, IMAGE_SEQ), generator=generator)
+        for start in starts:
+            ids[0, start : start + images.tokens_per_image] = images.image_token_id
+        mask = torch.zeros(1, IMAGE_SEQ - 1, dtype=torch.bool)
+        mask[0, completion - 1 :] = True
+        token_ids.append(ids)
+        masks.append(mask)
+        counts.append(len(starts))
+    pixel_values = torch.randn(
+        sum(counts), *images.grid, images.patch_dim, generator=generator
+    )
+    return LearnBatch(token_ids, masks, rewards, pixel_values, tuple(counts))
 
 
-def local_batch(
-    batch: tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor],
-    rank: int,
-    replica: int,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+def local_batch(batch: LearnBatch, rank: int, replica: int) -> LearnBatch:
     """This rank's data shard; the ``replica`` = tp * cp ranks of a shard see the same rows."""
-    token_ids, masks, rewards = batch
-    per_rank = len(token_ids) // (dist.get_world_size() // replica)
+    per_rank = len(batch.token_ids) // (dist.get_world_size() // replica)
     start = (rank // replica) * per_rank
     stop = start + per_rank
-    return token_ids[start:stop], masks[start:stop], rewards[start:stop]
+    counts = batch.image_counts[start:stop]
+    pixel_values = None
+    if sum(counts):
+        first = sum(batch.image_counts[:start])
+        pixel_values = batch.pixel_values[first : first + sum(counts)]
+    return LearnBatch(
+        batch.token_ids[start:stop],
+        batch.masks[start:stop],
+        batch.rewards[start:stop],
+        pixel_values,
+        counts,
+    )
 
 
 def assert_axis_split(
@@ -112,7 +178,7 @@ def assert_axis_split(
     assert local.numel() * degree == full, (name, local.numel(), full)
 
 
-def exported_lora(agent: CISPO) -> dict[str, torch.Tensor]:
+def exported_lora(agent: CISPO | LLMPPO) -> dict[str, torch.Tensor]:
     """Adapters in checkpoint row order, as rank 0 exports them; other ranks get none."""
     state = agent.shard_runtime.export_model_state(agent.actor)
     return {plain(key): value.float() for key, value in state.items() if "lora_" in key}
@@ -121,31 +187,58 @@ def exported_lora(agent: CISPO) -> dict[str, torch.Tensor]:
 def learn_step(
     case: FamilyCase,
     model: nn.Module,
-    batch: tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor],
+    batch: LearnBatch,
     rank: int,
     mesh: tuple[int, int, int],
+    ppo: bool = False,
+    vision_cache: bool = True,
 ) -> LearnResult:
+    """One learn of CISPO, or of LLM-PPO with a value head, on ``mesh``.
+
+    :param vision_cache: Whether forwards of the step reuse vision tower outputs.
+    """
     cp, tp, ep = mesh
     full = {name: weight.numel() for name, weight in case.probes(model).items()}
-    agent = CISPO(
-        actor_network=model,
+    lora_config = LoraConfig(
+        r=2,
+        lora_alpha=4,
+        target_modules=(
+            case.target_modules
+            if isinstance(case.target_modules, str)
+            else list(case.target_modules)
+        ),
+        target_parameters=list(case.target_parameters) or None,
+        lora_dropout=0.0,
+        bias="none",
+        task_type="CAUSAL_LM",
+        modules_to_save=["summary"] if ppo else None,
+    )
+    # The value head draws its init from the global RNG, which earlier steps advance.
+    torch.manual_seed(SEED)
+    algorithm_kwargs = (
+        {
+            "actor_network": AutoModelForCausalLMWithValueHead(model),
+            "lr_actor": 1e-2,
+            "lr_critic": 1e-2,
+            "batch_size": len(batch.token_ids),
+            "update_epochs": 1,
+        }
+        if ppo
+        else {
+            "actor_network": model,
+            "lr": 1e-2,
+            "group_size": GROUP,
+            "batch_size": len(batch.token_ids) // GROUP,
+        }
+    )
+    agent = (LLMPPO if ppo else CISPO)(
+        **algorithm_kwargs,
         pad_token_id=0,
         pad_token="<pad>",
         beta=0.0,
-        lr=1e-2,
-        group_size=GROUP,
-        batch_size=len(batch[0]) // GROUP,
         seed=SEED,
         max_model_len=256,
-        lora_config=LoraConfig(
-            r=2,
-            lora_alpha=4,
-            target_modules=list(case.target_modules),
-            target_parameters=list(case.target_parameters) or None,
-            lora_dropout=0.0,
-            bias="none",
-            task_type="CAUSAL_LM",
-        ),
+        lora_config=lora_config,
         fsdp_config=FSDPConfig(
             reshard_after_forward=True,
             activation_offload=False,
@@ -169,20 +262,42 @@ def learn_step(
         # 0.1 keeps every |g| well under eps 1, so the step follows g, not sign(g).
         for group in agent.optimizer.optimizer.param_groups:
             group["eps"] = 1.0
-        base = (
-            agent.actor.get_base_model()
-            if isinstance(agent.actor, PeftModel)
-            else agent.actor
-        )
+        if not vision_cache:
+            agent._vision_cache.step = nullcontext
+        base = agent.actor.pretrained_model if ppo else agent.actor
+        if isinstance(base, PeftModel):
+            base = base.get_base_model()
+        tower_rows: list[int] = []
+        if case.images is not None:
+            tower = base.get_encoder(modality="image")
+            next(tower.children()).register_forward_pre_hook(
+                lambda _module, args: tower_rows.append(args[0].shape[0])
+            )
         for name, weight in case.probes(base).items():
             if name.startswith("experts."):
                 assert_axis_split(name, weight, MeshAxisName.EP, ep, full[name])
             else:
                 assert_axis_split(name, weight, MeshAxisName.TP, tp, full[name])
         before = exported_lora(agent)
-        result = agent.learn(local_batch(batch, rank, cp * tp))
+        local = local_batch(batch, rank, cp * tp)
+        result = agent.learn(
+            (local.token_ids, local.masks, local.rewards),
+            pixel_values=local.pixel_values,
+            pixel_image_counts=(
+                None if local.pixel_values is None else list(local.image_counts)
+            ),
+            image_token_id=None if case.images is None else case.images.image_token_id,
+            sampling_logps=rollout_logps(local.masks) if ppo else None,
+        )
         after = exported_lora(agent)
-        return LearnResult(before, after, float(result["grad_norm_pre"]))
+        return LearnResult(
+            before,
+            after,
+            float(result["grad_norm_pre"]),
+            float(result["critic_grad_norm_pre"]) if ppo else None,
+            sum(tower_rows),
+            sum(local.image_counts),
+        )
     finally:
         agent.clean_up()
         del agent
@@ -204,7 +319,7 @@ def learn_worker(
     torch.backends.cudnn.allow_tf32 = False
     torch.cuda.set_device(rank)
     # One group per reference rank, so every rank sees a nonzero advantage.
-    batch = global_batch(prompts=world_size)
+    batch = global_batch(world_size, case.images)
     # Liger patches the modeling classes during the first init. FSDP does not
     # cast weights it leaves unwrapped, so the actor starts in the case dtype.
     dtype = getattr(torch, case.param_dtype)
@@ -213,12 +328,45 @@ def learn_worker(
     reference = learn_step(case, models[0], batch, rank, (1, 1, 1))
     parallel = learn_step(case, models[1], batch, rank, (cp, tp, ep))
 
-    assert torch.isclose(
-        torch.tensor(parallel.grad_norm),
-        torch.tensor(reference.grad_norm),
-        atol=case.atol,
-        rtol=case.rtol,
-    ), (parallel.grad_norm, reference.grad_norm)
+    assert_same_step(case, parallel, reference, rank)
+
+
+def ppo_learn_worker(rank: int, world_size: int, case: FamilyCase, cp: int) -> None:
+    """LLM-PPO on ``cp`` matches the pure-FSDP step, and its vision cache runs each image once."""
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.cuda.set_device(rank)
+    batch = global_batch(world_size, case.images)
+    dtype = getattr(torch, case.param_dtype)
+    models = [case.model().to(dtype) for _ in range(3)]
+
+    reference = learn_step(case, models[0], batch, rank, (1, 1, 1), ppo=True)
+    cached = learn_step(case, models[1], batch, rank, (cp, 1, 1), ppo=True)
+    uncached = learn_step(
+        case, models[2], batch, rank, (cp, 1, 1), ppo=True, vision_cache=False
+    )
+
+    assert_same_step(case, cached, reference, rank)
+    assert_same_step(case, uncached, cached, rank)
+    if cached.images:
+        # Every forward of the step names the same images; only the first runs the tower.
+        assert cached.tower_rows == cached.images, (cached.tower_rows, cached.images)
+        assert uncached.tower_rows > cached.tower_rows
+
+
+def assert_same_step(
+    case: FamilyCase, parallel: LearnResult, reference: LearnResult, rank: int
+) -> None:
+    """``parallel`` took ``reference``'s step: grad norms, and on rank 0 every LoRA step."""
+    for label, got, want in (
+        ("grad_norm", parallel.grad_norm, reference.grad_norm),
+        ("critic_grad_norm", parallel.critic_grad_norm, reference.critic_grad_norm),
+    ):
+        if want is None:
+            continue
+        assert torch.isclose(
+            torch.tensor(got), torch.tensor(want), atol=case.atol, rtol=case.rtol
+        ), (label, got, want)
     if rank != 0:
         return
     assert reference.before, "actor has no LoRA parameters"

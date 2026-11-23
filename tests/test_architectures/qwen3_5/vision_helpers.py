@@ -27,13 +27,15 @@ PATCH_DIM = 3 * 2 * 2 * 2
 
 @contextmanager
 def restored_qwen_vl_model() -> Iterator[None]:
-    """Undo the class-level GDN and vision-row patches of the Qwen3.5 VL installer on exit."""
+    """Undo the class-level GDN, vision-row and image-feature patches of the Qwen3.5 VL installer on exit."""
     forward = Qwen3_5Model.__dict__["forward"]
+    get_image_features = Qwen3_5Model.__dict__["get_image_features"]
     try:
         with restored_qwen_gdn_classes():
             yield
     finally:
         Qwen3_5Model.forward = forward
+        Qwen3_5Model.get_image_features = get_image_features
         for name in (ACCEPTS_VISION_ROWS, FILLER_METHOD):
             if name in vars(Qwen3_5Model):
                 delattr(Qwen3_5Model, name)

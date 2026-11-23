@@ -3136,6 +3136,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vision_lockstep: VisionLockstep | None = None
         self._pixel_staging = PinnedStaging()
         self._vision_language_module: PreTrainedModel | None = None
+        self._frozen_vision_tower: str | None = None
         self.final_logit_softcap: float | None = None
         # optimizer_steps // reference_update_interval at the last reference copy.
         self.reference_update_tracker = 0
@@ -3834,7 +3835,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         assert self.actor is not None, (
             "Actor is set to None, please check that the actor is defined."
         )
-        self._check_cp_strips_vision_towers()
+        self._check_cp_vision_tower_frozen()
         if self.gradient_checkpointing is None and (
             torch.device(self.device).type != "cuda"
             or self.pretrained_model_name_or_path not in SUPPORTED_MODEL_INFO
@@ -3893,17 +3894,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
         self.sequence_layout = self._build_sequence_layout()
 
-    def _check_cp_strips_vision_towers(self) -> None:
-        """Raise when context parallel runs a vision-language actor whose engine keeps its towers."""
+    def _check_cp_vision_tower_frozen(self) -> None:
+        """Raise when context parallel runs images through a vision tower that trains.
+
+        Every CP rank runs the tower on all images with Ulysses off, which
+        holds only for a tower that runs without autograd.
+        """
         if (
             self.fsdp_config is not None
             and self.fsdp_config.cp > 1
             and has_vision_tower(self.actor)
             and not self.rollout_strip_multimodal_towers
+            and self._frozen_vision_tower is None
         ):
             msg = (
-                f"cp={self.fsdp_config.cp} on a vision-language model needs a "
-                "text-only environment, so the engine strips its towers"
+                f"cp={self.fsdp_config.cp} with images needs a frozen vision "
+                "tower; this tower has trainable parameters"
             )
             raise ValueError(msg)
 
@@ -5186,6 +5192,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             None,
         )
 
+    def _ulysses_can_pack(self, base_model: torch.nn.Module) -> bool:
+        """Whether Ulysses context parallel can attend over packed rows of a model.
+
+        :param base_model: Model the actor wraps.
+        :type base_model: torch.nn.Module
+        :return: True on FlashAttention-2 when no live vision tower is sharded.
+        :rtype: bool
+        """
+        # Ulysses attends within published document offsets on FlashAttention-2
+        # only, and shards image tokens of padded rows only.
+        return language_model_attn_implementation(
+            base_model
+        ) == "flash_attention_2" and (
+            not has_vision_tower(base_model) or self.rollout_strip_multimodal_towers
+        )
+
     def _initialize_actors(
         self,
         base_model: torch.nn.Module | None,
@@ -5255,10 +5277,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             if packing_blocker is not None:
                 logger.info("Sequence packing off: %s", packing_blocker)
-            # Ulysses attends within published document offsets on FlashAttention-2 only.
             self.sequence_packing = packing_blocker is None and (
-                cp == 1
-                or language_model_attn_implementation(base_model) == "flash_attention_2"
+                cp == 1 or self._ulysses_can_pack(base_model)
             )
             self.final_logit_softcap = getattr(
                 nested_language_config(base_model.config),
@@ -5273,7 +5293,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.use_adapter("actor")
         patch_lora_for_fused_forward(actor)
         install_packed_expert_grouped_gemm(actor)
-        install_frozen_vision_no_grad(actor, self._vision_cache)
+        self._frozen_vision_tower = install_frozen_vision_no_grad(
+            actor, self._vision_cache
+        )
         self._vision_language_module = vision_language_module(actor)
         set_routed_experts_recompute(actor)
 

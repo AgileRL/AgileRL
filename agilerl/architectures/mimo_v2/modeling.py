@@ -36,7 +36,7 @@ from agilerl.architectures.mimo_v2.configuration import (
     MiMoV2Config,
     MiMoV2VisionConfig,
 )
-from agilerl.architectures.vision_rows import packed_patches
+from agilerl.architectures.vision_rows import packed_patches, shard_image_features
 
 __all__ = [
     "MiMoV2ForConditionalGeneration",
@@ -471,11 +471,13 @@ class MiMoV2Model(MiMoV2PreTrainedModel):
         """Replace the language model's token embeddings."""
         self.language_model.embed_tokens = value
 
+    @shard_image_features()
     def get_image_features(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Image tokens of ``(images, h, w, patch_dim)`` patch-grid rows.
 
         :param pixel_values: One patch grid per image, all of one shape.
-        :return: ``(images * h * w / merge**2, hidden)`` tokens in image order.
+        :return: ``(images * h * w / merge**2, hidden)`` tokens in image order,
+            or the rows of this context-parallel shard's image tokens.
         """
         patches, image_grid_hw = packed_patches(pixel_values)
         return self.visual(patches, F.pad(image_grid_hw, (1, 0), value=1))

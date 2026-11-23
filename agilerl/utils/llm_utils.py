@@ -2054,17 +2054,21 @@ def masked_whiten(
     return whitened
 
 
-def global_masked_whiten(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Whiten masked values with the mean and variance over every rank.
+def global_masked_whiten(
+    values: torch.Tensor, mask: torch.Tensor, replicas: int
+) -> torch.Tensor:
+    """Whiten masked values with the mean and variance over every data-parallel row.
 
     Every rank must call this once per learn, including ranks with no masked
-    values. Tensor- and context-parallel ranks repeat their group's rows
-    equally, so the world statistics match the data-parallel ones.
+    values.
 
     :param values: Values to whiten.
     :type values: torch.Tensor
     :param mask: 0/1 mask selecting which values count.
     :type mask: torch.Tensor
+    :param replicas: Ranks holding the same rows (``tp * cp``); the world sums
+        count each row this many times.
+    :type replicas: int
     :return: Whitened values.
     :rtype: torch.Tensor
     """
@@ -2075,7 +2079,7 @@ def global_masked_whiten(values: torch.Tensor, mask: torch.Tensor) -> torch.Tens
     )
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.all_reduce(stats)
-    count, total, total_sq = stats.tolist()
+    count, total, total_sq = (stats / replicas).tolist()
     if count <= 1:
         return values
     mean = total / count

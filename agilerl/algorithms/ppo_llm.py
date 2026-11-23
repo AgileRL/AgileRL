@@ -26,6 +26,7 @@ from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
     FSDPConfig,
     aggregate_metrics_dict,
+    get_world_size,
     resolve_device,
 )
 from agilerl.distributed.runtime import OptimizerStep
@@ -692,25 +693,25 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             epoch_orders = self._epoch_orders(
                 batch_idxs, self.update_epochs, aligned=has_segments
             )
+            # Unsegmented rows step once per window; segment rows step every
+            # ``accumulation_steps`` micro-batches.
             windows = self._micro_batch_windows(
                 epoch_orders,
                 num_samples
-                if token_budget is None
+                if has_segments
                 else batch_size * self.gradient_accumulation_steps,
                 batch_size,
                 token_ids,
                 token_budget,
             )
             micro_batches_per_step = self._micro_batches_per_step(
-                windows,
-                (accumulation_steps or self.gradient_accumulation_steps)
-                if token_budget is None
-                else None,
+                windows, accumulation_steps if has_segments else None
             )
-            # Policy, KL and value units: each term averages over its window's units.
+            # Policy, KL and value units: each term averages over its window's
+            # units on every rank, packed or padded.
             term_units = (
                 None
-                if token_budget is None
+                if has_segments
                 else (
                     self._loss_units_per_row(action_masks, None, "token"),
                     self._loss_units_per_row(action_masks, None, "token"),
@@ -835,8 +836,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             "clipfrac",
                             "off_policy_token_mask_frac",
                             "pg_loss",
+                            "policy_loss",
                         ),
-                        0.0,
+                        policy_loss,
                     )
                 else:
                     log_probs, values = self._actor_critic_pass(
@@ -858,6 +860,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     )
                     scored_rows[rows_index] = True
                 vf_loss = self._ppo_value_loss(values, *value_inputs)
+                metrics["vf_loss"] = vf_loss.detach()
                 if vf_scale is not None:
                     vf_loss = vf_loss * vf_scale
                 total_loss = policy_loss + vf_loss
@@ -875,10 +878,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     grad_updates += 1
                 if is_filler:
                     continue
-                learn_metrics.add(
-                    {"vf_loss": vf_loss, "policy_loss": policy_loss, **metrics},
-                    counted=batch_action_mask.any(),
-                )
+                learn_metrics.add(metrics, counted=batch_action_mask.any())
             # Gradients still pending a step carry into the next learn call.
             if held_loss is not None:
                 self._raise_if_loss_not_finite_on_any_rank(held_loss)
@@ -1111,7 +1111,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         token_advantages = turn_advantages.gather(dim=1, index=safe_turn_ids)
         # Whiten over the action tokens the policy loss averages over.
         if self.whiten_advantages:
-            token_advantages = global_masked_whiten(token_advantages, action_mask)
+            token_advantages = global_masked_whiten(
+                token_advantages, action_mask, self._row_replicas()
+            )
         token_returns = token_returns * valid_turn_mask.float()
         token_advantages = token_advantages * valid_turn_mask.float()
         del turn_values, turn_advantages
@@ -1178,8 +1180,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         mask_f = mask.float()
         token_returns = (token_advantages + values) * mask_f
         if self.whiten_advantages:
-            token_advantages = global_masked_whiten(token_advantages, action_mask)
+            token_advantages = global_masked_whiten(
+                token_advantages, action_mask, self._row_replicas()
+            )
         return token_returns, token_advantages * mask_f
+
+    def _row_replicas(self) -> int:
+        """Ranks that hold the same learn rows: the tensor- and context-parallel group."""
+        world_size = get_world_size()
+        return world_size // self.shard_runtime.data_parallel_world(world_size)
 
     def _backward_ppo_pass(
         self, loss: torch.Tensor, accumulation_steps: int | None
@@ -1385,7 +1394,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type term_scales: tuple[torch.Tensor, torch.Tensor] | None
         :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
             scalar tensors: ``kl`` (NaN when ``beta == 0``), ``kl_clamp_frac``,
-            ``pg_loss``, ``clipfrac``, ``off_policy_token_mask_frac``, ``entropy``.
+            ``pg_loss``, ``policy_loss`` (before ``term_scales``), ``clipfrac``,
+            ``off_policy_token_mask_frac``, ``entropy``.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         log_probs = torch.masked_fill(log_probs, ~action_mask.bool(), 1.0)
@@ -1427,12 +1437,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             ),
             "pg_loss": pg_loss.detach(),
         }
+        kl_loss = (
+            pg_loss.new_zeros(())
+            if self.beta == 0.0
+            else masked_mean(kl_penalty, action_mask)
+        )
+        metrics["policy_loss"] = (pg_loss + self.beta * kl_loss).detach()
         if term_scales is not None:
             pg_loss = pg_loss * term_scales[0]
-        if self.beta == 0.0:
-            return pg_loss, metrics
-        kl_loss = masked_mean(kl_penalty, action_mask)
-        if term_scales is not None:
             kl_loss = kl_loss * term_scales[1]
         return pg_loss + self.beta * kl_loss, metrics
 

@@ -14,6 +14,7 @@ without ``image_grid_hw``. Both are idempotent; safe to call twice.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -107,6 +108,7 @@ def install_nemotron_h_omni_vision(
         "get_image_features",
         accept_patch_grid_rows,
         vision_filler_features,
+        operator.attrgetter("image_token_id"),
     )
 
 

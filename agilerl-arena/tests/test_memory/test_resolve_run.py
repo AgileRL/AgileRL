@@ -1717,8 +1717,8 @@ def _quote(plan: RunMemoryPlan, merged: bool, transport: str) -> GpuSplit:
 
 class TestQwen35NineBWeightSync:
     def test_short_generation_keeps_the_adapter(self) -> None:
-        # Arrange: one short turn at batch 1. The two trainers split it at
-        # TP 2, which nccl_reshard cannot refit from, and merged NIXL sync
+        # Arrange: one short turn at batch 1. The two trainers split it over
+        # CP 2, which nccl_reshard cannot refit from, and merged NIXL sync
         # costs more than merged generation gains.
         manifest = _qwen35_9b_manifest(32, 1, 1)
         device = _device("A100-80").model_copy(update={"gpus_per_node": 4})
@@ -1732,12 +1732,12 @@ class TestQwen35NineBWeightSync:
         nixl = _quote(plan, True, "nixl")
         adapter = _quote(plan, False, "nixl")
         assert plan.training.fsdp is not None
-        assert plan.training.fsdp.tp == 2
+        assert (plan.training.fsdp.tp, plan.training.fsdp.cp) == (1, 2)
         assert {split.sync_transport for split in plan.quotes} == {"nixl"}
-        assert nixl.learn_seconds == pytest.approx(0.471, abs=0.01)
+        assert nixl.learn_seconds == pytest.approx(0.465, abs=0.01)
         assert nixl.generation_seconds == pytest.approx(0.232, abs=0.01)
         assert nixl.sync_seconds == pytest.approx(0.726, abs=0.01)
-        assert adapter.learn_seconds == pytest.approx(0.471, abs=0.01)
+        assert adapter.learn_seconds == pytest.approx(0.465, abs=0.01)
         assert adapter.generation_seconds == pytest.approx(0.470, abs=0.01)
         assert adapter.sync_seconds == pytest.approx(0.359, abs=0.005)
         assert adapter.synced_step_seconds < nixl.synced_step_seconds

@@ -14,6 +14,7 @@ splits a fused pass into micro-batches. Primitives stay in
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextvars import Token
 from itertools import accumulate, groupby, pairwise
 from typing import Any, Literal, NamedTuple
 
@@ -26,7 +27,9 @@ from typing_extensions import Self
 
 from agilerl.distributed import allreduce_max_ints
 from agilerl.distributed.context_parallel import (
+    IMAGE_TOKEN_SHARD,
     ULYSSES_PARAMS,
+    ImageTokenShard,
     clear_ulysses_params,
     update_ulysses_params,
 )
@@ -314,8 +317,9 @@ class PackedSequenceForward(SequenceForward):
 class ContextParallelSequenceForward(SequenceForward):
     """Ulysses shards of a right-padded batch; each rank scores its own shard.
 
-    Entering publishes the shard's varlen offsets to the Ulysses attention;
-    exiting restores the params published before it, so forwards nest.
+    Entering publishes the shard's varlen offsets to the Ulysses attention,
+    and the full rows of a forward with images to the vision tower; exiting
+    restores what was published before it, so forwards nest.
 
     :param model_kwargs: ``actor(**kwargs)`` inputs of this rank's shard.
     :param targets: ``(B, S_local)`` next-token ids of this rank's shard.
@@ -329,6 +333,7 @@ class ContextParallelSequenceForward(SequenceForward):
     :param action_len: ``S`` of the CP-aligned action frame across all ranks.
     :param cu_seqlens: Varlen offsets of the sharded rows.
     :param host_cu_seqlens: Host copy of ``cu_seqlens``.
+    :param image_shard: Full rows of a forward with images, or ``None``.
     """
 
     def __init__(
@@ -345,6 +350,7 @@ class ContextParallelSequenceForward(SequenceForward):
         action_len: int,
         cu_seqlens: torch.Tensor,
         host_cu_seqlens: tuple[int, ...],
+        image_shard: ImageTokenShard | None = None,
     ) -> None:
         super().__init__(
             model_kwargs, targets, score_mask, support_ids, n_scored, width
@@ -355,7 +361,9 @@ class ContextParallelSequenceForward(SequenceForward):
         self.action_len = action_len
         self.cu_seqlens = cu_seqlens
         self.host_cu_seqlens = host_cu_seqlens
+        self.image_shard = image_shard
         self.previous_params: dict[str, object] = {}
+        self.image_shard_token: Token[ImageTokenShard | None] | None = None
 
     def _gather(self, tensor: torch.Tensor) -> torch.Tensor:
         if torch.is_grad_enabled():
@@ -381,11 +389,14 @@ class ContextParallelSequenceForward(SequenceForward):
     def __enter__(self) -> Self:
         self.previous_params = dict(ULYSSES_PARAMS)
         update_ulysses_params(self.cu_seqlens, self.host_cu_seqlens)
+        self.image_shard_token = IMAGE_TOKEN_SHARD.set(self.image_shard)
         return self
 
     def __exit__(self, *exc: object) -> None:
         clear_ulysses_params()
         ULYSSES_PARAMS.update(self.previous_params)
+        assert self.image_shard_token is not None
+        IMAGE_TOKEN_SHARD.reset(self.image_shard_token)
 
 
 class PackedContextParallelSequenceForward(ContextParallelSequenceForward):
@@ -693,8 +704,10 @@ class ContextParallelSequence(SequenceLayout):
             "attention_mask": shard_for_cp(mask[:, :action_len], self.rank, self.cp),
             "use_cache": False,
         }
+        image_shard = None
         if pixel_values is not None:
             kwargs["pixel_values"] = _repeat_rows(pixel_values, copies)
+            image_shard = ImageTokenShard(ids[:, :-1], positions, self.rank, self.cp)
         cu_seqlens = (
             torch.arange(sharded_ids.shape[0] + 1, device=ids.device, dtype=torch.int32)
             * action_len
@@ -718,6 +731,7 @@ class ContextParallelSequence(SequenceLayout):
             action_len,
             cu_seqlens,
             tuple(range(0, (sharded_ids.shape[0] + 1) * action_len, action_len)),
+            image_shard,
         )
 
 
@@ -749,6 +763,9 @@ class PackedContextParallelSequence(ContextParallelSequence):
         copies: int = 1,
         host_masks: HostMasks | None = None,
     ) -> SequenceForward:
+        if pixel_values is not None:
+            msg = "Packed context parallel does not take images; run padded context parallel"
+            raise NotImplementedError(msg)
         if host_masks is None:
             host_masks = HostMasks.read(mask, score_mask)
         packed = pack_padded_batch(ids, mask, score_mask, host_masks.packed_counts())
@@ -778,8 +795,6 @@ class PackedContextParallelSequence(ContextParallelSequence):
             ),
             "use_cache": False,
         }
-        if pixel_values is not None:
-            kwargs["pixel_values"] = _repeat_rows(pixel_values, copies)
         cu_seqlens, host_cu_seqlens = _packed_cp_offsets(
             packed, n_predictions, action_len, copies
         )

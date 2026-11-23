@@ -138,8 +138,8 @@ TP_WHOLE_CLASSES = {Gemma4TextDecoderLayer, Gemma4TextModel}
 # Norms stay whole. The token and per-layer embeddings share this class and the
 # tied head; TP splits their columns outside the block plan.
 SKIPPED_CLASSES = {Gemma4RMSNorm, Gemma4TextScaledWordEmbedding}
-# cp > 1 on this VL checkpoint requires strip_multimodal_towers=True, so the
-# towers never run in a context-parallel forward.
+# The towers are frozen and run whole on every CP rank with Ulysses off, so
+# neither plan covers them.
 TOWER_CLASSES = {Gemma4VisionModel, Gemma4AudioModel, Gemma4MultimodalEmbedder}
 # One weight of each part the TP plan shards, by stack FQN without LoRA wrappers:
 # sliding and full attention, a KV-shared layer, the MLP, and the per-layer embedding.

@@ -1152,6 +1152,7 @@ def _activation_workspace_components(
 
 
 def _runtime_components(
+    arch: ModelArch,
     peak: ActivationPeak,
     adapters: AdapterState,
     device: DeviceSpec,
@@ -1169,8 +1170,16 @@ def _runtime_components(
     distributed_overhead = (
         trainer_distributed_bytes(device, settings) if multi_rank else 0
     )
+    gated_delta_cp = formulas.context_parallel_gated_delta_bytes(
+        arch, 1 if settings.fsdp is None else settings.fsdp.cp
+    )
     overhead = (
-        context_bytes + rollout + job_overhead + lib_overhead + distributed_overhead
+        context_bytes
+        + rollout
+        + job_overhead
+        + lib_overhead
+        + distributed_overhead
+        + gated_delta_cp
     )
     return (
         MemoryComponent(
@@ -1193,6 +1202,7 @@ def _runtime_components(
                 "job_overhead": int(job_overhead),
                 "trainer_lib_overhead": int(lib_overhead),
                 "distributed_trainer_overhead": int(distributed_overhead),
+                "context_parallel_gated_delta": int(gated_delta_cp),
             },
         ),
         MemoryComponent(
@@ -1463,6 +1473,7 @@ def _hostless_training_breakdown(
         _model_state_components(base, adapters, peak)
         + _activation_workspace_components(peak, adapters)
         + _runtime_components(
+            arch,
             peak,
             adapters,
             device,
