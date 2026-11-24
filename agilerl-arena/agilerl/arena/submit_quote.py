@@ -74,7 +74,7 @@ def print_quote(quote: dict[str, Any]) -> None:
 
 
 def submit_quote_lines(quote: dict[str, Any]) -> list[str]:
-    """Hardware, hourly rate and estimated total for a quote."""
+    """Hardware, hourly rate, startup and estimated total for a quote."""
     nodes = quote["num_nodes"]
     gpus = f"{quote['num_gpus']}x {quote['gpu_type']}" if quote["gpu_type"] else "CPU"
     hardware = (
@@ -88,8 +88,15 @@ def submit_quote_lines(quote: dict[str, Any]) -> list[str]:
             f"${quote['estimated_cost']:,.2f} for about {quote['estimated_hours']:.1f} h "
             f"({quote['max_steps']:,} steps)"
         )
-    return [
+    lines = [
         f"Hardware:        {hardware}",
         f"Hourly rate:     ${quote['hourly_cost']:,.2f} per hour",
-        f"Estimated total: {estimate}",
     ]
+    # Arena servers older than the startup estimate send no startup_minutes.
+    if quote.get("startup_minutes") is not None:
+        lines.append(
+            f"Startup:         ~{quote['startup_minutes']:.0f} min "
+            f"(${quote['startup_cost']:,.2f}) before training starts"
+        )
+    lines.append(f"Estimated total: {estimate}")
+    return lines
