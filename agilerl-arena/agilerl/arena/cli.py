@@ -764,14 +764,20 @@ def experiment_resume(
 
 @experiment.command("stop")
 @click.argument("experiment_name")
+@click.option(
+    "--project",
+    default=None,
+    help="Project the experiment is in (defaults to the default project in ~/.arena/config.json).",
+)
 @click.pass_obj
 def experiment_stop(
     config: CommandConfig,
     experiment_name: str,
+    project: str | None,
 ) -> None:
     """Stop a running experiment by name (same as the platform training job name)."""
     with arena_client(config) as client:
-        emit_result(client.stop_experiment(experiment_name))
+        emit_result(client.stop_experiment(experiment_name, project=project))
 
 
 @experiment.command("checkpoints")

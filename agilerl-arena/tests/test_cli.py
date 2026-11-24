@@ -1827,7 +1827,16 @@ class TestExperimentStopCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "stop", "my-exp"])
         assert result.exit_code == 0
-        mock_client.stop_experiment.assert_called_once_with("my-exp")
+        mock_client.stop_experiment.assert_called_once_with("my-exp", project=None)
+
+    def test_stop_with_project(self, runner, mock_client):
+        mock_client.stop_experiment.return_value = {"stopped": True}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "stop", "my-exp", "--project", "proj1"]
+            )
+        assert result.exit_code == 0
+        mock_client.stop_experiment.assert_called_once_with("my-exp", project="proj1")
 
 
 class TestExperimentCheckpointsCommand:

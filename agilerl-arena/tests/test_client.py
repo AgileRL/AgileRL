@@ -1262,11 +1262,33 @@ class TestResolveProject:
 class TestStopExperiment:
     def test_posts_cli_stop_by_name(self, api_key_client):
         api_key_client._request = MagicMock(return_value="Ok")
-        api_key_client.stop_experiment("my-exp")
+        with patch.object(api_key_client, "get_default_project", return_value=None):
+            api_key_client.stop_experiment("my-exp")
         api_key_client._request.assert_called_once_with(
             "POST",
             "/api/cli/v1/experiments/jobs/stop",
             json={"experiment_name": "my-exp"},
+        )
+
+    def test_sends_explicit_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="Ok")
+        api_key_client.stop_experiment("my-exp", project="proj")
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": "my-exp", "project": "proj"},
+        )
+
+    def test_falls_back_to_default_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="Ok")
+        with patch.object(
+            api_key_client, "get_default_project", return_value="my-default"
+        ):
+            api_key_client.stop_experiment("my-exp")
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": "my-exp", "project": "my-default"},
         )
 
 
