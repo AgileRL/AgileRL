@@ -1148,6 +1148,67 @@ class TestSolveMain:
         ) in capsys.readouterr().err
 
 
+class TestUnsetRubricPath:
+    """A dataset rollout that leaves the rubric path to ``--reward-file`` is sized as written."""
+
+    @staticmethod
+    def _without_rubric(tmp_path):
+        doc = copy.deepcopy(MANIFEST)
+        del doc["environment"]["reward_file_path"]
+        return write_manifest(tmp_path, doc, "no_rubric.yaml")
+
+    def test_estimate_matches_the_manifest_that_names_its_rubric(
+        self, tmp_path, manifest_path, capsys
+    ):
+        # Arrange
+        unset = self._without_rubric(tmp_path)
+
+        # Act
+        named_code = main(
+            manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+        named = json.loads(capsys.readouterr().out)
+        unset_code = main(unset, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True)
+        unset_report = json.loads(capsys.readouterr().out)
+
+        # Assert
+        assert unset_code == named_code == EXIT_OK
+        assert unset_report["training"] == named["training"]
+        assert unset_report["generation"] == named["generation"]
+
+    def test_solve_matches_the_manifest_that_names_its_rubric(
+        self, tmp_path, manifest_path, capsys
+    ):
+        # Arrange
+        unset = self._without_rubric(tmp_path)
+
+        # Act
+        named_code = run_solve(
+            manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+        named = json.loads(capsys.readouterr().out)
+        unset_code = run_solve(
+            unset, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+
+        # Assert
+        assert unset_code == named_code == EXIT_OK
+        assert json.loads(capsys.readouterr().out) == named
+
+    def test_a_manifest_that_is_not_a_mapping_is_a_usage_error(self, tmp_path, capsys):
+        # Arrange
+        listed = tmp_path / "listed.yaml"
+        listed.write_text("- GRPO\n")
+
+        # Act
+        estimate_code = main(str(listed), gpu="NVIDIA L4", config_path=TINY_CONFIG)
+        solve_code = run_solve(str(listed), gpu="NVIDIA L4", config_path=TINY_CONFIG)
+
+        # Assert
+        assert estimate_code == solve_code == EXIT_USAGE
+        assert "The manifest must be a mapping, not list." in capsys.readouterr().err
+
+
 class TestMemorySolveCommand:
     def test_solves_from_the_command_line(self, manifest_path):
         # Act

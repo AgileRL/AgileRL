@@ -211,6 +211,10 @@ asynchronously: rollout engines generate while the trainer learns. The ``network
 the base model, ``Qwen/Qwen3.5-0.8B``, and a LoRA adapter, so training only updates the adapter
 weights.
 
+``algorithm.batch_size`` is the number of prompts per step, and GRPO samples ``group_size``
+completions for each. Arena only accepts a ``batch_size`` that is a power of 2 from 1 to 1024, so
+the manifest uses 8.
+
 .. collapse:: gsm8k_grpo.yaml
 
    .. literalinclude:: /_static/examples/gsm8k_grpo.yaml
