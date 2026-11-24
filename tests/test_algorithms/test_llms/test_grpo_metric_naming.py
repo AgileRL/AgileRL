@@ -66,6 +66,8 @@ class _Stub:
         clipfrac_value: float = 0.1,
     ) -> None:
         self.device = torch.device("cpu")
+        self.actor = torch.nn.Linear(1, 1)
+        self.optimizer_steps = 0
         self.beta = beta
         self.use_value_head = False
         self.loss_type = "grpo"
