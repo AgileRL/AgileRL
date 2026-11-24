@@ -549,6 +549,50 @@ class ArenaClient:
         """Get the authenticated user's credit information."""
         return self._request("GET", "/api/users/credits")
 
+    def get_credit_balance(self) -> dict[str, Any]:
+        """Get the active organization's balance and its accrued, uncharged cost.
+
+        :returns: ``balance`` (spendable credits), ``accrued_cost`` (run up by
+            running jobs and deployments but not charged yet),
+            ``balance_after_accrued`` and ``accrued``, one entry per running
+            item with ``kind``, ``id``, ``experiment_id``, ``name``, ``since``,
+            ``hourly_cost`` and ``accrued_cost``.
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: With status 404 from an Arena server without
+            accrued cost.
+        """
+        return self._request("GET", "/api/credit-usages/balance")
+
+    def get_credit_ledger(
+        self,
+        *,
+        job_id: int | None = None,
+        deployment_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List the active organization's charges and credits, newest first.
+
+        :param job_id: Only charges for this job.
+        :param deployment_id: Only charges for this deployment.
+        :param limit: Most entries to return (the server caps it at 1000).
+        :returns: Entries with ``time``, ``kind``, ``job_id``,
+            ``deployment_id``, ``experiment_id``, ``item``, ``description``,
+            ``amount`` (negative for charges) and ``balance`` (after the entry).
+        :rtype: list[dict[str, Any]]
+        :raises ArenaAPIError: With status 404 from an Arena server without the
+            ledger.
+        """
+        params = {
+            key: value
+            for key, value in (
+                ("job_id", job_id),
+                ("deployment_id", deployment_id),
+                ("limit", limit),
+            )
+            if value is not None
+        }
+        return self._request("GET", "/api/credit-usages/ledger", params=params)
+
     # -------------------------------------------------------------------------
     ### Environments ###
     # -------------------------------------------------------------------------

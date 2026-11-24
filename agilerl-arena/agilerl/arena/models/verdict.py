@@ -38,6 +38,10 @@ CLASSIC_RL_UNAVAILABLE_MESSAGE = (
     "Classic RL is no longer supported in Arena. Use the open-source AgileRL v2 "
     "release: https://github.com/AgileRL/AgileRL/releases/tag/v2.67.0"
 )
+LORA_TARGET_MODULES_FIELD = "network.lora_config.target_modules"
+LORA_TARGET_MODULES_MESSAGE = (
+    "LoRA target modules are chosen by Arena; remove target_modules."
+)
 
 
 def loc_to_path(loc: tuple[Any, ...]) -> str:
@@ -295,6 +299,43 @@ def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     return []
 
 
+def sets_lora_target_modules(manifest: TrainingManifest) -> bool:
+    """Whether the manifest names LoRA modules, which Arena chooses itself.
+
+    ``all-linear`` is the unset sentinel the submit API allows. The algorithm
+    and network sections share one LoRA config after validation, so this
+    covers ``algorithm.lora_config`` too.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: True when either section sets a module list.
+    :rtype: bool
+    """
+    network = manifest.network
+    if not isinstance(network, FinetuningNetworkSpec):
+        return False
+    return network.lora_config.target_modules != "all-linear"
+
+
+def lora_target_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Refuse a LoRA module list; Arena chooses the modules.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    if not sets_lora_target_modules(manifest):
+        return []
+    return [
+        {
+            "path": LORA_TARGET_MODULES_FIELD,
+            "message": LORA_TARGET_MODULES_MESSAGE,
+            "kind": "lora_target_modules_unavailable",
+        }
+    ]
+
+
 def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     """What Arena refuses on submit that the manifest schema allows.
 
@@ -310,10 +351,31 @@ def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
         *batch_size_errors(manifest),
         *context_length_errors(manifest),
         *run_errors(manifest),
+        *lora_target_errors(manifest),
     ]
 
 
-def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
+def failure(failures: list[dict[str, str]]) -> dict[str, Any]:
+    """A verdict record for a manifest that failed.
+
+    :param failures: Error records, as :func:`errors` builds them.
+    :type failures: list[dict[str, str]]
+    :returns: The verdict.
+    :rtype: dict[str, Any]
+    """
+    return {
+        "ok": False,
+        "errors": failures,
+        "warnings": [],
+        "manifest_version": __version__,
+    }
+
+
+def verdict(
+    document: dict[str, Any],
+    submit: bool = False,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Validate *document* and report the outcome as one JSON-safe record.
 
     :param document: The raw manifest document.
@@ -321,11 +383,13 @@ def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
     :param submit: Also report :func:`submit_errors`, as ``arena manifest
         validate`` does. Arena validates a stored run without them.
     :type submit: bool
+    :param context: Pydantic validation context.
+    :type context: dict[str, Any] | None
     :returns: The verdict.
     :rtype: dict[str, Any]
     """
     try:
-        manifest = TrainingManifest.model_validate(document)
+        manifest = TrainingManifest.model_validate(document, context=context)
     except (ValidationError, ValueError) as err:
         failures = errors(err)
     else:
@@ -339,12 +403,7 @@ def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
                 "warnings": model_warnings(manifest),
                 "manifest_version": __version__,
             }
-    return {
-        "ok": False,
-        "errors": failures,
-        "warnings": [],
-        "manifest_version": __version__,
-    }
+    return failure(failures)
 
 
 __all__ = [
@@ -353,14 +412,18 @@ __all__ = [
     "EXIT_INVALID",
     "EXIT_OK",
     "HPO_UNAVAILABLE_MESSAGE",
+    "LORA_TARGET_MODULES_FIELD",
+    "LORA_TARGET_MODULES_MESSAGE",
     "arena_failures",
     "describe",
     "errors",
+    "failure",
     "hpo_fields",
     "is_classic_rl",
     "loc_to_path",
     "model_warnings",
     "read_manifest",
+    "sets_lora_target_modules",
     "submit_errors",
     "verdict",
 ]

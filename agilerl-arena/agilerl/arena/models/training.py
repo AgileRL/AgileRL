@@ -27,6 +27,12 @@ CheckpointExportTrigger = Literal["final", "best", "on_demand", "every"]
 
 DEFAULT_DROP_UNINFORMATIVE_GROUPS = True
 
+# Starting values for a new LLM run; the schema and the default manifest share them.
+LLM_REPORTING_INTERVAL = 1
+LLM_EVALUATION_INTERVAL = 10
+ROLLOUT_LLM_MAX_STEPS = 200
+DATASET_LLM_NUM_EPOCHS = 1
+
 
 class CheckpointExportSpec(BaseModel):
     """When to write a merged Hugging Face package next to adapter checkpoints.

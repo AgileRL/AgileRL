@@ -64,7 +64,7 @@ from agilerl.arena.models.schema import (
     _inline_lora_config_inplace,
     algorithm_name_if,
     algorithm_schema,
-    dataset_backed_grpo_rollout_if,
+    dataset_backed_rollout_if,
     environment_dataset_identity_if,
     environment_dataset_type_if,
     environment_rollout_type_if,
@@ -2283,8 +2283,8 @@ class TestSchema:
         )
         assert llm_cnn["evo_steps"] == 20
 
-    def test_dataset_backed_grpo_rollout_num_epochs_conditional(self) -> None:
-        expected_if = dataset_backed_grpo_rollout_if()
+    def test_dataset_backed_rollout_num_epochs_conditional(self) -> None:
+        expected_if = dataset_backed_rollout_if()
         conditionals = manifest_schema().get("allOf") or []
         match = next(
             c
@@ -2317,6 +2317,13 @@ class TestSchema:
         assert applied["num_epochs"] == 1
         assert applied["max_steps"] is None
         assert applied["evo_steps"] == 20
+
+        for name in ("LLMPPO", "LLMREINFORCE"):
+            applied = self._applied_training_defaults(
+                {**dataset_rollout, "algorithm": {"name": name}}
+            )
+            assert applied["num_epochs"] == 1
+            assert applied["max_steps"] is None
 
         generative_rollout = {
             "algorithm": {"name": "GRPO"},
@@ -2428,21 +2435,6 @@ class TestSchema:
         )
         assert split_cond is not None
 
-        rollout_dataset_cond = next(
-            c
-            for c in conditionals
-            if c.get("if")
-            == {
-                "allOf": [
-                    environment_dataset_identity_if(),
-                    environment_rollout_type_if(),
-                ]
-            }
-            and c.get("then")
-            == environment_then({"rubric_name": {"default": "reward_fn"}})
-        )
-        assert rollout_dataset_cond is not None
-
         response_column_cond = next(
             c
             for c in conditionals
@@ -2488,7 +2480,7 @@ class TestSchema:
         assert applied["train_test_split"] == 0.9
         assert applied["strict_chat_template_boundary"] is True
         assert "response_column" not in applied
-        assert applied["rubric_name"] == "reward_fn"
+        assert "rubric_name" not in applied
         assert applied["num_envs"] == 1
 
         dataset_sft = {

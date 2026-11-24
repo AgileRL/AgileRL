@@ -51,7 +51,11 @@ from agilerl.arena.memory.resolve.decode_costs import (
     decode_costs,
     merged_engine_speedups,
 )
-from agilerl.arena.memory.resolve.fsdp import TrainingMemoryPlan
+from agilerl.arena.memory.resolve.fsdp import (
+    CrossNodeSeconds,
+    StepTiming,
+    TrainingMemoryPlan,
+)
 from agilerl.arena.memory.resolve.learn_costs import learn_costs
 from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
@@ -229,17 +233,23 @@ class TrainerCost(NamedTuple):
     fsdp: bool
     # :attr:`TrainingMemoryPlan.optimizer_offload_seconds`, per optimizer step.
     optimizer_offload_seconds: float = 0.0
+    # :attr:`TrainingMemoryPlan.cross_node`, per optimizer step.
+    cross_node: CrossNodeSeconds = CrossNodeSeconds()
 
     @classmethod
     def of(cls, plan: TrainingMemoryPlan) -> TrainerCost:
         """The cost of one training-memory plan.
 
         :param plan: The plan for one trainer count.
-        :return: Its learn cost ratio, whether it trains FSDP, and its
-            optimizer-offload seconds per optimizer step.
+        :return: Its learn cost ratio, whether it trains FSDP, its
+            optimizer-offload seconds and its traffic between nodes, per
+            optimizer step.
         """
         return cls(
-            plan.learn_cost_ratio, plan.fsdp is not None, plan.optimizer_offload_seconds
+            plan.learn_cost_ratio,
+            plan.fsdp is not None,
+            plan.optimizer_offload_seconds,
+            plan.cross_node,
         )
 
 
@@ -330,13 +340,30 @@ def learn_forward_passes(spec: RolloutLLMSpec) -> int:
     :param spec: The rollout algorithm.
     :return: Update passes plus no-grad passes.
     """
-    update = 2 * spec.gradient_row_copies * spec.update_epochs
+    return 2 * spec.gradient_row_copies * spec.update_epochs + no_grad_passes(spec)
+
+
+def no_grad_passes(spec: RolloutLLMSpec) -> int:
+    """No-grad forwards a learn step runs over every trained row.
+
+    :param spec: The rollout algorithm.
+    :return: Reference, critic and old log-prob passes.
+    """
     reference = int(spec.beta > 0)
     if isinstance(spec, LLMPPOSpec):
-        return update + 1 + reference
+        return 1 + reference
     if isinstance(spec, LLMREINFORCESpec):
-        return update + 2 * reference
-    return update + reference
+        return 2 * reference
+    return reference
+
+
+def no_grad_sweeps(spec: RolloutLLMSpec) -> float:
+    """No-grad forwards over one optimizer step's tokens.
+
+    :param spec: The rollout algorithm.
+    :return: :func:`no_grad_passes` spread over the update epochs and row copies.
+    """
+    return no_grad_passes(spec) / (spec.gradient_row_copies * spec.update_epochs)
 
 
 def _learn_gpu_seconds(
@@ -790,6 +817,37 @@ def _optimizer_steps(workload: SplitWorkload, trainers: int) -> int:
     return workload.update_epochs * (per_rank // (workload.mini_batch_size or per_rank))
 
 
+def step_timing(
+    manifest: TrainingManifest, model: ModelSpec, device: DeviceSpec
+) -> StepTiming | None:
+    """What the training-memory search ranks a multi-node trainer plan's learn seconds by.
+
+    :param manifest: Validated rollout manifest; ``training_gpus_per_agent`` is the trainer count.
+    :param model: Training-side model.
+    :param device: Training GPU.
+    :return: The timing, or ``None`` when the trainers fit one node or cannot
+        shard the batch, the algorithm does not generate rollouts, or the GPU's
+        peak FLOPs are unknown.
+    """
+    spec = manifest.algorithm
+    trainers = manifest.training.training_gpus_per_agent
+    peak_flops = device.peak_bf16_flops
+    if (
+        trainers <= (device.gpus_per_node or trainers)
+        or not isinstance(spec, RolloutLLMSpec)
+        or peak_flops is None
+    ):
+        return None
+    workload = split_workload_from_manifest(manifest)
+    if not _trainers_shard_batch(workload, trainers):
+        return None
+    steps = max(_optimizer_steps(workload, trainers), 1)
+    return StepTiming(
+        _learn_gpu_seconds(model, device, peak_flops, workload) / (trainers * steps),
+        no_grad_sweeps(spec),
+    )
+
+
 def _cycle_rollout_batch_size(
     workload: SplitWorkload, trainers: int, engines: int, resident: int
 ) -> int | None:
@@ -947,14 +1005,28 @@ def _split_pricer(
         cycles_per_step = (
             workload.batch_size * workload.generated_per_trained / rollout_batch_size
         )
+        optimizer_steps = _optimizer_steps(workload, trainers)
+        # FSDP prefetch overlaps weight gathers with compute; the routed-token
+        # exchange, gradient sync and optimizer offload do not overlap.
+        learn_seconds = (
+            max(
+                learn_gpu_seconds * cost.learn_cost_ratio / trainers,
+                cost.cross_node.gathers * optimizer_steps,
+            )
+            + (
+                cost.cross_node.exchange
+                + cost.cross_node.grad_sync
+                + cost.optimizer_offload_seconds
+            )
+            * optimizer_steps
+        )
         return GpuSplit(
             trainers=trainers,
             engines=engines,
             engine_width=engine_width,
             teacher_engine_gpus=workload.teacher_engine_gpus,
             rollout_batch_size=rollout_batch_size,
-            learn_seconds=learn_gpu_seconds * cost.learn_cost_ratio / trainers
-            + cost.optimizer_offload_seconds * _optimizer_steps(workload, trainers),
+            learn_seconds=learn_seconds,
             generation_seconds=cycles_per_step * cycle_seconds,
             max_num_batched_tokens=None if step == fallback else step,
             sync_seconds=syncs[sync_key],
