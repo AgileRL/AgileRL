@@ -300,21 +300,27 @@ def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
 
 
 def sets_lora_target_modules(manifest: TrainingManifest) -> bool:
-    """Whether the manifest names LoRA modules, which Arena chooses itself.
+    """Whether the manifest picks LoRA modules, which Arena chooses itself.
 
-    ``all-linear`` is the unset sentinel the submit API allows. The algorithm
-    and network sections share one LoRA config after validation, so this
-    covers ``algorithm.lora_config`` too.
+    ``all-linear`` is the unset sentinel the submit API allows. The catalog's
+    default modules for the model are Arena's own choice: the platform writes
+    that list into default and stored run specs, so it passes too. The
+    algorithm and network sections share one LoRA config after validation, so
+    this covers ``algorithm.lora_config`` too.
 
     :param manifest: A validated manifest.
     :type manifest: TrainingManifest
-    :returns: True when either section sets a module list.
+    :returns: True when either section picks a module list.
     :rtype: bool
     """
     network = manifest.network
     if not isinstance(network, FinetuningNetworkSpec):
         return False
-    return network.lora_config.target_modules != "all-linear"
+    modules = network.lora_config.target_modules
+    if isinstance(modules, str):
+        return modules != "all-linear"
+    entry = SUPPORTED_MODEL_INFO.get(network.pretrained_model_name_or_path)
+    return entry is None or set(modules) != entry.default_lora_modules
 
 
 def lora_target_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
