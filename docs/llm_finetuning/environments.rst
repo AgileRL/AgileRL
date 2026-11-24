@@ -83,7 +83,9 @@ It runs **in the training process, with no HTTP**:
    env = RolloutHarness.local(GuessEnv(), tokenizer, max_turns=3)
 
 ``max_turns`` bounds the episode; the env can still finish earlier by returning
-``terminated=True``. For a batch, wrap the same call so each slot gets its own
+``terminated=True``. ``max_turns=None`` puts no cap on turns: the episode runs
+until the env ends it or the next prompt no longer fits ``max_model_len``, which
+must then be set. For a batch, wrap the same call so each slot gets its own
 instance:
 
 .. code-block:: python

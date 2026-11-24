@@ -18,7 +18,7 @@ from agilerl.llm_envs import (
     RolloutHarness,
 )
 from agilerl.llm_envs.harness import ACTION_HISTORY_MAX_CHARS, PROMPT_LIMIT_INFO_KEY
-from agilerl.llm_envs.rubrics import reward_fn_to_rubric
+from agilerl.llm_envs.rubrics import add_group_score, reward_fn_to_rubric
 from agilerl.llm_envs.task_assigner import _mix_seed
 from tests.helpers.rollout_doubles import (
     FakeEnvClient,
@@ -310,6 +310,69 @@ class TestRolloutEnvStep:
         assert truncated is False
         assert terminated is False
         assert next_obs["input_ids"].shape[1] > first_len
+
+
+class TestRolloutEnvUncappedTurns:
+    def test_runs_until_the_next_prompt_no_longer_fits(self) -> None:
+        # Arrange
+        # A 6-token first prompt grows 10 a turn (2 generated, 8 feedback); the
+        # 63-token prompt budget holds six prompts and not a seventh of 66.
+        harness = RolloutHarness(
+            FakeEnvClient(reward=0.5),
+            _ChrTokenizer(),
+            max_turns=None,
+            apply_chat_template=False,
+            max_model_len=64,
+        )
+
+        # Act
+        prompts = _run_text_episode(harness, "xy")
+
+        # Assert
+        assert [int(p["input_ids"].shape[1]) for p in prompts] == [
+            6,
+            16,
+            26,
+            36,
+            46,
+            56,
+        ]
+        assert harness.current_prompt == {}
+        assert harness.get_episode_data()[3].tolist() == [0.5] * 6
+
+    def test_a_turn_zero_prompt_limit_keeps_one_reward(self) -> None:
+        # Arrange
+        harness = RolloutHarness(
+            FakeEnvClient(),
+            _ChrTokenizer(),
+            max_turns=None,
+            apply_chat_template=False,
+            max_model_len=1,
+        )
+
+        # Act
+        prompt, info = harness.reset()
+        rewards = harness.get_episode_data()[3]
+        add_group_score(rewards, 0, 0.5)
+
+        # Assert
+        assert prompt == {}
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
+        assert rewards.tolist() == [0.5]
+
+    def test_rejects_a_context_restart(self) -> None:
+        with pytest.raises(ValueError, match="max_turns=None cannot restart"):
+            RolloutHarness(
+                FakeEnvClient(),
+                _ChrTokenizer(),
+                max_turns=None,
+                max_model_len=64,
+                segment_prompt_tokens=32,
+            )
+
+    def test_requires_max_model_len(self) -> None:
+        with pytest.raises(ValueError, match="max_turns=None needs max_model_len"):
+            RolloutHarness(FakeEnvClient(), _ChrTokenizer(), max_turns=None)
 
 
 class TestRolloutEnvChatTemplateBoundary:
