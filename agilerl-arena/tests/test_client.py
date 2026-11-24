@@ -1294,16 +1294,16 @@ class TestStopExperiment:
             json={"experiment_name": "my-exp", "project": "proj"},
         )
 
-    def test_falls_back_to_default_project(self, api_key_client):
+    def test_unique_name_ignores_the_default_project(self, api_key_client):
         api_key_client._request = MagicMock(return_value="Ok")
         with patch.object(
-            api_key_client, "get_default_project", return_value="my-default"
+            api_key_client, "get_default_project", return_value="stale-default"
         ):
             api_key_client.stop_experiment("my-exp")
         api_key_client._request.assert_called_once_with(
             "POST",
             "/api/cli/v1/experiments/jobs/stop",
-            json={"experiment_name": "my-exp", "project": "my-default"},
+            json={"experiment_name": "my-exp"},
         )
 
 
@@ -2473,6 +2473,17 @@ class TestExperimentMethods:
                 "new_name": "exp1-again",
                 "project": "proj",
             },
+        )
+
+    def test_list_checkpoints_sends_the_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[])
+
+        api_key_client.list_checkpoints("exp1", project="proj")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/jobs/checkpoints",
+            params={"experiment_name": "exp1", "project": "proj"},
         )
 
     def test_list_checkpoints(self, api_key_client):
@@ -3901,9 +3912,8 @@ def _log_line(timestamp: int, message: str) -> dict[str, Any]:
 class TestArenaClientExperimentStatusAndLogs:
     def test_status_sends_the_name_and_project(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"status": "Failed"})
-        api_key_client._resolve_project = MagicMock(return_value="proj")
 
-        result = api_key_client.get_experiment_status("exp1")
+        result = api_key_client.get_experiment_status("exp1", project="proj")
 
         api_key_client._request.assert_called_once_with(
             "GET",
@@ -3980,3 +3990,62 @@ class TestArenaClientExperimentStatusAndLogs:
         pages = list(api_key_client.iter_experiment_logs("exp1"))
 
         assert len(pages) == 1
+
+
+class TestArenaClientByExperimentName:
+    def test_unique_name_sends_no_project(self, api_key_client):
+        # Arrange
+        api_key_client._request = MagicMock(return_value={"status": "Running"})
+        api_key_client.get_default_project = MagicMock(return_value="stale-default")
+
+        # Act
+        result = api_key_client.get_experiment_status("exp1")
+
+        # Assert
+        assert result == {"status": "Running"}
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/status",
+            params={"experiment_name": "exp1"},
+        )
+
+    def test_ambiguous_name_retries_in_the_default_project(self, api_key_client):
+        # Arrange
+        ambiguous = ArenaAPIError(
+            "ambiguous: 2 experiments named 'exp1'; pass project or projectName",
+            status_code=400,
+        )
+        api_key_client._request = MagicMock(
+            side_effect=[ambiguous, {"status": "Running"}]
+        )
+        api_key_client.get_default_project = MagicMock(return_value="my-default")
+
+        # Act
+        result = api_key_client.get_experiment_status("exp1")
+
+        # Assert
+        assert result == {"status": "Running"}
+        assert api_key_client._request.call_args.kwargs["params"] == {
+            "experiment_name": "exp1",
+            "project": "my-default",
+        }
+
+    def test_ambiguous_name_without_a_default_raises(self, api_key_client):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("ambiguous: 2 experiments", status_code=400)
+        )
+        api_key_client.get_default_project = MagicMock(return_value=None)
+
+        with pytest.raises(ArenaAPIError, match="ambiguous"):
+            api_key_client.get_experiment_status("exp1")
+
+    def test_other_errors_do_not_retry(self, api_key_client):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("Not found", status_code=404)
+        )
+        api_key_client.get_default_project = MagicMock(return_value="my-default")
+
+        with pytest.raises(ArenaAPIError, match="Not found"):
+            api_key_client.get_experiment_status("exp1")
+
+        assert api_key_client._request.call_count == 1

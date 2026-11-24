@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, ClassVar, Literal, TypedDict
+from typing import Any, BinaryIO, ClassVar, Literal, TypedDict, TypeVar
 
 import httpx
 from typing_extensions import Self
@@ -73,6 +73,7 @@ from agilerl.arena.utils import (
 )
 
 logger = logging.getLogger(__name__)
+Result = TypeVar("Result")
 
 DATASET_CATEGORIES = frozenset(
     {"sft", "preference", "reasoning", "tabular", "non-tabular", TRACES_DATASET_FORMAT}
@@ -1680,18 +1681,25 @@ class ArenaClient:
             ),
         )
 
-    def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
+    def list_checkpoints(
+        self, experiment_name: str, project: str | None = None
+    ) -> list[dict[str, Any]]:
         """List all checkpoints for an experiment.
 
         :param experiment_name: The name of the experiment to list checkpoints for.
         :type experiment_name: str
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
         :returns: A list of checkpoints.
         :rtype: list[dict[str, Any]]
         """
-        return self._request(
-            "GET",
-            "/api/cli/v1/experiments/jobs/checkpoints",
-            params={"experiment_name": experiment_name},
+        return self._by_experiment_name(
+            project,
+            lambda scope: self._request(
+                "GET",
+                "/api/cli/v1/experiments/jobs/checkpoints",
+                params=self._experiment_params(experiment_name, scope),
+            ),
         )
 
     def get_experiment_status(
@@ -1707,10 +1715,13 @@ class ArenaClient:
             unless the run failed) and ``last_modified``.
         :rtype: dict[str, Any]
         """
-        return self._request(
-            "GET",
-            "/api/cli/v1/experiments/status",
-            params=self._experiment_params(experiment_name, project),
+        return self._by_experiment_name(
+            project,
+            lambda scope: self._request(
+                "GET",
+                "/api/cli/v1/experiments/status",
+                params=self._experiment_params(experiment_name, scope),
+            ),
         )
 
     def get_experiment_logs(
@@ -1743,12 +1754,16 @@ class ArenaClient:
             ``next_after`` and ``has_more``.
         :rtype: dict[str, Any]
         """
-        params = self._experiment_params(experiment_name, project)
         optional = {"tail": tail, "after": after, "limit": limit, "level": level}
-        params.update(
-            {key: value for key, value in optional.items() if value is not None}
+        paging = {key: value for key, value in optional.items() if value is not None}
+        return self._by_experiment_name(
+            project,
+            lambda scope: self._request(
+                "GET",
+                "/api/cli/v1/experiments/logs",
+                params={**self._experiment_params(experiment_name, scope), **paging},
+            ),
         )
-        return self._request("GET", "/api/cli/v1/experiments/logs", params=params)
 
     def iter_experiment_logs(
         self,
@@ -1799,14 +1814,32 @@ class ArenaClient:
             )
             yield page
 
-    def _experiment_params(
-        self, experiment_name: str, project: str | None
-    ) -> dict[str, Any]:
+    @staticmethod
+    def _experiment_params(experiment_name: str, project: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {"experiment_name": experiment_name}
-        resolved_project = self._resolve_project(project)
-        if resolved_project is not None:
-            params["project"] = resolved_project
+        if project is not None:
+            params["project"] = project
         return params
+
+    def _by_experiment_name(
+        self, project: str | None, call: Callable[[str | None], Result]
+    ) -> Result:
+        """Run a lookup by experiment name, adding the default project only when the name is ambiguous.
+
+        :param project: Project the caller named, or ``None``.
+        :param call: The request, given the project to send.
+        :return: What ``call`` returns.
+        """
+        if project is not None:
+            return call(project)
+        default_project = self.get_default_project()
+        try:
+            return call(None)
+        except ArenaAPIError as exc:
+            ambiguous = exc.status_code == 400 and exc.detail.startswith("ambiguous")
+            if not (ambiguous and default_project):
+                raise
+        return call(default_project)
 
     def preview_experiment_metrics_csv(
         self,
@@ -1832,19 +1865,18 @@ class ArenaClient:
         :returns: A tuple of the metrics payload, content type, and disposition.
         :rtype: tuple[bytes, str | None, str | None]
         """
-        resolved_project = self._resolve_project(project)
-        params: list[tuple[str, Any]] = [
-            ("experiment_name", experiment_name),
-            ("preview_rows", preview_rows),
-        ]
-        if resolved_project is not None:
-            params.append(("project", resolved_project))
-        if metrics:
-            params.extend(("metric", m) for m in metrics)
-        return self._request_raw(
-            "GET",
-            "/api/cli/v1/experiments/metrics",
-            params=params,
+        metric_params = [("metric", m) for m in metrics or ()]
+        return self._by_experiment_name(
+            project,
+            lambda scope: self._request_raw(
+                "GET",
+                "/api/cli/v1/experiments/metrics",
+                params=[
+                    *self._experiment_params(experiment_name, scope).items(),
+                    ("preview_rows", preview_rows),
+                    *metric_params,
+                ],
+            ),
         )
 
     def list_experiment_metric_names(
@@ -1869,16 +1901,17 @@ class ArenaClient:
             ``details`` is True.
         :rtype: list[dict[str, Any]] | dict[str, Any]
         """
-        resolved_project = self._resolve_project(project)
-        params: dict[str, Any] = {"experiment_name": experiment_name}
-        if resolved_project is not None:
-            params["project"] = resolved_project
-        if details:
-            params["details"] = True
-        return self._request(
-            "GET",
-            "/api/cli/v1/experiments/metrics",
-            params=params,
+        detail_params = {"details": True} if details else {}
+        return self._by_experiment_name(
+            project,
+            lambda scope: self._request(
+                "GET",
+                "/api/cli/v1/experiments/metrics",
+                params={
+                    **self._experiment_params(experiment_name, scope),
+                    **detail_params,
+                },
+            ),
         )
 
     def list_resources(self, algorithm: str | None = None) -> dict[str, Any]:
@@ -1963,18 +1996,16 @@ class ArenaClient:
 
         :param experiment_name: Experiment name to halt.
         :type experiment_name: str
-        :param project: Project the experiment is in; defaults to the saved
-            default project.
+        :param project: Project, when the experiment name exists in more than one.
         :type project: str | None
         """
-        payload: dict[str, Any] = {"experiment_name": experiment_name.strip()}
-        resolved_project = self._resolve_project(project)
-        if resolved_project is not None:
-            payload["project"] = resolved_project
-        return self._request(
-            "POST",
-            "/api/cli/v1/experiments/jobs/stop",
-            json=payload,
+        return self._by_experiment_name(
+            project,
+            lambda scope: self._request(
+                "POST",
+                "/api/cli/v1/experiments/jobs/stop",
+                json=self._experiment_params(experiment_name.strip(), scope),
+            ),
         )
 
     # -------------------------------------------------------------------------

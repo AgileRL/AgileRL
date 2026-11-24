@@ -253,7 +253,7 @@ def _serialize_algorithm(spec: AlgoSpec) -> dict[str, Any]:
 
 
 def normalize_network_section(data: object) -> object:
-    """Nest a top-level ``arch`` and pin a concrete NetworkSpec when it is set.
+    """Pin the union branch: finetuning for a pretrained model, else a nested NetworkSpec.
 
     Without this, an unknown encoder key fails ``NetworkSpec`` then matches
     ``DeferredNetworkSpec``, whose ``encoder_config`` is an untyped dict.
@@ -261,7 +261,7 @@ def normalize_network_section(data: object) -> object:
     if isinstance(data, BaseModel) or not isinstance(data, dict):
         return data
     if "pretrained_model_name_or_path" in data:
-        return data
+        return FinetuningNetworkSpec.model_validate(data)
     data = normalize_manifest_network(data)
     if isinstance(data, dict) and network_arch_is_resolvable(data):
         return NetworkSpec.model_validate(data)
