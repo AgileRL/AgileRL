@@ -83,6 +83,7 @@ from agilerl.utils.algo_utils import (
     create_warmup_cosine_scheduler,
     stack_and_pad_experiences,
 )
+from agilerl.utils.stochastic_round import cast_exported_adapter
 
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
@@ -3414,7 +3415,10 @@ def save_peft_adapter_for_vllm_rollout(
     # materialise any remaining ``DTensor`` entries here before safetensors
     # serialisation (which cannot read a DTensor storage pointer).
     state = {
-        k: (v.full_tensor() if isinstance(v, DTensor) else v) for k, v in state.items()
+        key: cast_exported_adapter(
+            tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
+        )
+        for key, tensor in state.items()
     }
     save_file(state, adapter_path / "adapter_model.safetensors")
 

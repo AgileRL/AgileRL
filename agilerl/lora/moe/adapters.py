@@ -25,6 +25,7 @@ from agilerl.lora.moe.grouped_gemm import (
     grouped_operand,
     pad_lora_rank,
 )
+from agilerl.utils.stochastic_round import cast_compute_weight
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft.tuners.lora.layer import ParamWrapper
@@ -179,11 +180,20 @@ def partitioned_lora_delta(
 
 
 def lora_operands(
-    lora_a: torch.Tensor, lora_b: torch.Tensor, scaling: float
+    lora_a: torch.Tensor, lora_b: torch.Tensor, scaling: float, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Grouped-GEMM operands of stacked ``[E, r, in]`` / ``[E, out, r]`` factors, with ``scaling`` folded into ``A``."""
-    # One [E, r, in] multiply per layer: no row chunk scales its rows.
-    return grouped_operand(lora_a * scaling), grouped_operand(lora_b)
+    """Grouped-GEMM operands of stacked ``[E, r, in]`` / ``[E, out, r]`` factors, with ``scaling`` folded into ``A``.
+
+    :param lora_a: Stacked ``A`` factors.
+    :param lora_b: Stacked ``B`` factors.
+    :param scaling: LoRA scaling.
+    :param dtype: Activation dtype the GEMM runs in.
+    :return: The ``A`` and ``B`` operands.
+    """
+    # One [E, r, in] multiply per layer: no row chunk scales its rows. ``A`` is
+    # cast before scaling so its rounding is the draw the rollout adapter gets.
+    scaled_a = cast_compute_weight(lora_a, dtype) * scaling
+    return grouped_operand(scaled_a), grouped_operand(lora_b)
 
 
 def low_rank_delta(
