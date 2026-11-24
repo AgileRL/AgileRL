@@ -1257,6 +1257,8 @@ SUBMIT_QUOTE = {
     "step_seconds": 36.0,
     "estimated_hours": 11.25,
     "estimated_cost": 288.0,
+    "startup_minutes": 13.0,
+    "startup_cost": 5.5466,
 }
 
 
@@ -1509,6 +1511,9 @@ class TestExperimentSubmitPricePreview:
         )
         assert "Hourly rate:     $25.60 per hour" in result.stderr
         assert (
+            "Startup:         ~13 min ($5.55) before training starts" in result.stderr
+        )
+        assert (
             "Estimated total: $288.00 for about 11.2 h (1,000 steps)" in result.stderr
         )
         mock_client.quote_experiment.assert_called_once_with(
@@ -1607,8 +1612,30 @@ class TestExperimentSubmitPricePreview:
 
         assert result.exit_code == 0
         assert "Hourly rate:" in result.output
+        assert "Startup:         ~13 min ($5.55) before training starts" in (
+            result.output
+        )
         assert "Estimated total:" in result.output
         mock_client.submit_experiment.assert_not_called()
+
+    def test_a_server_without_a_startup_estimate_prints_no_startup_line(
+        self, runner, mock_client, manifest
+    ):
+        quote = {
+            key: value
+            for key, value in SUBMIT_QUOTE.items()
+            if key not in ("startup_minutes", "startup_cost")
+        }
+        mock_client.quote_experiment.return_value = quote
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "submit", "--yes", str(manifest)]
+            )
+
+        assert result.exit_code == 0
+        assert "Hourly rate:     $25.60 per hour" in result.stderr
+        assert "Startup:" not in result.stderr
 
     def test_dry_run_with_json_prints_the_quote(self, runner, mock_client, manifest):
         with _patched_arena_client(mock_client):
