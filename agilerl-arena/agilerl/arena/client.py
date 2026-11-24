@@ -181,7 +181,7 @@ def _environment_is_rollout(
     return spec_cls.env_type == "rollout"
 
 
-def _with_reward_file_path(
+def with_reward_file_path(
     manifest: str | Path | dict[str, Any],
     reward_file: str | os.PathLike[str] | bytes | None,
 ) -> str | Path | dict[str, Any]:
@@ -1444,7 +1444,7 @@ class ArenaClient:
         :return: The validated manifest payload and the resolved project name.
         """
         self._check_num_gpus(num_gpus)
-        manifest = _with_reward_file_path(manifest, reward_file)
+        manifest = with_reward_file_path(manifest, reward_file)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_runs_on_arena(training_manifest)
         self._check_model_status(training_manifest)
