@@ -3094,6 +3094,66 @@ class TestToPayloadModelFields:
         )
 
 
+STORE_WEIGHTS = "s3://arena-tenant/models/qwen3.5-0.8b/"
+
+
+class TestWeightsPath:
+    def test_network_weights_path_lifts_and_dumps_on_the_network(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "weights_path": STORE_WEIGHTS,
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+        payload = validated.to_payload()
+
+        # Assert
+        assert validated.algorithm.pretrained_model_name_or_path == (
+            "Qwen/Qwen3.5-0.8B"
+        )
+        assert validated.algorithm.weights_path == STORE_WEIGHTS
+        assert validated.algorithm.load_path == STORE_WEIGHTS
+        assert payload["network"]["weights_path"] == STORE_WEIGHTS
+        assert "weights_path" not in payload["algorithm"]
+
+    def test_algorithm_only_weights_path_moves_to_the_network(self) -> None:
+        # Arrange
+        doc = manifest(GRPO, algorithm={"weights_path": STORE_WEIGHTS})
+
+        # Act
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        # Assert
+        assert payload["network"]["weights_path"] == STORE_WEIGHTS
+        assert "weights_path" not in payload["algorithm"]
+
+    def test_without_weights_path_the_model_id_loads(self) -> None:
+        # Act
+        validated = TrainingManifest.model_validate(GRPO)
+
+        # Assert
+        assert validated.algorithm.weights_path is None
+        assert validated.algorithm.load_path == "Qwen/Qwen2.5-0.5B-Instruct"
+        assert "weights_path" not in validated.to_payload()["network"]
+
+    def test_disagreeing_weights_paths_raise(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            algorithm={"weights_path": "s3://arena-tenant/models/other/"},
+            network={"weights_path": STORE_WEIGHTS},
+        )
+
+        # Act / Assert
+        with pytest.raises(ValidationError, match=r"algorithm\.weights_path="):
+            TrainingManifest.model_validate(doc)
+
+
 class TestTrainingSpecWeightSyncBackend:
     def test_the_removed_key_is_rejected(self) -> None:
         broken = manifest(GRPO, training={"weight_sync_backend": "nccl"})

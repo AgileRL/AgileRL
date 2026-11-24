@@ -48,6 +48,25 @@ def teacher_manifest(**sections: dict) -> dict:
     return doc
 
 
+class TestDistillationTeacherModelLoadPathProperty:
+    def test_weights_path_is_where_the_teacher_loads(self) -> None:
+        # Act
+        model = DistillationTeacherModel(
+            pretrained_model_name_or_path="Qwen/Qwen3.5-9B",
+            weights_path="s3://arena-tenant/models/teacher/",
+        )
+
+        # Assert
+        assert model.load_path == "s3://arena-tenant/models/teacher/"
+
+    def test_without_weights_path_the_hub_id_loads(self) -> None:
+        # Act
+        model = DistillationTeacherModel(pretrained_model_name_or_path="big/model")
+
+        # Assert
+        assert model.load_path == "big/model"
+
+
 class TestDistillationTeacherConfig:
     def test_defaults_read_the_reference_trace_key(self) -> None:
         config = DistillationTeacherConfig()

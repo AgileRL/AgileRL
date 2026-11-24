@@ -992,6 +992,15 @@ class FinetuningNetworkSpec(BaseModel):
         min_length=1,
         description="HuggingFace model id or local path to fine-tune.",
     )
+    weights_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Local or s3:// directory to load the weights and tokenizer from. "
+            "pretrained_model_name_or_path then names the catalog model with "
+            "the same architecture, which sizes and configures the run."
+        ),
+    )
     max_context_length: int = Field(
         ...,
         ge=1,

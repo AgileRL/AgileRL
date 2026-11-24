@@ -225,9 +225,9 @@ class MultiAgentAlgorithmSpec(AlgorithmSpec):
 class LLMAlgorithmSpec(AlgorithmSpec):
     """LLM fine-tuning algorithms.
 
-    ``pretrained_model_name_or_path``, ``max_model_len`` and ``lora_config`` are
-    written under the manifest's ``network`` section and lifted onto the
-    algorithm when the manifest is validated.
+    ``pretrained_model_name_or_path``, ``weights_path``, ``max_model_len`` and
+    ``lora_config`` are written under the manifest's ``network`` section and
+    lifted onto the algorithm when the manifest is validated.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -348,6 +348,15 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "in the network section and lifted onto the algorithm."
         ),
     )
+    weights_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Local or s3:// directory to load the weights and tokenizer from, "
+            "when they are not at pretrained_model_name_or_path. Normally "
+            "written in the network section and lifted onto the algorithm."
+        ),
+    )
     max_model_len: int = Field(
         default=1024,
         ge=1,
@@ -372,6 +381,11 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     gradient_row_copies: ClassVar[int] = 1
     # The gradient forward packs its sequences when the attention backend can.
     supports_sequence_packing: ClassVar[bool] = False
+
+    @property
+    def load_path(self) -> str | None:
+        """Where the weights and tokenizer load from."""
+        return self.weights_path or self.pretrained_model_name_or_path
 
     @field_validator("fsdp", mode="before")
     @classmethod
