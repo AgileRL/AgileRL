@@ -147,7 +147,7 @@ def test_qa_dataset_empty_rows_raises() -> None:
 
 
 class TestRewardFnToRubric:
-    def test_calls_fn_with_message_answer_question(self) -> None:
+    def test_calls_fn_with_the_whole_turn_answer_and_question(self) -> None:
         seen: list[tuple] = []
 
         def fn(completion, answer, question):
@@ -159,7 +159,7 @@ class TestRewardFnToRubric:
         score = reward_fn_to_rubric(fn)(action, observation)
 
         assert score == 0.5
-        assert seen == [("done", "a", "q")]
+        assert seen == [("<think>r</think>done", "a", "q")]
 
     def test_binds_arguments_by_name(self) -> None:
         seen: list[tuple] = []
@@ -173,7 +173,7 @@ class TestRewardFnToRubric:
         score = reward_fn_to_rubric(fn)(action, observation)
 
         assert score == 0.25
-        assert seen == [("q", "a", "done")]
+        assert seen == [("q", "a", "<think>r</think>done")]
 
     def test_names_the_component_after_the_fn(self) -> None:
         def accuracy(completion, answer, question):

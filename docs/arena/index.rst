@@ -457,6 +457,8 @@ class, which provides a higher-level interface:
 
    - :ref:`training_manifests` section for an overview of the training manifest and its options.
 
+   - :ref:`arena_reward_inputs` for how ``prompt_template`` is rendered and what your reward function receives.
+
    - :ref:`trainers` section for more information on the ``ArenaTrainer`` class and its usage.
 
    - :ref:`llm_distributed` for sizing multi-GPU LLM runs (``fsdp``, ``training_gpus_per_agent``).
@@ -720,5 +722,6 @@ account. See :doc:`snowflake`.
 .. toctree::
    :maxdepth: 1
 
+   prompts_and_rewards
    traces
    snowflake
