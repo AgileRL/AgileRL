@@ -49,7 +49,7 @@ from agilerl.arena.output import (
     supports_interactive_selection,
 )
 from agilerl.arena.snowflake.cli import snowflake_group
-from agilerl.arena.submit_quote import confirm_submit_price
+from agilerl.arena.submit_quote import confirm_resume_price, confirm_submit_price
 
 ArenaError.enable_cli_mode()
 
@@ -711,6 +711,13 @@ def _experiment_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
     default=None,
     help="Project, when the experiment name exists in more than one.",
 )
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Resume without asking to confirm the price.",
+)
 @click.pass_obj
 def experiment_resume(
     config: CommandConfig,
@@ -719,18 +726,23 @@ def experiment_resume(
     checkpoint: str | None,
     new_name: str | None,
     project: str | None,
+    yes: bool,
 ) -> None:
-    """Resume an experiment by name."""
+    """Resume an experiment by name.
+
+    Prints the hardware, hourly rate and estimated total first, then asks to
+    go on. --yes skips the question, and so does a pipe or a file on stdin.
+    """
+    resume_args = {
+        "experiment_name": experiment_name,
+        "max_steps": max_steps,
+        "checkpoint": checkpoint,
+        "new_name": new_name,
+        "project": project,
+    }
     with arena_client(config) as client:
-        emit_result(
-            client.resume_experiment(
-                experiment_name=experiment_name,
-                max_steps=max_steps,
-                checkpoint=checkpoint,
-                new_name=new_name,
-                project=project,
-            )
-        )
+        confirm_resume_price(client, yes, **resume_args)
+        emit_result(client.resume_experiment(**resume_args))
 
 
 @experiment.command("stop")
