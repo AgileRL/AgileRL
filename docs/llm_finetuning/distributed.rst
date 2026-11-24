@@ -88,7 +88,8 @@ On Arena
 --------
 
 Arena launches the ranks for you; there is no ``torchrun``. Size the run in the
-manifest and pick a GPU type and GPUs per node from ``arena resources list``:
+manifest and pick a GPU type and GPUs per node from
+``arena resources list --algorithm <algorithm.name>``:
 
 .. code-block:: yaml
 

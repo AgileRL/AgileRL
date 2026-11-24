@@ -79,8 +79,8 @@ See `agilerl/arena/memory/README.md`.
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
 
-# List the GPU types you can train on and the --num-gpus values each takes:
-arena resources list
+# List the GPU types a GRPO run trains on and the --num-gpus values each takes:
+arena resources list --algorithm GRPO
 
 # Pick a GPU type and count; Arena uses the fewest nodes that fit:
 arena experiments submit path/to/manifest.yaml --project my-project \

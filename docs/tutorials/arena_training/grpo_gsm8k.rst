@@ -264,13 +264,14 @@ estimate and picks the cheapest GPUs that fit. Asynchronous GRPO needs at least 
 trains the adapter and one runs the vLLM rollout engine. A 0.8B model fits on two single-GPU
 nodes, or on one 8-GPU node.
 
-LLM training runs on the GPU types ``arena resources list`` shows. Arena cloud L4 and A100 GPUs are
+LLM training runs on the GPU types ``arena resources list --algorithm GRPO`` shows, with the GPU
+counts a GRPO run trains on. Arena cloud L4 and A100 GPUs are
 not available for LLM training. To choose the GPUs yourself, pass both flags, for example
 ``--gpu-type h100-80 --num-gpus 8``, and check the fit first:
 
 .. code-block:: bash
 
-   arena resources list
+   arena resources list --algorithm GRPO
    arena memory estimate gsm8k_grpo.yaml --gpu h100-80 --num-gpus 8
 
 Monitor Training

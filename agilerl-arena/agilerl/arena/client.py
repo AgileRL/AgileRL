@@ -1888,8 +1888,10 @@ class ArenaClient:
         ``gpu_type``, and each of its ``numGpus`` a value for ``num_gpus``. An
         older platform returns resource ``tiers`` instead.
 
-        :param algorithm: The run's ``algorithm.name``. Without it the list is
-            for LLM training.
+        :param algorithm: The run's ``algorithm.name``. Arena then lists only
+            the GPU counts that algorithm trains on: a GRPO-family run
+            generates on its own GPU, so it needs at least two. Without it the
+            list is for LLM training and includes single GPUs.
         :type algorithm: str | None
         :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int],
             "numGpus": list[int], "devOnly": bool}]}``.
