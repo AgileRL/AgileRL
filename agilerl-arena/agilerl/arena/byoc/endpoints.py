@@ -44,6 +44,7 @@ UPDATE_CLASS: ManifestInvoke = {
     "responseKind": "json",
     "params": [
         {"name": "name", "in": "query", "type": "string", "required": True},
+        {"name": "byocScope", "in": "query", "type": "string", "required": False},
         {"name": "num_nodes", "in": "body", "type": "int", "required": False},
         {"name": "node_selector", "in": "body", "type": "json", "required": False},
         {"name": "metadata", "in": "body", "type": "json", "required": False},
@@ -72,7 +73,10 @@ DELETE_CLASS: ManifestInvoke = {
     # The endpoint reads ``name`` from the query string, so declare it explicitly
     # rather than relying on the method-based fallback (which routes DELETE
     # payloads to the JSON body).
-    "params": [{"name": "name", "in": "query", "type": "string", "required": True}],
+    "params": [
+        {"name": "name", "in": "query", "type": "string", "required": True},
+        {"name": "byocScope", "in": "query", "type": "string", "required": False},
+    ],
 }
 
 DISABLE: ManifestInvoke = {
@@ -206,6 +210,7 @@ UNREGISTER_CLUSTER: ManifestInvoke = {
     "responseKind": "json",
     "params": [
         {"name": "name", "in": "body", "type": "string", "required": True},
+        {"name": "byocScope", "in": "body", "type": "string", "required": False},
     ],
 }
 
@@ -215,6 +220,7 @@ ROTATE_CLUSTER_TOKEN: ManifestInvoke = {
     "responseKind": "json",
     "params": [
         {"name": "name", "in": "body", "type": "string", "required": True},
+        {"name": "byocScope", "in": "body", "type": "string", "required": False},
     ],
 }
 
@@ -236,6 +242,7 @@ INSTALL_CLUSTER_PACKAGE: ManifestInvoke = {
             "type": "string",
             "required": False,
         },
+        {"name": "byocScope", "in": "body", "type": "string", "required": False},
     ],
 }
 
@@ -245,6 +252,7 @@ INSTALL_CLUSTER_ARTIFACTS: ManifestInvoke = {
     "responseKind": "json",
     "params": [
         {"name": "name", "in": "body", "type": "string", "required": True},
+        {"name": "byocScope", "in": "body", "type": "string", "required": False},
     ],
 }
 
