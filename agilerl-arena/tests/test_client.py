@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -2735,9 +2736,18 @@ class TestListResources:
         result = api_key_client.list_resources()
 
         api_key_client._request.assert_called_once_with(
-            "GET", "/api/cli/v1/resources/list"
+            "GET", "/api/cli/v1/resources/list", params=None
         )
         assert result == body
+
+    def test_sends_the_algorithm(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"gpuTypes": []})
+
+        api_key_client.list_resources(algorithm="SUPERVISED")
+
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/resources/list", params={"algorithm": "SUPERVISED"}
+        )
 
 
 class TestDownloadExperimentMetrics:
@@ -3825,3 +3835,110 @@ class TestArenaClientVersionSignals:
             f"agilerl-arena 9.9.9 is available (you have {__version__}). "
             "Run: pip install -U agilerl-arena\n"
         )
+
+
+def _logs_page(
+    lines: list[dict[str, Any]],
+    *,
+    status: str = "Running",
+    next_after: int | None = None,
+    has_more: bool = False,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "experiment_name": "exp1",
+        "status": status,
+        "failure_reason": failure_reason,
+        "last_modified": "2026-11-23T10:00:00+00:00",
+        "lines": lines,
+        "next_after": next_after,
+        "has_more": has_more,
+    }
+
+
+def _log_line(timestamp: int, message: str) -> dict[str, Any]:
+    return {"timestamp": timestamp, "severity": "INFO", "message": message}
+
+
+class TestArenaClientExperimentStatusAndLogs:
+    def test_status_sends_the_name_and_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"status": "Failed"})
+        api_key_client._resolve_project = MagicMock(return_value="proj")
+
+        result = api_key_client.get_experiment_status("exp1")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/status",
+            params={"experiment_name": "exp1", "project": "proj"},
+        )
+        assert result == {"status": "Failed"}
+
+    def test_logs_sends_only_the_paging_options_given(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=_logs_page([]))
+        api_key_client._resolve_project = MagicMock(return_value=None)
+
+        api_key_client.get_experiment_logs("exp1", tail=20, level="warning")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/logs",
+            params={"experiment_name": "exp1", "tail": 20, "level": "warning"},
+        )
+
+    def test_iter_pages_forward_until_the_server_has_no_more(self, api_key_client):
+        api_key_client._resolve_project = MagicMock(return_value=None)
+        api_key_client._request = MagicMock(
+            side_effect=[
+                _logs_page([_log_line(1, "a")], next_after=1, has_more=True),
+                _logs_page([_log_line(2, "b")], next_after=2),
+            ]
+        )
+
+        pages = list(api_key_client.iter_experiment_logs("exp1"))
+
+        assert [line["message"] for page in pages for line in page["lines"]] == [
+            "a",
+            "b",
+        ]
+        second_call = api_key_client._request.call_args_list[1]
+        assert second_call.kwargs["params"]["after"] == 1
+
+    def test_follow_polls_until_the_run_ends_and_a_poll_is_empty(self, api_key_client):
+        api_key_client._resolve_project = MagicMock(return_value=None)
+        api_key_client._request = MagicMock(
+            side_effect=[
+                _logs_page([_log_line(1, "a")], next_after=1),
+                _logs_page([], next_after=1),
+                _logs_page([_log_line(2, "b")], status="Failed", next_after=2),
+                _logs_page(
+                    [],
+                    status="Failed",
+                    next_after=2,
+                    failure_reason="Out of GPU memory.",
+                ),
+            ]
+        )
+
+        with patch("agilerl.arena.client.time.sleep") as sleep:
+            pages = list(
+                api_key_client.iter_experiment_logs("exp1", tail=50, follow=True)
+            )
+
+        assert len(pages) == 4
+        assert pages[-1]["failure_reason"] == "Out of GPU memory."
+        assert sleep.call_count == 3
+        first_call = api_key_client._request.call_args_list[0]
+        assert first_call.kwargs["params"]["tail"] == 50
+
+    def test_without_follow_a_running_experiment_stops_after_the_last_page(
+        self, api_key_client
+    ):
+        api_key_client._resolve_project = MagicMock(return_value=None)
+        api_key_client._request = MagicMock(
+            return_value=_logs_page([], next_after=None)
+        )
+
+        pages = list(api_key_client.iter_experiment_logs("exp1"))
+
+        assert len(pages) == 1
