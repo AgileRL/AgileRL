@@ -44,6 +44,8 @@ UPDATE_CLASS: ManifestInvoke = {
     "responseKind": "json",
     "params": [
         {"name": "name", "in": "query", "type": "string", "required": True},
+        {"name": "cluster", "in": "query", "type": "string", "required": False},
+        {"name": "cluster_id", "in": "query", "type": "int", "required": False},
         {"name": "byocScope", "in": "query", "type": "string", "required": False},
         {"name": "num_nodes", "in": "body", "type": "int", "required": False},
         {"name": "node_selector", "in": "body", "type": "json", "required": False},
@@ -75,6 +77,8 @@ DELETE_CLASS: ManifestInvoke = {
     # payloads to the JSON body).
     "params": [
         {"name": "name", "in": "query", "type": "string", "required": True},
+        {"name": "cluster", "in": "query", "type": "string", "required": False},
+        {"name": "cluster_id", "in": "query", "type": "int", "required": False},
         {"name": "byocScope", "in": "query", "type": "string", "required": False},
     ],
 }
