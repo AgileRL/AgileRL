@@ -702,10 +702,19 @@ def experiment_list(config: CommandConfig, project: str | None) -> None:
         rows = client.list_experiments(project=project)
     emit_result(
         rows,
+        display=lambda rows: [_experiment_row_for_display(row) for row in rows],
         empty_message=(
             "No experiments yet. Submit one with: arena experiments submit <manifest>"
         ),
     )
+
+
+def _experiment_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
+    """Show the server's ``status_label`` (e.g. "Waiting for capacity") as the status."""
+    shown = {key: value for key, value in row.items() if key != "status_label"}
+    if "status_label" in row:
+        shown["status"] = row["status_label"]
+    return shown
 
 
 @experiment.command("resume")
@@ -755,14 +764,20 @@ def experiment_resume(
 
 @experiment.command("stop")
 @click.argument("experiment_name")
+@click.option(
+    "--project",
+    default=None,
+    help="Project the experiment is in (defaults to the default project in ~/.arena/config.json).",
+)
 @click.pass_obj
 def experiment_stop(
     config: CommandConfig,
     experiment_name: str,
+    project: str | None,
 ) -> None:
     """Stop a running experiment by name (same as the platform training job name)."""
     with arena_client(config) as client:
-        emit_result(client.stop_experiment(experiment_name))
+        emit_result(client.stop_experiment(experiment_name, project=project))
 
 
 @experiment.command("checkpoints")
