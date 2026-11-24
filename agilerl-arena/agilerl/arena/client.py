@@ -54,9 +54,10 @@ from agilerl.arena.models import (
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.verdict import (
-    HPO_UNAVAILABLE_MESSAGE,
+    CLASSIC_RL_UNAVAILABLE_MESSAGE,
+    arena_failures,
     describe,
-    hpo_fields,
+    is_classic_rl,
     submit_errors,
 )
 from agilerl.arena.output import StreamRichRenderer
@@ -1234,7 +1235,10 @@ class ArenaClient:
         :type pretrained_model_name_or_path: str | None
         :returns: A filled RunSpec, or one section when ``field`` is set.
         :rtype: dict[str, Any]
+        :raises ArenaValidationError: When ``algorithm`` is a classic RL algorithm.
         """
+        if is_classic_rl(algorithm):
+            raise ArenaValidationError(CLASSIC_RL_UNAVAILABLE_MESSAGE)
         params: dict[str, Any] = {"algorithm": algorithm}
         optional = {
             "gymEnv": env_name,
@@ -1372,7 +1376,7 @@ class ArenaClient:
         self._check_num_gpus(num_gpus)
         manifest = _with_reward_file_path(manifest, reward_file)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
-        self._check_no_hpo(training_manifest)
+        self._check_runs_on_arena(training_manifest)
         self._check_model_status(training_manifest)
         self._check_submit_rules(training_manifest)
         resolved_project = self._resolve_project(project)
@@ -1469,11 +1473,12 @@ class ArenaClient:
             raise ArenaValidationError(msg)
 
     @staticmethod
-    def _check_no_hpo(manifest: TrainingManifest) -> None:
-        """Reject a manifest that turns on HPO, which Arena does not run."""
-        fields = hpo_fields(manifest)
-        if fields:
-            msg = f"{', '.join(fields)}: {HPO_UNAVAILABLE_MESSAGE}"
+    def _check_runs_on_arena(manifest: TrainingManifest) -> None:
+        """Reject a classic RL manifest, or one that turns on HPO; Arena runs neither."""
+        failures = arena_failures(manifest)
+        if failures:
+            paths = ", ".join(failure["path"] for failure in failures)
+            msg = f"{paths}: {failures[0]['message']}"
             raise ArenaValidationError(msg)
 
     @staticmethod
@@ -1907,7 +1912,9 @@ class ArenaClient:
 
         :param experiment_name: The name of the experiment to deploy.
         :type experiment_name: str
-        :param checkpoint: The checkpoint to deploy. If None, deploy the best checkpoint.
+        :param checkpoint: Steps of the checkpoint to deploy, as listed by
+            :meth:`list_checkpoints` (e.g. ``"500"``). If None, deploy the
+            checkpoint with the most steps.
         :type checkpoint: str | None
         :param memory_scope: Who an LLM deployment keeps chat sessions for. ``"user"``
             gives every caller their own conversations, ``"organization"`` shares them
@@ -1941,7 +1948,9 @@ class ArenaClient:
             json=body,
         )
         checkpoint_suffix = (
-            f" (checkpoint {checkpoint})" if checkpoint else " (best checkpoint)"
+            f" (checkpoint {checkpoint})"
+            if checkpoint
+            else " (checkpoint with the most steps)"
         )
         logger.info(
             "Agent submitted for deployment from experiment %s%s. "

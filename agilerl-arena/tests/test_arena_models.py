@@ -821,8 +821,10 @@ class TestVerdict:
             document = read_manifest("-")
         assert document["algorithm"]["name"] == "DQN"
 
-    def test_valid_and_invalid_documents(self) -> None:
-        assert verdict(_manifest())["ok"] is True
+    def test_classic_and_invalid_documents(self) -> None:
+        classic = verdict(_manifest())
+        assert classic["ok"] is False
+        assert classic["errors"][0]["kind"] == "classic_rl_unavailable"
         failed = verdict(_manifest(algorithm={"name": "NOPE"}))
         assert failed["ok"] is False
         assert failed["errors"]
@@ -831,6 +833,11 @@ class TestVerdict:
         manifest = TrainingManifest.model_construct(
             algorithm=GRPOSpec.model_construct(pretrained_model_name_or_path=None),
         )
+
+        assert model_warnings(manifest) == []
+
+    def test_model_warnings_for_a_classic_manifest(self) -> None:
+        manifest = TrainingManifest.model_validate(_manifest())
 
         assert model_warnings(manifest) == []
 

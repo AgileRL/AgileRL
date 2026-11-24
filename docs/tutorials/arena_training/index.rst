@@ -11,6 +11,11 @@ provider-agnostic and gives users the flexibility to train on a variety of compu
 The **Arena client** is how you interact with the platform from your machine: upload and validate
 custom environments, submit training jobs on scalable compute, and deploy trained agents for inference.
 
+.. note::
+
+   Arena trains LLMs. Classic RL algorithms such as PPO, DQN and TD3 are no longer available on
+   Arena; train them with open-source AgileRL, starting from the :ref:`Gymnasium tutorials <Gymnasium_tutorials>`.
+
 .. seealso::
 
    :ref:`arena_client` for the full CLI and Python SDK reference (commands, manifests, and API details).

@@ -24,7 +24,7 @@ from agilerl.arena.models.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.models.registry import did_you_mean
+from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -33,6 +33,10 @@ EXIT_FAILED = 2
 HPO_UNAVAILABLE_MESSAGE = (
     "HPO and populations aren't available for LLM training on Arena. "
     "Remove training.hpo and the mutation section, and set training.pop_size to 1."
+)
+CLASSIC_RL_UNAVAILABLE_MESSAGE = (
+    "Classic RL is no longer supported in Arena. Use the open-source AgileRL v2 "
+    "release: https://github.com/AgileRL/AgileRL/releases/tag/v2.67.0"
 )
 
 
@@ -155,6 +159,50 @@ def hpo_fields(manifest: TrainingManifest) -> list[str]:
     ):
         fields.append("training.pop_size")
     return fields
+
+
+def is_classic_rl(algorithm_name: str) -> bool:
+    """Whether *algorithm_name* is a registered algorithm that is not an LLM one.
+
+    Arena trains only the LLM algorithms; the rest run with open-source AgileRL.
+    An unregistered name is not classic: the server decides what it is.
+
+    :param algorithm_name: The manifest's ``algorithm.name``.
+    :type algorithm_name: str
+    :returns: True for classic RL algorithms such as PPO or DQN.
+    :rtype: bool
+    """
+    try:
+        spec_cls = MANIFEST_REGISTRY.get(algorithm_name)
+    except KeyError:
+        return False
+    return not issubclass(spec_cls, LLMAlgorithmSpec)
+
+
+def arena_failures(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """List what stops a valid manifest from running on Arena.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: One record per failure, with ``path``, ``message`` and ``kind``.
+    :rtype: list[dict[str, str]]
+    """
+    if not isinstance(manifest.algorithm, LLMAlgorithmSpec):
+        return [
+            {
+                "path": "algorithm.name",
+                "message": CLASSIC_RL_UNAVAILABLE_MESSAGE,
+                "kind": "classic_rl_unavailable",
+            }
+        ]
+    return [
+        {
+            "path": field,
+            "message": HPO_UNAVAILABLE_MESSAGE,
+            "kind": "hpo_unavailable",
+        }
+        for field in hpo_fields(manifest)
+    ]
 
 
 def not_allowed(path: str, requirement: str, options: list[int]) -> dict[str, str]:
@@ -281,14 +329,7 @@ def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
     except (ValidationError, ValueError) as err:
         failures = errors(err)
     else:
-        failures = [
-            {
-                "path": field,
-                "message": HPO_UNAVAILABLE_MESSAGE,
-                "kind": "hpo_unavailable",
-            }
-            for field in hpo_fields(manifest)
-        ]
+        failures = arena_failures(manifest)
         if submit:
             failures += submit_errors(manifest)
         if not failures:
@@ -307,13 +348,16 @@ def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
 
 
 __all__ = [
+    "CLASSIC_RL_UNAVAILABLE_MESSAGE",
     "EXIT_FAILED",
     "EXIT_INVALID",
     "EXIT_OK",
     "HPO_UNAVAILABLE_MESSAGE",
+    "arena_failures",
     "describe",
     "errors",
     "hpo_fields",
+    "is_classic_rl",
     "loc_to_path",
     "model_warnings",
     "read_manifest",

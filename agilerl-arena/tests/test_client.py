@@ -33,7 +33,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.models import __version__
+from agilerl.arena.models import MANIFEST_REGISTRY, TrainingManifest, __version__
 from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
@@ -1686,21 +1686,22 @@ class TestDuplicateEnvironmentVersion:
         assert payload["version"] is None
 
 
-def _hpo_manifest() -> dict:
+def _dqn_manifest() -> dict:
     return {
         "algorithm": {"name": "DQN", "lr": 0.001},
         "environment": {"name": "LunarLander-v3", "num_envs": 8},
-        "network": {
-            "latent_dim": 64,
-            "encoder_config": {"hidden_size": [64]},
-            "head_config": {"hidden_size": [64]},
-        },
-        "training": {"max_steps": 1000, "pop_size": 4, "hpo": True},
-        "mutation": {"probabilities": {"no_mut": 0.5, "rl_hp_mut": 0.5}},
+        "training": {"max_steps": 1000},
     }
 
 
-class TestArenaClientSubmitExperimentHpo:
+def _hpo_manifest() -> dict:
+    manifest = _grpo_manifest("Qwen/Qwen3.5-4B")
+    manifest["training"] = {"max_steps": 100, "hpo": True}
+    manifest["mutation"] = {"probabilities": {"no_mut": 0.5, "rl_hp_mut": 0.5}}
+    return manifest
+
+
+class TestArenaClientSubmitChecks:
     def test_manifest_without_hpo_is_submitted(self, api_key_client):
         manifest = _hpo_manifest()
         manifest["training"]["hpo"] = False
@@ -1723,6 +1724,22 @@ class TestArenaClientSubmitExperimentHpo:
             api_key_client.submit_experiment(manifest=_hpo_manifest(), project="proj")
 
         api_key_client._open_stream.assert_not_called()
+
+    def test_classic_rl_manifest_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"algorithm\.name: Classic RL is no longer supported in Arena",
+        ):
+            api_key_client.submit_experiment(manifest=_dqn_manifest(), project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_model_status_check_skips_a_classic_manifest(self):
+        manifest = TrainingManifest.model_validate(_dqn_manifest())
+
+        assert ArenaClient._check_model_status(manifest) is None
 
     def test_llm_population_is_rejected_before_any_request(self, api_key_client):
         api_key_client._open_stream = MagicMock()
@@ -1781,7 +1798,8 @@ def _validated_grpo(mock_validated: MagicMock) -> None:
     mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
     mock_validated.return_value.training.hpo = False
     mock_validated.return_value.mutation = None
-    mock_validated.return_value.algorithm.batch_size = 64
+    mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+    mock_validated.return_value.training.pop_size = 1
 
 
 @patch("agilerl.arena.client.TrainingManifest.get_validated")
@@ -1875,15 +1893,16 @@ class TestExperimentMethods:
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment(self, mock_validated, api_key_client):
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         mock_stream = _mock_ndjson_stream({"job_id": 1})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
         result = api_key_client.submit_experiment(
-            manifest={"algorithm": "PPO"},
+            manifest={"algorithm": "SFT"},
             project="proj",
             experiment_name="exp1",
         )
@@ -1892,7 +1911,7 @@ class TestExperimentMethods:
         mock_validated.assert_called_once()
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["json"] == {
-            "manifest": {"algorithm": "PPO"},
+            "manifest": {"algorithm": "SFT"},
             "project": "proj",
             "experiment_name": "exp1",
         }
@@ -1906,7 +1925,7 @@ class TestExperimentMethods:
 
         with pytest.raises(TypeError, match=removed):
             api_key_client.submit_experiment(
-                manifest={"algorithm": "PPO"}, project="proj", **{removed: 2}
+                manifest={"algorithm": "SFT"}, project="proj", **{removed: 2}
             )
         api_key_client._open_stream.assert_not_called()
 
@@ -1915,18 +1934,19 @@ class TestExperimentMethods:
         self, mock_validated, api_key_client
     ):
         # The server rejects explicit nulls; unset optionals must be absent.
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 3})
         )
 
-        api_key_client.submit_experiment(manifest={"algorithm": "PPO"}, project="proj")
+        api_key_client.submit_experiment(manifest={"algorithm": "SFT"}, project="proj")
 
         payload = api_key_client._open_stream.call_args[1]["json"]
-        assert payload == {"manifest": {"algorithm": "PPO"}, "project": "proj"}
+        assert payload == {"manifest": {"algorithm": "SFT"}, "project": "proj"}
         assert api_key_client._open_stream.call_args[1]["headers"] == {}
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
@@ -1934,7 +1954,8 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
@@ -1969,17 +1990,18 @@ class TestExperimentMethods:
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_requires_project(self, mock_validated, api_key_client):
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         api_key_client._open_stream = MagicMock()
 
         with (
             patch.object(api_key_client, "get_default_project", return_value=None),
             pytest.raises(ArenaConfigError, match="No project specified"),
         ):
-            api_key_client.submit_experiment(manifest={"algorithm": "PPO"})
+            api_key_client.submit_experiment(manifest={"algorithm": "SFT"})
 
         api_key_client._open_stream.assert_not_called()
 
@@ -1994,7 +2016,8 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = payload
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         reward_path = tmp_path / "reward.py"
         reward_path.write_text(
             "def reward(question, answer, completion):\n    return 1.0\n",
@@ -2031,7 +2054,8 @@ class TestExperimentMethods:
         mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 5})
         )
@@ -2054,16 +2078,17 @@ class TestExperimentMethods:
     def test_submit_experiment_sends_idempotency_key(
         self, mock_validated, api_key_client
     ):
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
 
         api_key_client.submit_experiment(
-            manifest={"algorithm": "PPO"},
+            manifest={"algorithm": "SFT"},
             project="proj",
             idempotency_key=" user-1:run ",
         )
@@ -2076,16 +2101,17 @@ class TestExperimentMethods:
     def test_submit_experiment_omits_a_blank_idempotency_key(
         self, mock_validated, api_key_client
     ):
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
         mock_validated.return_value.training.hpo = False
         mock_validated.return_value.mutation = None
-        mock_validated.return_value.algorithm.batch_size = 64
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
 
         api_key_client.submit_experiment(
-            manifest={"algorithm": "PPO"},
+            manifest={"algorithm": "SFT"},
             project="proj",
             idempotency_key="  ",
         )
@@ -3607,6 +3633,24 @@ class TestGetDefaultRunSpec:
                 "pretrainedModelNameOrPath": "ibm-granite/granite-3.3-2b-instruct",
             },
         )
+
+    @pytest.mark.parametrize("algorithm", ["PPO", "Recurrent PPO", "MATD3"])
+    def test_classic_rl_is_refused_before_any_request(self, api_key_client, algorithm):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError, match="Classic RL is no longer supported in Arena"
+        ):
+            api_key_client.get_default_run_spec(algorithm, env_name="my-gym-env")
+
+        api_key_client._request.assert_not_called()
+
+    def test_an_unregistered_algorithm_is_left_to_the_server(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={})
+
+        api_key_client.get_default_run_spec("Supervised", dataset_name="tabular")
+
+        api_key_client._request.assert_called_once()
 
 
 class TestArenaClientVersionSignals:
