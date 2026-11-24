@@ -268,7 +268,7 @@ class TestTrainingSettings:
         assert settings.fsdp is not None
         assert settings.fsdp.optim_cpu_offload is True
 
-    def test_attention_only_lora_scope(self):
+    def test_lora_scope_comes_from_the_catalog_not_the_manifest(self):
         settings = training_settings_from_manifest(
             manifest(
                 network={
@@ -276,7 +276,7 @@ class TestTrainingSettings:
                 }
             )
         )
-        assert settings.lora_target_scope == "attention-only"
+        assert settings.lora_target_scope == "all-linear"
 
     def test_packed_expert_targets_select_contracted_dispatch(self):
         settings = training_settings_from_manifest(
@@ -578,12 +578,13 @@ class TestTrainingSettings:
 
         assert settings.sequence_packing is True
 
-    def test_model_outside_the_catalog_packs_as_dense(self):
-        settings = training_settings_from_manifest(
-            manifest(network={"pretrained_model_name_or_path": "org/unlisted"})
-        )
-
-        assert settings.sequence_packing is True
+    def test_model_outside_the_catalog_has_no_lora_modules(self):
+        with pytest.raises(
+            ValueError, match="'org/unlisted' is not in the Arena model catalog"
+        ):
+            training_settings_from_manifest(
+                manifest(network={"pretrained_model_name_or_path": "org/unlisted"})
+            )
 
     def test_context_parallel_packs_under_flash_attention_2(self):
         settings = training_settings_from_manifest(
@@ -932,7 +933,18 @@ class TestGenerationSettings:
 
         assert settings.lora_dual_stream is True
 
-    def test_rollout_engines_receive_the_trainer_adapter_scope(self):
+    def test_model_outside_the_catalog_has_no_engine_adapter(self):
+        with pytest.raises(
+            ValueError, match="'org/unlisted' is not in the Arena model catalog"
+        ):
+            generation_settings_from_manifest(
+                manifest(
+                    network={"pretrained_model_name_or_path": "org/unlisted"},
+                    **ASYNC_ROLLOUT,
+                )
+            )
+
+    def test_rollout_engines_receive_the_catalog_adapter_scope(self):
         attention = {"lora_config": {"target_modules": ["q_proj", "v_proj"]}}
 
         rollout = generation_settings_from_manifest(
@@ -951,7 +963,7 @@ class TestGenerationSettings:
             }
         )
 
-        assert rollout.lora_sync_scope == "attention-only"
+        assert rollout.lora_sync_scope == "all-linear"
         assert sft.lora_sync_scope is None
 
     @pytest.mark.parametrize(
@@ -1837,8 +1849,8 @@ class TestRunConfig:
 
         assert settings.max_lora_rank == 32
 
-    def test_unknown_model_prices_the_rank_batch(self) -> None:
-        # Arrange: 8 prompts, group 4, on 2 trainer GPUs. The id is outside the catalog.
+    def test_unknown_model_cannot_be_sized(self) -> None:
+        # Arrange: the id is outside the catalog, so it has no LoRA modules.
         doc = manifest(
             algorithm={
                 "batch_size": 8,
@@ -1856,11 +1868,11 @@ class TestRunConfig:
         )
         device = device_spec_from_resource_class(L4_TIER)
 
-        # Act
-        config = run_config_from_manifest(doc, device, TINY_CONFIG)
-
-        # Assert
-        assert config.training.micro_batch_size == 16
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="'missing/not-a-model' is not in the Arena model catalog"
+        ):
+            run_config_from_manifest(doc, device, TINY_CONFIG)
 
     def test_omitted_micro_batch_is_searched_on_the_catalog_model(self) -> None:
         # Arrange: 8 prompts, group 4, at 8192 tokens on one L4. The run sizes

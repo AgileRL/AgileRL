@@ -1,0 +1,40 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+"""Placeholders a prompt template over dataset rows may use."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+# A single-braced ``{name}``; doubled braces are literal text.
+PROMPT_PLACEHOLDER = re.compile(r"(?<!\{)\{([A-Za-z_]\w*)\}(?!\})")
+ROW_PLACEHOLDERS = ("question", "answer")
+
+
+def check_row_placeholders(
+    prompt_template: dict[str, Any], columns: dict[str, str] | None
+) -> None:
+    """Reject a ``{name}`` the trainer never fills: over dataset rows only {question} and {answer} are.
+
+    :param prompt_template: The environment's prompt template.
+    :param columns: The environment's column mapping, or None when the names already match.
+    :raises ValueError: A message is not text, or names a placeholder that is not a row field.
+    """
+    columns = columns or {}
+    for key, text in prompt_template.items():
+        if not isinstance(text, str):
+            msg = f"prompt_template.{key} must be text, got {type(text).__name__}."
+            raise ValueError(msg)
+        for name in PROMPT_PLACEHOLDER.findall(text):
+            if name in ROW_PLACEHOLDERS:
+                continue
+            msg = (
+                f"prompt_template.{key} uses {{{name}}}, which no dataset "
+                "column fills, so the model would see it as literal text. "
+                "A prompt over dataset rows can use {question} and {answer}: "
+                f"they read the dataset's {columns.get('question', 'question')!r} "
+                f"and {columns.get('answer', 'answer')!r} columns. Map a "
+                "different column onto either one in environment.columns."
+            )
+            raise ValueError(msg)

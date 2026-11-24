@@ -66,7 +66,7 @@ from agilerl.arena.memory.resolve.sequences import (
     resolve_gpu_memory_utilization,
     resolve_max_num_seqs,
 )
-from agilerl.arena.memory.resolve.training import lora_target_scope
+from agilerl.arena.memory.resolve.training import catalog_lora_scope
 from agilerl.arena.memory.resolve.weight_sync import (
     SyncLink,
     WeightSyncTransport,
@@ -1190,7 +1190,7 @@ def split_workload_from_manifest(
         ),
         merged_lora_sync=not adapter_sync and can_sync_merged_lora(spec),
         lora_rank=lora.lora_r,
-        lora_target_scope=lora_target_scope(lora.target_modules),
+        lora_target_scope=catalog_lora_scope(spec.pretrained_model_name_or_path),
         lora_packed_target_matrices=len(set(lora.target_parameters or ())),
         min_p=spec.min_p,
         logit_bias=rollout_logit_bias(spec),

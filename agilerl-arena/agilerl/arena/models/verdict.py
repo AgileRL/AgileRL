@@ -24,6 +24,7 @@ from agilerl.arena.models.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.networks import TARGET_MODULES_IGNORED
 from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
 
 EXIT_OK = 0
@@ -37,10 +38,6 @@ HPO_UNAVAILABLE_MESSAGE = (
 CLASSIC_RL_UNAVAILABLE_MESSAGE = (
     "Classic RL is no longer supported in Arena. Use the open-source AgileRL v2 "
     "release: https://github.com/AgileRL/AgileRL/releases/tag/v2.67.0"
-)
-LORA_TARGET_MODULES_FIELD = "network.lora_config.target_modules"
-LORA_TARGET_MODULES_MESSAGE = (
-    "LoRA target modules are chosen by Arena; remove target_modules."
 )
 
 
@@ -299,47 +296,21 @@ def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     return []
 
 
-def sets_lora_target_modules(manifest: TrainingManifest) -> bool:
-    """Whether the manifest picks LoRA modules, which Arena chooses itself.
+def target_modules_warnings(document: dict[str, Any]) -> list[str]:
+    """Warn when the document names LoRA modules, which Arena ignores.
 
-    ``all-linear`` is the unset sentinel the submit API allows. The catalog's
-    default modules for the model are Arena's own choice: the platform writes
-    that list into default and stored run specs, so it passes too. The
-    algorithm and network sections share one LoRA config after validation, so
-    this covers ``algorithm.lora_config`` too.
-
-    :param manifest: A validated manifest.
-    :type manifest: TrainingManifest
-    :returns: True when either section picks a module list.
-    :rtype: bool
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :returns: Zero or one warning.
+    :rtype: list[str]
     """
-    network = manifest.network
-    if not isinstance(network, FinetuningNetworkSpec):
-        return False
-    modules = network.lora_config.target_modules
-    if isinstance(modules, str):
-        return modules != "all-linear"
-    entry = SUPPORTED_MODEL_INFO.get(network.pretrained_model_name_or_path)
-    return entry is None or set(modules) != entry.default_lora_modules
-
-
-def lora_target_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
-    """Refuse a LoRA module list; Arena chooses the modules.
-
-    :param manifest: A validated manifest.
-    :type manifest: TrainingManifest
-    :returns: Zero or one error record.
-    :rtype: list[dict[str, str]]
-    """
-    if not sets_lora_target_modules(manifest):
-        return []
-    return [
-        {
-            "path": LORA_TARGET_MODULES_FIELD,
-            "message": LORA_TARGET_MODULES_MESSAGE,
-            "kind": "lora_target_modules_unavailable",
-        }
-    ]
+    names_modules = any(
+        isinstance(section, dict)
+        and isinstance(section.get("lora_config"), dict)
+        and "target_modules" in section["lora_config"]
+        for section in (document.get("network"), document.get("algorithm"))
+    )
+    return [TARGET_MODULES_IGNORED] if names_modules else []
 
 
 def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
@@ -357,7 +328,6 @@ def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
         *batch_size_errors(manifest),
         *context_length_errors(manifest),
         *run_errors(manifest),
-        *lora_target_errors(manifest),
     ]
 
 
@@ -406,7 +376,10 @@ def verdict(
             return {
                 "ok": True,
                 "payload": manifest.to_payload(),
-                "warnings": model_warnings(manifest),
+                "warnings": [
+                    *model_warnings(manifest),
+                    *target_modules_warnings(document),
+                ],
                 "manifest_version": __version__,
             }
     return failure(failures)
@@ -418,8 +391,6 @@ __all__ = [
     "EXIT_INVALID",
     "EXIT_OK",
     "HPO_UNAVAILABLE_MESSAGE",
-    "LORA_TARGET_MODULES_FIELD",
-    "LORA_TARGET_MODULES_MESSAGE",
     "arena_failures",
     "describe",
     "errors",
@@ -429,7 +400,7 @@ __all__ = [
     "loc_to_path",
     "model_warnings",
     "read_manifest",
-    "sets_lora_target_modules",
     "submit_errors",
+    "target_modules_warnings",
     "verdict",
 ]

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, TypeVar, get_args, overload
 
@@ -12,8 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializationInfo,
-    field_serializer,
     model_validator,
 )
 from typing_extensions import Self
@@ -37,6 +36,13 @@ from agilerl.arena.models.descriptions import (
     STRIDE_SIZE,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
+logger = logging.getLogger(__name__)
+
+TARGET_MODULES_IGNORED = (
+    "lora_config.target_modules is ignored: Arena trains LoRA on the model "
+    "catalog's modules for the model. Remove target_modules from the manifest."
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -716,7 +722,11 @@ class ValueNetworkSpec(NetworkSpec):
 
 
 class LoraConfigDict(BaseModel):
-    """Model specification for LLM LoRA configuration."""
+    """Model specification for LLM LoRA configuration.
+
+    It names no modules: Arena trains LoRA on the catalog's modules for the
+    model (:func:`~agilerl.arena.models.model_info.catalog_lora_modules`).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -731,14 +741,6 @@ class LoraConfigDict(BaseModel):
         ge=1,
         title="Alpha",
         description="LoRA scaling. Conventionally set to twice the rank.",
-    )
-    target_modules: list[str] | str | set[str] = Field(
-        default="all-linear",
-        description=(
-            "Modules to attach adapters to: 'all-linear', or names such as "
-            "q_proj, k_proj, v_proj, o_proj. On a vision-language model these "
-            "land on the language model only; the towers stay frozen."
-        ),
     )
     # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
     # ["block_sparse_moe.experts.gate_up_proj", ...]; requires lora_dropout=0.
@@ -764,12 +766,16 @@ class LoraConfigDict(BaseModel):
         ),
     )
 
-    @field_serializer("target_modules")
+    @model_validator(mode="before")
     @classmethod
-    def _serialize_target_modules(
-        cls, v: list[str] | str | set[str], _info: SerializationInfo
-    ) -> list[str] | str:
-        return sorted(v) if isinstance(v, set) else v
+    def _drop_target_modules(cls, data: object) -> object:
+        """Drop ``target_modules``; saved run specs still carry it, so it is not refused."""
+        if isinstance(data, dict) and "target_modules" in data:
+            logger.warning(TARGET_MODULES_IGNORED)
+            return {
+                key: value for key, value in data.items() if key != "target_modules"
+            }
+        return data
 
 
 class CosineLRScheduleConfig(BaseModel):
@@ -928,7 +934,7 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
 
 
 def check_lora_config_supported(hub_id: str, lora: LoraConfigDict) -> None:
-    """Fill a LoRA config's catalog defaults, then reject a rank or targets the Hub id cannot train with.
+    """Fill a LoRA config's catalog defaults, then reject a rank or expert targets the Hub id cannot train with.
 
     :param hub_id: The model the config trains.
     :type hub_id: str
@@ -944,27 +950,6 @@ def check_lora_config_supported(hub_id: str, lora: LoraConfigDict) -> None:
         msg = (
             f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
             f"for {hub_id} ({max(entry.lora_ranks)})"
-        )
-        raise ValueError(msg)
-    valid_modules = ", ".join(sorted(entry.modules))
-    if isinstance(lora.target_modules, str):
-        if lora.target_modules != "all-linear":
-            msg = (
-                f"LoRA target_modules for {hub_id} must be 'all-linear' or a "
-                f"list of module names, got {lora.target_modules!r}; "
-                f"valid modules: {valid_modules}"
-            )
-            raise ValueError(msg)
-    elif unknown := sorted(set(lora.target_modules) - entry.modules):
-        msg = (
-            f"Unknown LoRA target_modules {unknown} for {hub_id}; "
-            f"valid modules: {valid_modules}"
-        )
-        raise ValueError(msg)
-    elif towers := sorted(set(lora.target_modules) - entry.default_lora_modules):
-        msg = (
-            f"LoRA target_modules {towers} are tower modules of {hub_id}; "
-            "the towers stay frozen, so LoRA targets the language model only"
         )
         raise ValueError(msg)
     if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):

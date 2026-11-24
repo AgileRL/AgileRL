@@ -488,6 +488,8 @@ def env_validate(
             do_rollouts=do_rollouts,
         )
     emit_json_result(result)
+    if "error_code" in result:  # Failed checks still complete the stream.
+        sys.exit(1)
 
 
 @env.command("delete")

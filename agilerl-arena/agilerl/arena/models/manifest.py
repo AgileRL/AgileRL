@@ -209,6 +209,20 @@ def _registered_algorithms() -> str:
     return f"Registered: {', '.join(MANIFEST_REGISTRY.alias_groups())}."
 
 
+def names_llm_algorithm(section: object) -> bool:
+    """Whether an algorithm section, raw or validated, is a registered LLM algorithm."""
+    if isinstance(section, BaseModel):
+        return isinstance(section, LLMAlgorithmSpec)
+    name = section.get("name") if isinstance(section, dict) else None
+    if not isinstance(name, str):
+        return False
+    try:
+        spec_cls = MANIFEST_REGISTRY.get(name)
+    except KeyError:
+        return False
+    return issubclass(spec_cls, LLMAlgorithmSpec)
+
+
 def _resolve_algorithm(data: object) -> object:
     """Dispatch the algorithm section to its registered spec class via ``name``."""
     if isinstance(data, BaseModel):
@@ -568,21 +582,28 @@ class TrainingManifest(BaseModel):
             self.mutation = MutationSpec(probabilities=no_op_mutation_probabilities())
         return self
 
-    @model_validator(mode="after")
-    def _reject_llm_epochs(self) -> Self:
-        """An LLM run's length is training.max_steps; unset over dataset rows it trains one pass."""
-        if not isinstance(self.algorithm, LLMAlgorithmSpec):
-            return self
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_llm_epochs(cls, data: object) -> object:
+        """An LLM run's length is training.max_steps; unset over dataset rows it trains one pass.
+
+        It runs before the training section validates, so the section's own
+        epoch checks do not answer an LLM run with advice it cannot follow.
+        """
+        if not isinstance(data, dict) or not names_llm_algorithm(data.get("algorithm")):
+            return data
+        training = data.get("training")
+        if isinstance(training, BaseModel):
+            training = training.model_dump()
+        if not isinstance(training, dict):
+            return data
         named = [
-            field
-            for field, value in (
-                ("training.num_epochs", self.training.num_epochs),
-                ("training.evo_epochs", self.training.evo_epochs),
-            )
-            if value is not None
+            f"training.{field}"
+            for field in ("num_epochs", "evo_epochs")
+            if training.get(field) is not None
         ]
         if not named:
-            return self
+            return data
         msg = (
             f"{' and '.join(named)} are not used by LLM runs; set "
             "training.max_steps and training.evo_steps instead. Leave max_steps "

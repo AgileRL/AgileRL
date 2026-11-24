@@ -1397,7 +1397,7 @@ _LLM_COMMON_KWARGS = {
     "lora_config": {"lora_r": 8, "lora_alpha": 16, "lora_dropout": 0.1},
     "max_model_len": 512,
     "use_separate_reference_adapter": False,
-    "pretrained_model_name_or_path": "gpt2",
+    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
     "calc_position_embeddings": False,
 }
 
@@ -1422,7 +1422,7 @@ class TestLLMSpecConstruction:
         assert dpo_spec.env_type == "dataset"
         assert dpo_spec.objective == "preference"
         assert isinstance(dpo_spec, LLMAlgorithmSpec)
-        assert dpo_spec.pretrained_model_name_or_path == "gpt2"
+        assert dpo_spec.pretrained_model_name_or_path == "Qwen/Qwen2.5-0.5B-Instruct"
 
     def test_grpo_spec_fields(self, grpo_spec):
         assert grpo_spec.name == "GRPO"
@@ -1446,14 +1446,14 @@ class TestLLMSpecConstruction:
 
     def test_dpo_model_dump_contains_expected_fields(self, dpo_spec):
         dumped = dpo_spec.model_dump(mode="python", exclude={"hp_config"})
-        assert dumped["pretrained_model_name_or_path"] == "gpt2"
+        assert dumped["pretrained_model_name_or_path"] == "Qwen/Qwen2.5-0.5B-Instruct"
         assert dumped["update_epochs"] == 1
         assert dumped["beta"] == pytest.approx(0.1)  # DPO's constructor default
 
     def test_grpo_model_dump_contains_group_size(self, grpo_spec):
         dumped = grpo_spec.model_dump(mode="python", exclude={"hp_config"})
         assert dumped["group_size"] == 4
-        assert dumped["pretrained_model_name_or_path"] == "gpt2"
+        assert dumped["pretrained_model_name_or_path"] == "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 class TestLLMGetTrainingKwargs:
@@ -1543,7 +1543,7 @@ class TestLLMBuildAlgorithm:
 
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
-        assert call_kwargs["model_name"] == "gpt2"
+        assert call_kwargs["model_name"] == "Qwen/Qwen2.5-0.5B-Instruct"
         assert call_kwargs["pad_token_id"] == 50256
         assert call_kwargs["pad_token"] == "<|endoftext|>"
         assert call_kwargs["index"] == 0
@@ -1570,7 +1570,7 @@ class TestLLMBuildAlgorithm:
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
         assert call_kwargs["index"] == 1
-        assert call_kwargs["model_name"] == "gpt2"
+        assert call_kwargs["model_name"] == "Qwen/Qwen2.5-0.5B-Instruct"
 
     def test_build_algorithm_with_accelerator(
         self, dpo_spec, monkeypatch: pytest.MonkeyPatch
@@ -1666,7 +1666,9 @@ class TestLLMLocalTrainer:
 
         assert trainer.algorithm_spec is dpo_spec
         assert trainer.tokenizer is mock_tokenizer
-        mock_auto_tok.from_pretrained.assert_called_once_with("gpt2")
+        mock_auto_tok.from_pretrained.assert_called_once_with(
+            "Qwen/Qwen2.5-0.5B-Instruct"
+        )
         mock_create_pop.assert_called_once()
         _, create_kwargs = mock_create_pop.call_args
         assert create_kwargs["tokenizer"] is mock_tokenizer
@@ -3878,7 +3880,7 @@ class TestMakeRolloutFactoryGuards:
             env_type="rollout",
             dataset="ds",
             rubric_file_path="reward.py",
-            prompt_template={"user": "{q}"},
+            prompt_template={"user": "{question}"},
         )
 
     def test_a_non_llm_algorithm_gets_no_rollout_factory(self):

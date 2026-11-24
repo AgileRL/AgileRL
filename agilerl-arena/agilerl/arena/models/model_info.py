@@ -84,7 +84,7 @@ GLM5_NEXT_LORA_EXCLUDED_MODULES = frozenset(
 )
 
 # PEFT exclude_modules per Hugging Face model_type: module-path suffixes that
-# get no LoRA whatever target_modules names.
+# get no LoRA.
 LORA_EXCLUDED_MODULES: Mapping[str, frozenset[str]] = {
     # vLLM runs the KV compressor and its indexer as raw matmuls that skip
     # LoRA. o_a_proj is a grouped linear; PEFT's delta mismatches its groups.
@@ -210,8 +210,8 @@ class ModelInfo(BaseModel):
     text_lora_modules: frozenset[str] | None = Field(
         default=None,
         description=(
-            "Default target_modules of a VL checkpoint: language-model linears "
-            "only. Text-only checkpoints default to every module."
+            "LoRA modules of a VL checkpoint: language-model linears only. "
+            "Text-only checkpoints train every module."
         ),
     )
     rollout_gpu_memory_utilization: float | None = Field(
@@ -273,7 +273,7 @@ class ModelInfo(BaseModel):
     @computed_field
     @property
     def modules(self) -> frozenset[str]:
-        """Valid ``target_modules`` names: keys with a module not in ``LORA_EXCLUDED_MODULES``."""
+        """LoRA-able module names: keys with a module not in ``LORA_EXCLUDED_MODULES``."""
         return frozenset(
             key
             for key in self._target_keys("module")
@@ -286,7 +286,7 @@ class ModelInfo(BaseModel):
     @computed_field
     @property
     def default_lora_modules(self) -> frozenset[str]:
-        """Default ``target_modules``: the text model's modules only."""
+        """The modules Arena trains LoRA on: the text model's modules only."""
         if self.text_lora_modules is None:
             return self.modules
         return self.text_lora_modules
@@ -556,3 +556,26 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ),
     )
 }
+
+
+def catalog_lora_modules(hub_id: str) -> list[str]:
+    """The modules Arena trains LoRA on for a catalog model: its text model's linears.
+
+    Manifests do not name LoRA modules; training, rollout and memory sizing
+    all read them here.
+
+    :param hub_id: The model's ``pretrained_model_name_or_path``.
+    :type hub_id: str
+    :returns: Sorted module names.
+    :rtype: list[str]
+    :raises ValueError: The model is not in :data:`SUPPORTED_MODEL_INFO`.
+    """
+    info = SUPPORTED_MODEL_INFO.get(hub_id)
+    if info is None:
+        msg = (
+            f"{hub_id!r} is not in the Arena model catalog, so Arena has no LoRA "
+            "modules for it. Set pretrained_model_name_or_path to a model from "
+            "'arena models supported'; for other weights, also set weights_path."
+        )
+        raise ValueError(msg)
+    return sorted(info.default_lora_modules)

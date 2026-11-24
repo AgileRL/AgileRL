@@ -183,7 +183,6 @@ the env scores a single answer. Everything else is an ordinary rollout config:
         lora_config:
             lora_r: 8
             lora_alpha: 32
-            target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, down_proj, gate_proj]
             task_type: CAUSAL_LM
 
 Under the hood, the ``env_url`` field builds each rollout slot as

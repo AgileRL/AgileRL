@@ -588,7 +588,7 @@ class TestManifestCommands:
             "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
         ]
 
-    def test_validate_rejects_lora_target_modules(self, runner):
+    def test_validate_warns_that_lora_target_modules_are_ignored(self, runner):
         manifest = (
             "algorithm: {name: GRPO}\n"
             "environment: {env_type: rollout, entrypoint: 'envs:MyEnv'}\n"
@@ -600,11 +600,8 @@ class TestManifestCommands:
 
         result = runner.invoke(main, ["manifest", "validate", "-"], input=manifest)
 
-        assert result.exit_code == 1
-        assert (
-            "network.lora_config.target_modules: LoRA target modules are chosen "
-            "by Arena; remove target_modules."
-        ) in result.output
+        assert result.exit_code == 0
+        assert "warning: lora_config.target_modules is ignored" in result.output
 
     def test_validate_json_invalid_verdict_has_the_same_keys(self, runner):
         result = runner.invoke(
@@ -1151,6 +1148,32 @@ class TestEnvValidateCommand:
         assert result.exit_code == 0
         call_kwargs = mock_client.validate_environment.call_args.kwargs
         assert call_kwargs["do_rollouts"] is True
+
+    def test_passed_checks_exit_zero(self, runner, mock_client):
+        # Arrange
+        mock_client.validate_environment.return_value = {"cpu_per_env": 0.1}
+
+        # Act
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "env", "validate", "my-env"])
+
+        # Assert
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"cpu_per_env": 0.1}
+
+    @pytest.mark.parametrize("error_code", ["VALIDATION_FAILED", "VALIDATOR_ERROR"])
+    def test_failed_checks_exit_non_zero(self, runner, mock_client, error_code):
+        # Arrange
+        failed = {"error_code": error_code}
+        mock_client.validate_environment.return_value = failed
+
+        # Act
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "env", "validate", "my-env"])
+
+        # Assert
+        assert result.exit_code == 1
+        assert json.loads(result.output) == failed
 
     @pytest.mark.parametrize("flag", ["--multi-agent", "--language-based", "--classic"])
     def test_rejects_removed_classic_flags(self, runner, mock_client, flag):

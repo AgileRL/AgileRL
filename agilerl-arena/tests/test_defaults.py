@@ -245,3 +245,53 @@ class TestDefaultVerdict:
 
         # Assert
         assert record["ok"] is False
+
+    def test_sets_the_vllm_memory_share(self) -> None:
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, dataset_rollout()))
+
+        # Assert
+        assert record["ok"] is True
+        assert (
+            record["payload"]["algorithm"]["vllm_config"]["gpu_memory_utilization"]
+            == 0.9
+        )
+
+    def test_names_no_lora_modules(self) -> None:
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, dataset_rollout()))
+
+        # Assert
+        assert "target_modules" not in record["payload"]["network"]["lora_config"]
+
+    def test_default_manifest_passes_submit(self) -> None:
+        # Arrange
+        payload = default_verdict(document({"name": "GRPO"}, dataset_rollout()))[
+            "payload"
+        ]
+        payload["environment"]["rubric_file_path"] = "s3://bucket/reward.py"
+
+        # Act
+        record = verdict(payload, submit=True)
+
+        # Assert
+        assert record["ok"] is True, record["errors"]
+        assert record["warnings"] == []
+
+    def test_uploaded_entrypoint_with_host_resources_is_hosted(self) -> None:
+        # Arrange
+        environment = {
+            "name": "env",
+            "env_type": "rollout",
+            "entrypoint": "mod:Env",
+            "version": 3,
+            "cpus_per_env_host": 1.5,
+            "env_host_memory_bytes": 4 * 1024**3,
+        }
+
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, environment))
+
+        # Assert
+        assert record["ok"] is True, record
+        assert record["payload"]["environment"]["env_hosts"] == 1
