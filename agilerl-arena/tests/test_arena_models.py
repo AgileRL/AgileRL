@@ -44,6 +44,7 @@ from agilerl.arena.models.fsdp import (
     parallel_layout_pins,
 )
 from agilerl.arena.models.manifest import _resolve_algorithm
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
@@ -905,6 +906,20 @@ class TestSetsLoraTargetModules:
 
         assert sets_lora_target_modules(manifest) is False
 
+    def test_catalog_default_modules_do_not_set_them(self) -> None:
+        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
+        document = _grpo_manifest(network={"target_modules": sorted(catalog)})
+        manifest = TrainingManifest.model_validate(document)
+
+        assert sets_lora_target_modules(manifest) is False
+
+    def test_a_subset_of_the_catalog_modules_sets_them(self) -> None:
+        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
+        document = _grpo_manifest(network={"target_modules": sorted(catalog)[1:]})
+        manifest = TrainingManifest.model_validate(document)
+
+        assert sets_lora_target_modules(manifest) is True
+
 
 class TestVerdictRejectLoraTargets:
     def test_submit_rejects_a_module_list(self) -> None:
@@ -926,6 +941,13 @@ class TestVerdictRejectLoraTargets:
         document = _grpo_manifest(network={"target_modules": ["q_proj", "v_proj"]})
 
         assert verdict(document)["ok"] is True
+
+    def test_submit_accepts_the_catalog_default_modules(self) -> None:
+        # The platform's default and stored run specs carry this list.
+        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
+        document = _grpo_manifest(network={"target_modules": sorted(catalog)})
+
+        assert verdict(document, submit=True)["ok"] is True
 
     def test_submit_accepts_a_manifest_without_target_modules(self) -> None:
         assert verdict(_grpo_manifest(), submit=True)["ok"] is True
