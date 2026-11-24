@@ -937,7 +937,10 @@ class TestTracesManifest:
 
     @pytest.mark.parametrize(
         ("field", "value"),
-        [("columns", {"prompt": "input"}), ("prompt_template", {"user_0": "{q}"})],
+        [
+            ("columns", {"prompt": "input"}),
+            ("prompt_template", {"user_0": "{question}"}),
+        ],
     )
     def test_rejects_a_column_mapping(self, field: str, value: Any) -> None:
         with pytest.raises(ValidationError, match=f"drop {field}"):

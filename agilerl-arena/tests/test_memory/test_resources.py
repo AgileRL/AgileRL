@@ -1196,7 +1196,7 @@ class TestCheckTiers:
         assert by_name["b200-8x"].reason == "no 1-node option, where a100-8x fits"
         assert by_name["b200-8x"].config is None
 
-    def test_an_uncatalogued_model_is_priced_as_written(self, monkeypatch):
+    def test_an_uncatalogued_model_cannot_be_priced(self, monkeypatch):
         # Arrange
         manifest = TrainingManifest.model_validate(
             with_model(MANIFEST, "local/uncatalogued-model")
@@ -1205,14 +1205,29 @@ class TestCheckTiers:
             resources_module, "estimate_run", lambda _config: flat_estimate(1, 10_000)
         )
 
-        # Act
-        (check,) = check_tiers(
-            [tier("l4-4x", "NVIDIA L4", 4, 1.0)], manifest, tiny_model(), builder()
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match="'local/uncatalogued-model' is not in the Arena model catalog",
+        ):
+            check_tiers(
+                [tier("l4-4x", "NVIDIA L4", 4, 1.0)], manifest, tiny_model(), builder()
+            )
+
+    def test_an_uncatalogued_model_with_a_searched_split_cannot_be_priced(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(
+            unset_split(with_model(MANIFEST, "acme/not-in-the-catalogue"))
         )
 
-        # Assert
-        assert check.fits
-        assert check.layout is None
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match="'acme/not-in-the-catalogue' is not in the Arena model catalog",
+        ):
+            check_tiers(
+                [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
+            )
 
     def test_a_pinned_shard_group_is_kept(self, monkeypatch):
         # Arrange: 2 trainers and 1 engine need 3 GPUs, so two 2-GPU nodes.
@@ -1606,21 +1621,6 @@ class TestTierCheckFailure:
         assert check.reason == "no GPU"
         assert check.failure == FailureKind.OTHER
         assert check.host_limited is False
-
-    def test_a_model_outside_the_catalogue_keeps_the_split_reason_as_other(self):
-        manifest = TrainingManifest.model_validate(
-            unset_split(with_model(MANIFEST, "acme/not-in-the-catalogue"))
-        )
-
-        (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
-        )
-
-        assert not check.fits
-        assert check.reason == (
-            "'acme/not-in-the-catalogue' is not in the memory estimator catalogue"
-        )
-        assert check.failure == FailureKind.OTHER
 
     def test_a_build_that_cannot_solve_is_gpu_memory(self):
         # Arrange

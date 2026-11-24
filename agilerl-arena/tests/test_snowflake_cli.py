@@ -268,7 +268,7 @@ class TestSubmitCommand:
             "algorithm: {name: GRPO}\n"
             "environment:\n"
             "  env_type: rollout\n"
-            "  prompt_template: {user_0: '{QUESTION}'}\n",
+            "  prompt_template: {user_0: '{question}'}\n",
             encoding="utf-8",
         )
         reward = tmp_path / "my_reward.py"
@@ -293,7 +293,7 @@ class TestSubmitCommand:
         assert result.exit_code == 0, result.output
         assert uploaded[0]["environment"] == {
             "env_type": "rollout",
-            "prompt_template": {"user_0": "{QUESTION}"},
+            "prompt_template": {"user_0": "{question}"},
             "dataset": TABLE,
             "rubric_file_path": "reward.py",
         }

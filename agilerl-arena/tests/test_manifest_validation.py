@@ -1482,7 +1482,7 @@ class TestEpochDrivenTraining:
         }
         doc["training"] = {"num_epochs": 1, "max_steps": 50}
 
-        with pytest.raises(ValidationError, match="are both set; set one"):
+        with pytest.raises(ValidationError, match="not used by LLM runs"):
             TrainingManifest.model_validate(doc)
 
     @pytest.mark.parametrize(
@@ -1546,8 +1546,14 @@ class TestEpochDrivenTraining:
             TrainingManifest.model_validate(doc)
 
     def test_grpo_rejects_num_epochs_and_max_steps(self) -> None:
-        with pytest.raises(ValidationError, match="are both set; set one"):
-            TrainingManifest.model_validate(manifest(GRPO, training={"num_epochs": 1}))
+        with pytest.raises(
+            ValidationError,
+            match=r"training\.num_epochs are not used by LLM runs; set "
+            r"training\.max_steps and training\.evo_steps instead",
+        ):
+            TrainingManifest.model_validate(
+                manifest(GRPO, training={"num_epochs": 1, "max_steps": 50})
+            )
 
     def test_accepts_num_epochs_with_evo_epochs(self) -> None:
         doc = copy.deepcopy(DQN)
@@ -2475,7 +2481,7 @@ class TestSchema:
             "environment": {
                 "env_type": "rollout",
                 "dataset": "rows",
-                "prompt_template": {"user_0": "{q}"},
+                "prompt_template": {"user_0": "{question}"},
             }
         }
         applied = self._applied_environment_defaults(dataset_rollout)
@@ -2949,16 +2955,6 @@ class TestAlgorithmOnlyLoraCatalog:
                 "Qwen/Qwen2.5-0.5B-Instruct",
                 {"lora_r": 256},
                 r"LoRA rank 256 .*Qwen2.5-0.5B-Instruct \(128\)",
-            ),
-            (
-                "Qwen/Qwen2.5-0.5B-Instruct",
-                {"target_modules": ["q_projj"]},
-                r"Unknown LoRA target_modules \['q_projj'\]",
-            ),
-            (
-                "Qwen/Qwen3.5-2B",
-                {"target_modules": ["q_proj", "qkv"]},
-                r"\['qkv'\] are tower modules",
             ),
             (
                 "openai/gpt-oss-20b",

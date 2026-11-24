@@ -22,6 +22,7 @@ from agilerl.arena.models.model_info import (
     STATUS_LIVE,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
+    catalog_lora_modules,
     resolve_reasoning_parser,
     supported_path,
 )
@@ -34,12 +35,11 @@ from agilerl.arena.models.networks import (
 
 def finetuning_network(
     hub_id: str,
-    target_modules: object = ("q_proj",),
     target_parameters: object = None,
     lora_r: int = 16,
 ) -> FinetuningNetworkSpec:
-    """Finetuning section for a Hub id with explicit LoRA targets."""
-    lora: dict[str, object] = {"target_modules": target_modules, "lora_r": lora_r}
+    """Finetuning section for a Hub id with explicit LoRA expert targets."""
+    lora: dict[str, object] = {"lora_r": lora_r}
     if target_parameters is not None:
         lora["target_parameters"] = target_parameters
     return FinetuningNetworkSpec.model_validate(
@@ -539,37 +539,35 @@ class TestModelInfoBiasesImageTokenProperty:
 
 
 class TestFinetuningNetworkSpecLoraTargets:
-    def test_valid_targets_pass(self) -> None:
-        spec = finetuning_network(
-            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
-            ("q_proj", "in_proj"),
+    @pytest.mark.parametrize(
+        "target_modules",
+        [["q_proj", "q_projj"], "all-linear", r".*\.language_model.*\.(q_proj)$"],
+        ids=["unknown-module", "all-linear", "regex"],
+    )
+    def test_target_modules_are_dropped(self, target_modules: object) -> None:
+        # Act
+        spec = FinetuningNetworkSpec.model_validate(
+            {
+                "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+                "max_context_length": 512,
+                "lora_config": {"target_modules": target_modules},
+            }
         )
 
-        assert spec.lora_config is not None
-
-    def test_unknown_module_raises_with_valid_options(self) -> None:
-        with pytest.raises(ValidationError, match="q_projj"):
-            finetuning_network("Qwen/Qwen3-4B", ("q_proj", "q_projj"))
+        # Assert
+        assert "target_modules" not in spec.lora_config.model_dump()
 
     def test_expert_parameters_on_dense_family_raise(self) -> None:
         with pytest.raises(ValidationError, match="target_parameters"):
-            finetuning_network(
-                "Qwen/Qwen3-4B",
-                ("q_proj",),
-                ("mixer.experts.up_proj",),
-            )
+            finetuning_network("Qwen/Qwen3-4B", ("mixer.experts.up_proj",))
 
     def test_valid_expert_parameters_pass(self) -> None:
-        spec = finetuning_network(
-            "openai/gpt-oss-20b",
-            ("q_proj",),
-            ("mlp.experts.gate_up_proj",),
-        )
+        spec = finetuning_network("openai/gpt-oss-20b", ("mlp.experts.gate_up_proj",))
 
         assert spec.lora_config is not None
 
     def test_unlisted_id_skips_validation(self) -> None:
-        spec = finetuning_network("org/custom-model", ("anything_at_all",))
+        spec = finetuning_network("org/custom-model", lora_r=4096)
 
         assert spec.lora_config is not None
 
@@ -599,52 +597,28 @@ class TestFinetuningNetworkSpecLoraTargets:
 
         assert spec.lora_config is not None
 
-    @pytest.mark.parametrize(
-        ("hub_id", "tower_module"),
-        [
-            ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", "fc1"),
-            ("Qwen/Qwen3.5-2B", "qkv"),
-            ("google/gemma-4-E4B-it", "linear"),
-        ],
-    )
-    def test_tower_module_in_target_modules_raises(
-        self, hub_id: str, tower_module: str
-    ) -> None:
+
+class TestCatalogLoraModules:
+    def test_vision_model_trains_its_text_modules(self) -> None:
+        # Act
+        modules = catalog_lora_modules("Qwen/Qwen3.5-2B")
+
+        # Assert
+        assert modules == sorted(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-2B"].text_lora_modules
+        )
+        assert "qkv" not in modules
+
+    def test_text_model_trains_every_module(self) -> None:
+        assert catalog_lora_modules("Qwen/Qwen3-4B") == sorted(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].modules
+        )
+
+    def test_model_outside_the_catalog_raises(self) -> None:
         with pytest.raises(
-            ValidationError, match=rf"\['{tower_module}'\] are tower modules"
+            ValueError, match="'org/custom-model' is not in the Arena model catalog"
         ):
-            finetuning_network(hub_id, ("q_proj", tower_module))
-
-    def test_super_vl_rejects_latent_projections(self) -> None:
-        with pytest.raises(
-            ValidationError, match=r"Unknown LoRA target_modules \['fc1_latent_proj'\]"
-        ):
-            finetuning_network(
-                "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-                ("q_proj", "fc1_latent_proj"),
-            )
-
-    def test_all_linear_in_a_list_is_a_module_name(self) -> None:
-        with pytest.raises(ValidationError, match="all-linear"):
-            finetuning_network("Qwen/Qwen3-4B", ["all-linear"])
-
-    def test_all_linear_string_passes(self) -> None:
-        spec = finetuning_network("Qwen/Qwen3-4B", "all-linear")
-
-        assert spec.lora_config is not None
-
-    def test_regex_string_raises(self) -> None:
-        with pytest.raises(ValidationError, match="must be 'all-linear' or a list"):
-            finetuning_network("Qwen/Qwen3-4B", r".*\.language_model.*\.(q_proj)$")
-
-    def test_dotted_target_raises(self) -> None:
-        with pytest.raises(ValidationError, match=r"\['q_proj.linear'\]"):
-            finetuning_network("google/gemma-4-E4B-it", ("q_proj.linear",))
-
-    def test_bare_projection_on_wrapped_family_passes(self) -> None:
-        spec = finetuning_network("google/gemma-4-E4B-it", ("q_proj",))
-
-        assert spec.lora_config is not None
+            catalog_lora_modules("org/custom-model")
 
 
 class TestFinetuningNetworkSpecExpertDefault:

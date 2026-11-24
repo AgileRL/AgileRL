@@ -321,10 +321,12 @@ class TestNetworkSpec:
 
 
 class TestLoraConfigDict:
-    def test_serializes_set_target_modules(self) -> None:
-        config = LoraConfigDict(target_modules={"q_proj", "v_proj"})
-        dumped = config.model_dump(mode="json")
-        assert dumped["target_modules"] == ["q_proj", "v_proj"]
+    def test_drops_target_modules(self) -> None:
+        # Act
+        config = LoraConfigDict.model_validate({"target_modules": ["q_proj"]})
+
+        # Assert
+        assert "target_modules" not in config.model_dump(mode="json")
 
 
 class TestCosineLRScheduleConfig:

@@ -45,17 +45,14 @@ from agilerl.arena.models.fsdp import (
 )
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.models.networks import VLLMConfig
+from agilerl.arena.models.networks import TARGET_MODULES_IGNORED, VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
 from agilerl.arena.models.verdict import (
-    LORA_TARGET_MODULES_FIELD,
-    LORA_TARGET_MODULES_MESSAGE,
     errors,
     loc_to_path,
     model_warnings,
     read_manifest,
-    sets_lora_target_modules,
     verdict,
 )
 
@@ -906,92 +903,48 @@ def _grpo_manifest(**lora_sections) -> dict:
     )
 
 
-class TestSetsLoraTargetModules:
+class TestVerdictIgnoresLoraTargetModules:
     @pytest.mark.parametrize(
         "lora_sections",
         [
-            {"network": {"target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]}},
+            {"network": {"target_modules": ["q_proj", "v_proj"]}},
+            {"network": {"target_modules": "all-linear"}},
             {"algorithm": {"target_modules": ["q_proj"]}},
         ],
-        ids=["network-list", "algorithm-list"],
+        ids=["network-list", "all-linear", "algorithm-list"],
     )
-    def test_manifest_naming_target_modules_sets_them(self, lora_sections) -> None:
-        manifest = TrainingManifest.model_validate(_grpo_manifest(**lora_sections))
+    def test_submit_drops_them_and_warns(self, lora_sections) -> None:
+        # Act
+        result = verdict(_grpo_manifest(**lora_sections), submit=True)
 
-        assert sets_lora_target_modules(manifest) is True
+        # Assert
+        assert result["ok"] is True
+        assert TARGET_MODULES_IGNORED in result["warnings"]
+        assert "target_modules" not in result["payload"]["network"]["lora_config"]
+        assert "target_modules" not in result["payload"]["algorithm"].get(
+            "lora_config", {}
+        )
 
-    @pytest.mark.parametrize(
-        "lora_sections",
-        [
-            {},
-            {"network": {"lora_r": 8, "lora_alpha": 16}},
-            {"network": {"target_modules": "all-linear"}},
-        ],
-        ids=["no-lora-config", "rank-only", "all-linear"],
-    )
-    def test_manifest_without_target_modules_does_not_set_them(
-        self, lora_sections
-    ) -> None:
-        manifest = TrainingManifest.model_validate(_grpo_manifest(**lora_sections))
-
-        assert sets_lora_target_modules(manifest) is False
-
-    def test_non_llm_manifest_does_not_set_them(self) -> None:
-        manifest = TrainingManifest.model_validate(_manifest())
-
-        assert sets_lora_target_modules(manifest) is False
-
-    def test_catalog_default_modules_do_not_set_them(self) -> None:
-        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
-        document = _grpo_manifest(network={"target_modules": sorted(catalog)})
-        manifest = TrainingManifest.model_validate(document)
-
-        assert sets_lora_target_modules(manifest) is False
-
-    def test_a_subset_of_the_catalog_modules_sets_them(self) -> None:
-        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
-        document = _grpo_manifest(network={"target_modules": sorted(catalog)[1:]})
-        manifest = TrainingManifest.model_validate(document)
-
-        assert sets_lora_target_modules(manifest) is True
-
-
-class TestVerdictRejectLoraTargets:
-    def test_submit_rejects_a_module_list(self) -> None:
-        document = _grpo_manifest(network={"target_modules": ["q_proj", "v_proj"]})
-
-        result = verdict(document, submit=True)
-
-        assert result["ok"] is False
-        assert result["errors"] == [
-            {
-                "path": LORA_TARGET_MODULES_FIELD,
-                "message": LORA_TARGET_MODULES_MESSAGE,
-                "kind": "lora_target_modules_unavailable",
-            }
-        ]
-
-    def test_stored_run_keeps_a_module_list(self) -> None:
-        # The platform validates web-app run specs, which carry the catalog modules.
-        document = _grpo_manifest(network={"target_modules": ["q_proj", "v_proj"]})
-
-        assert verdict(document)["ok"] is True
-
-    def test_submit_accepts_the_catalog_default_modules(self) -> None:
-        # The platform's default and stored run specs carry this list.
+    def test_stored_run_with_the_catalog_list_still_validates(self) -> None:
+        # Arrange
         catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
         document = _grpo_manifest(network={"target_modules": sorted(catalog)})
 
-        assert verdict(document, submit=True)["ok"] is True
+        # Act
+        result = verdict(document)
 
-    def test_submit_accepts_a_manifest_without_target_modules(self) -> None:
-        assert verdict(_grpo_manifest(), submit=True)["ok"] is True
+        # Assert
+        assert result["ok"] is True
+        assert "target_modules" not in result["payload"]["network"]["lora_config"]
 
-    def test_submit_accepts_the_default_payload(self) -> None:
-        payload = verdict(_grpo_manifest(), submit=True)["payload"]
+    def test_manifest_without_them_has_no_warning(self) -> None:
+        # Act
+        result = verdict(_grpo_manifest(), submit=True)
 
-        assert payload["network"]["lora_config"]["target_modules"] == "all-linear"
-        assert verdict(payload, submit=True)["ok"] is True
+        # Assert
+        assert result["ok"] is True
+        assert TARGET_MODULES_IGNORED not in result["warnings"]
+        assert "target_modules" not in result["payload"]["network"]["lora_config"]
 
 
 class TestSchemaPackageVersion:
@@ -1075,7 +1028,7 @@ class TestTrainingSpec:
         payload = TrainingManifest.get_validated(manifest, mode="json")
 
         assert payload["network"]["lora_config"]["lora_r"] == 16
-        assert payload["network"]["lora_config"]["target_modules"] == "all-linear"
+        assert "target_modules" not in payload["network"]["lora_config"]
 
     def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
         spec = TrainingSpec(rollout_mode="async")
@@ -1161,6 +1114,37 @@ class TestLLMEnvSpecEnvPods:
         assert spec.env_services == [EnvServiceSpec.model_validate(CLASSIFIEDS_SERVICE)]
         assert spec.env_services[0].ready_timeout_s == 600.0
         assert spec.env_services[0].containers[0].cpu == "10m"
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            {"cpus_per_env_host": 1.5},
+            {"env_host_memory_bytes": 4 * 1024**3},
+            {"env_host_resource": "env-pool"},
+        ],
+    )
+    def test_entrypoint_with_host_resources_gets_one_host(self, resource: dict) -> None:
+        # Act
+        spec = LLMEnvSpec(env_type="rollout", entrypoint="mod:Env", **resource)
+
+        # Assert
+        assert spec.env_hosts == 1
+
+    def test_bare_entrypoint_runs_in_process(self) -> None:
+        # Act
+        spec = LLMEnvSpec(env_type="rollout", entrypoint="mod:Env")
+
+        # Assert
+        assert spec.env_hosts is None
+
+    def test_entrypoint_keeps_an_authored_host_count(self) -> None:
+        # Act
+        spec = LLMEnvSpec(
+            env_type="rollout", entrypoint="mod:Env", env_hosts=3, cpus_per_env_host=2
+        )
+
+        # Assert
+        assert spec.env_hosts == 3
 
     @pytest.mark.parametrize(
         "field",
@@ -1354,7 +1338,7 @@ class TestLLMEnvSpecSurfaces:
             env_type="rollout",
             dataset="rows",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
         assert dataset.name is None
         assert dataset.label == "rows"
@@ -1388,7 +1372,7 @@ class TestLLMEnvSpecSurfaces:
             dataset="rows",
             name="countdown",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
         assert named.name == "countdown"
         assert named.label == "countdown"
@@ -1401,7 +1385,7 @@ class TestLLMEnvSpecSurfaces:
                 env_type="rollout",
                 dataset="rows",
                 rubric_file_path="rubric.py",
-                prompt_template={"user_0": "{q}"},
+                prompt_template={"user_0": "{question}"},
                 env_hosts=1,
             )
 
@@ -1466,7 +1450,7 @@ class TestLLMEnvSpecSurfaces:
             env_type="rollout",
             dataset="rows",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
         assert rollout.train_test_split == 0.9
         assert rollout.response_column is None
@@ -1489,6 +1473,61 @@ class TestLLMEnvSpecSurfaces:
         assert dataset.rubric_name is None
         assert dataset.num_envs is None
         assert dataset.action_field is None
+
+
+class TestLLMEnvSpecPromptPlaceholders:
+    def test_accepts_question_answer_and_literal_braces(self) -> None:
+        # Act
+        env = LLMEnvSpec(
+            env_type="rollout",
+            dataset="gsm8k",
+            rubric_file_path="reward.py",
+            prompt_template={
+                "system_0": 'Reply as JSON like {"answer": 4} or {{name}}.',
+                "user_1": "{question} (reference: {answer})",
+            },
+        )
+
+        # Assert
+        assert env.prompt_template["user_1"] == "{question} (reference: {answer})"
+
+    def test_rejects_a_placeholder_no_column_fills(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=(
+                r"prompt_template\.user_1 uses \{prompt_text\}, which no dataset "
+                r"column fills.*read the dataset's 'problem' and 'answer' columns"
+            ),
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="gsm8k",
+                rubric_file_path="reward.py",
+                columns={"question": "problem"},
+                prompt_template={"system_0": "Solve it.", "user_1": "{prompt_text}"},
+            )
+
+    def test_rejects_a_value_that_is_not_text(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"prompt_template\.user_1 must be text, got list"
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="gsm8k",
+                rubric_file_path="reward.py",
+                prompt_template={"system_0": "Solve it.", "user_1": ["{question}"]},
+            )
+
+    def test_leaves_env_rollout_prompts_alone(self) -> None:
+        # Act
+        env = LLMEnvSpec(
+            env_type="rollout",
+            entrypoint="envs:MyEnv",
+            prompt_template={"user_0": "{observation}"},
+        )
+
+        # Assert
+        assert env.prompt_template == {"user_0": "{observation}"}
 
 
 class TestLLMEnvSpecSegmentPromptTokens:
@@ -1529,7 +1568,7 @@ class TestLLMEnvSpecMaxTurns:
             env_type="rollout",
             dataset="rows",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
 
         assert spec.max_turns == 1
@@ -1716,7 +1755,7 @@ class TestLLMEnvSpecImageFields:
                 env_type="rollout",
                 dataset="rows",
                 rubric_file_path="rubric.py",
-                prompt_template={"user_0": "{q}"},
+                prompt_template={"user_0": "{question}"},
                 screenshot_field="screenshot",
             )
 
@@ -2053,7 +2092,7 @@ class TestLLMEnvSpecSendsReasoningProperty:
             env_type="rollout",
             dataset="rows",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
 
         assert spec.sends_reasoning is True
@@ -2082,7 +2121,7 @@ class TestLLMEnvSpecGroupRubric:
             dataset="rows",
             rubric_file_path="rubric.py",
             group_rubric_name="RULER",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
 
         # Assert
