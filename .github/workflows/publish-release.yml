@@ -12,7 +12,7 @@ name: Publish release
 # is the only source of truth.
 #
 # Auth:
-#   fetch   — GitHub OIDC → read-only IAM role (repository secret
+#   fetch   — GitHub OIDC → read-only IAM role (repository variable
 #             AWS_CODEARTIFACT_READ_ROLE_ARN). No long-lived AWS keys.
 #   publish — PyPI Trusted Publishing (OIDC) via environment `pypi`.
 #             No UV_PUBLISH_TOKEN. Fetch credentials do not leak into publish.
@@ -106,18 +106,18 @@ jobs:
 
             - name: Require read role
               env:
-                  AWS_CODEARTIFACT_READ_ROLE_ARN: ${{ secrets.AWS_CODEARTIFACT_READ_ROLE_ARN }}
+                  AWS_CODEARTIFACT_READ_ROLE_ARN: ${{ vars.AWS_CODEARTIFACT_READ_ROLE_ARN }}
               run: |
                   set -euo pipefail
                   if [[ -z "${AWS_CODEARTIFACT_READ_ROLE_ARN:-}" ]]; then
-                    echo "Set repository secret AWS_CODEARTIFACT_READ_ROLE_ARN to the read-only IAM role ARN." >&2
+                    echo "Set repository variable AWS_CODEARTIFACT_READ_ROLE_ARN to the read-only IAM role ARN." >&2
                     exit 1
                   fi
 
             - name: Configure AWS credentials (OIDC, read-only)
               uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
               with:
-                  role-to-assume: ${{ secrets.AWS_CODEARTIFACT_READ_ROLE_ARN }}
+                  role-to-assume: ${{ vars.AWS_CODEARTIFACT_READ_ROLE_ARN }}
                   aws-region: us-east-1
                   audience: sts.amazonaws.com
                   role-session-name: agilerl-pypi-fetch

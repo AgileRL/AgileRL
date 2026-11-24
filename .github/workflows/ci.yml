@@ -110,7 +110,9 @@ jobs:
         needs: select
         if: ${{ !cancelled() && needs.select.result != 'failure' }}
         uses: ./.github/workflows/reusable-linux.yml
-        secrets: inherit
+        permissions:
+            contents: read
+            id-token: write
         with:
             cpu_pythons: ${{ needs.select.result == 'success' && '["3.13"]' || '["3.10", "3.11", "3.12", "3.13"]' }}
             cpu_shards: ${{ needs.select.outputs.cpu_shards || '[1, 2, 3, 4, 5]' }}

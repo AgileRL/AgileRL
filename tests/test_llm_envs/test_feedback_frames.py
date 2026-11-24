@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import huggingface_hub.constants as hub_constants
 import pytest
-from huggingface_hub import get_token, snapshot_download
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from agilerl.architectures import family_runtime
@@ -27,10 +27,8 @@ from agilerl.llm_envs.harness import RolloutHarness
 from tests.helpers.rollout_doubles import FakeEnvClient
 from tests.helpers.transcripts import assistant_runs
 
-# Tokenizer files come from the Hub, and Gemma 4 is gated. CI runs these on the
-# Linux CPU shard, which has HF_TOKEN and a Hub cache.
-if get_token() is None:
-    pytest.skip("needs a Hugging Face Hub token", allow_module_level=True)
+# Tokenizer files come from the Hub without a token: every checkpoint below is
+# ungated. Add a gated one as pinned fixture files, not as a CI secret.
 
 # One checkpoint per chat template family, pinned so an upstream template edit
 # shows up as a revision bump here, not as a red run.
