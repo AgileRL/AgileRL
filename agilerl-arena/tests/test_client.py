@@ -2231,6 +2231,40 @@ class TestExperimentMethods:
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()
 
+    def test_submit_experiment_rejects_a_lora_module_list(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["lora_config"] = {
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
+        }
+
+        # Act / Assert
+        with pytest.raises(
+            ArenaValidationError,
+            match=re.escape(
+                "network.lora_config.target_modules: LoRA target modules are "
+                "chosen by Arena; remove target_modules."
+            ),
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_accepts_all_linear_lora_targets(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        payload = TrainingManifest.get_validated(manifest, mode="json")
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=payload, project="proj")
+
+        # Assert
+        assert payload["network"]["lora_config"]["target_modules"] == "all-linear"
+        assert result == {"job_id": 5}
+
     @pytest.mark.parametrize(
         ("hub_id", "context_length"),
         [

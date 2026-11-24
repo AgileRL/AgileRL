@@ -38,6 +38,10 @@ CLASSIC_RL_UNAVAILABLE_MESSAGE = (
     "Classic RL is no longer supported in Arena. Use the open-source AgileRL v2 "
     "release: https://github.com/AgileRL/AgileRL/releases/tag/v2.67.0"
 )
+LORA_TARGET_MODULES_FIELD = "network.lora_config.target_modules"
+LORA_TARGET_MODULES_MESSAGE = (
+    "LoRA target modules are chosen by Arena; remove target_modules."
+)
 
 
 def loc_to_path(loc: tuple[Any, ...]) -> str:
@@ -295,6 +299,43 @@ def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     return []
 
 
+def sets_lora_target_modules(manifest: TrainingManifest) -> bool:
+    """Whether the manifest names LoRA modules, which Arena chooses itself.
+
+    ``all-linear`` is the unset sentinel the submit API allows. The algorithm
+    and network sections share one LoRA config after validation, so this
+    covers ``algorithm.lora_config`` too.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: True when either section sets a module list.
+    :rtype: bool
+    """
+    network = manifest.network
+    if not isinstance(network, FinetuningNetworkSpec):
+        return False
+    return network.lora_config.target_modules != "all-linear"
+
+
+def lora_target_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Refuse a LoRA module list; Arena chooses the modules.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    if not sets_lora_target_modules(manifest):
+        return []
+    return [
+        {
+            "path": LORA_TARGET_MODULES_FIELD,
+            "message": LORA_TARGET_MODULES_MESSAGE,
+            "kind": "lora_target_modules_unavailable",
+        }
+    ]
+
+
 def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     """What Arena refuses on submit that the manifest schema allows.
 
@@ -310,6 +351,7 @@ def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
         *batch_size_errors(manifest),
         *context_length_errors(manifest),
         *run_errors(manifest),
+        *lora_target_errors(manifest),
     ]
 
 
@@ -353,6 +395,8 @@ __all__ = [
     "EXIT_INVALID",
     "EXIT_OK",
     "HPO_UNAVAILABLE_MESSAGE",
+    "LORA_TARGET_MODULES_FIELD",
+    "LORA_TARGET_MODULES_MESSAGE",
     "arena_failures",
     "describe",
     "errors",
@@ -361,6 +405,7 @@ __all__ = [
     "loc_to_path",
     "model_warnings",
     "read_manifest",
+    "sets_lora_target_modules",
     "submit_errors",
     "verdict",
 ]
