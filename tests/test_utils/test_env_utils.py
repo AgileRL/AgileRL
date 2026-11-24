@@ -80,6 +80,26 @@ class TestMakeConversationTemplate:
         conversation = env_utils.make_conversation_template(template)
         assert [message["role"] for message in conversation] == ["user", "system"]
 
+    def test_only_question_and_answer_are_placeholders(self) -> None:
+        template = {"user_0": '{question} as JSON: {"n": {other}}'}
+
+        content = env_utils.make_conversation_template(template)[0]["content"]
+
+        assert content.format(question="Q", answer="A") == 'Q as JSON: {"n": {other}}'
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            {"system_0": "S", "user_1": "U", "assistant_prefill": "<answer>"},
+            {"system_0": "S", "user_0": "U"},
+        ],
+    )
+    def test_rejects_partly_numbered_or_repeated_indices(
+        self, template: dict[str, str]
+    ) -> None:
+        with pytest.raises(ValueError, match="distinct index"):
+            env_utils.make_conversation_template(template)
+
 
 class TestParseEntrypoint:
     def test_rejects_missing_colon(self):

@@ -487,9 +487,11 @@ These are the names this package reads:
    * - ``include_reasoning``
      - ``None``
      - Send each turn's reasoning, with the model's markers (``</think>``,
-       Gemma 4 channels, gpt-oss harmony channels), to the reward or env.
-       Unset sends it to a ``rubric_file_path`` reward and sends an
-       ``entrypoint`` / ``env_url`` env only the text after the reasoning.
+       Gemma 4 channels, gpt-oss harmony channels), to the env and to
+       ``TurnAction.message``. Unset sends it over dataset rows and sends an
+       ``entrypoint`` / ``env_url`` env only the text after the reasoning. A
+       reward function gets the whole turn as ``completion`` either way (see
+       :ref:`arena_reward_inputs`).
    * - ``entrypoint``
      - ``None``
      - The env to build: a registry id, or ``module:Class`` /
