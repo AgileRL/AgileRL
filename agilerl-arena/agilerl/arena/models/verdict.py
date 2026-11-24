@@ -313,7 +313,27 @@ def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     ]
 
 
-def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
+def failure(failures: list[dict[str, str]]) -> dict[str, Any]:
+    """A verdict record for a manifest that failed.
+
+    :param failures: Error records, as :func:`errors` builds them.
+    :type failures: list[dict[str, str]]
+    :returns: The verdict.
+    :rtype: dict[str, Any]
+    """
+    return {
+        "ok": False,
+        "errors": failures,
+        "warnings": [],
+        "manifest_version": __version__,
+    }
+
+
+def verdict(
+    document: dict[str, Any],
+    submit: bool = False,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Validate *document* and report the outcome as one JSON-safe record.
 
     :param document: The raw manifest document.
@@ -321,11 +341,13 @@ def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
     :param submit: Also report :func:`submit_errors`, as ``arena manifest
         validate`` does. Arena validates a stored run without them.
     :type submit: bool
+    :param context: Pydantic validation context.
+    :type context: dict[str, Any] | None
     :returns: The verdict.
     :rtype: dict[str, Any]
     """
     try:
-        manifest = TrainingManifest.model_validate(document)
+        manifest = TrainingManifest.model_validate(document, context=context)
     except (ValidationError, ValueError) as err:
         failures = errors(err)
     else:
@@ -339,12 +361,7 @@ def verdict(document: dict[str, Any], submit: bool = False) -> dict[str, Any]:
                 "warnings": model_warnings(manifest),
                 "manifest_version": __version__,
             }
-    return {
-        "ok": False,
-        "errors": failures,
-        "warnings": [],
-        "manifest_version": __version__,
-    }
+    return failure(failures)
 
 
 __all__ = [
@@ -356,6 +373,7 @@ __all__ = [
     "arena_failures",
     "describe",
     "errors",
+    "failure",
     "hpo_fields",
     "is_classic_rl",
     "loc_to_path",
