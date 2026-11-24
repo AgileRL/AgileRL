@@ -26,6 +26,7 @@ from agilerl.arena.memory.specs import (
     LoraSplit,
     LoraTargetScope,
     ModelArch,
+    TrainingSettings,
 )
 
 
@@ -331,6 +332,42 @@ def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
     if arch.gated_mlp:
         widths += expert_inter
     return int(arch.moe_layers * n_experts * rank * widths)
+
+
+def adapter_params(
+    arch: ModelArch, settings: TrainingSettings, ep: int
+) -> tuple[int, int]:
+    """Expert-LoRA and dense parameters of one adapter; expert LoRA is its own group only under EP.
+
+    :param arch: Decoder geometry.
+    :param settings: Training settings (rank, scope, packed matrices).
+    :param ep: Expert-parallel degree.
+    :return: Expert-LoRA and dense parameters per adapter.
+    """
+    rank = settings.lora_rank
+    packed = settings.lora_packed_target_matrices
+    expert_lora = packed_lora_param_count(arch, rank, packed) if ep > 1 else 0
+    dense_packed = 0 if ep > 1 else packed
+    per_adapter = lora_param_count(
+        arch, rank, settings.lora_target_scope
+    ) + packed_lora_param_count(arch, rank, dense_packed)
+    return expert_lora, per_adapter
+
+
+def trained_param_counts(
+    arch: ModelArch, settings: TrainingSettings, ep: int
+) -> tuple[int, int]:
+    """Trained parameters outside and inside the expert-parallel group, unsharded.
+
+    :param arch: Decoder geometry.
+    :param settings: Training settings (rank, scope, adapters, critic).
+    :param ep: Expert-parallel degree; expert LoRA is its own group above 1.
+    :return: Dense adapters plus the value head, and expert LoRA.
+    """
+    expert_lora, per_adapter = adapter_params(arch, settings, ep)
+    n_trained = settings.n_trained_adapters
+    head = arch.hidden_size + 1 if settings.uses_critic else 0
+    return per_adapter * n_trained + head, expert_lora * n_trained
 
 
 @lru_cache(maxsize=256)

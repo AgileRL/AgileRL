@@ -645,6 +645,35 @@ class TestCrossNodeExpertBytes:
 
 
 class TestLeastCrossNodePlan:
+    def test_a_score_ranks_the_priced_layouts_in_place_of_bytes(self):
+        # Arrange: EP 16 moves the fewest bytes but steps slowest.
+        layouts = [ParallelLayout(ep=4), ParallelLayout(ep=8), ParallelLayout(ep=16)]
+        moved = {4: 2064.0, 8: 1032.0, 16: 387.0}
+        seconds = {4: 300.0, 8: 120.0, 16: 190.0}
+
+        # Act
+        plan = least_cross_node_plan(
+            layouts,
+            lambda layout: layout.ep,
+            lambda layout, _plan: moved[layout.ep],
+            lambda layout, _plan: seconds[layout.ep],
+        )
+
+        # Assert
+        assert plan == 8
+
+    def test_a_score_does_not_price_alternatives_to_a_plan_moving_nothing(self):
+        layouts = [ParallelLayout(ep=4), ParallelLayout(ep=16)]
+
+        plan = least_cross_node_plan(
+            layouts,
+            lambda layout: layout.ep,
+            lambda layout, _plan: 0.0 if layout.ep == 4 else 1.0,
+            lambda layout, _plan: 1.0 if layout.ep == 4 else 0.0,
+        )
+
+        assert plan == 4
+
     def test_a_first_plan_that_moves_nothing_wins_unpriced_alternatives(self):
         # Arrange
         layouts = [ParallelLayout(ep=4), ParallelLayout(ep=16)]

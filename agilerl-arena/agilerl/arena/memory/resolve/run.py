@@ -48,6 +48,7 @@ from agilerl.arena.memory.resolve.split import (
     no_split_reason,
     price_gpu_split,
     split_workload_from_manifest,
+    step_timing,
 )
 from agilerl.arena.memory.resolve.weight_sync import (
     SyncLink,
@@ -236,13 +237,15 @@ def _price_training_plan(
     :param mode: Weight-sync mode.
     :return: The plan, or ``None`` when training does not fit one GPU.
     """
+    at_trainers = _at_trainers(placed, trainers)
     try:
         return training_memory_from_manifest(
-            _at_trainers(placed, trainers),
+            at_trainers,
             model,
             device,
             not mode.merged,
             mode.transport == "nccl_reshard",
+            step_timing(at_trainers, model, device),
         )
     except (TrainingMemoryUnfitError, TrainerSplitError):
         return None
@@ -406,8 +409,8 @@ def resolve_run_memory(
 
     Layouts are tried from least parallel to most (:func:`parallel_layouts`):
     the first with a split that fits with the underprediction buffer wins,
-    else the first that fits at all, unless a higher expert degree moves
-    fewer routed-expert bytes between nodes at its split
+    else the first that fits at all, unless its split moves routed-expert
+    bytes between nodes and a higher expert degree's split steps faster
     (:func:`least_cross_node_plan`). A layout stays fixed across its trainer
     counts, each priced with its own :func:`training_memory_from_manifest`
     plan; a count where a group the search raised over the manifest's own
@@ -471,6 +474,11 @@ def resolve_run_memory(
             model.arch, plan.training, searched, trainers, node
         )
 
+    def stepped(_searched: ParallelLayout, plan: RunMemoryPlan) -> float:
+        # A searched plan always has a split, which prices its traffic between nodes in seconds.
+        assert plan.split is not None
+        return plan.split.synced_step_seconds
+
     for require_buffer in (True, False):
         found = least_cross_node_plan(
             placed,
@@ -486,6 +494,7 @@ def resolve_run_memory(
                 buffer,
             ),
             moved,
+            stepped,
         )
         if found is not None:
             return found
@@ -752,8 +761,9 @@ def kept_split_memory(
     :func:`training_memory_from_manifest` tries them; the first where a
     :func:`weight_sync_modes` mode's plan fits with the
     underprediction buffer wins, else the first where one fits at all,
-    unless a higher expert degree moves fewer routed-expert bytes between
-    nodes (:func:`least_cross_node_plan`). When
+    unless its plan moves routed-expert bytes between nodes and a higher
+    expert degree's plan learns faster, or moves fewer bytes when
+    :func:`step_timing` gives no timing (:func:`least_cross_node_plan`). When
     rollout is async and ``sync_link`` is set, each mode that fits there is
     priced at those counts by :func:`price_gpu_split`, with the engine width
     the run resolves for that mode, and picked as a searched split is
@@ -782,6 +792,12 @@ def kept_split_memory(
     placed = {layout: manifest_at_layout(manifest, layout) for layout in layouts}
     trainers = manifest.training.training_gpus_per_agent
     node = device.gpus_per_node or total_gpus
+    timing = step_timing(manifest, model, device)
+    learned = (
+        None
+        if timing is None
+        else lambda _layout, plan: timing.learn_seconds(plan.training)
+    )
     for require_buffer in (True, False):
         found = least_cross_node_plan(
             placed,
@@ -797,6 +813,7 @@ def kept_split_memory(
             lambda layout, plan: cross_node_expert_bytes(
                 model.arch, plan.training, layout, trainers, node
             ),
+            learned,
         )
         if found is not None:
             return found

@@ -743,7 +743,7 @@ class TestCachedTrainingPlan:
         cache = SearchCache()
         priced: list[int | None] = []
 
-        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+        def fake(manifest, model, device, adapter_sync, nccl_reshard, _timing):
             priced.append(device.host_bytes_per_gpu)
             if device.host_bytes_per_gpu is None:
                 return _plan_with_host(1000, None)
@@ -808,7 +808,7 @@ class TestCachedTrainingPlan:
         cache = SearchCache()
         priced: list[int | None] = []
 
-        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+        def fake(manifest, model, device, adapter_sync, nccl_reshard, _timing):
             priced.append(device.host_bytes_per_gpu)
             if device.host_bytes_per_gpu is None:
                 return _plan_with_host(1000, None)
@@ -848,7 +848,7 @@ class TestCachedTrainingPlan:
         cache = SearchCache()
         priced: list[int | None] = []
 
-        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+        def fake(manifest, model, device, adapter_sync, nccl_reshard, _timing):
             priced.append(device.host_bytes_per_gpu)
             return _plan_with_host(1000, None)
 
@@ -891,7 +891,7 @@ class TestCachedTrainingPlan:
         )
         priced: list[int | None] = []
 
-        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+        def fake(manifest, model, device, adapter_sync, nccl_reshard, _timing):
             priced.append(device.host_bytes_per_gpu)
             raise TrainingMemoryUnfitError(over, device)
 
@@ -1585,7 +1585,7 @@ def _prequantized_manifest(
 
 class TestResolveRunMemoryPrequantizedCheckpoint:
     @pytest.mark.parametrize("hub_id", PREQUANTIZED_EXPERT_LORA_MODELS)
-    def test_three_h100_nodes_serve_one_tp8_engine(self, hub_id: str) -> None:
+    def test_three_h100_nodes_serve_from_the_third_node(self, hub_id: str) -> None:
         # Arrange
         manifest = _prequantized_manifest(hub_id)
 
@@ -1594,10 +1594,12 @@ class TestResolveRunMemoryPrequantizedCheckpoint:
             manifest, catalog_model(manifest.algorithm), _h100_nodes(), 24
         )
 
-        # Assert
+        # Assert: expert gathers between the trainer nodes bound the learn
+        # step, so any engine width that fits the third node ties.
         assert plan.split is not None
-        assert (plan.split.trainers, plan.split.engines) == (16, 1)
-        assert plan.split.engine_width == 8
+        assert plan.split.trainers == 16
+        assert plan.split.engines * plan.split.engine_width == 8
+        assert plan.split.learn_seconds > plan.split.generation_seconds
         assert plan.merged_lora_sync is False
 
     @pytest.mark.parametrize("hub_id", PREQUANTIZED_EXPERT_LORA_MODELS)
@@ -2160,6 +2162,24 @@ class TestResolveRunMemoryCrossNodeExperts:
         assert plan.training.fsdp.routed_expert_chunk_mib == 512
         assert plan.training.fsdp.optim_cpu_offload is False
 
+    def test_learn_time_prices_expert_gathers_between_nodes(self) -> None:
+        # Arrange: at EP 4 x CP 4 each rank gathers 2 of its 4 expert pieces
+        # from the other node every pass; EP 16 gathers only dense weights.
+        manifest = _guess_the_number_smoke("deepseek-ai/DeepSeek-V4-Flash-0731")
+        model = catalog_model(manifest.algorithm)
+
+        # Act
+        gathered, whole = (
+            resolve_run_memory(manifest, model, _h100_nodes(), 24, layout=layout)
+            for layout in (ParallelLayout(ep=4, cp=4), ParallelLayout(ep=16, cp=4))
+        )
+
+        # Assert: about 2 TiB against 0.4 TiB between nodes per step.
+        assert gathered.split is not None
+        assert whole.split is not None
+        assert gathered.split.learn_seconds > 5 * whole.split.learn_seconds
+        assert gathered.split.learn_seconds > 18 * 60
+
     def test_long_rows_keep_gathering_weights(self) -> None:
         # Arrange: at 32k tokens the routed tokens EP 16 would send outweigh
         # the expert pieces EP 8 gathers.
@@ -2197,6 +2217,31 @@ class TestResolveRunMemoryCrossNodeExperts:
 
         assert plan is not None
         assert _layout(plan) == ParallelLayout(ep=16, cp=4)
+
+    def test_kept_counts_take_the_expert_degree_that_learns_faster(self) -> None:
+        # Arrange: 8 L4 trainers on two nodes. EP 8 sends more bytes between
+        # nodes than EP 1, but as routed tokens at the faster exchange rate
+        # instead of expert gathers that outlast compute.
+        raw = _countdown_at(1536, {})
+        raw["network"]["pretrained_model_name_or_path"] = "openai/gpt-oss-20b"
+        raw["algorithm"].update(name="CISPO", batch_size=32)
+        manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
+        manifest.training.training_gpus_per_agent = 8
+        device = _device("L4").model_copy(update={"gpus_per_node": 4})
+
+        # Act
+        plan = kept_split_memory(
+            manifest,
+            catalog_model(manifest.algorithm),
+            device,
+            16,
+            "tcp",
+            SearchCache(),
+        )
+
+        # Assert
+        assert plan is not None
+        assert _layout(plan) == ParallelLayout(ep=8)
 
     def test_one_node_keeps_the_least_parallel_layout(self) -> None:
         # Arrange: on one node no group crosses, so the least parallel fit
