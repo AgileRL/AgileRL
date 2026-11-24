@@ -5,13 +5,45 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from agilerl.arena.byoc import ByocApi
 from agilerl.arena.byoc.api import class_by_name, cluster_by_name
+from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaAPIError
+
+CLUSTER_AND_CLASS_CALLS: list[tuple[Callable[[ByocApi], object], str, str]] = [
+    (lambda api: api.list_clusters(), "/clusters/list", "query"),
+    (lambda api: api.unregister_cluster("arena"), "/clusters/unregister", "body"),
+    (lambda api: api.rotate_cluster_token("arena"), "/clusters/rotate-token", "body"),
+    (
+        lambda api: api.fetch_cluster_install_artifacts("arena"),
+        "/clusters/install-artifacts",
+        "body",
+    ),
+    (
+        lambda api: api.download_cluster_install_package("arena", "image: {}\n"),
+        "/clusters/install-package",
+        "body",
+    ),
+    (lambda api: api.list_classes(), "/classes/list", "query"),
+    (
+        lambda api: api.create_class("pool", 1, "arena", {}, {}),
+        "/classes/create",
+        "body",
+    ),
+    (lambda api: api.update_class("pool", 1, {}, {}), "/classes/update", "query"),
+    (lambda api: api.delete_class("pool"), "/classes/delete", "query"),
+    (
+        lambda api: api.fetch_bundle("pool", "helm"),
+        "/classes/deployment-setup",
+        "query",
+    ),
+]
 
 
 class TestClassByName:
@@ -587,3 +619,77 @@ class TestByocApiStoredNebiusConfig:
         assert data == b"pkg"
         _invoke, body = mock_client._invoke_manifest_command.call_args.args
         assert body["storageHelmValuesYaml"] == "bucket: arena-data\n"
+
+
+class TestByocApiPlatformScope:
+    @pytest.mark.parametrize(("call", "route", "location"), CLUSTER_AND_CLASS_CALLS)
+    def test_platform_sends_the_platform_scope(
+        self,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+        call: Callable[[ByocApi], object],
+        route: str,
+        location: str,
+    ) -> None:
+        # Act
+        call(ByocApi(http_client, platform=True))
+
+        # Assert
+        sent = sent_scope(http_client, route)
+        assert sent[location] == "platform"
+        assert list(sent.values()).count("platform") == 1
+
+    @pytest.mark.parametrize(("call", "route", "location"), CLUSTER_AND_CLASS_CALLS)
+    def test_customer_calls_send_no_scope(
+        self,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+        call: Callable[[ByocApi], object],
+        route: str,
+        location: str,
+    ) -> None:
+        call(ByocApi(http_client))
+
+        assert sent_scope(http_client, route) == {"query": None, "body": None}
+
+    def test_platform_keeps_provider_routes_unscoped(
+        self, http_client: ArenaClient
+    ) -> None:
+        ByocApi(http_client, platform=True).enable()
+
+        assert http_client._http.request.call_args.kwargs.get("json") is None
+
+    def test_platform_403_names_the_staff_requirement(
+        self, http_client: ArenaClient
+    ) -> None:
+        http_client._http.request.side_effect = None
+        http_client._http.request.return_value = httpx.Response(
+            403, json={"error": "forbidden"}
+        )
+
+        with pytest.raises(
+            ArenaAPIError, match="Only AgileRL staff can manage platform clusters"
+        ) as raised:
+            ByocApi(http_client, platform=True).fetch_cluster_install_artifacts("arena")
+
+        assert raised.value.status_code == 403
+
+    def test_customer_403_keeps_the_arena_message(
+        self, http_client: ArenaClient
+    ) -> None:
+        http_client._http.request.side_effect = None
+        http_client._http.request.return_value = httpx.Response(
+            403, json={"error": "Not an org admin"}
+        )
+
+        with pytest.raises(ArenaAPIError, match="Not an org admin"):
+            ByocApi(http_client).unregister_cluster("arena")
+
+    def test_platform_keeps_other_errors(self, http_client: ArenaClient) -> None:
+        http_client._http.request.side_effect = None
+        http_client._http.request.return_value = httpx.Response(
+            404, json={"error": "Cluster not found"}
+        )
+
+        with pytest.raises(ArenaAPIError, match="Cluster not found"):
+            ByocApi(http_client, platform=True).rotate_cluster_token("arena")
