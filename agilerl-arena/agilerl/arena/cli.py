@@ -20,6 +20,7 @@ from agilerl.arena import console
 from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
 from agilerl.arena.cli_agent import register_deployment_commands
 from agilerl.arena.cli_datasets import datasets_group
+from agilerl.arena.cli_experiment_logs import register_experiment_log_commands
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.cli_secrets import secrets_group
 from agilerl.arena.cli_user import user_group
@@ -49,7 +50,7 @@ from agilerl.arena.output import (
     supports_interactive_selection,
 )
 from agilerl.arena.snowflake.cli import snowflake_group
-from agilerl.arena.submit_quote import confirm_submit_price
+from agilerl.arena.submit_quote import confirm_resume_price, confirm_submit_price
 
 ArenaError.enable_cli_mode()
 
@@ -308,14 +309,15 @@ def manifest_schema_command() -> None:
 
 @main.group("resources")
 def resources_group() -> None:
-    """List the GPU types you can train on."""
+    """List the GPU types and GPU counts you can train on."""
 
 
 def _gpu_types(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the platform's GPU types, derived from resource tiers on an older platform.
 
     :param data: The ``resources/list`` response.
-    :return: One ``{"gpuType", "gpusPerNode", "devOnly"}`` dict per GPU type.
+    :return: One ``{"gpuType", "gpusPerNode", "numGpus", "devOnly"}`` dict per GPU
+        type. Rows derived from tiers have no ``numGpus``.
     """
     if "gpuTypes" in data:
         return data["gpuTypes"]
@@ -331,18 +333,29 @@ def _gpu_types(data: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _counts(counts: list[int]) -> str:
+    """Join GPU counts with commas."""
+    return ", ".join(str(n) for n in counts)
+
+
 @resources_group.command("list")
+@click.option(
+    "--algorithm",
+    default=None,
+    help="The run's algorithm.name, e.g. SUPERVISED. Without it, lists what LLM training accepts.",
+)
 @click.pass_obj
-def resources_list(config: CommandConfig) -> None:
-    """List the GPU types you can train on and their GPUs per node."""
+def resources_list(config: CommandConfig, algorithm: str | None) -> None:
+    """List the GPU types you can train on, with the --num-gpus values each takes."""
     with arena_client(config) as client:
-        gpu_types = _gpu_types(client.list_resources())
+        gpu_types = _gpu_types(client.list_resources(algorithm=algorithm))
     emit_result(
         gpu_types,
         display=lambda rows: [
             {
                 "GPU type": row["gpuType"],
-                "GPUs per node": ", ".join(str(n) for n in row["gpusPerNode"]),
+                "--num-gpus": _counts(row.get("numGpus", [])),
+                "GPUs per node": _counts(row["gpusPerNode"]),
                 "Dev only": "yes" if row.get("devOnly") else "",
             }
             for row in rows
@@ -552,6 +565,9 @@ def experiment() -> None:
     """Manage experiments (training jobs) by name."""
 
 
+register_experiment_log_commands(experiment)
+
+
 @experiment.command("submit")
 @click.argument(
     "manifest",
@@ -711,6 +727,13 @@ def _experiment_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
     default=None,
     help="Project, when the experiment name exists in more than one.",
 )
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Resume without asking to confirm the price.",
+)
 @click.pass_obj
 def experiment_resume(
     config: CommandConfig,
@@ -719,18 +742,23 @@ def experiment_resume(
     checkpoint: str | None,
     new_name: str | None,
     project: str | None,
+    yes: bool,
 ) -> None:
-    """Resume an experiment by name."""
+    """Resume an experiment by name.
+
+    Prints the hardware, hourly rate and estimated total first, then asks to
+    go on. --yes skips the question, and so does a pipe or a file on stdin.
+    """
+    resume_args = {
+        "experiment_name": experiment_name,
+        "max_steps": max_steps,
+        "checkpoint": checkpoint,
+        "new_name": new_name,
+        "project": project,
+    }
     with arena_client(config) as client:
-        emit_result(
-            client.resume_experiment(
-                experiment_name=experiment_name,
-                max_steps=max_steps,
-                checkpoint=checkpoint,
-                new_name=new_name,
-                project=project,
-            )
-        )
+        confirm_resume_price(client, yes, **resume_args)
+        emit_result(client.resume_experiment(**resume_args))
 
 
 @experiment.command("stop")

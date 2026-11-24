@@ -11,6 +11,7 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import singledispatch
 from typing import Any
 
@@ -651,6 +652,40 @@ class StreamRichRenderer:
         for row in self._rows:
             table.add_row(row.name, row.status, row.details)
         return table
+
+
+def emit_log_line(line: dict[str, Any]) -> None:
+    """Print one experiment log line, or its JSON object under ``--json``.
+
+    :param line: ``timestamp`` (Unix microseconds), ``severity`` and ``message``.
+    :type line: dict[str, Any]
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(line))
+        return
+    when = datetime.fromtimestamp(line["timestamp"] / 1_000_000, tz=timezone.utc)
+    click.echo(f"{when:%Y-%m-%d %H:%M:%S} {line['severity']:<7} {line['message']}")
+
+
+def emit_log_summary(page: dict[str, Any], *, printed: int) -> None:
+    """Close ``arena experiments logs`` with the status and any failure reason.
+
+    :param page: The last logs page, carrying ``status`` and ``failure_reason``.
+    :type page: dict[str, Any]
+    :param printed: How many log lines were printed.
+    :type printed: int
+    """
+    if json_output_enabled():
+        summary = {
+            key: page.get(key)
+            for key in ("experiment_name", "status", "failure_reason")
+        }
+        click.echo(json.dumps(summary))
+        return
+    if printed == 0:
+        click.echo(f"No log lines for {page['experiment_name']} yet.", err=True)
+    if page.get("failure_reason"):
+        click.echo(f"{page['status']}: {page['failure_reason']}", err=True)
 
 
 def emit_csv_preview(payload: bytes, *, max_rows: int) -> None:
