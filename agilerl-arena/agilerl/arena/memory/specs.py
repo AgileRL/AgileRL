@@ -136,6 +136,13 @@ NCCL_GROUP_BYTES_BY_DEVICE: dict[str, int] = {
     "NVIDIA L4": 125 * MiB,
 }
 NCCL_GROUP_BYTES_DEFAULT = 820 * MiB
+# All-to-all buffers one rank holds for an EP group across nodes, keyed by
+# torch device name. Socket buffers do not shrink with a device's small
+# PCIe on-node groups; L4 is measured on 2 x 4 L4 at ep 8. Unlisted devices
+# price them from their on-node group bytes.
+NCCL_CROSS_NODE_ALL_TO_ALL_BYTES_BY_DEVICE: dict[str, int] = {
+    "NVIDIA L4": 2560 * MiB,
+}
 
 # Bytes per element.
 DTYPE_BYTES: dict[str, float] = {
@@ -1000,6 +1007,13 @@ class DeviceSpec(BaseModel):
         return NCCL_GROUP_BYTES_BY_DEVICE.get(self.name, NCCL_GROUP_BYTES_DEFAULT)
 
     @property
+    def nccl_cross_node_all_to_all_bytes(self) -> int | None:
+        """Measured all-to-all bytes one rank holds for an EP group across nodes; ``None`` when unmeasured."""
+        if self.name is None:
+            return None
+        return NCCL_CROSS_NODE_ALL_TO_ALL_BYTES_BY_DEVICE.get(self.name)
+
+    @property
     def usable_bytes(self) -> int:
         """Capacity the predicted peak is checked against.
 
@@ -1157,11 +1171,12 @@ class TrainingSettings(BaseModel):
         """GPUs packed expert weights are sharded across.
 
         Expert parallel times leftover FSDP covers the whole shard group, not
-        the dense ``dp_shard * cp`` group.
+        the dense ``dp_shard * cp`` group. An expert group wider than the
+        shard group holds each expert once with no leftover FSDP.
         """
         if self.fsdp is None or self.fsdp.ep <= 1:
             return self.dense_fsdp_gpus
-        return self.shard_group_gpus
+        return max(self.shard_group_gpus, self.fsdp.ep)
 
     @property
     def uses_reference(self) -> bool:

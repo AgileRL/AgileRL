@@ -33,6 +33,7 @@ def trainer_nccl_bytes(
     tensor_parallel: int = 1,
     gpus_per_node: int | None = None,
     context_parallel: int = 1,
+    cross_node_all_to_all_bytes: int | None = None,
 ) -> int:
     """NCCL buffers on one trainer rank, summed over the process groups it joins.
 
@@ -48,6 +49,9 @@ def trainer_nccl_bytes(
     :param group_bytes: The device's 4-rank on-node group bytes.
     :param gpus_per_node: GPUs on one node; ``None`` keeps every rank on one node.
     :param context_parallel: Context-parallel degree.
+    :param cross_node_all_to_all_bytes: The device's measured all-to-all
+        buffers for an EP group across nodes; ``None`` prices them as a
+        fraction of ``group_bytes``.
     """
     node = n_gpus if gpus_per_node is None else gpus_per_node
 
@@ -60,11 +64,13 @@ def trainer_nccl_bytes(
     fraction = NCCL_BASE_FRACTION + group(n_gpus, n_gpus)
     if replicate > 1:
         fraction += group(shard_gpus, shard_gpus) + group(replicate, n_gpus)
-    all_to_all = (
-        NCCL_ALL_TO_ALL_ON_NODE_FRACTION
-        if expert_parallel <= node
-        else NCCL_ALL_TO_ALL_CROSS_NODE_FRACTION
-    )
+    all_to_all = NCCL_ALL_TO_ALL_ON_NODE_FRACTION
+    if expert_parallel > node:
+        all_to_all = (
+            NCCL_ALL_TO_ALL_CROSS_NODE_FRACTION
+            if cross_node_all_to_all_bytes is None
+            else cross_node_all_to_all_bytes / group_bytes
+        )
     for degree, own_group in (
         (expert_parallel, group(expert_parallel, expert_parallel) + all_to_all),
         (tensor_parallel, group(tensor_parallel, tensor_parallel)),

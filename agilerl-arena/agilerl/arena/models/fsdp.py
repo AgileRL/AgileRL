@@ -221,7 +221,9 @@ class FSDPConfig:
             description=(
                 "Ranks that shard weights between them; groups replicate "
                 "(HSDP). Set to GPUs per node so weight gathers stay "
-                "inside a node. None shards across all trainer ranks."
+                "inside a node. An ep that is a multiple of it spans whole "
+                "groups and holds each expert once per ep ranks. None shards "
+                "across all trainer ranks."
             ),
         ),
     ] = None
@@ -272,16 +274,18 @@ class FSDPConfig:
             if self.shard_group_size < 1:
                 msg = "FSDPConfig.shard_group_size must be >= 1"
                 raise ValueError(msg)
-            for name, degree in (
-                ("ep", self.ep),
-                ("tp * cp", self.tp * self.cp),
-            ):
-                if self.shard_group_size % degree:
-                    msg = (
-                        f"FSDPConfig.shard_group_size={self.shard_group_size} "
-                        f"must be divisible by {name}={degree}"
-                    )
-                    raise ValueError(msg)
+            if self.shard_group_size % (self.tp * self.cp):
+                msg = (
+                    f"FSDPConfig.shard_group_size={self.shard_group_size} "
+                    f"must be divisible by tp * cp={self.tp * self.cp}"
+                )
+                raise ValueError(msg)
+            if self.shard_group_size % self.ep and self.ep % self.shard_group_size:
+                msg = (
+                    f"FSDPConfig.shard_group_size={self.shard_group_size} must be "
+                    f"divisible by ep={self.ep}, or ep a multiple of it"
+                )
+                raise ValueError(msg)
 
 
 def parallel_layout_pins(config: FSDPConfig) -> frozenset[str]:

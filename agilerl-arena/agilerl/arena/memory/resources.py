@@ -8,7 +8,7 @@ import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
 from agilerl.arena.memory.formulas import recommendation_fits
@@ -705,15 +705,27 @@ def _with_cross_node_bytes(
     )
 
 
+@dataclass(frozen=True)
+class NodeShardGroups:
+    """``layout`` with one FSDP shard group per node of the tier it is priced on."""
+
+    layout: ParallelLayout
+
+
+SearchStep = ParallelLayout | NodeShardGroups
+
+
 def _search_steps(
     manifest: TrainingManifest, tiers: list[dict[str, Any]]
-) -> list[ParallelLayout | Literal["hsdp"]]:
-    """Layouts in search order; ``"hsdp"`` shards at each tier's node size.
+) -> list[SearchStep]:
+    """Layouts in search order; a :class:`NodeShardGroups` step shards at each tier's node size.
 
-    The manifest's own pins come first and run as written. A searched layout
-    is kept when it is allowed (:func:`off_node_reason`) at some tier and
-    node count. Empty when the manifest has no layout to search: no
-    catalogued LLM.
+    The manifest's own pins come first and run as written, then with
+    node-sized shard groups. A searched layout is kept when it is allowed
+    (:func:`off_node_reason`) at some tier and node count. An expert group
+    wider than the smallest node is tried with node-sized shard groups
+    first. A set shard group adds no node-sized steps. Empty when the
+    manifest has no layout to search: no catalogued LLM.
     """
     spec = manifest.algorithm
     model = catalog_model(spec) if isinstance(spec, LLMAlgorithmSpec) else None
@@ -750,14 +762,25 @@ def _search_steps(
     ]
     if "shard_group_size" in parallel_layout_pins(fsdp):
         return [pinned, *placeable]
-    return [pinned, "hsdp", *placeable]
+    smallest = min((node for node, _ in spans), default=None)
+    steps: list[SearchStep] = [pinned, NodeShardGroups(pinned)]
+    for layout in placeable:
+        # Routed tokens already cross nodes there; node-sized shard groups
+        # keep the dense gathers on one node.
+        if smallest is not None and layout.ep > smallest:
+            steps.append(NodeShardGroups(layout))
+        steps.append(layout)
+    return steps
 
 
-def _hsdp_layout(
-    manifest: TrainingManifest, node_gpus: int, allocation: int
+def _node_shard_layout(
+    step: NodeShardGroups,
+    manifest: TrainingManifest,
+    node_gpus: int,
+    allocation: int,
 ) -> ParallelLayout | None:
-    """A shard group of one node, when the trainers can span more than one; else ``None``."""
-    layout = replace(pinned_layout(manifest_fsdp(manifest)), shard_group_size=node_gpus)
+    """``step``'s layout with a shard group of one node, when the trainers can span more than one; else ``None``."""
+    layout = replace(step.layout, shard_group_size=node_gpus)
     trainers = _most_trainers(manifest, allocation)
     ranks_fixed = not searches_gpu_split(manifest)
     if trainers <= node_gpus or not layout_runs(trainers, layout, ranks_fixed):
@@ -789,7 +812,7 @@ def _covers(larger: dict[str, Any], smaller: dict[str, Any]) -> bool:
 
 
 def _price_step(
-    step: ParallelLayout | Literal["hsdp"] | None,
+    step: SearchStep | None,
     tier: dict[str, Any],
     manifest: TrainingManifest,
     model: ModelSpec,
@@ -799,33 +822,37 @@ def _price_step(
     num_nodes: int,
     cache: SearchCache,
 ) -> TierCheck | None:
-    """Price ``step`` on ``num_nodes`` of ``tier``. ``None`` when HSDP cannot run there."""
-    if step != "hsdp":
+    """Price ``step`` on ``num_nodes`` of ``tier``. ``None`` when its node-sized shard groups cannot run there."""
+    if not isinstance(step, NodeShardGroups):
         return _price(tier, manifest, model, build_config, step, num_nodes, cache)
-    layout = _hsdp_layout(manifest, _node_gpus(tier), _allocation(tier, num_nodes))
+    layout = _node_shard_layout(
+        step, manifest, _node_gpus(tier), _allocation(tier, num_nodes)
+    )
     if layout is None:
         return None
     return _price(tier, manifest, model, build_config, layout, num_nodes, cache)
 
 
 def _searched_expert_spans_node(
-    step: ParallelLayout | Literal["hsdp"] | None,
+    step: SearchStep | None,
     tier: dict[str, Any],
-    pinned: ParallelLayout | Literal["hsdp"] | None,
+    pinned: SearchStep | None,
 ) -> bool:
     """Whether ``step`` is a searched expert group wider than ``tier``'s node.
 
-    The manifest's own layout (``pinned``) runs as written.
+    The manifest's own layout (``pinned``) runs as written, with or without
+    node-sized shard groups.
     """
+    layout = step.layout if isinstance(step, NodeShardGroups) else step
     return (
-        step is not pinned
-        and isinstance(step, ParallelLayout)
-        and step.ep > _node_gpus(tier)
+        layout is not pinned
+        and isinstance(layout, ParallelLayout)
+        and layout.ep > _node_gpus(tier)
     )
 
 
 def _lock_layout(
-    steps: list[ParallelLayout | Literal["hsdp"] | None],
+    steps: list[SearchStep | None],
     usable: list[dict[str, Any]],
     manifest: TrainingManifest,
     model: ModelSpec,
@@ -879,8 +906,9 @@ def check_tiers(
     on a node stays ahead of context and tensor parallel when the search
     covers several node sizes. When that lock moves routed-expert bytes
     between nodes, each later layout that differs only in a higher expert
-    degree is priced at the lock's tier and node count, and the fit moving
-    the fewest bytes takes the lock (:func:`_fewer_cross_node_bytes`). A layout that fails at a tier's largest node count is not priced
+    degree, and maybe its shard group, is priced at the lock's tier and node
+    count, and the fit moving the fewest bytes takes the lock
+    (:func:`_fewer_cross_node_bytes`). A layout that fails at a tier's largest node count is not priced
     at the counts in between, and a same-GPU tier with no more host RAM per
     GPU is not priced again for that layout. Tiers with at least as many
     GPUs per node and as much memory per GPU are priced at that layout
@@ -915,9 +943,7 @@ def check_tiers(
     ordered = sorted(tiers, key=lambda t: t["price_per_node_hour"])
     ruled_out = {tier["name"]: check for tier in ordered if (check := _unusable(tier))}
     usable = [tier for tier in ordered if tier["name"] not in ruled_out]
-    steps: list[ParallelLayout | Literal["hsdp"] | None] = [
-        *_search_steps(manifest, usable)
-    ] or [None]
+    steps: list[SearchStep | None] = [*_search_steps(manifest, usable)] or [None]
     cache = SearchCache() if search_cache is None else search_cache
     first_failure: dict[str, TierCheck] = {}
     lock = _lock_layout(
@@ -936,7 +962,7 @@ def check_tiers(
 
 def _fewer_cross_node_bytes(
     lock: TierCheck,
-    steps: list[ParallelLayout | Literal["hsdp"] | None],
+    steps: list[SearchStep | None],
     manifest: TrainingManifest,
     model: ModelSpec,
     build_config: Callable[
@@ -953,23 +979,34 @@ def _fewer_cross_node_bytes(
     if first is None or lock.cross_node_expert_bytes == 0:
         return lock
     best = lock
+    node_gpus = _node_gpus(lock.tier)
     for step in steps:
+        layout = (
+            replace(step.layout, shard_group_size=node_gpus)
+            if isinstance(step, NodeShardGroups)
+            else step
+        )
         if not (
-            isinstance(step, ParallelLayout)
-            and step.ep > first.ep
-            and replace(step, ep=first.ep) == first
+            layout is not None
+            and layout.ep > first.ep
+            and replace(layout, ep=first.ep, shard_group_size=first.shard_group_size)
+            == first
         ):
             continue
-        check = _price(
-            lock.tier, manifest, model, build_config, step, lock.num_nodes, cache
+        check = _price_step(
+            step, lock.tier, manifest, model, build_config, lock.num_nodes, cache
         )
-        if check.fits and check.cross_node_expert_bytes < best.cross_node_expert_bytes:
+        if (
+            check is not None
+            and check.fits
+            and check.cross_node_expert_bytes < best.cross_node_expert_bytes
+        ):
             best = check
     return best
 
 
 def _first_fit(
-    step: ParallelLayout | Literal["hsdp"] | None,
+    step: SearchStep | None,
     usable: list[dict[str, Any]],
     manifest: TrainingManifest,
     model: ModelSpec,

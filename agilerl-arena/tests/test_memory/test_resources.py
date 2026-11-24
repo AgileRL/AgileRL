@@ -29,6 +29,7 @@ from agilerl.arena.memory.resolve.run import (
 )
 from agilerl.arena.memory.resources import (
     FailureKind,
+    NodeShardGroups,
     check_tiers,
     colocated_manifest,
     engine_width,
@@ -1790,10 +1791,25 @@ class TestSearchSteps:
         # Assert
         assert steps == [
             ParallelLayout(),
-            "hsdp",
+            NodeShardGroups(ParallelLayout()),
             ParallelLayout(cp=2),
             ParallelLayout(tp=2),
         ]
+
+    def test_an_expert_group_over_nodes_comes_first_with_node_shard_groups(self):
+        # Arrange: Qwen3.6-35B-A3B SFT on 8 trainers, two 4-GPU nodes.
+        doc = with_model(SFT_MANIFEST, "Qwen/Qwen3.6-35B-A3B")
+        doc["training"]["training_gpus_per_agent"] = 8
+        manifest = TrainingManifest.model_validate(doc)
+        tiers = [{**tier("l4-4x", "NVIDIA L4", 4, 1.0), "node_counts": [1, 2]}]
+
+        # Act
+        steps = resources_module._search_steps(manifest, tiers)
+
+        # Assert
+        wide = steps.index(ParallelLayout(ep=8))
+        assert steps[wide - 1] == NodeShardGroups(ParallelLayout(ep=8))
+        assert NodeShardGroups(ParallelLayout(ep=4)) not in steps
 
 
 def flat_estimate(peak: int, usable: int) -> RunEstimate:
@@ -1855,7 +1871,7 @@ class TestCheckTiersCrossNodeExperts:
     def test_a_lock_gathering_experts_across_nodes_gives_way_to_whole_experts(self):
         # Arrange: 16 trainers on two of three 8-H100 nodes. EP 4 is the
         # first layout that fits and gathers expert pieces from the other
-        # node; EP 16 holds every expert once.
+        # node; EP 16 holds every expert once, with a shard group per node.
         manifest = deepseek_kept_counts()
         tiers = [
             {
@@ -1877,7 +1893,7 @@ class TestCheckTiersCrossNodeExperts:
         # Assert
         assert check.fits
         assert check.num_nodes == 3
-        assert check.layout == ParallelLayout(ep=16)
+        assert check.layout == ParallelLayout(ep=16, shard_group_size=8)
         assert check.cross_node_expert_bytes > 0
 
     def test_mixed_node_sizes_try_expert_parallel_before_context_parallel(

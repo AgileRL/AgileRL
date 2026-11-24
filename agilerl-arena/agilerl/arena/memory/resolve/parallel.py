@@ -80,11 +80,14 @@ def layout_runs(n_gpus: int, layout: ParallelLayout, ranks_fixed: bool) -> bool:
     :param ranks_fixed: ``n_gpus`` is the trainer count, not an upper bound.
     :return: False when a group does not divide the ranks it has to cover, or
         under an open count, when no trainer count up to ``n_gpus`` holds
-        every group.
+        every group. An expert group either fits in one shard group or holds
+        whole shard groups.
     """
     shard = layout.shard_group_size
     dense = layout.tp * layout.cp
-    if shard is not None and (shard % dense or shard % layout.ep):
+    if shard is not None and (
+        shard % dense or (shard % layout.ep and layout.ep % shard)
+    ):
         return False
     if not ranks_fixed:
         return lcm(dense, layout.ep, shard or 1) <= n_gpus
@@ -125,7 +128,8 @@ def parallel_layouts(
     Each degree must split the model's heads. Searched tensor x context
     groups stay within one node, and searched expert groups within one node
     or across whole nodes (:func:`off_node_reason`), the latter after every
-    layout on one node; under an open count the split drops trainer counts
+    layout on one node, each first with node-sized shard groups unless the
+    shard group is set; under an open count the split drops trainer counts
     where they straddle nodes. A searched MoE layout keeps ``ep >= tp``, and a set
     ``cpu_offload`` keeps the degrees it runs at.
 
@@ -200,14 +204,20 @@ def _cached_layouts(
         if not (arch.is_moe and ep < tp)
         and _offload_runs(cpu_offload, layout := ParallelLayout(tp, ep, cp, shard))
     ]
+    hsdp = "shard_group_size" not in pins and node < n_gpus
     candidates = [pinned]
-    if "shard_group_size" not in pins and node < n_gpus:
+    if hsdp:
         candidates.append(replace(pinned, shard_group_size=node))
     # An expert group across nodes is tried only after every layout on one node.
-    candidates += sorted(
+    for layout in sorted(
         searched,
         key=lambda layout: (layout.ep > node, _search_rank(layout, pinned)),
-    )
+    ):
+        # Routed tokens already cross nodes there; node-sized shard groups
+        # keep the dense gathers on one node.
+        if hsdp and layout.ep > node:
+            candidates.append(replace(layout, shard_group_size=node))
+        candidates.append(layout)
     return tuple(
         layout
         for layout in dict.fromkeys(candidates)
@@ -501,7 +511,7 @@ def least_cross_node_plan(
 
     The first layout ``plan_at`` gives a plan for wins unless its plan moves
     routed-expert bytes between nodes. Then each later layout that differs
-    only in a higher expert-parallel degree is priced, and the one moving the
+    only in a higher expert-parallel degree, and maybe its shard group, is priced, and the one moving the
     fewest bytes wins, or with ``score`` the lowest score; the earlier wins a
     tie.
 
@@ -519,7 +529,9 @@ def least_cross_node_plan(
     least = 0.0
     for layout in layouts:
         if first is not None and not (
-            layout.ep > first.ep and replace(layout, ep=first.ep) == first
+            layout.ep > first.ep
+            and replace(layout, ep=first.ep, shard_group_size=first.shard_group_size)
+            == first
         ):
             continue
         plan = plan_at(layout)
