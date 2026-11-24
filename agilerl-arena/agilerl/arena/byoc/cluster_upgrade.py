@@ -94,6 +94,7 @@ def run_cluster_upgrade(
     kubeconfig: Path | None = None,
     agent_namespace: str | None = None,
     helm_wait: bool = True,
+    platform: bool = False,
 ) -> None:
     """Upgrade the installed BYOC agent chart without rotating credentials.
 
@@ -112,6 +113,8 @@ def run_cluster_upgrade(
     :type agent_namespace: str | None
     :param helm_wait: Wait for the agent Deployment when ``True``.
     :type helm_wait: bool
+    :param platform: Upgrade one of AgileRL's platform clusters.
+    :type platform: bool
     :returns: None
     :rtype: None
     :raises click.ClickException: If no agent Helm release is installed.
@@ -121,7 +124,7 @@ def run_cluster_upgrade(
         msg = "--name is required."
         raise click.ClickException(msg)
     explicit_namespace = (agent_namespace or "").strip() or None
-    api = ByocApi(client)
+    api = ByocApi(client, platform=platform)
     artifacts = api.fetch_cluster_install_artifacts(cluster_name)
     agent_yaml = artifacts.get("agentHelmValuesYaml")
     if not isinstance(agent_yaml, str) or not agent_yaml.strip():
