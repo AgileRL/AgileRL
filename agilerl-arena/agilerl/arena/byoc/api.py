@@ -11,6 +11,9 @@ commands never construct raw invoke descriptors themselves.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from http import HTTPStatus
 from typing import Any, TypedDict
 
 from typing_extensions import NotRequired, Unpack
@@ -18,10 +21,11 @@ from typing_extensions import NotRequired, Unpack
 from agilerl.arena.byoc import endpoints
 from agilerl.arena.byoc.endpoints import SetupKind
 from agilerl.arena.byoc.provisioning.spec import api_byoc_scope, api_placement
-from agilerl.arena.client import ArenaClient
+from agilerl.arena.client import ArenaClient, ManifestInvoke
 from agilerl.arena.exceptions import ArenaAPIError
 
 logger = logging.getLogger("agilerl.arena.byoc")
+PLATFORM_STAFF_ONLY = "Only AgileRL staff can manage platform clusters."
 
 
 def _named_item(items: object, name: str, kind: str) -> dict[str, Any] | None:
@@ -105,14 +109,45 @@ class RegisterClusterFields(TypedDict):
 class ByocApi:
     """Talks to the Arena BYOC endpoints through an :class:`ArenaClient`."""
 
-    def __init__(self, client: ArenaClient) -> None:
+    def __init__(self, client: ArenaClient, platform: bool = False) -> None:
         """Wrap an :class:`ArenaClient` with the BYOC endpoint operations.
 
         :param client: The authenticated Arena client to issue requests through.
         :type client: ArenaClient
+        :param platform: Address AgileRL's platform clusters instead of the
+            active org's clusters on every cluster and class call.
+        :type platform: bool
         """
         self._client = client
+        self._scope: dict[str, str] = {"byocScope": "platform"} if platform else {}
         self._listed_classes: object | None = None
+
+    @contextmanager
+    def _platform_access(self) -> Iterator[None]:
+        """Name the staff requirement when Arena refuses a platform call."""
+        try:
+            yield
+        except ArenaAPIError as exc:
+            if self._scope and exc.status_code == HTTPStatus.FORBIDDEN:
+                raise ArenaAPIError(
+                    PLATFORM_STAFF_ONLY, status_code=exc.status_code
+                ) from exc
+            raise
+
+    def _invoke(self, invoke: ManifestInvoke, args: Mapping[str, object]) -> object:
+        """Call a cluster or class route and return its decoded JSON."""
+        with self._platform_access():
+            return self._client._invoke_manifest_command(
+                invoke, {**args, **self._scope}
+            )
+
+    def _download(self, invoke: ManifestInvoke, args: Mapping[str, object]) -> bytes:
+        """Call a binary cluster or class route and return its body."""
+        with self._platform_access():
+            raw_b, _ctype, _disp = self._client._invoke_manifest_command(
+                invoke, {**args, **self._scope}
+            )
+        return raw_b
 
     def enable(self) -> None:
         """Enable the BYOC provider for the account.
@@ -138,7 +173,7 @@ class ByocApi:
         :returns: The decoded ``classes/list`` payload (expected to be a list).
         :rtype: object
         """
-        return self._client._invoke_manifest_command(endpoints.LIST_CLASSES, {})
+        return self._invoke(endpoints.LIST_CLASSES, {})
 
     def load_classes(self) -> None:
         """Fetch resource classes once for later lookups."""
@@ -171,7 +206,7 @@ class ByocApi:
             logger.info("No Arena resource class %r; skipping API delete.", name)
             return
         logger.info("Deleting BYOC resource class %r from Arena…", name)
-        self._client._invoke_manifest_command(endpoints.DELETE_CLASS, {"name": name})
+        self._invoke(endpoints.DELETE_CLASS, {"name": name})
 
     def register_cluster(
         self, **fields: Unpack[RegisterClusterFields]
@@ -227,10 +262,11 @@ class ByocApi:
                 continue
             body[key] = value
         logger.info("Registering BYOC cluster %r…", name)
-        result = self._client._invoke_manifest_command(
-            endpoints.REGISTER_CLUSTER,
-            body,
-        )
+        with self._platform_access():
+            result = self._client._invoke_manifest_command(
+                endpoints.REGISTER_CLUSTER,
+                body,
+            )
         if not isinstance(result, dict):
             msg = "Unexpected cluster registration response from Arena."
             raise ArenaAPIError(msg)
@@ -242,7 +278,7 @@ class ByocApi:
         :returns: The decoded ``clusters/list`` payload (expected to be a list).
         :rtype: object
         """
-        return self._client._invoke_manifest_command(endpoints.LIST_CLUSTERS, {})
+        return self._invoke(endpoints.LIST_CLUSTERS, {})
 
     def find_cluster(self, name: str) -> dict[str, Any] | None:
         """Return the active cluster named *name*, or ``None`` if it does not exist.
@@ -315,10 +351,7 @@ class ByocApi:
         :rtype: object
         """
         logger.info("Unregistering BYOC cluster %r…", name)
-        return self._client._invoke_manifest_command(
-            endpoints.UNREGISTER_CLUSTER,
-            {"name": name},
-        )
+        return self._invoke(endpoints.UNREGISTER_CLUSTER, {"name": name})
 
     def rotate_cluster_token(self, name: str) -> dict[str, Any]:
         """Rotate the agent token for the BYOC cluster named *name*.
@@ -329,10 +362,7 @@ class ByocApi:
         :rtype: dict[str, Any]
         """
         logger.info("Rotating BYOC cluster token for %r…", name)
-        result = self._client._invoke_manifest_command(
-            endpoints.ROTATE_CLUSTER_TOKEN,
-            {"name": name},
-        )
+        result = self._invoke(endpoints.ROTATE_CLUSTER_TOKEN, {"name": name})
         if not isinstance(result, dict):
             msg = "Unexpected cluster token rotation response from Arena."
             raise ArenaAPIError(msg)
@@ -368,10 +398,7 @@ class ByocApi:
             body["availabilities"] = availabilities
         if enabled is not None:
             body["enabled"] = enabled
-        result = self._client._invoke_manifest_command(
-            endpoints.CREATE_CLASS,
-            body,
-        )
+        result = self._invoke(endpoints.CREATE_CLASS, body)
         if not isinstance(result, dict):
             msg = "Unexpected resource class create response from Arena."
             raise ArenaAPIError(msg)
@@ -401,10 +428,7 @@ class ByocApi:
             body["availabilities"] = availabilities
         if enabled is not None:
             body["enabled"] = enabled
-        result = self._client._invoke_manifest_command(
-            endpoints.UPDATE_CLASS,
-            body,
-        )
+        result = self._invoke(endpoints.UPDATE_CLASS, body)
         if not isinstance(result, dict):
             msg = "Unexpected resource class update response from Arena."
             raise ArenaAPIError(msg)
@@ -421,10 +445,7 @@ class ByocApi:
         body: dict[str, object] = {"name": name, "availabilities": availabilities}
         if enabled is not None:
             body["enabled"] = enabled
-        result = self._client._invoke_manifest_command(
-            endpoints.UPDATE_CLASS,
-            body,
-        )
+        result = self._invoke(endpoints.UPDATE_CLASS, body)
         if not isinstance(result, dict):
             msg = "Unexpected resource class update response from Arena."
             raise ArenaAPIError(msg)
@@ -442,10 +463,7 @@ class ByocApi:
         :rtype: dict[str, Any]
         """
         logger.info("Fetching BYOC install artifacts for %r…", name)
-        result = self._client._invoke_manifest_command(
-            endpoints.INSTALL_CLUSTER_ARTIFACTS,
-            {"name": name},
-        )
+        result = self._invoke(endpoints.INSTALL_CLUSTER_ARTIFACTS, {"name": name})
         if not isinstance(result, dict):
             msg = "Unexpected cluster install artifacts response from Arena."
             raise ArenaAPIError(msg)
@@ -475,11 +493,7 @@ class ByocApi:
         if storage_helm_values_yaml is not None:
             body["storageHelmValuesYaml"] = storage_helm_values_yaml
         logger.info("Downloading BYOC install package for cluster %r…", cluster)
-        raw_b, _ctype, _disp = self._client._invoke_manifest_command(
-            endpoints.INSTALL_CLUSTER_PACKAGE,
-            body,
-        )
-        return raw_b
+        return self._download(endpoints.INSTALL_CLUSTER_PACKAGE, body)
 
     def fetch_bundle(self, name: str, setup_type: SetupKind) -> bytes:
         """Download the deployment bundle zip for class *name* and return its bytes.
@@ -491,12 +505,7 @@ class ByocApi:
         :returns: The raw bytes of the deployment bundle zip.
         :rtype: bytes
         """
-        raw_b, _ctype, _disp = self._client._invoke_manifest_command(
+        return self._download(
             endpoints.BUNDLE,
-            {
-                "name": name,
-                "setupType": setup_type,
-                "archivedType": "zip",
-            },
+            {"name": name, "setupType": setup_type, "archivedType": "zip"},
         )
-        return raw_b

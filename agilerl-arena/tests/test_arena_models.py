@@ -391,6 +391,41 @@ class TestGetValidated:
         assert validated.environment.env_type == "bandit"
 
 
+def _server_sft_default(**network: object) -> dict:
+    """The SFT document ``GET /api/cli/v1/experiments/run-spec/default`` returns."""
+    return {
+        "algorithm": {"name": "SFT"},
+        "environment": {
+            "name": "support-tickets-sft",
+            "dataset": "support-tickets-sft",
+            "columns": {"prompt": "instruction", "target": "response"},
+        },
+        "network": {
+            "pretrained_model_name_or_path": "Qwen/Qwen3.5-4B",
+            "max_context_length": 4096,
+            **network,
+        },
+    }
+
+
+class TestTrainingManifestPretrainedNetwork:
+    def test_server_default_validates(self) -> None:
+        manifest = TrainingManifest.get_validated(_server_sft_default(), mode="python")
+
+        assert manifest.network.pretrained_model_name_or_path == "Qwen/Qwen3.5-4B"
+
+    def test_unknown_key_reports_only_the_finetuning_error(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            TrainingManifest.get_validated(
+                _server_sft_default(kind="llm"), mode="python"
+            )
+
+        errors = exc_info.value.errors()
+        assert [(e["loc"], e["type"]) for e in errors] == [
+            (("network", "kind"), "extra_forbidden")
+        ]
+
+
 class TestLLMAlgorithmSpecValidators:
     def test_valid_constrain_answer_pattern_compiles(self) -> None:
         spec = GRPOSpec(
