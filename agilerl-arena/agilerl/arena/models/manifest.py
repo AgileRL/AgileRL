@@ -620,6 +620,15 @@ class TrainingManifest(BaseModel):
             )
             _copy_when_unset(
                 self.algorithm,
+                "weights_path",
+                self.network.weights_path,
+                source_set="weights_path" in self.network.model_fields_set,
+            )
+            # The payload keeps the model fields on the network section only.
+            if isinstance(self.algorithm, LLMAlgorithmSpec):
+                self.network.weights_path = self.algorithm.weights_path
+            _copy_when_unset(
+                self.algorithm,
                 "max_model_len",
                 self.network.max_context_length,
                 source_set=True,
@@ -1014,12 +1023,13 @@ class TrainingManifest(BaseModel):
 
     @staticmethod
     def _move_model_fields_to_network(algorithm: dict[str, Any]) -> None:
-        """Drop the algorithm's copies of the model, context length and LoRA; ``network`` holds them.
+        """Drop the algorithm's copies of the model, weights, context length and LoRA; ``network`` holds them.
 
         :param algorithm: The dumped ``algorithm`` section, edited in place.
         :type algorithm: dict[str, Any]
         """
         algorithm.pop("pretrained_model_name_or_path", None)
+        algorithm.pop("weights_path", None)
         algorithm.pop("max_model_len", None)
         algorithm.pop("lora_config", None)
 

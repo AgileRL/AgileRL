@@ -130,9 +130,10 @@ def reward_fn_to_rubric(
 ) -> Rubric:
     """Wrap a reward function called as ``completion``, ``answer``, and ``question``.
 
-    One scorer, one scalar reward. Parameter order does not matter. For
-    per-criterion metrics, write OpenEnv ``Rubric`` subclasses and compose
-    them (assign children as attributes so they auto-register).
+    ``completion`` is the whole turn, reasoning and its markers included. One
+    scorer, one scalar reward. Parameter order does not matter. For
+    per-criterion metrics, write OpenEnv ``Rubric`` subclasses and compose them
+    (assign children as attributes so they auto-register).
 
     :param fn: Scorer called with completion, answer, and question by name.
     :param name: Component name for metrics; defaults to ``fn.__name__`` when valid.
@@ -157,7 +158,7 @@ class RewardFnRubric(Rubric):
     def forward(self, action: TurnAction, observation: TurnObservation) -> float:
         return float(
             self._fn(
-                completion=action.message,
+                completion=action.completion,
                 answer=observation.answer,
                 question=observation.question,
             )
