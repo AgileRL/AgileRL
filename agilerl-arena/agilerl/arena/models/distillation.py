@@ -29,6 +29,15 @@ class DistillationTeacherModel(BaseModel):
             "student's tokenizer vocabulary, since it scores the student's token ids."
         ),
     )
+    weights_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Local or s3:// directory to load the teacher's weights and "
+            "tokenizer from. pretrained_model_name_or_path then names the "
+            "catalog model with the same architecture."
+        ),
+    )
     vllm_config: VLLMConfig = Field(
         default_factory=VLLMConfig,
         description=(
@@ -37,6 +46,11 @@ class DistillationTeacherModel(BaseModel):
             "sizes it from the teacher and the GPU."
         ),
     )
+
+    @property
+    def load_path(self) -> str:
+        """Where the teacher's weights and tokenizer load from."""
+        return self.weights_path or self.pretrained_model_name_or_path
 
     @property
     def gpus(self) -> int:
