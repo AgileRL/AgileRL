@@ -1725,16 +1725,22 @@ class ArenaClient:
             params=params,
         )
 
-    def list_resources(self) -> dict[str, Any]:
-        """List the GPU types you can train on.
+    def list_resources(self, algorithm: str | None = None) -> dict[str, Any]:
+        """List the GPU types and GPU counts a submit accepts.
 
         Each ``gpuType`` is a value ``ArenaClient.submit_experiment`` accepts as
-        ``gpu_type``. An older platform returns resource ``tiers`` instead.
+        ``gpu_type``, and each of its ``numGpus`` a value for ``num_gpus``. An
+        older platform returns resource ``tiers`` instead.
 
-        :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int], "devOnly": bool}]}``.
+        :param algorithm: The run's ``algorithm.name``. Without it the list is
+            for LLM training.
+        :type algorithm: str | None
+        :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int],
+            "numGpus": list[int], "devOnly": bool}]}``.
         :rtype: dict[str, Any]
         """
-        return self._request("GET", "/api/cli/v1/resources/list")
+        params = {"algorithm": algorithm} if algorithm is not None else None
+        return self._request("GET", "/api/cli/v1/resources/list", params=params)
 
     def download_experiment_metrics(
         self,
