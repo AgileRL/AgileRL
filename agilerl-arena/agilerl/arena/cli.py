@@ -1016,7 +1016,8 @@ def agent_list(
 @click.option(
     "--checkpoint",
     default=None,
-    help="Checkpoint to deploy. Omit to deploy the best checkpoint.",
+    help="Steps of the checkpoint to deploy, from `arena experiments checkpoints`. "
+    "Omit to deploy the checkpoint with the most steps.",
 )
 @click.option(
     "--memory-scope",

@@ -486,8 +486,9 @@ that accepts prompts and returns completions, making the integration of
 fine-tuned models into applications seamless.
 
 To deploy an agent, you can use the :meth:`~agilerl.arena.client.ArenaClient.deploy_agent` method by specifying the experiment
-name and optionally the checkpoint you wish to deploy. If the latter is not provided, the checkpoint with the largest fitness value
-will be deployed by default.
+name and optionally the checkpoint you wish to deploy. Name a checkpoint by its ``steps`` from
+:meth:`~agilerl.arena.client.ArenaClient.list_checkpoints` (or ``arena experiments checkpoints``), for example ``500``.
+If no checkpoint is given, the one with the most steps is deployed.
 
 .. tab-set::
    :sync-group: interface
@@ -500,7 +501,7 @@ will be deployed by default.
          # Deploy an agent from an experiment
          client.deploy_agent(
             experiment_name="<experiment-name>",
-            checkpoint="<checkpoint-name>",  # optional, defaults to best fitness
+            checkpoint="500",  # optional: the checkpoint's steps; defaults to the most steps
          )
 
    .. tab-item:: CLI
@@ -508,11 +509,11 @@ will be deployed by default.
 
       .. code-block:: bash
 
-         # Deploy the best checkpoint from an experiment
+         # Deploy the checkpoint with the most steps
          arena agent deploy gsm8k-grpo
 
          # Deploy a specific checkpoint
-         arena agent deploy gsm8k-grpo --checkpoint step_500
+         arena agent deploy gsm8k-grpo --checkpoint 500
 
 GPUs
 ~~~~

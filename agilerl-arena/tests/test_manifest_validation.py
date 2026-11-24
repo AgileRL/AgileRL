@@ -74,8 +74,10 @@ from agilerl.arena.models.schema import (
     training_then,
 )
 from agilerl.arena.models.verdict import (
+    CLASSIC_RL_UNAVAILABLE_MESSAGE,
     HPO_UNAVAILABLE_MESSAGE,
     hpo_fields,
+    is_classic_rl,
     verdict,
 )
 
@@ -3799,7 +3801,7 @@ class TestHpoFields:
 
 class TestVerdictHpo:
     def test_hpo_manifest_is_invalid(self) -> None:
-        result = verdict(manifest(DQN, training={"hpo": True}, mutation=HPO_MUTATION))
+        result = verdict(manifest(GRPO, training={"hpo": True}, mutation=HPO_MUTATION))
 
         assert result["ok"] is False
         assert [error["path"] for error in result["errors"]] == [
@@ -3811,7 +3813,7 @@ class TestVerdictHpo:
         }
 
     def test_manifest_without_hpo_is_valid(self) -> None:
-        result = verdict(DQN)
+        result = verdict(GRPO)
 
         assert result["ok"] is True
         assert "errors" not in result
@@ -3830,3 +3832,31 @@ class TestVerdictHpo:
         assert "HPO and populations aren't available for LLM training on Arena" in (
             HPO_UNAVAILABLE_MESSAGE
         )
+
+
+class TestVerdictClassicRl:
+    def test_classic_manifest_is_invalid(self) -> None:
+        result = verdict(DQN)
+
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": "algorithm.name",
+                "message": CLASSIC_RL_UNAVAILABLE_MESSAGE,
+                "kind": "classic_rl_unavailable",
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        ("name", "classic"),
+        [
+            ("PPO", True),
+            ("Rainbow DQN", True),
+            ("MADDPG", True),
+            ("GRPO", False),
+            ("SFT", False),
+            ("Supervised", False),
+        ],
+    )
+    def test_is_classic_rl(self, name: str, classic: bool) -> None:
+        assert is_classic_rl(name) is classic
