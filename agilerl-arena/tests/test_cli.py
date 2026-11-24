@@ -78,8 +78,11 @@ def mock_client() -> MagicMock:
             "quote_experiment",
             "list_experiments",
             "resume_experiment",
+            "quote_resume",
             "stop_experiment",
             "list_checkpoints",
+            "get_experiment_status",
+            "iter_experiment_logs",
             "download_experiment_metrics",
             "preview_experiment_metrics_csv",
             "deploy_agent",
@@ -899,8 +902,18 @@ class TestResourcesListCommand:
         # Arrange
         mock_client.list_resources.return_value = {
             "gpuTypes": [
-                {"gpuType": "h100-80", "gpusPerNode": [1, 4, 8], "devOnly": False},
-                {"gpuType": "l4", "gpusPerNode": [1], "devOnly": False},
+                {
+                    "gpuType": "h100-80",
+                    "gpusPerNode": [8],
+                    "numGpus": [8, 16, 32],
+                    "devOnly": False,
+                },
+                {
+                    "gpuType": "b200",
+                    "gpusPerNode": [1, 8],
+                    "numGpus": [1, 2, 4, 8],
+                    "devOnly": False,
+                },
             ]
         }
 
@@ -911,10 +924,28 @@ class TestResourcesListCommand:
         # Assert
         assert result.exit_code == 0
         assert "GPU type" in result.output
+        assert "--num-gpus" in result.output
         assert "GPUs per node" in result.output
-        assert "h100-80" in result.output
-        assert "1, 4, 8" in result.output
+        h100_line = next(
+            line for line in result.output.splitlines() if "h100-80" in line
+        )
+        b200_line = next(line for line in result.output.splitlines() if "b200" in line)
+        assert "8, 16, 32" in h100_line
+        assert "1, 2, 4, 8" in b200_line
+        assert "1, 8" in b200_line
         assert "yes" not in result.output
+        mock_client.list_resources.assert_called_once_with(algorithm=None)
+
+    def test_passes_the_algorithm(self, runner, mock_client):
+        mock_client.list_resources.return_value = {"gpuTypes": []}
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["resources", "list", "--algorithm", "SUPERVISED"]
+            )
+
+        assert result.exit_code == 0
+        mock_client.list_resources.assert_called_once_with(algorithm="SUPERVISED")
 
     def test_marks_dev_only_gpu_types(self, runner, mock_client):
         mock_client.list_resources.return_value = {
@@ -1961,6 +1992,10 @@ class TestExperimentListCommand:
 
 
 class TestExperimentResumeCommand:
+    @pytest.fixture(autouse=True)
+    def quoted(self, mock_client):
+        mock_client.quote_resume.return_value = dict(SUBMIT_QUOTE)
+
     def test_resume(self, runner, mock_client):
         mock_client.resume_experiment.return_value = {"resumed": True}
         with _patched_arena_client(mock_client):
@@ -2010,6 +2045,114 @@ class TestExperimentResumeCommand:
         assert result.exit_code != 0
 
 
+class TestExperimentResumePricePreview:
+    @pytest.fixture(autouse=True)
+    def quoted(self, mock_client):
+        mock_client.quote_resume.return_value = dict(SUBMIT_QUOTE)
+        mock_client.resume_experiment.return_value = {"resumed": True}
+
+    @staticmethod
+    def interactive(answer: bool = True):
+        return patch(
+            "agilerl.arena.submit_quote.stdin_is_a_terminal", return_value=answer
+        )
+
+    def test_prints_hardware_rate_and_total_before_resuming(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 0
+        assert "Hourly rate:     $25.60 per hour" in result.stderr
+        assert (
+            "Estimated total: $288.00 for about 11.2 h (1,000 steps)" in result.stderr
+        )
+        mock_client.quote_resume.assert_called_once_with(
+            experiment_name="my-exp",
+            max_steps=1000,
+            checkpoint=None,
+            new_name=None,
+            project=None,
+        )
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_declining_stops_before_anything_is_billed(self, runner, mock_client):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main,
+                ["experiments", "resume", "my-exp", "--max-steps", "1000"],
+                input="n\n",
+            )
+
+        assert result.exit_code == 1
+        assert "Resume and start billing?" in result.stderr
+        mock_client.resume_experiment.assert_not_called()
+
+    def test_accepting_resumes(self, runner, mock_client):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main,
+                ["experiments", "resume", "my-exp", "--max-steps", "1000"],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0
+        mock_client.resume_experiment.assert_called_once()
+
+    @pytest.mark.parametrize("flag", ["--yes", "-y"])
+    def test_yes_resumes_without_asking(self, runner, mock_client, flag):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000", flag]
+            )
+
+        assert result.exit_code == 0
+        assert "Hourly rate:" in result.stderr
+        assert "Resume and start billing?" not in result.stderr
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_non_interactive_prints_and_resumes_without_asking(
+        self, runner, mock_client
+    ):
+        with _patched_arena_client(mock_client), self.interactive(answer=False):
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 0
+        assert "Resume and start billing?" not in result.stderr
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_server_without_resume_quotes_resumes_as_before(self, runner, mock_client):
+        mock_client.quote_resume.side_effect = ArenaAPIError(
+            "Not Found", status_code=404
+        )
+
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 0
+        assert "cannot price a run before it starts" in result.stderr
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_a_rejected_quote_stops_the_resume(self, runner, mock_client):
+        mock_client.quote_resume.side_effect = ArenaAPIError(
+            "Halt the experiment before resuming", status_code=400
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 1
+        assert "Halt the experiment before resuming" in result.output
+        mock_client.resume_experiment.assert_not_called()
+
+
 class TestExperimentStopCommand:
     def test_stop(self, runner, mock_client):
         mock_client.stop_experiment.return_value = {"stopped": True}
@@ -2026,6 +2169,122 @@ class TestExperimentStopCommand:
             )
         assert result.exit_code == 0
         mock_client.stop_experiment.assert_called_once_with("my-exp", project="proj1")
+
+
+class TestExperimentStatusCommand:
+    def test_prints_the_failure_reason(self, runner, mock_client):
+        mock_client.get_experiment_status.return_value = {
+            "experiment_name": "my-exp",
+            "status": "Failed",
+            "failure_reason": "Installing the run's Python packages failed.",
+            "last_modified": "2026-11-23T10:00:00+00:00",
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "status", "my-exp"])
+
+        assert result.exit_code == 0, result.output
+        assert "Installing the run's Python packages failed." in result.output
+        mock_client.get_experiment_status.assert_called_once_with(
+            "my-exp", project=None
+        )
+
+    def test_json_keeps_every_field(self, runner, mock_client):
+        status = {
+            "experiment_name": "my-exp",
+            "status": "Running",
+            "failure_reason": None,
+        }
+        mock_client.get_experiment_status.return_value = status
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "experiments", "status", "my-exp"])
+
+        assert json.loads(result.output) == status
+
+
+def _log_page(lines, *, status="Failed", failure_reason=None):
+    return {
+        "experiment_name": "my-exp",
+        "status": status,
+        "failure_reason": failure_reason,
+        "lines": lines,
+        "next_after": None,
+        "has_more": False,
+    }
+
+
+class TestExperimentLogsCommand:
+    def test_prints_lines_then_the_failure_reason(self, runner, mock_client):
+        mock_client.iter_experiment_logs.return_value = iter(
+            [
+                _log_page(
+                    [
+                        {
+                            "timestamp": 1_763_892_000_000_000,
+                            "severity": "ERROR",
+                            "message": "boom",
+                        }
+                    ],
+                    failure_reason="Training ran out of GPU memory.",
+                )
+            ]
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "logs", "my-exp", "--tail", "20", "--follow"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "2025-11-23 10:00:00 ERROR   boom" in result.output
+        assert "Failed: Training ran out of GPU memory." in result.output
+        mock_client.iter_experiment_logs.assert_called_once_with(
+            "my-exp", tail=20, follow=True, level=None, project=None
+        )
+
+    def test_a_run_that_failed_before_training_says_why(self, runner, mock_client):
+        mock_client.iter_experiment_logs.return_value = iter(
+            [
+                _log_page(
+                    [], failure_reason="Installing the run's Python packages failed."
+                )
+            ]
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "logs", "my-exp"])
+
+        assert "No log lines for my-exp yet." in result.output
+        assert "Failed: Installing the run's Python packages failed." in result.output
+
+    def test_json_is_one_object_per_line_then_a_summary(self, runner, mock_client):
+        line = {"timestamp": 1, "severity": "INFO", "message": "step 1"}
+        mock_client.iter_experiment_logs.return_value = iter(
+            [_log_page([line], status="Succeeded")]
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "experiments", "logs", "my-exp"])
+
+        objects = [json.loads(text) for text in result.output.splitlines()]
+        assert objects == [
+            line,
+            {
+                "experiment_name": "my-exp",
+                "status": "Succeeded",
+                "failure_reason": None,
+            },
+        ]
+
+    def test_tail_is_bounded(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "logs", "my-exp", "--tail", "0"]
+            )
+
+        assert result.exit_code != 0
+        mock_client.iter_experiment_logs.assert_not_called()
 
 
 class TestExperimentCheckpointsCommand:

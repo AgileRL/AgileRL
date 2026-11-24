@@ -79,7 +79,7 @@ See `agilerl/arena/memory/README.md`.
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
 
-# List the GPU types you can train on and their GPUs per node:
+# List the GPU types you can train on and the --num-gpus values each takes:
 arena resources list
 
 # Pick a GPU type and count; Arena uses the fewest nodes that fit:
@@ -90,6 +90,20 @@ arena experiments submit path/to/manifest.yaml --project my-project \
 Without `--num-gpus` or `--gpu-type`, Arena picks the cheapest resource that
 fits. With them, Arena picks only a layout the run's memory estimate fits and
 rejects the request when none does.
+
+### 6) Watch a run
+
+```bash
+arena experiments status my-experiment            # status, and why it failed if it did
+arena experiments logs my-experiment --tail 100   # newest training log lines
+arena experiments logs my-experiment --follow     # stream lines until the run ends
+```
+
+`logs` prints the same lines as the Log view in the web app, then the failure
+reason when the run failed, including failures before training started (for
+example a Python package that would not install). In Python:
+`client.get_experiment_status(...)`, `client.get_experiment_logs(...)` and
+`client.iter_experiment_logs(..., follow=True)`.
 
 ## Python SDK example
 

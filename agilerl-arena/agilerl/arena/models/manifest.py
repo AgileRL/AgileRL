@@ -664,6 +664,17 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _default_async_rollout_fields(self) -> Self:
+        """A run Ray rolls out async gets the LLM rollout buffer and the oldest-turn stamp unless set."""
+        if not async_rollout(self) or explicit_colocated_rollout(self):
+            return self
+        if self.replay_buffer is None:
+            self.replay_buffer = LLMRolloutBufferSpec()
+        if self.training.rollout_version_stamp is None:
+            self.training.rollout_version_stamp = "oldest_turn"
+        return self
+
+    @model_validator(mode="after")
     def _check_rollout_engines(self) -> Self:
         """Only algorithms that generate their own rollouts start rollout engines."""
         blocker = rollout_engines_blocker(

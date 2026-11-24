@@ -80,6 +80,8 @@ DATASET_CATEGORIES = frozenset(
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
 JSONL_CONTENT_TYPE = "application/x-ndjson"
+# Experiment statuses that can still produce new log lines.
+ACTIVE_EXPERIMENT_STATUSES = frozenset({"Pending", "Queued", "Running", "Stopping"})
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -283,6 +285,30 @@ def _response_error(
     if is_upgrade_required(status_code, raw):
         error_cls = ArenaClientUpgradeRequiredError
     return error_cls.from_response_body(raw, status_code=status_code)
+
+
+def _resume_payload(
+    experiment_name: str,
+    max_steps: int | None,
+    checkpoint: str | None,
+    new_name: str | None,
+    project: str | None,
+) -> dict[str, Any]:
+    """Resume request body; the server rejects explicit nulls."""
+    payload: dict[str, Any] = {"experiment_name": experiment_name}
+    payload.update(
+        {
+            key: value
+            for key, value in (
+                ("max_steps", max_steps),
+                ("checkpoint", checkpoint),
+                ("new_name", new_name),
+                ("project", project),
+            )
+            if value is not None
+        }
+    )
+    return payload
 
 
 class ArenaClient:
@@ -1619,23 +1645,39 @@ class ArenaClient:
         :returns: A dictionary containing the resume result.
         :rtype: dict[str, Any]
         """
-        payload: dict[str, Any] = {"experiment_name": experiment_name}
-        payload.update(
-            {
-                key: value
-                for key, value in (
-                    ("max_steps", max_steps),
-                    ("checkpoint", checkpoint),
-                    ("new_name", new_name),
-                    ("project", project),
-                )
-                if value is not None
-            }
-        )
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/resume",
-            json=payload,
+            json=_resume_payload(
+                experiment_name, max_steps, checkpoint, new_name, project
+            ),
+        )
+
+    def quote_resume(
+        self,
+        experiment_name: str,
+        max_steps: int | None = None,
+        checkpoint: str | None = None,
+        new_name: str | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Price a resume without starting it.
+
+        A resume runs on the experiment's own hardware. Arguments match
+        :meth:`resume_experiment`.
+
+        :returns: The fields :meth:`quote_experiment` returns, for ``max_steps``
+            steps on that hardware.
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: With status 404 from an Arena server that
+            cannot price a resume before it starts.
+        """
+        return self._request(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume/quote",
+            json=_resume_payload(
+                experiment_name, max_steps, checkpoint, new_name, project
+            ),
         )
 
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
@@ -1651,6 +1693,120 @@ class ArenaClient:
             "/api/cli/v1/experiments/jobs/checkpoints",
             params={"experiment_name": experiment_name},
         )
+
+    def get_experiment_status(
+        self, experiment_name: str, project: str | None = None
+    ) -> dict[str, Any]:
+        """Return an experiment's status and, when it failed, why.
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
+        :returns: ``experiment_name``, ``status``, ``failure_reason`` (``None``
+            unless the run failed) and ``last_modified``.
+        :rtype: dict[str, Any]
+        """
+        return self._request(
+            "GET",
+            "/api/cli/v1/experiments/status",
+            params=self._experiment_params(experiment_name, project),
+        )
+
+    def get_experiment_logs(
+        self,
+        experiment_name: str,
+        *,
+        tail: int | None = None,
+        after: int | None = None,
+        limit: int | None = None,
+        level: Literal["info", "warning", "error"] | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one page of an experiment's training logs (the web Log view).
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
+        :param tail: Return the newest ``tail`` lines (1-1000). Not with ``after``.
+        :type tail: int | None
+        :param after: Return lines after this line ``timestamp`` (Unix microseconds),
+            oldest first. Pass the previous page's ``next_after``.
+        :type after: int | None
+        :param limit: Lines per page when not tailing (1-1000, server default 500).
+        :type limit: int | None
+        :param level: Lowest severity to return.
+        :type level: Literal["info", "warning", "error"] | None
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
+        :returns: The status fields of :meth:`get_experiment_status` plus ``lines``
+            (``timestamp``, ``severity``, ``message``, ``event_type``),
+            ``next_after`` and ``has_more``.
+        :rtype: dict[str, Any]
+        """
+        params = self._experiment_params(experiment_name, project)
+        optional = {"tail": tail, "after": after, "limit": limit, "level": level}
+        params.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
+        return self._request("GET", "/api/cli/v1/experiments/logs", params=params)
+
+    def iter_experiment_logs(
+        self,
+        experiment_name: str,
+        *,
+        tail: int | None = None,
+        follow: bool = False,
+        level: Literal["info", "warning", "error"] | None = None,
+        project: str | None = None,
+        poll_interval: float = 5.0,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield pages of an experiment's training logs until there are no more.
+
+        With ``follow``, keep polling while the experiment is pending or running,
+        and stop once it has ended and a poll brings no new lines.
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
+        :param tail: Start with the newest ``tail`` lines instead of the first line.
+        :type tail: int | None
+        :param follow: Keep polling for new lines while the experiment runs.
+        :type follow: bool
+        :param level: Lowest severity to return.
+        :type level: Literal["info", "warning", "error"] | None
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
+        :param poll_interval: Seconds between polls when following.
+        :type poll_interval: float
+        :returns: Pages as returned by :meth:`get_experiment_logs`; the last one
+            carries the final ``status`` and ``failure_reason``.
+        :rtype: Iterator[dict[str, Any]]
+        """
+        page = self.get_experiment_logs(
+            experiment_name, tail=tail, level=level, project=project
+        )
+        yield page
+        while True:
+            active = page.get("status") in ACTIVE_EXPERIMENT_STATUSES
+            if not page["has_more"]:
+                if not follow or (not active and not page["lines"]):
+                    return
+                time.sleep(poll_interval)
+            page = self.get_experiment_logs(
+                experiment_name,
+                after=page["next_after"],
+                level=level,
+                project=project,
+            )
+            yield page
+
+    def _experiment_params(
+        self, experiment_name: str, project: str | None
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"experiment_name": experiment_name}
+        resolved_project = self._resolve_project(project)
+        if resolved_project is not None:
+            params["project"] = resolved_project
+        return params
 
     def preview_experiment_metrics_csv(
         self,
@@ -1725,16 +1881,22 @@ class ArenaClient:
             params=params,
         )
 
-    def list_resources(self) -> dict[str, Any]:
-        """List the GPU types you can train on.
+    def list_resources(self, algorithm: str | None = None) -> dict[str, Any]:
+        """List the GPU types and GPU counts a submit accepts.
 
         Each ``gpuType`` is a value ``ArenaClient.submit_experiment`` accepts as
-        ``gpu_type``. An older platform returns resource ``tiers`` instead.
+        ``gpu_type``, and each of its ``numGpus`` a value for ``num_gpus``. An
+        older platform returns resource ``tiers`` instead.
 
-        :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int], "devOnly": bool}]}``.
+        :param algorithm: The run's ``algorithm.name``. Without it the list is
+            for LLM training.
+        :type algorithm: str | None
+        :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int],
+            "numGpus": list[int], "devOnly": bool}]}``.
         :rtype: dict[str, Any]
         """
-        return self._request("GET", "/api/cli/v1/resources/list")
+        params = {"algorithm": algorithm} if algorithm is not None else None
+        return self._request("GET", "/api/cli/v1/resources/list", params=params)
 
     def download_experiment_metrics(
         self,
