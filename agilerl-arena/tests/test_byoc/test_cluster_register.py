@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import click
+import httpx
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -37,6 +38,7 @@ from agilerl.arena.byoc.cluster_register import (
 )
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
+from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaAPIError
 
@@ -450,6 +452,78 @@ class TestRunClusterRegister:
             )
         install_mock.assert_not_called()
 
+    def test_platform_install_without_token_keeps_the_token_secret(
+        self,
+        mock_client: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange
+        upsert_bundle = {
+            **ENTERPRISE_BUNDLE,
+            "token": None,
+            "upserted": True,
+            "agentHelmValues": {
+                "cluster": {"apiUrl": "http://172.24.0.5:8443", "id": 7},
+                "existingClusterTokenSecret": "arena-cluster-token",
+            },
+        }
+
+        # Act
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(ByocApi, "register_cluster", return_value=upsert_bundle),
+            patch(
+                "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
+            ) as install_mock,
+        ):
+            run_cluster_register(
+                mock_client,
+                name="arena",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+                install=True,
+                no_write=True,
+                byoc_scope="platform",
+            )
+
+        # Assert
+        agent_values = install_mock.call_args.kwargs["agent_values"]
+        assert agent_values["existingClusterTokenSecret"] == "arena-cluster-token"
+        assert "clusterToken" not in agent_values
+        assert "Keeping the agent's cluster token Secret" in capsys.readouterr().out
+
+    def test_platform_install_without_token_or_secret_fails(
+        self,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        upsert_bundle = {**ENTERPRISE_BUNDLE, "token": None, "upserted": True}
+
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(ByocApi, "register_cluster", return_value=upsert_bundle),
+            patch(
+                "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
+            ) as install_mock,
+            pytest.raises(
+                click.ClickException, match="Cannot --install without an agent token"
+            ),
+        ):
+            run_cluster_register(
+                mock_client,
+                name="arena",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+                install=True,
+                no_write=True,
+                byoc_scope="platform",
+            )
+
+        install_mock.assert_not_called()
+
     def test_install_with_rotated_token_on_upsert(
         self,
         mock_client: MagicMock,
@@ -827,6 +901,61 @@ class TestRunClusterRegister:
             availabilities=None,
         )
         assert "Resource class 'arena-lab-gpu' is linked" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("byoc_scope", "sent"),
+        [("platform", "platform"), ("customer", None), (None, None)],
+    )
+    def test_class_calls_follow_the_registered_scope(
+        self,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+        tmp_path: Path,
+        byoc_scope: str | None,
+        sent: str | None,
+    ) -> None:
+        resource_class = ClusterResourceClass(
+            name="arena-gpu",
+            num_nodes=1,
+            node_selector={"class": "gpu"},
+            metadata={},
+        )
+
+        with (
+            patch.object(ByocApi, "register_cluster", return_value=ENTERPRISE_BUNDLE),
+        ):
+            run_cluster_register(
+                http_client,
+                name="prod-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+                byoc_scope=byoc_scope,
+                resource_classes=[resource_class],
+            )
+
+        assert sent_scope(http_client, "/classes/list")["query"] == sent
+        assert sent_scope(http_client, "/classes/create")["body"] == sent
+
+    def test_platform_register_403_names_the_staff_requirement(
+        self, http_client: ArenaClient, tmp_path: Path
+    ) -> None:
+        http_client._http.request.side_effect = None
+        http_client._http.request.return_value = httpx.Response(
+            403, json={"error": "forbidden"}
+        )
+
+        with pytest.raises(
+            ArenaAPIError, match="Only AgileRL staff can manage platform clusters"
+        ):
+            run_cluster_register(
+                http_client,
+                name="arena",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+                byoc_scope="platform",
+            )
 
     def test_no_write_skips_persisted_files(
         self,

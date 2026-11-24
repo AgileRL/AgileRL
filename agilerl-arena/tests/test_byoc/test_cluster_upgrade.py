@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import click
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -18,6 +20,7 @@ from agilerl.arena.byoc import ClusterDynamicGroup, build_cluster_upgrade_comman
 from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.cluster_helm import STORAGE_RELEASE, agent_deployment_selector
 from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
+from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaAPIError
 
@@ -199,6 +202,44 @@ def test_upgrade_copies_storage_endpoint_before_helm_and_restarts(
     assert calls == ["sync", "helm", "restart"]
     restart.assert_called_once_with("arena-agent", "corp-k8s", wait=False)
     assert os.environ["KUBECONFIG"] == "/tmp/original-kubeconfig"
+
+
+def test_upgrade_platform_cluster_fetches_its_artifacts_and_runs_helm(
+    tmp_path: Path,
+    http_client: ArenaClient,
+    sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+) -> None:
+    # Arrange
+    package_root, values_file = _install_package(tmp_path)
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
+    listed = _helm_list([{"name": "arena", "namespace": "arena-agent"}])
+
+    # Act
+    with (
+        patch(
+            "agilerl.arena.byoc.cluster_upgrade.extract_cluster_install_package",
+            return_value=package_root,
+        ) as extract,
+        patch("agilerl.arena.byoc.cluster_helm.helm_available", return_value=True),
+        patch("agilerl.arena.byoc.cluster_helm.subprocess.run", return_value=listed),
+        patch(
+            "agilerl.arena.byoc.cluster_upgrade.sync_storage_secret_endpoint",
+            return_value=False,
+        ),
+        patch("agilerl.arena.byoc.cluster_upgrade.helm_upgrade_install") as helm,
+    ):
+        run_cluster_upgrade(
+            http_client, name="arena", kubeconfig=kubeconfig, platform=True
+        )
+
+    # Assert
+    assert sent_scope(http_client, "/clusters/install-artifacts")["body"] == "platform"
+    assert sent_scope(http_client, "/clusters/install-package")["body"] == "platform"
+    assert extract.call_args.args[0] == b"pkg"
+    assert helm.call_args.kwargs["release"] == "arena"
+    assert helm.call_args.kwargs["namespace"] == "arena-agent"
+    assert helm.call_args.kwargs["values_file"] == values_file
 
 
 def test_upgrade_stops_when_no_agent_release_is_installed(tmp_path: Path) -> None:
@@ -461,6 +502,56 @@ def test_upgrade_command_passes_install_flags(
     assert upgrade.call_args.kwargs["kubeconfig"] == kubeconfig
     assert upgrade.call_args.kwargs["agent_namespace"] == "arena-agent"
     assert upgrade.call_args.kwargs["helm_wait"] is False
+
+
+def test_upgrade_command_targets_platform_clusters_with_the_flag(
+    command_config: CommandConfig,
+) -> None:
+    with patch("agilerl.arena.byoc.commands.run_cluster_upgrade") as upgrade:
+        result = CliRunner().invoke(
+            build_cluster_upgrade_command(),
+            ["--platform", "--name", "arena"],
+            obj=command_config,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert upgrade.call_args.kwargs["platform"] is True
+
+
+def test_upgrade_command_targets_org_clusters_by_default(
+    command_config: CommandConfig,
+) -> None:
+    with patch("agilerl.arena.byoc.commands.run_cluster_upgrade") as upgrade:
+        result = CliRunner().invoke(
+            build_cluster_upgrade_command(),
+            ["--name", "corp-k8s"],
+            obj=command_config,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert upgrade.call_args.kwargs["platform"] is False
+
+
+def test_upgrade_command_explains_a_platform_refusal(
+    command_config: CommandConfig,
+    http_client: ArenaClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    http_client._http.request.side_effect = None
+    http_client._http.request.return_value = httpx.Response(
+        403, json={"error": "forbidden"}
+    )
+
+    with patch("agilerl.arena.config.build_client", return_value=http_client):
+        result = CliRunner().invoke(
+            build_cluster_upgrade_command(),
+            ["--platform", "--name", "arena"],
+            obj=command_config,
+        )
+
+    assert result.exit_code == 1
+    printed = result.output + capsys.readouterr().err
+    assert "Only AgileRL staff can manage platform clusters." in printed
 
 
 def test_upgrade_command_discovers_namespace_when_omitted(

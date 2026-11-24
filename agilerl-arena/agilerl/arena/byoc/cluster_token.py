@@ -164,6 +164,7 @@ def run_cluster_rotate_token(
     secret_name: str | None = None,
     namespace: str | None = None,
     run: KubectlRun = subprocess.run,
+    platform: bool = False,
 ) -> str:
     """Rotate the Arena cluster token and write it into the agent Secret.
 
@@ -173,9 +174,10 @@ def run_cluster_rotate_token(
     :param secret_name: Secret to update; Helm default when omitted.
     :param namespace: Agent namespace; discovered from Helm when omitted.
     :param run: kubectl runner.
+    :param platform: Rotate the token of one of AgileRL's platform clusters.
     :return: The rotated token.
     """
-    api = ByocApi(client)
+    api = ByocApi(client, platform=platform)
     if api.find_cluster(name) is None:
         msg = f"No registered BYOC cluster named {name!r}."
         raise click.ClickException(msg)

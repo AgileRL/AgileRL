@@ -210,6 +210,11 @@ Both commands resolve a kubeconfig in this order: `--kubeconfig`,
 Helm releases with `helm list --all-namespaces`, preferring a release named
 after the cluster and falling back to `arena-byoc-agent`.
 
+`unregister`, `rotate-token` and `upgrade` look the cluster up in your active
+org. `--platform` targets AgileRL's own platform clusters instead, which needs
+AgileRL staff access. Register, `register-classes` and `destroy` take the
+scope from `--byoc-scope` or the spec's `byoc_scope`.
+
 ## Cloud cluster provisioning
 
 `arena cluster` can provision a Kubernetes cluster with a packaged
