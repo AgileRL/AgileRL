@@ -569,6 +569,28 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _reject_llm_epochs(self) -> Self:
+        """An LLM run's length is training.max_steps; unset over dataset rows it trains one pass."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        named = [
+            field
+            for field, value in (
+                ("training.num_epochs", self.training.num_epochs),
+                ("training.evo_epochs", self.training.evo_epochs),
+            )
+            if value is not None
+        ]
+        if not named:
+            return self
+        msg = (
+            f"{' and '.join(named)} are not used by LLM runs; set "
+            "training.max_steps and training.evo_steps instead. Leave max_steps "
+            "unset to train one pass over a dataset."
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
     def _resolve_cross_section_defaults(self) -> Self:
         """Fill in the values one section implies for another."""
         if self.training.evo_steps is None and self.training.evo_epochs is None:

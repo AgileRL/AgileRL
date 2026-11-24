@@ -31,7 +31,6 @@ DEFAULT_DROP_UNINFORMATIVE_GROUPS = True
 LLM_REPORTING_INTERVAL = 1
 LLM_EVALUATION_INTERVAL = 10
 ROLLOUT_LLM_MAX_STEPS = 200
-DATASET_LLM_NUM_EPOCHS = 1
 
 
 class CheckpointExportSpec(BaseModel):
@@ -279,7 +278,10 @@ class TrainingSpec(BaseModel):
     max_steps: int = Field(
         default=1_000_000,
         ge=1,
-        description="Total steps to train for. The run stops here.",
+        description=(
+            "Total steps to train for. The run stops here. Unset on an LLM run "
+            "over dataset rows trains one pass over the dataset."
+        ),
     )
     evo_steps: int | None = Field(
         default=None,
@@ -397,7 +399,10 @@ class TrainingSpec(BaseModel):
     num_epochs: int | None = Field(
         default=None,
         ge=1,
-        description="Passes over the dataset, when the loop is epoch-driven rather than step-driven.",
+        description=(
+            "Passes over the dataset, when the loop is epoch-driven rather than "
+            "step-driven. Not for LLM runs: they set max_steps."
+        ),
     )
     evo_epochs: int | None = Field(
         default=None,

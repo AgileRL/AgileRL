@@ -39,14 +39,14 @@ class TestDefaultVerdict:
     @pytest.mark.parametrize(
         "name", ["GRPO", "CISPO", "GSPO", "LLMPPO", "LLMREINFORCE"]
     )
-    def test_dataset_rollout_trains_one_epoch(self, name: str) -> None:
+    def test_dataset_rollout_leaves_the_length_to_one_pass(self, name: str) -> None:
         # Act
         record = default_verdict(document({"name": name}, dataset_rollout()))
 
         # Assert
         assert record["ok"] is True
         training = record["payload"]["training"]
-        assert training["num_epochs"] == 1
+        assert "num_epochs" not in training
         assert "max_steps" not in training
         assert training["reporting_interval"] == 1
         assert training["evaluation_interval"] == 10
@@ -116,7 +116,7 @@ class TestDefaultVerdict:
         # Assert
         assert record["payload"]["training"]["reporting_interval"] == 5
 
-    def test_sft_dataset_trains_one_epoch(self) -> None:
+    def test_sft_dataset_leaves_the_length_to_one_pass(self) -> None:
         # Arrange
         environment = {
             "name": "rows",
@@ -130,7 +130,8 @@ class TestDefaultVerdict:
 
         # Assert
         assert record["ok"] is True
-        assert record["payload"]["training"]["num_epochs"] == 1
+        assert "num_epochs" not in record["payload"]["training"]
+        assert "max_steps" not in record["payload"]["training"]
         assert "rubric_file_path" not in record["payload"]["environment"]
 
     def test_hosted_env_keeps_its_own_reward(self) -> None:
@@ -221,7 +222,6 @@ class TestDefaultVerdict:
         # Assert
         assert record["ok"] is True
         assert record["payload"]["training"]["max_steps"] == 50
-        assert "num_epochs" not in record["payload"]["training"]
 
     def test_rejects_a_group_rubric_without_its_file(self) -> None:
         # Arrange

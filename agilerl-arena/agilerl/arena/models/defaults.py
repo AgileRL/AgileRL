@@ -17,7 +17,6 @@ from agilerl.arena.models.manifest import REWARD_FILE_AT_SUBMIT, TrainingManifes
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.arena.models.training import (
-    DATASET_LLM_NUM_EPOCHS,
     LLM_EVALUATION_INTERVAL,
     LLM_REPORTING_INTERVAL,
     ROLLOUT_LLM_MAX_STEPS,
@@ -85,14 +84,15 @@ def training_defaults(manifest: TrainingManifest) -> dict[str, Any]:
             mode="json", exclude_none=True
         ),
     }
-    if training.model_fields_set & {"num_epochs", "max_steps"}:
-        return defaults
+    # Unset over dataset rows trains one pass, which the trainer sizes from the rows.
     environment = manifest.environment
     over_rows = environment.env_type == "dataset" or (
         isinstance(environment, LLMEnvSpec) and environment.dataset_backed_rollout
     )
-    if over_rows:
-        defaults["num_epochs"] = DATASET_LLM_NUM_EPOCHS
-    elif isinstance(manifest.algorithm, RolloutLLMSpec):
+    if (
+        "max_steps" not in training.model_fields_set
+        and isinstance(manifest.algorithm, RolloutLLMSpec)
+        and not over_rows
+    ):
         defaults["max_steps"] = ROLLOUT_LLM_MAX_STEPS
     return defaults
