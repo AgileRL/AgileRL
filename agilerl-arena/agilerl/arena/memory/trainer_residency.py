@@ -48,6 +48,7 @@ def trainer_base_bytes(
         expert_parallel=fsdp.ep,
         expert_gpus=settings.expert_shard_gpus,
         frozen_tp_resident=fsdp.frozen_tp_resident,
+        expert_lora=settings.lora_packed_target_matrices > 0,
     )
     byte = DTYPE_BYTES[settings.weight_dtype]
     resident = (

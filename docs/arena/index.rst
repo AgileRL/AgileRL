@@ -357,7 +357,8 @@ Available GPU Types on Arena
 Arena trains on several GPU types. These might change over time, so it is recommended to use the
 :meth:`ArenaClient.list_resources <agilerl.arena.client.ArenaClient.list_resources>` method to get
 the latest list before setting off an experiment. Pass a GPU type as ``gpu_type`` (``--gpu-type`` on
-the CLI) and a GPU count as ``num_gpus`` (``--num-gpus``) when you submit.
+the CLI) and a GPU count as ``num_gpus`` (``--num-gpus``) when you submit. Pass your manifest's
+``algorithm.name`` to list only the GPU counts that algorithm trains on.
 
 .. tab-set::
    :sync-group: interface
@@ -367,14 +368,14 @@ the CLI) and a GPU count as ``num_gpus`` (``--num-gpus``) when you submit.
 
       .. code-block:: python
 
-         resources = client.list_resources()
+         resources = client.list_resources(algorithm="GRPO")
 
    .. tab-item:: CLI
       :sync: cli
 
       .. code-block:: bash
 
-         arena resources list
+         arena resources list --algorithm GRPO
 
 Example output from CLI command. Arena cloud L4 and A100 GPUs are not available for LLM training,
 so they are not listed:

@@ -974,6 +974,21 @@ def _helm_releases_to_uninstall(
     return selected
 
 
+def _platform_option(command: click.Command) -> click.Command:
+    """Add ``--platform`` to a command that names a registered cluster."""
+    return click.option(
+        "--platform",
+        is_flag=True,
+        default=False,
+        help="Target AgileRL's own platform clusters, which needs AgileRL staff access.",
+    )(command)
+
+
+def _is_platform_spec(spec: ClusterSpec) -> bool:
+    """Whether *spec* describes one of AgileRL's platform clusters."""
+    return spec.values.byoc_scope == "platform"
+
+
 def build_cluster_unregister_command() -> click.Command:
     """``arena cluster unregister`` — archive a registered cluster by name.
 
@@ -1016,6 +1031,7 @@ def build_cluster_unregister_command() -> click.Command:
         default=False,
         help="Unregister without prompting.",
     )
+    @_platform_option
     @click.pass_obj
     def unregister_cmd(
         config: CommandConfig,
@@ -1024,6 +1040,7 @@ def build_cluster_unregister_command() -> click.Command:
         uninstall_helm: bool,
         uninstall_storage: bool,
         yes: bool,
+        platform: bool,
     ) -> None:
         """Unregister a BYOC cluster from Arena by name."""
         cluster_name = name.strip()
@@ -1060,7 +1077,7 @@ def build_cluster_unregister_command() -> click.Command:
         if to_uninstall and kubeconfig_path is not None:
             uninstall_byoc_releases(to_uninstall, kubeconfig_path)
         with arena_client(config) as client:
-            ByocApi(client).unregister_cluster(cluster_name)
+            ByocApi(client, platform=platform).unregister_cluster(cluster_name)
         click.echo(f"Unregistered BYOC cluster {cluster_name!r}.")
 
     return unregister_cmd
@@ -1099,6 +1116,7 @@ def build_cluster_rotate_token_command() -> click.Command:
         default=False,
         help="Rotate without prompting.",
     )
+    @_platform_option
     @click.pass_obj
     def rotate_token_cmd(
         config: CommandConfig,
@@ -1107,6 +1125,7 @@ def build_cluster_rotate_token_command() -> click.Command:
         agent_namespace: str | None,
         secret_name: str | None,
         yes: bool,
+        platform: bool,
     ) -> None:
         """Rotate the Arena cluster token and update the agent Secret."""
         cluster_name = name.strip()
@@ -1127,6 +1146,7 @@ def build_cluster_rotate_token_command() -> click.Command:
                 kubeconfig=kubeconfig,
                 secret_name=secret_name,
                 namespace=agent_namespace,
+                platform=platform,
             )
 
     return rotate_token_cmd
@@ -1160,6 +1180,7 @@ def build_cluster_upgrade_command() -> click.Command:
         default=False,
         help="Do not wait for the agent Deployment.",
     )
+    @_platform_option
     @click.pass_obj
     def upgrade_cmd(
         config: CommandConfig,
@@ -1167,6 +1188,7 @@ def build_cluster_upgrade_command() -> click.Command:
         kubeconfig: Path | None,
         agent_namespace: str | None,
         no_helm_wait: bool,
+        platform: bool,
     ) -> None:
         """Upgrade the BYOC agent chart without changing cluster credentials."""
         cluster_name = name.strip()
@@ -1180,6 +1202,7 @@ def build_cluster_upgrade_command() -> click.Command:
                 kubeconfig=kubeconfig,
                 agent_namespace=agent_namespace,
                 helm_wait=not no_helm_wait,
+                platform=platform,
             )
 
     return upgrade_cmd
@@ -1695,7 +1718,7 @@ def build_cluster_register_classes_command() -> click.Command:
         with arena_client(config) as client:
             _register_gpu_resource_classes(
                 config,
-                ByocApi(client),
+                ByocApi(client, platform=_is_platform_spec(cluster_spec)),
                 cluster_spec,
                 spec_path=spec,
                 state_dir=resolved_state,
@@ -2064,8 +2087,12 @@ def _run_cluster_destroy(
     )
     delete_storage = delete_storage or delete_storage_project or delete_all
     unregister = False
+    platform = _is_platform_spec(cluster_spec)
     with arena_client(config) as client:
-        if ByocApi(client).find_cluster(cluster_spec.name) is not None:
+        if (
+            ByocApi(client, platform=platform).find_cluster(cluster_spec.name)
+            is not None
+        ):
             unregister_prompt = (
                 f"Unregister BYOC cluster {cluster_spec.name!r} from Arena "
                 f"after destroying the cloud cluster?"
@@ -2090,7 +2117,7 @@ def _run_cluster_destroy(
     )
     if unregister:
         with arena_client(config) as client:
-            ByocApi(client).unregister_cluster(cluster_spec.name)
+            ByocApi(client, platform=platform).unregister_cluster(cluster_spec.name)
         click.echo(f"Unregistered BYOC cluster {cluster_spec.name!r}.")
     _echo_destroy_result(
         cluster_spec,

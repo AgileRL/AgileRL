@@ -729,6 +729,26 @@ def _run_register_helm_install(
     )
 
 
+def _install_token(
+    bundle: RegisterBundle, options: ClusterRegisterOptions
+) -> str | None:
+    """Return the token the agent chart installs with.
+
+    Re-registering a platform cluster returns no token, so its agent keeps
+    reading the token Secret it already has.
+    """
+    existing_secret = bundle.agent_values.get("existingClusterTokenSecret")
+    if (
+        _normalize_cluster_token(bundle.token) is None
+        and options.get("byoc_scope") == "platform"
+        and isinstance(existing_secret, str)
+        and existing_secret
+    ):
+        click.echo(f"Keeping the agent's cluster token Secret {existing_secret!r}.")
+        return None
+    return _require_token_for_install(bundle.token)
+
+
 def _persist_and_install_registration(
     api: ByocApi,
     bundle: RegisterBundle,
@@ -736,7 +756,7 @@ def _persist_and_install_registration(
 ) -> None:
     """Write register files and optionally install Helm charts."""
     install = options.get("install", False)
-    install_token = _require_token_for_install(bundle.token) if install else None
+    install_token = _install_token(bundle, options) if install else None
     helm_charts = install or bundle.include_storage
     force = options["force"]
     charts_dir = options.get("charts_dir")
@@ -856,7 +876,7 @@ def run_cluster_register(
     skip_enable = options["skip_enable"]
     install = options.get("install", False)
     install_storage = options.get("install_storage", False)
-    api = ByocApi(client)
+    api = ByocApi(client, platform=options.get("byoc_scope") == "platform")
     resolved_agent_namespace = normalize_agent_namespace(
         options.get("agent_namespace", AGENT_NAMESPACE)
     )

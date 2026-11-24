@@ -74,6 +74,27 @@ class TestTrainerBaseBytes:
         # Assert: bf16 B/C rows of one group, 2 x 128 state rows x (1536 + 4 + 1).
         assert shared - unshared == 36 * 256 * 1541 * 2
 
+    def test_expert_lora_without_reshard_holds_one_expert_layer(self):
+        # Arrange
+        nemotron = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO[
+                "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+            ].config
+        )
+        model = ModelSpec(model_id="nemotron", arch=nemotron)
+        counts = formulas.param_counts(nemotron)
+        fsdp = FSDPConfig(ep=2, reshard_after_forward=False)
+        base_only = TrainingSettings(fsdp=fsdp, n_training_gpus=4)
+        expert_lora = base_only.model_copy(update={"lora_packed_target_matrices": 2})
+
+        # Act
+        held = trainer_base_bytes(model, base_only, counts, 4, 0.0)
+        released = trainer_base_bytes(model, expert_lora, counts, 4, 0.0)
+
+        # Assert: bf16, all but one MoE layer of this rank's half of the experts.
+        layer = formulas.routed_expert_params_per_layer(nemotron) // 2
+        assert held - released == (nemotron.moe_layers - 1) * layer * 2
+
 
 class TestFsdpCpuOffloadHostBytes:
     def test_cpu_offload_matches_the_resident_shard(self):

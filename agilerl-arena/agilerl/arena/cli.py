@@ -50,7 +50,11 @@ from agilerl.arena.output import (
     supports_interactive_selection,
 )
 from agilerl.arena.snowflake.cli import snowflake_group
-from agilerl.arena.submit_quote import confirm_resume_price, confirm_submit_price
+from agilerl.arena.submit_quote import (
+    confirm_resume_price,
+    confirm_submit_price,
+    print_quote,
+)
 
 ArenaError.enable_cli_mode()
 
@@ -342,7 +346,10 @@ def _counts(counts: list[int]) -> str:
 @click.option(
     "--algorithm",
     default=None,
-    help="The run's algorithm.name, e.g. SUPERVISED. Without it, lists what LLM training accepts.",
+    help=(
+        "The run's algorithm.name, e.g. GRPO. Lists only the GPU counts it trains "
+        "on. Without it, lists what LLM training accepts, single GPUs included."
+    ),
 )
 @click.pass_obj
 def resources_list(config: CommandConfig, algorithm: str | None) -> None:
@@ -632,6 +639,12 @@ register_experiment_log_commands(experiment)
     default=False,
     help="Submit without asking to confirm the price.",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the hardware and estimated price, then stop without submitting.",
+)
 @click.pass_obj
 def experiment_submit(
     config: CommandConfig,
@@ -644,14 +657,28 @@ def experiment_submit(
     completion: str | None,
     idempotency_key: str | None,
     yes: bool,
+    dry_run: bool,
 ) -> None:
     """Submit an experiment from a manifest.
 
     Prints the hardware, hourly rate and estimated total first, then asks to
-    go on. --yes skips the question, and so does a pipe or a file on stdin.
-    Redirected stdout still asks.
+    go on. --yes skips the question; without a terminal on stdin, --yes is
+    required. --dry-run prints the price and submits nothing.
     """
     with arena_client(config) as client:
+        if dry_run:
+            print_quote(
+                client.quote_experiment(
+                    manifest=manifest,
+                    num_gpus=num_gpus,
+                    gpu_type=gpu_type,
+                    project=project,
+                    experiment_name=experiment_name,
+                    reward_file=reward_file,
+                    completion=completion,
+                )
+            )
+            return
         confirm_submit_price(
             client,
             yes,
@@ -725,7 +752,7 @@ def _experiment_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
 @click.option(
     "--project",
     default=None,
-    help="Project, when the experiment name exists in more than one.",
+    help="Project, when the experiment name exists in more than one; the default project is used only then.",
 )
 @click.option(
     "--yes",
@@ -747,7 +774,8 @@ def experiment_resume(
     """Resume an experiment by name.
 
     Prints the hardware, hourly rate and estimated total first, then asks to
-    go on. --yes skips the question, and so does a pipe or a file on stdin.
+    go on. --yes skips the question; without a terminal on stdin, --yes is
+    required.
     """
     resume_args = {
         "experiment_name": experiment_name,
@@ -766,7 +794,7 @@ def experiment_resume(
 @click.option(
     "--project",
     default=None,
-    help="Project the experiment is in (defaults to the default project in ~/.arena/config.json).",
+    help="Project, when the experiment name exists in more than one; the default project is used only then.",
 )
 @click.pass_obj
 def experiment_stop(
@@ -777,23 +805,6 @@ def experiment_stop(
     """Stop a running experiment by name (same as the platform training job name)."""
     with arena_client(config) as client:
         emit_result(client.stop_experiment(experiment_name, project=project))
-
-
-@experiment.command("checkpoints")
-@click.argument("experiment_name")
-@click.pass_obj
-def experiment_checkpoints(
-    config: CommandConfig,
-    experiment_name: str,
-) -> None:
-    """List checkpoints for an experiment."""
-    with arena_client(config) as client:
-        rows = client.list_checkpoints(experiment_name=experiment_name)
-    emit_result(
-        rows,
-        display=_format_checkpoint_rows_for_display,
-        empty_message=f"No checkpoints for {experiment_name}.",
-    )
 
 
 @experiment.command("metrics")
@@ -825,7 +836,7 @@ def experiment_checkpoints(
 @click.option(
     "--project",
     default=None,
-    help="Project the experiment is in (defaults to the default project in ~/.arena/config.json).",
+    help="Project, when the experiment name exists in more than one; the default project is used only then.",
 )
 @click.pass_obj
 def experiment_metrics(
@@ -893,25 +904,6 @@ def _model_summary_row(row: dict[str, Any]) -> dict[str, Any]:
         if row.get("enabled") is False
         else row.get("status") or "—",
     }
-
-
-def _format_checkpoint_rows_for_display(
-    rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Put ``steps`` first and round ``size_mb`` to two decimals for the table."""
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        ordered: dict[str, Any] = {}
-        if "steps" in row:
-            ordered["steps"] = row["steps"]
-        for key, value in row.items():
-            if key == "steps":
-                continue
-            if key == "size_mb" and isinstance(value, (int, float)):
-                value = f"{value:.2f}"
-            ordered[key] = value
-        out.append(ordered)
-    return out
 
 
 def _resolve_agent_target(

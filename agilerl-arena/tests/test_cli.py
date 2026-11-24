@@ -1255,7 +1255,9 @@ class TestExperimentSubmitCommand:
         manifest.write_text("experiment: test")
         mock_client.submit_experiment.return_value = {"id": "exp-123"}
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
+            result = runner.invoke(
+                main, ["experiments", "submit", "--yes", str(manifest)]
+            )
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
@@ -1280,6 +1282,7 @@ class TestExperimentSubmitCommand:
                 [
                     "experiments",
                     "submit",
+                    "--yes",
                     str(manifest),
                     "--num-gpus",
                     "4",
@@ -1316,6 +1319,7 @@ class TestExperimentSubmitCommand:
                 [
                     "experiments",
                     "submit",
+                    "--yes",
                     str(manifest),
                     "--idempotency-key",
                     "run-1",
@@ -1336,6 +1340,7 @@ class TestExperimentSubmitCommand:
                 [
                     "experiments",
                     "submit",
+                    "--yes",
                     str(manifest),
                     "--num-gpus",
                     "8",
@@ -1405,7 +1410,7 @@ class TestExperimentSubmitCommand:
 
         with _patched_arena_client(mock_client):
             result = runner.invoke(
-                main, ["--json", "experiments", "submit", str(manifest)]
+                main, ["--json", "experiments", "submit", "--yes", str(manifest)]
             )
 
         assert result.exit_code == 0
@@ -1419,7 +1424,7 @@ class TestExperimentSubmitCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
-                ["experiments", "submit", str(manifest)],
+                ["experiments", "submit", "--yes", str(manifest)],
                 env={"ARENA_JSON": "1"},
             )
 
@@ -1465,6 +1470,7 @@ class TestExperimentSubmitPricePreview:
                 [
                     "experiments",
                     "submit",
+                    "--yes",
                     str(manifest),
                     "--num-gpus",
                     "8",
@@ -1504,7 +1510,9 @@ class TestExperimentSubmitPricePreview:
         }
 
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
+            result = runner.invoke(
+                main, ["experiments", "submit", "--yes", str(manifest)]
+            )
 
         assert result.exit_code == 0
         assert "Hourly rate:     $25.60 per hour" in result.stderr
@@ -1558,16 +1566,36 @@ class TestExperimentSubmitPricePreview:
         assert "Submit and start billing?" not in result.stderr
         mock_client.submit_experiment.assert_called_once()
 
-    def test_non_interactive_prints_and_submits_without_asking(
-        self, runner, mock_client, manifest
-    ):
+    def test_non_interactive_without_yes_refuses(self, runner, mock_client, manifest):
         with _patched_arena_client(mock_client), self.interactive(answer=False):
             result = runner.invoke(main, ["experiments", "submit", str(manifest)])
 
+        assert result.exit_code == 2
+        assert "Pass --yes to submit anyway." in result.stderr
+        mock_client.submit_experiment.assert_not_called()
+
+    def test_dry_run_prints_the_price_and_submits_nothing(
+        self, runner, mock_client, manifest
+    ):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "submit", str(manifest), "--dry-run"]
+            )
+
         assert result.exit_code == 0
-        assert "Hourly rate:" in result.stderr
-        assert "Submit and start billing?" not in result.stderr
-        mock_client.submit_experiment.assert_called_once()
+        assert "Hourly rate:" in result.output
+        assert "Estimated total:" in result.output
+        mock_client.submit_experiment.assert_not_called()
+
+    def test_dry_run_with_json_prints_the_quote(self, runner, mock_client, manifest):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["--json", "experiments", "submit", str(manifest), "--dry-run"]
+            )
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == SUBMIT_QUOTE
+        mock_client.submit_experiment.assert_not_called()
 
     def test_server_without_quotes_submits_as_before(
         self, runner, mock_client, manifest
@@ -2000,7 +2028,8 @@ class TestExperimentResumeCommand:
         mock_client.resume_experiment.return_value = {"resumed": True}
         with _patched_arena_client(mock_client):
             result = runner.invoke(
-                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+                main,
+                ["experiments", "resume", "--yes", "my-exp", "--max-steps", "1000"],
             )
         assert result.exit_code == 0
         mock_client.resume_experiment.assert_called_once_with(
@@ -2019,6 +2048,7 @@ class TestExperimentResumeCommand:
                 [
                     "experiments",
                     "resume",
+                    "--yes",
                     "my-exp",
                     "--max-steps",
                     "1000",
@@ -2060,7 +2090,8 @@ class TestExperimentResumePricePreview:
     def test_prints_hardware_rate_and_total_before_resuming(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(
-                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+                main,
+                ["experiments", "resume", "--yes", "my-exp", "--max-steps", "1000"],
             )
 
         assert result.exit_code == 0
@@ -2112,17 +2143,15 @@ class TestExperimentResumePricePreview:
         assert "Resume and start billing?" not in result.stderr
         mock_client.resume_experiment.assert_called_once()
 
-    def test_non_interactive_prints_and_resumes_without_asking(
-        self, runner, mock_client
-    ):
+    def test_non_interactive_without_yes_refuses(self, runner, mock_client):
         with _patched_arena_client(mock_client), self.interactive(answer=False):
             result = runner.invoke(
                 main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
             )
 
-        assert result.exit_code == 0
-        assert "Resume and start billing?" not in result.stderr
-        mock_client.resume_experiment.assert_called_once()
+        assert result.exit_code == 2
+        assert "Pass --yes to resume anyway." in result.stderr
+        mock_client.resume_experiment.assert_not_called()
 
     def test_server_without_resume_quotes_resumes_as_before(self, runner, mock_client):
         mock_client.quote_resume.side_effect = ArenaAPIError(
@@ -2293,7 +2322,18 @@ class TestExperimentCheckpointsCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
         assert result.exit_code == 0
-        mock_client.list_checkpoints.assert_called_once_with(experiment_name="my-exp")
+        mock_client.list_checkpoints.assert_called_once_with("my-exp", project=None)
+
+    def test_checkpoints_passes_the_project(self, runner, mock_client):
+        mock_client.list_checkpoints.return_value = [{"step": 100}]
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "checkpoints", "my-exp", "--project", "proj"]
+            )
+
+        assert result.exit_code == 0
+        mock_client.list_checkpoints.assert_called_once_with("my-exp", project="proj")
 
     def test_no_checkpoints_says_so(self, runner, mock_client):
         mock_client.list_checkpoints.return_value = []

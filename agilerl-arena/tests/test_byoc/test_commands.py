@@ -36,9 +36,11 @@ from agilerl.arena.byoc.commands import (
     _register_runtime_fields,
     _registration_values_from_spec,
     _resource_classes_from_outputs,
+    _run_cluster_destroy,
     _selected_worker_names,
     build_cluster_generate_spec_command,
     build_cluster_provision_command,
+    build_cluster_register_classes_command,
     build_cluster_status_command,
 )
 from agilerl.arena.byoc.provisioning.module_catalog import ModulePin, write_module_pin
@@ -57,6 +59,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
 )
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
+from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 
 INSTALLED_BYOC_RELEASES = [
@@ -1672,3 +1675,157 @@ nebius:
 
         assert result.exit_code == 0, result.output
         assert "Module arena-cluster-nebius 1.0.0" in result.output
+
+
+def _platform_spec() -> ClusterSpec:
+    spec, _registration = _registration_values_from_spec(
+        _nebius_spec(), name="arena", byoc_scope="platform"
+    )
+    return spec
+
+
+class TestPlatformClusters:
+    def test_unregister_platform_sends_the_platform_scope(
+        self,
+        command_config: CommandConfig,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+    ) -> None:
+        with (
+            patch("agilerl.arena.byoc.commands.helm_available", return_value=False),
+            patch("agilerl.arena.config.build_client", return_value=http_client),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_unregister_command(),
+                ["--platform", "--name", "arena", "--yes"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert sent_scope(http_client, "/clusters/unregister")["body"] == "platform"
+
+    def test_unregister_without_the_flag_sends_no_scope(
+        self,
+        command_config: CommandConfig,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+    ) -> None:
+        with (
+            patch("agilerl.arena.byoc.commands.helm_available", return_value=False),
+            patch("agilerl.arena.config.build_client", return_value=http_client),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_unregister_command(),
+                ["--name", "arena", "--yes"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert sent_scope(http_client, "/clusters/unregister") == {
+            "query": None,
+            "body": None,
+        }
+
+    def test_rotate_token_passes_the_flag(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch("agilerl.arena.byoc.commands.run_cluster_rotate_token") as rotate,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_rotate_token_command(),
+                ["--platform", "--name", "arena", "--yes"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert rotate.call_args.kwargs["platform"] is True
+
+    @pytest.mark.parametrize("command", ["unregister", "rotate-token", "upgrade"])
+    def test_help_says_staff_only(self, command: str) -> None:
+        result = CliRunner().invoke(ClusterDynamicGroup().commands[command], ["--help"])
+
+        help_text = " ".join(result.output.split())
+        assert (
+            "--platform Target AgileRL's own platform clusters, "
+            "which needs AgileRL staff access." in help_text
+        )
+
+    def test_register_classes_uses_the_spec_scope(
+        self,
+        command_config: CommandConfig,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+        tmp_path: Path,
+    ) -> None:
+        # Arrange
+        spec_file = tmp_path / "cluster.yaml"
+        spec_file.write_text("unused\n", encoding="utf-8")
+
+        def register(
+            _config: CommandConfig, api: ByocApi, spec: ClusterSpec, **_kwargs: object
+        ) -> None:
+            api.find_cluster(spec.name)
+
+        # Act
+        with (
+            patch(
+                "agilerl.arena.byoc.commands._load_provisioning",
+                return_value=(_platform_spec(), tmp_path),
+            ),
+            patch(
+                "agilerl.arena.byoc.commands._recover_spec", side_effect=lambda _c, s: s
+            ),
+            patch(
+                "agilerl.arena.byoc.commands._register_gpu_resource_classes",
+                side_effect=register,
+            ),
+            patch("agilerl.arena.config.build_client", return_value=http_client),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_classes_command(),
+                ["--spec", str(spec_file), "--all"],
+                obj=command_config,
+            )
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        assert sent_scope(http_client, "/clusters/list")["query"] == "platform"
+
+    def test_destroy_unregisters_a_platform_spec_cluster(
+        self,
+        command_config: CommandConfig,
+        http_client: ArenaClient,
+        sent_scope: Callable[[ArenaClient, str], dict[str, object]],
+        tmp_path: Path,
+    ) -> None:
+        with (
+            patch(
+                "agilerl.arena.byoc.commands._load_destroy_target",
+                return_value=(_platform_spec(), tmp_path, None),
+            ),
+            patch("agilerl.arena.byoc.commands._cluster_provisioner") as provisioner,
+            patch("agilerl.arena.byoc.commands._echo_destroy_result"),
+            patch("agilerl.arena.config.build_client", return_value=http_client),
+        ):
+            _run_cluster_destroy(
+                command_config,
+                spec=None,
+                name="arena",
+                state_dir=None,
+                delete_storage=False,
+                delete_storage_project=False,
+                delete_all=False,
+                module_version=None,
+                yes=True,
+            )
+
+        provisioner.return_value.destroy.assert_called_once()
+        assert sent_scope(http_client, "/clusters/list")["query"] == "platform"
+        assert sent_scope(http_client, "/clusters/unregister")["body"] == "platform"

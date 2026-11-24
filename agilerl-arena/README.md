@@ -79,8 +79,8 @@ See `agilerl/arena/memory/README.md`.
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
 
-# List the GPU types you can train on and the --num-gpus values each takes:
-arena resources list
+# List the GPU types a GRPO run trains on and the --num-gpus values each takes:
+arena resources list --algorithm GRPO
 
 # Pick a GPU type and count; Arena uses the fewest nodes that fit:
 arena experiments submit path/to/manifest.yaml --project my-project \
@@ -209,6 +209,11 @@ Both commands resolve a kubeconfig in this order: `--kubeconfig`,
 `./arena-cluster-<name>/kubeconfig`, `KUBECONFIG`, `~/.kube/config`. They find
 Helm releases with `helm list --all-namespaces`, preferring a release named
 after the cluster and falling back to `arena-byoc-agent`.
+
+`unregister`, `rotate-token` and `upgrade` look the cluster up in your active
+org. `--platform` targets AgileRL's own platform clusters instead, which needs
+AgileRL staff access. Register, `register-classes` and `destroy` take the
+scope from `--byoc-scope` or the spec's `byoc_scope`.
 
 ## Cloud cluster provisioning
 
