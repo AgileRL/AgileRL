@@ -142,6 +142,23 @@ class TestByocApiRegisterCluster:
             "storagePrefix": "data/",
         }
 
+    @pytest.mark.parametrize(
+        ("rotate_token", "expected"), [(True, {"rotateToken": True}), (False, {})]
+    )
+    def test_register_cluster_sends_rotate_token_only_when_set(
+        self,
+        byoc_api: ByocApi,
+        mock_client: MagicMock,
+        rotate_token: bool,
+        expected: dict[str, bool],
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = ENTERPRISE_BUNDLE
+
+        byoc_api.register_cluster(name="prod-cluster", rotate_token=rotate_token)
+
+        _, body = mock_client._invoke_manifest_command.call_args.args
+        assert body == {"name": "prod-cluster", **expected}
+
 
 class TestAgentValuesForHelm:
     def test_merges_inference_domain_and_hostname_template(self) -> None:
@@ -415,30 +432,37 @@ class TestRunClusterRegister:
         assert "clusterToken" not in agent
         assert "Updated cluster" in capsys.readouterr().out
 
-    def test_install_without_token_fails_on_upsert(
+    def test_install_without_token_fails_when_the_cluster_has_no_token_secret(
         self,
         mock_client: MagicMock,
         tmp_path: Path,
     ) -> None:
+        # Arrange
         upsert_bundle = {
             **ENTERPRISE_BUNDLE,
             "token": None,
             "upserted": True,
+            "tokenRotated": False,
             "agentHelmValues": {
                 "cluster": {"apiUrl": "http://172.24.0.5:8443", "id": 7},
-                "existingClusterTokenSecret": (
-                    "arena-byoc-agent-arena-byoc-agent-cluster-token"
-                ),
+                "clusterTokenSecret": {"name": "cluster-token", "key": "cluster-token"},
             },
         }
+
+        # Act / Assert
         with (
             patch.object(ByocApi, "enable"),
             patch.object(ByocApi, "register_cluster", return_value=upsert_bundle),
             patch(
+                "agilerl.arena.byoc.cluster_register.secret_exists",
+                return_value=False,
+            ) as exists_mock,
+            patch(
                 "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
             ) as install_mock,
             pytest.raises(
-                click.ClickException, match="Cannot --install without an agent token"
+                click.ClickException,
+                match=r"has no token Secret 'cluster-token'.*--rotate-token",
             ),
         ):
             run_cluster_register(
@@ -450,9 +474,10 @@ class TestRunClusterRegister:
                 install=True,
                 no_write=True,
             )
+        exists_mock.assert_called_once_with("cluster-token", "arena")
         install_mock.assert_not_called()
 
-    def test_platform_install_without_token_keeps_the_token_secret(
+    def test_install_without_token_keeps_the_token_secret(
         self,
         mock_client: MagicMock,
         tmp_path: Path,
@@ -463,6 +488,7 @@ class TestRunClusterRegister:
             **ENTERPRISE_BUNDLE,
             "token": None,
             "upserted": True,
+            "tokenRotated": False,
             "agentHelmValues": {
                 "cluster": {"apiUrl": "http://172.24.0.5:8443", "id": 7},
                 "existingClusterTokenSecret": "arena-cluster-token",
@@ -473,6 +499,10 @@ class TestRunClusterRegister:
         with (
             patch.object(ByocApi, "enable"),
             patch.object(ByocApi, "register_cluster", return_value=upsert_bundle),
+            patch(
+                "agilerl.arena.byoc.cluster_register.secret_exists",
+                return_value=True,
+            ) as exists_mock,
             patch(
                 "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
             ) as install_mock,
@@ -489,50 +519,25 @@ class TestRunClusterRegister:
             )
 
         # Assert
+        exists_mock.assert_called_once_with("arena-cluster-token", "arena")
         agent_values = install_mock.call_args.kwargs["agent_values"]
         assert agent_values["existingClusterTokenSecret"] == "arena-cluster-token"
         assert "clusterToken" not in agent_values
-        assert "Keeping the agent's cluster token Secret" in capsys.readouterr().out
-
-    def test_platform_install_without_token_or_secret_fails(
-        self,
-        mock_client: MagicMock,
-        tmp_path: Path,
-    ) -> None:
-        upsert_bundle = {**ENTERPRISE_BUNDLE, "token": None, "upserted": True}
-
-        with (
-            patch.object(ByocApi, "enable"),
-            patch.object(ByocApi, "register_cluster", return_value=upsert_bundle),
-            patch(
-                "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
-            ) as install_mock,
-            pytest.raises(
-                click.ClickException, match="Cannot --install without an agent token"
-            ),
-        ):
-            run_cluster_register(
-                mock_client,
-                name="arena",
-                output_dir=tmp_path,
-                skip_enable=True,
-                force=False,
-                install=True,
-                no_write=True,
-                byoc_scope="platform",
-            )
-
-        install_mock.assert_not_called()
+        out = capsys.readouterr().out
+        assert "Kept the existing agent token. Pass --rotate-token" in out
+        assert "Keeping the agent's cluster token Secret 'arena-cluster-token'" in out
 
     def test_install_with_rotated_token_on_upsert(
         self,
         mock_client: MagicMock,
         tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         upsert_bundle = {
             **ENTERPRISE_BUNDLE,
             "token": "rotated.token.secret",
             "upserted": True,
+            "tokenRotated": True,
             "agentHelmValues": {
                 "cluster": {"apiUrl": "http://172.24.0.5:8443", "id": 7},
                 "clusterToken": "rotated.token.secret",
@@ -558,6 +563,94 @@ class TestRunClusterRegister:
         agent_values = install_mock.call_args.kwargs["agent_values"]
         assert agent_values["clusterToken"] == "rotated.token.secret"
         assert "existingClusterTokenSecret" not in agent_values
+        assert "Rotated the agent token." in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("token", "token_rotated", "message"),
+        [
+            (None, False, "Kept the existing agent token."),
+            (
+                "new.token",
+                False,
+                "Issued an agent token: the cluster had no active token.",
+            ),
+            ("new.token", True, "Rotated the agent token."),
+            # An API without tokenRotated rotates on every re-register.
+            ("new.token", None, "Rotated the agent token."),
+        ],
+    )
+    def test_upsert_says_what_happened_to_the_token(
+        self,
+        mock_client: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        token: str | None,
+        token_rotated: bool | None,
+        message: str,
+    ) -> None:
+        # Arrange
+        upsert_bundle = {**ENTERPRISE_BUNDLE, "token": token, "upserted": True}
+        if token_rotated is not None:
+            upsert_bundle["tokenRotated"] = token_rotated
+
+        # Act
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(ByocApi, "register_cluster", return_value=upsert_bundle),
+        ):
+            run_cluster_register(
+                mock_client,
+                name="prod-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+            )
+
+        # Assert
+        assert message in capsys.readouterr().out
+
+    def test_new_cluster_says_nothing_about_the_token(
+        self,
+        mock_client: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(ByocApi, "register_cluster", return_value=ENTERPRISE_BUNDLE),
+        ):
+            run_cluster_register(
+                mock_client,
+                name="prod-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "Registered cluster 'prod-cluster'." in out
+        assert "agent token" not in out
+
+    @pytest.mark.parametrize("rotate_token", [True, False])
+    def test_passes_rotate_token_to_register_api(
+        self, mock_client: MagicMock, tmp_path: Path, rotate_token: bool
+    ) -> None:
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(
+                ByocApi, "register_cluster", return_value=ENTERPRISE_BUNDLE
+            ) as register_mock,
+        ):
+            run_cluster_register(
+                mock_client,
+                name="prod-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+                rotate_token=rotate_token,
+            )
+
+        assert register_mock.call_args.kwargs["rotate_token"] is rotate_token
 
     def test_install_passes_agent_namespace(
         self,
@@ -1901,6 +1994,7 @@ nebius:
         assert run_mock.call_args.kwargs["resource_classes"][0].name == (
             "spec-cluster-workers"
         )
+        assert run_mock.call_args.kwargs["rotate_token"] is True
 
     def test_recovers_nebius_settings_before_checking_terraform_state(
         self,
@@ -2168,6 +2262,28 @@ nebius:
         assert kwargs["output_dir"] == Path("/tmp/out").resolve()
         assert kwargs["skip_enable"] is True
         assert kwargs["byoc_provider"] is None
+        assert kwargs["rotate_token"] is False
+
+    def test_cli_passes_rotate_token(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch("agilerl.arena.byoc.commands.run_cluster_register") as run_mock,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--name", "prod-cluster", "--install", "--rotate-token"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert run_mock.call_args.kwargs["rotate_token"] is True
 
     def test_cli_passes_agent_namespace(
         self,

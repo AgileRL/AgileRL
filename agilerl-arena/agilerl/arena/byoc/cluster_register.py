@@ -23,12 +23,14 @@ from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.cluster_helm import (
     AGENT_NAMESPACE,
     AGENT_RELEASE,
+    agent_token_secret_name,
     install_enterprise_agent_chart,
     install_from_install_package_root,
     install_lab_cluster_charts,
     normalize_agent_namespace,
     normalize_agent_release,
     resolve_install_release,
+    secret_exists,
 )
 from agilerl.arena.byoc.cluster_install_package import (
     extract_cluster_install_package,
@@ -181,18 +183,6 @@ def _normalize_cluster_token(token: object) -> str | None:
     if isinstance(token, str) and token.strip():
         return token.strip()
     return None
-
-
-def _require_token_for_install(token: object) -> str:
-    normalized = _normalize_cluster_token(token)
-    if normalized:
-        return normalized
-    msg = (
-        "Cannot --install without an agent token. "
-        "Rotate token in Arena (Account → Enterprise K8s clusters), "
-        "then register again or set clusterToken on the agent Helm release."
-    )
-    raise click.ClickException(msg)
 
 
 def _agent_values_for_helm(
@@ -599,6 +589,7 @@ class ClusterRegisterOptions(TypedDict):
     byoc_provider: NotRequired[dict[str, Any] | None]
     resource_classes: NotRequired[Sequence[ClusterResourceClass]]
     yes: NotRequired[bool]
+    rotate_token: NotRequired[bool]
 
 
 @dataclass(frozen=True)
@@ -619,6 +610,22 @@ class RegisterBundle:
     def has_storage_values(self) -> bool:
         """Return whether Arena sent MinIO Helm values."""
         return isinstance(self.storage_values, dict)
+
+
+def _echo_upsert_token(bundle: dict[str, Any]) -> None:
+    """Say whether re-registering kept, rotated or issued the agent token."""
+    has_token = _normalize_cluster_token(bundle.get("token")) is not None
+    # An API without tokenRotated rotates on every re-register.
+    if bundle.get("tokenRotated", has_token):
+        click.echo(
+            "Rotated the agent token. The previous token keeps working for 24 hours."
+        )
+    elif has_token:
+        click.echo("Issued an agent token: the cluster had no active token.")
+    else:
+        click.echo(
+            "Kept the existing agent token. Pass --rotate-token to issue a new one."
+        )
 
 
 def _echo_register_bundle(
@@ -646,14 +653,10 @@ def _echo_register_bundle(
                 "storageHelmValues."
             )
             raise click.ClickException(msg)
-    token = bundle.get("token")
-    if upserted and isinstance(token, str) and token:
-        click.echo(
-            "Cluster token rotated for Helm install (previous token valid during grace)."
-        )
     cluster_name = _registered_cluster_name(bundle, name)
     if upserted:
         click.echo(f"Updated cluster {cluster_name!r}.")
+        _echo_upsert_token(bundle)
     else:
         click.echo(f"Registered cluster {cluster_name!r}.")
     scope = _registered_scope(bundle)
@@ -729,24 +732,25 @@ def _run_register_helm_install(
     )
 
 
-def _install_token(
-    bundle: RegisterBundle, options: ClusterRegisterOptions
-) -> str | None:
+def _install_token(bundle: RegisterBundle) -> str | None:
     """Return the token the agent chart installs with.
 
-    Re-registering a platform cluster returns no token, so its agent keeps
-    reading the token Secret it already has.
+    Without a token from Arena the install keeps the token Secret the agent
+    already reads, so that Secret must exist.
     """
-    existing_secret = bundle.agent_values.get("existingClusterTokenSecret")
-    if (
-        _normalize_cluster_token(bundle.token) is None
-        and options.get("byoc_scope") == "platform"
-        and isinstance(existing_secret, str)
-        and existing_secret
-    ):
-        click.echo(f"Keeping the agent's cluster token Secret {existing_secret!r}.")
-        return None
-    return _require_token_for_install(bundle.token)
+    token = _normalize_cluster_token(bundle.token)
+    if token is not None:
+        return token
+    secret = agent_token_secret_name(bundle.agent_values)
+    if not secret_exists(secret, bundle.agent_namespace):
+        msg = (
+            f"Arena kept the agent token of cluster {bundle.cluster_name!r}, but "
+            f"namespace {bundle.agent_namespace!r} has no token Secret {secret!r}. "
+            "Re-run with --rotate-token to issue a token this install can apply."
+        )
+        raise click.ClickException(msg)
+    click.echo(f"Keeping the agent's cluster token Secret {secret!r}.")
+    return None
 
 
 def _persist_and_install_registration(
@@ -756,7 +760,7 @@ def _persist_and_install_registration(
 ) -> None:
     """Write register files and optionally install Helm charts."""
     install = options.get("install", False)
-    install_token = _install_token(bundle, options) if install else None
+    install_token = _install_token(bundle) if install else None
     helm_charts = install or bundle.include_storage
     force = options["force"]
     charts_dir = options.get("charts_dir")
@@ -834,6 +838,7 @@ def _submit_cluster_register(
         placement=options.get("placement"),
         byoc_scope=options.get("byoc_scope"),
         byoc_provider=options.get("byoc_provider"),
+        rotate_token=options.get("rotate_token", False),
     )
 
 
@@ -868,6 +873,8 @@ def run_cluster_register(
     :type agent_namespace: str
     :param resource_classes: GPU classes to create for the registered cluster.
     :type resource_classes: Sequence[ClusterResourceClass]
+    :param rotate_token: Rotate the agent token of a cluster that is already registered.
+    :type rotate_token: bool
     :returns: None
     :rtype: None
     """
