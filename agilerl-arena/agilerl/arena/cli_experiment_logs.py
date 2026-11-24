@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""``arena experiments status`` and ``arena experiments logs``."""
+"""``arena experiments status``, ``logs`` and ``checkpoints``."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from agilerl.arena.output import emit_log_line, emit_log_summary, emit_result
 
 
 def register_experiment_log_commands(group: click.Group) -> None:
-    """Attach the status and logs commands to the ``experiments`` *group*."""
+    """Attach the status, logs and checkpoints commands to the ``experiments`` *group*."""
     group.add_command(experiment_status)
     group.add_command(experiment_logs)
+    group.add_command(experiment_checkpoints)
 
 
 @click.command("status")
@@ -24,7 +25,7 @@ def register_experiment_log_commands(group: click.Group) -> None:
 @click.option(
     "--project",
     default=None,
-    help="Project, when the experiment name exists in more than one.",
+    help="Project, when the experiment name exists in more than one; the default project is used only then.",
 )
 @click.pass_obj
 def experiment_status(
@@ -58,7 +59,7 @@ def experiment_status(
 @click.option(
     "--project",
     default=None,
-    help="Project, when the experiment name exists in more than one.",
+    help="Project, when the experiment name exists in more than one; the default project is used only then.",
 )
 @click.pass_obj
 def experiment_logs(
@@ -84,3 +85,45 @@ def experiment_logs(
                 emit_log_line(line)
             printed += len(page["lines"])
     emit_log_summary(page, printed=printed)
+
+
+@click.command("checkpoints")
+@click.argument("experiment_name")
+@click.option(
+    "--project",
+    default=None,
+    help="Project, when the experiment name exists in more than one; the default project is used only then.",
+)
+@click.pass_obj
+def experiment_checkpoints(
+    config: CommandConfig,
+    experiment_name: str,
+    project: str | None,
+) -> None:
+    """List checkpoints for an experiment."""
+    with arena_client(config) as client:
+        rows = client.list_checkpoints(experiment_name, project=project)
+    emit_result(
+        rows,
+        display=format_checkpoint_rows,
+        empty_message=f"No checkpoints for {experiment_name}.",
+    )
+
+
+def format_checkpoint_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Put ``steps`` first and round ``size_mb`` to two decimals for the table."""
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ordered: dict[str, Any] = {}
+        if "steps" in row:
+            ordered["steps"] = row["steps"]
+        for key, value in row.items():
+            if key == "steps":
+                continue
+            if key == "size_mb" and isinstance(value, (int, float)):
+                value = f"{value:.2f}"
+            ordered[key] = value
+        out.append(ordered)
+    return out

@@ -10,7 +10,11 @@ import click
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaAPIError
-from agilerl.arena.output import stdin_is_a_terminal
+from agilerl.arena.output import (
+    emit_json_result,
+    json_output_enabled,
+    stdin_is_a_terminal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -35,9 +39,10 @@ def confirm_resume_price(client: ArenaClient, yes: bool, **resume_args: Any) -> 
 def confirm_price(quote: Callable[[], dict[str, Any]], yes: bool, action: str) -> None:
     """Print the quote, then ask "<action> and start billing?".
 
-    ``yes`` or stdin that is not a terminal skips the question.
+    ``yes`` skips the question. Without ``yes``, stdin must be a terminal.
 
     :raises click.Abort: The user declined.
+    :raises click.UsageError: No terminal to ask on and no ``yes``.
     """
     try:
         lines = submit_quote_lines(quote())
@@ -52,9 +57,20 @@ def confirm_price(quote: Callable[[], dict[str, Any]], yes: bool, action: str) -
         return
     for line in lines:
         click.echo(line, err=True)
-    if yes or not stdin_is_a_terminal():
+    if yes:
         return
+    if not stdin_is_a_terminal():
+        msg = f"No terminal to confirm the price on. Pass --yes to {action.lower()} anyway."
+        raise click.UsageError(msg)
     click.confirm(f"{action} and start billing?", default=False, abort=True, err=True)
+
+
+def print_quote(quote: dict[str, Any]) -> None:
+    """Print a quote for ``--dry-run``: JSON in JSON mode, else the price lines."""
+    if json_output_enabled():
+        emit_json_result(quote)
+        return
+    click.echo("\n".join(submit_quote_lines(quote)))
 
 
 def submit_quote_lines(quote: dict[str, Any]) -> list[str]:
