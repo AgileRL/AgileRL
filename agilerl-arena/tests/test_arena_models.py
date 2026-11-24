@@ -1483,6 +1483,30 @@ class TestLLMEnvSpecSegmentPromptTokens:
             )
 
 
+class TestLLMEnvSpecMaxTurns:
+    def test_an_entrypoint_env_without_max_turns_is_uncapped(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", entrypoint="game:Guess")
+
+        assert spec.max_turns is None
+
+    def test_a_dataset_rollout_is_one_turn(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{q}"},
+        )
+
+        assert spec.max_turns == 1
+
+    @pytest.mark.parametrize(
+        "segment", [{"segment_prompt_tokens": 2000}, {"segment_max_images": 4}]
+    )
+    def test_a_context_restart_needs_max_turns(self, segment: dict[str, int]) -> None:
+        with pytest.raises(ValidationError, match="max_turns is required with segment"):
+            LLMEnvSpec(env_type="rollout", entrypoint="game:Guess", **segment)
+
+
 class TestLLMEnvSpecSegmentMaxImages:
     def test_accepts_a_positive_image_count(self) -> None:
         spec = LLMEnvSpec(
