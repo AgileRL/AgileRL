@@ -35,15 +35,23 @@ EnvT = TypeVar("EnvT", bound=gym.Env | GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
-    """Make a conversation template, in index order when every key is ``role_index``.
+    """Make chat messages from the template, ordered by the keys' ``_index`` when they have one.
 
     :param prompt_template: Template dictionary with prompt keys
     :type prompt_template: dict[str, str]
     :return: List of conversation dictionaries
     :rtype: list[dict[str, str]]
     """
+    indices = [key.rpartition("_")[2] for key in prompt_template]
+    numbered = [index.isdigit() for index in indices]
     keys = list(prompt_template)
-    if all(key.rpartition("_")[2].isdigit() for key in keys):
+    if any(numbered):
+        if not all(numbered) or len(set(map(int, indices))) != len(indices):
+            msg = (
+                "prompt_template keys must all end in a distinct index "
+                f"(system_0, user_1, ...) or none may: got {keys}"
+            )
+            raise ValueError(msg)
         keys.sort(key=lambda key: int(key.rpartition("_")[2]))
     return [
         {
