@@ -10,7 +10,7 @@ import json
 import re
 import subprocess
 import sys
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -3852,3 +3852,44 @@ class TestVerdictClassicRl:
     )
     def test_is_classic_rl(self, name: str, classic: bool) -> None:
         assert is_classic_rl(name) is classic
+
+
+class TestTrainingManifestAsyncRolloutDefaults:
+    @staticmethod
+    def grpo_manifest(training: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "algorithm": {"name": "GRPO"},
+            "environment": {"name": "env", "env_type": "rollout", "env_image": "env:1"},
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 1024,
+            },
+            "training": training,
+        }
+
+    def test_async_run_gets_llm_buffer_and_oldest_turn_stamp(self) -> None:
+        # Act
+        payload = TrainingManifest.model_validate(self.grpo_manifest({})).to_payload()
+
+        # Assert
+        assert payload["replay_buffer"]["kind"] == "llm"
+        assert payload["training"]["rollout_version_stamp"] == "oldest_turn"
+
+    def test_keeps_an_authored_stamp(self) -> None:
+        # Act
+        payload = TrainingManifest.model_validate(
+            self.grpo_manifest({"rollout_version_stamp": "publish"})
+        ).to_payload()
+
+        # Assert
+        assert payload["training"]["rollout_version_stamp"] == "publish"
+
+    def test_colocated_run_gets_neither(self) -> None:
+        # Act
+        payload = TrainingManifest.model_validate(
+            self.grpo_manifest({"rollout_mode": "colocated"})
+        ).to_payload()
+
+        # Assert
+        assert "replay_buffer" not in payload
+        assert "rollout_version_stamp" not in payload["training"]
