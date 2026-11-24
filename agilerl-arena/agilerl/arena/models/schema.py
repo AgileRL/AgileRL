@@ -28,7 +28,6 @@ from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_num
 from agilerl.arena.models.manifest_rules import async_rollout_algorithm
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.arena.models.training import (
-    DATASET_LLM_NUM_EPOCHS,
     LLM_EVALUATION_INTERVAL,
     LLM_REPORTING_INTERVAL,
     ROLLOUT_LLM_MAX_STEPS,
@@ -277,10 +276,6 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
-            "then": training_then({"num_epochs": {"default": DATASET_LLM_NUM_EPOCHS}}),
-        },
-        {
-            "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
             "then": training_then({"max_steps": {"default": None}}),
         },
         {
@@ -295,7 +290,6 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             "if": dataset_backed_rollout_if(),
             "then": training_then(
                 {
-                    "num_epochs": {"default": DATASET_LLM_NUM_EPOCHS},
                     "max_steps": {"default": None},
                 }
             ),

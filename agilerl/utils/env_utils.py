@@ -35,19 +35,22 @@ EnvT = TypeVar("EnvT", bound=gym.Env | GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
-    """Make a conversation template for the model.
+    """Make a conversation template, in index order when every key is ``role_index``.
 
     :param prompt_template: Template dictionary with prompt keys
     :type prompt_template: dict[str, str]
     :return: List of conversation dictionaries
     :rtype: list[dict[str, str]]
     """
+    keys = list(prompt_template)
+    if all(key.rpartition("_")[2].isdigit() for key in keys):
+        keys.sort(key=lambda key: int(key.rpartition("_")[2]))
     return [
         {
             "role": key.split("_")[0],
             "content": escape_non_format_braces(prompt_template[key]),
         }
-        for key in prompt_template
+        for key in keys
     ]
 
 

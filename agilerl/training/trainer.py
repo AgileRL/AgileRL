@@ -1010,10 +1010,14 @@ class LocalTrainer(Trainer):
             else self.algorithm_spec.default_evo_steps
         )
         max_steps = self.training_spec.max_steps
+        # Unset keeps the million-step default; a dataset run reads that as one pass.
         if (
             isinstance(self.algorithm_spec, LLMAlgorithmSpec)
             and getattr(self.algorithm_spec, "env_type", None) == LLMEnvType.DATASET
-            and self.training_spec.num_epochs is not None
+            and (
+                "max_steps" not in self.training_spec.model_fields_set
+                or self.training_spec.num_epochs is not None
+            )
         ):
             max_steps = None
         kwargs: dict[str, Any] = {

@@ -1489,9 +1489,7 @@ class TestEpochDrivenTraining:
         ("name", "objective"),
         [("SFT", "sft"), ("DPO", "preference")],
     )
-    def test_dataset_llm_accepts_only_num_epochs(
-        self, name: str, objective: str
-    ) -> None:
+    def test_dataset_llm_rejects_num_epochs(self, name: str, objective: str) -> None:
         doc = copy.deepcopy(GRPO)
         doc["algorithm"] = {"name": name}
         doc["environment"] = {
@@ -1501,13 +1499,8 @@ class TestEpochDrivenTraining:
         }
         doc["training"] = {"num_epochs": 1}
 
-        validated = TrainingManifest.model_validate(doc)
-        payload = validated.to_payload()
-
-        assert validated.training.num_epochs == 1
-        assert "max_steps" not in validated.training.model_fields_set
-        assert "max_steps" not in payload["training"]
-        TrainingManifest.model_validate(payload)
+        with pytest.raises(ValidationError, match="not used by LLM runs"):
+            TrainingManifest.model_validate(doc)
 
     @pytest.mark.parametrize(
         ("name", "objective"),
@@ -1533,14 +1526,24 @@ class TestEpochDrivenTraining:
         assert payload["training"]["max_steps"] == 50
         TrainingManifest.model_validate(payload)
 
-    def test_dataset_backed_grpo_epoch_only_payload_round_trips(self) -> None:
+    def test_dataset_backed_grpo_without_steps_round_trips(self) -> None:
         doc = copy.deepcopy(GRPO)
-        doc["training"] = {"num_epochs": 1}
+        doc["training"] = {}
 
         payload = TrainingManifest.model_validate(doc).to_payload()
 
         assert "max_steps" not in payload["training"]
         TrainingManifest.model_validate(payload)
+
+    def test_llm_rejects_evo_epochs(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["training"] = {"num_epochs": 2, "evo_epochs": 1}
+
+        with pytest.raises(
+            ValidationError,
+            match=r"training\.num_epochs and training\.evo_epochs are not used",
+        ):
+            TrainingManifest.model_validate(doc)
 
     def test_grpo_rejects_num_epochs_and_max_steps(self) -> None:
         with pytest.raises(ValidationError, match="are both set; set one"):
@@ -2214,7 +2217,7 @@ class TestSchema:
         assert "experience_sharing" not in grpo
 
         sft = self._applied_training_defaults({"algorithm": {"name": "SFT"}})
-        assert sft["num_epochs"] == 1
+        assert "num_epochs" not in sft
         assert sft["reporting_interval"] == 1
         assert sft["max_steps"] is None
 
@@ -2283,7 +2286,7 @@ class TestSchema:
         )
         assert llm_cnn["evo_steps"] == 20
 
-    def test_dataset_backed_rollout_num_epochs_conditional(self) -> None:
+    def test_dataset_backed_rollout_leaves_max_steps_unset(self) -> None:
         expected_if = dataset_backed_rollout_if()
         conditionals = manifest_schema().get("allOf") or []
         match = next(
@@ -2295,7 +2298,6 @@ class TestSchema:
                 "properties": {
                     "training": {
                         "properties": {
-                            "num_epochs": {"default": 1},
                             "max_steps": {"default": None},
                         }
                     }
@@ -2314,7 +2316,7 @@ class TestSchema:
             },
         }
         applied = self._applied_training_defaults(dataset_rollout)
-        assert applied["num_epochs"] == 1
+        assert "num_epochs" not in applied
         assert applied["max_steps"] is None
         assert applied["evo_steps"] == 20
 
@@ -2322,7 +2324,7 @@ class TestSchema:
             applied = self._applied_training_defaults(
                 {**dataset_rollout, "algorithm": {"name": name}}
             )
-            assert applied["num_epochs"] == 1
+            assert "num_epochs" not in applied
             assert applied["max_steps"] is None
 
         generative_rollout = {

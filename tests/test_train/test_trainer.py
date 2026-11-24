@@ -1894,6 +1894,83 @@ class TestLLMLocalTrainer:
         assert call_kwargs["max_steps"] is None
         assert call_kwargs["num_epochs"] == 3
 
+    @pytest.mark.parametrize(
+        ("training", "expected_max_steps"),
+        [
+            pytest.param(
+                TrainingSpec(evo_steps=10, pop_size=2),
+                None,
+                id="unset",
+            ),
+            pytest.param(
+                TrainingSpec(max_steps=1_000_000, evo_steps=10, pop_size=2),
+                1_000_000,
+                id="authored",
+            ),
+        ],
+    )
+    def test_dataset_train_max_steps_follows_whether_the_field_was_set(
+        self, dpo_spec, training, expected_max_steps
+    ):
+        mock_pop = [MagicMock()]
+        mock_env = MagicMock()
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>")
+        env_spec = MagicMock(max_reward=None)
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMDatasetStrategy, "get_training_loop", return_value=mock_train_fn
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=dpo_spec,
+                environment=env_spec,
+                training=training,
+            )
+            trainer.train()
+
+        assert mock_train_fn.call_args[1]["max_steps"] == expected_max_steps
+
+    def test_rollout_train_keeps_default_max_steps_when_unset(self, grpo_spec):
+        mock_pop = [MagicMock()]
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>")
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMRolloutStrategy, "get_training_loop", return_value=mock_train_fn
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=MagicMock(max_reward=None),
+                training=TrainingSpec(evo_steps=10, pop_size=1),
+            )
+            trainer.train()
+
+        assert mock_train_fn.call_args[1]["max_steps"] == 1_000_000
+
     # -- Missing LLM dependencies raises ImportError -----------------------
 
     def test_missing_llm_deps_raises(self, dpo_spec):

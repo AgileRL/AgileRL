@@ -59,6 +59,28 @@ class TestEscapeNonFormatBraces:
         assert result.format(question="q") == 'return {"result": {"answer": 1}} for q'
 
 
+class TestMakeConversationTemplate:
+    def test_role_index_keys_follow_the_index_not_the_mapping_order(self):
+        template = {
+            "assistant_2": "Let me think.",
+            "system_0": "Reason step by step.",
+            "user_10": "Again: {question}",
+            "user_1": "{question}",
+        }
+        conversation = env_utils.make_conversation_template(template)
+        assert conversation == [
+            {"role": "system", "content": "Reason step by step."},
+            {"role": "user", "content": "{question}"},
+            {"role": "assistant", "content": "Let me think."},
+            {"role": "user", "content": "Again: {question}"},
+        ]
+
+    def test_keys_without_an_index_keep_the_mapping_order(self):
+        template = {"user_prompt": "{question}", "system_prompt": "Be brief."}
+        conversation = env_utils.make_conversation_template(template)
+        assert [message["role"] for message in conversation] == ["user", "system"]
+
+
 class TestParseEntrypoint:
     def test_rejects_missing_colon(self):
         with pytest.raises(ValueError, match="Invalid entrypoint format"):
