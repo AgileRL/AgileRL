@@ -149,6 +149,23 @@ def _coerced_system_prompt(value: object) -> str | None:
     return None
 
 
+def _check_uncapped_turns(
+    max_turns: int | None,
+    max_model_len: int | None,
+    segment_prompt_tokens: int | None,
+    segment_max_images: int | None,
+) -> None:
+    """An uncapped episode needs a context length and no context restart."""
+    if max_turns is not None:
+        return
+    if max_model_len is None:
+        msg = "max_turns=None needs max_model_len: an uncapped episode stops when its prompt no longer fits."
+        raise ValueError(msg)
+    if segment_prompt_tokens is not None or segment_max_images is not None:
+        msg = "max_turns=None cannot restart the context: a restarted episode never fills it, so nothing would end it."
+        raise ValueError(msg)
+
+
 def _resolve_rollout_env_client(
     env_client: str | Callable[[], str] | EnvClientProtocol,
     *,
@@ -196,7 +213,7 @@ class RolloutHarness(RestartPromptMixin):
         self,
         env_client: str | Callable[[], str] | EnvClientProtocol,
         tokenizer: PreTrainedTokenizerBase,
-        max_turns: int = 1,
+        max_turns: int | None = 1,
         *,
         timeout_s: float | None = None,
         answer_tool: str | None = None,
@@ -235,7 +252,10 @@ class RolloutHarness(RestartPromptMixin):
             WebSocket session, the provider re-resolved per dial) or an
             ``EnvClientProtocol``.
         :param tokenizer: Encodes prompts/feedback and applies the chat template.
-        :param max_turns: Max generation turns per episode.
+        :param max_turns: Max generation turns per episode. ``None`` puts no cap
+            on turns: the episode ends when the env does or the next prompt no
+            longer fits ``max_model_len``, which must then be set, with no
+            context restart setting.
         :param timeout_s: Per-request OpenEnv timeout; ``None`` leaves requests unbounded.
         :param answer_tool: For an MCP env, one of its real tools (e.g. ``guess``,
             ``submit_answer``) receiving a turn's prose as ``call_tool`` when
@@ -345,6 +365,12 @@ class RolloutHarness(RestartPromptMixin):
         :ivar sampling_supports: Per-turn ``(n, K)`` token ids vLLM could sample
             at each generated token (empty unless the engine records them).
         """
+        _check_uncapped_turns(
+            max_turns,
+            max_model_len,
+            segment_prompt_tokens,
+            segment_max_images,
+        )
         self.max_turns = max_turns
         if segment_prompt_tokens is not None and segment_prompt_tokens < 1:
             msg = (
@@ -502,7 +528,7 @@ class RolloutHarness(RestartPromptMixin):
         cls,
         env: TextEnvProtocol | Environment,
         tokenizer: PreTrainedTokenizerBase,
-        max_turns: int = 1,
+        max_turns: int | None = 1,
         *,
         action_field: str = "message",
         answer_tool: str | None = None,
@@ -513,7 +539,7 @@ class RolloutHarness(RestartPromptMixin):
 
         :param env: A plain-text env or an OpenEnv ``Environment``.
         :param tokenizer: Tokenizer for the token-level loop.
-        :param max_turns: Generation turns per episode.
+        :param max_turns: Generation turns per episode; ``None`` for no cap.
         :param action_field: Action field the model's text goes into, on the
             env's declared action class, or the ``answer_tool`` argument name.
         :param answer_tool: For an MCP env, one of its real tools receiving a
@@ -545,7 +571,7 @@ class RolloutHarness(RestartPromptMixin):
         spec: str | Callable[..., TextEnvProtocol],
         env_config: dict[str, Any] | None,
         tokenizer: PreTrainedTokenizerBase,
-        max_turns: int = 1,
+        max_turns: int | None = 1,
         *,
         factory: str | None = None,
         **kwargs: Any,
@@ -564,7 +590,7 @@ class RolloutHarness(RestartPromptMixin):
             is set on the built env and passed to the harness so the chat
             template renders it; ``action_field`` goes to the harness.
         :param tokenizer: Tokenizer for the token-level loop.
-        :param max_turns: Generation turns per episode.
+        :param max_turns: Generation turns per episode; ``None`` for no cap.
         :param factory: Optional ``module:attr`` builder that receives ``spec``.
         :param kwargs: Forwarded to :class:`RolloutHarness`.
         :rtype: RolloutHarness
@@ -1651,7 +1677,11 @@ class RolloutHarness(RestartPromptMixin):
         _add_scores(self.rubric_score_sums, info.get("rubric_scores") or {})
         self._turn_idx += 1
 
-        if not (terminated or truncated) and self._turn_idx >= self.max_turns:
+        if (
+            not (terminated or truncated)
+            and self.max_turns is not None
+            and self._turn_idx >= self.max_turns
+        ):
             truncated = True
 
         prompt: dict[str, Any] = {}
@@ -1900,7 +1930,10 @@ class RolloutHarness(RestartPromptMixin):
             offset += int(ids.shape[1])
 
         turn_rewards = list(self.turn_rewards)
-        while len(turn_rewards) < self.max_turns:
+        if self.max_turns is not None:
+            turn_rewards += [0.0] * (self.max_turns - len(turn_rewards))
+        elif not turn_rewards:
+            # Group scoring writes a turn-0 ending at index 0.
             turn_rewards.append(0.0)
 
         pixel_values = self._episode_pixel_values

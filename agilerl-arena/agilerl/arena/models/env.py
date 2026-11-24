@@ -791,8 +791,10 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         ge=1,
         description=(
-            "Turn budget per episode. Unset probes it from an entrypoint env; "
-            "required with env_url, where it cannot be probed."
+            "Turn budget per episode. Unset puts no cap on turns: the episode "
+            "ends when the env terminates or truncates, or when the next prompt "
+            "no longer fits the model's context. Required with env_url, "
+            "segment_prompt_tokens or segment_max_images."
         ),
     )
     segment_prompt_tokens: int | None = Field(
@@ -1243,8 +1245,8 @@ class LLMEnvSpec(EnvSpecBase):
             raise ValueError(msg)
         if self.env_url is not None and self.max_turns is None:
             msg = (
-                "max_turns is required with env_url: a remote env's turn budget "
-                "cannot be probed, so set it explicitly (1 for single-turn)."
+                "max_turns is required with env_url: set the remote env's turn "
+                "budget explicitly (1 for single-turn)."
             )
             raise ValueError(msg)
         if dataset is not None:
@@ -1258,6 +1260,16 @@ class LLMEnvSpec(EnvSpecBase):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
             self.max_turns = 1
+        if self.max_turns is None and (
+            self.segment_prompt_tokens is not None
+            or self.segment_max_images is not None
+        ):
+            msg = (
+                "max_turns is required with segment_prompt_tokens or "
+                "segment_max_images: a restarted context never fills, so only "
+                "the turn cap ends an episode the env does not end."
+            )
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
