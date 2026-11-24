@@ -346,7 +346,10 @@ def _counts(counts: list[int]) -> str:
 @click.option(
     "--algorithm",
     default=None,
-    help="The run's algorithm.name, e.g. SUPERVISED. Without it, lists what LLM training accepts.",
+    help=(
+        "The run's algorithm.name, e.g. GRPO. Lists only the GPU counts it trains "
+        "on. Without it, lists what LLM training accepts, single GPUs included."
+    ),
 )
 @click.pass_obj
 def resources_list(config: CommandConfig, algorithm: str | None) -> None:
