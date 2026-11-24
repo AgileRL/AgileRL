@@ -217,6 +217,11 @@ from agilerl.utils.llm_packing import (
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.utils.phase_timer import PhaseTimer
 from agilerl.utils.sampling_supports import extract_vllm_sampling_supports
+from agilerl.utils.stochastic_round import (
+    activate_bf16_rounding,
+    bf16_round_step,
+    stop_reusing_roundings,
+)
 from agilerl.utils.token_micro_batches import (
     balance_windows,
     fill_micro_batches,
@@ -3608,6 +3613,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if self.lr_scheduler is not None and "lr_scheduler" in checkpoint:
                 self.lr_scheduler.last_epoch = checkpoint["lr_scheduler"]["last_epoch"]
             self.apply_lr()
+        activate_bf16_rounding(self.actor, self.optimizer_steps)
 
     def load_weights(
         self,
@@ -3891,6 +3897,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             set_routed_experts_chunk_bytes(
                 self.actor, self.routed_expert_chunk_mib * MiB
             )
+        activate_bf16_rounding(self.actor, self.optimizer_steps)
         self.sequence_layout = self._build_sequence_layout()
 
     def _check_cp_strips_vision_towers(self) -> None:
@@ -5128,6 +5135,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Adapters train in fp32: bf16 weights drop small Adam updates. FSDP's
         # mixed-precision policy and the expert kernels run them in bf16.
+        # The frozen base is already bf16 and is not rounded.
         with full_shape_views(peft_target, expert_params):
             peft_target = get_peft_model(
                 peft_target,
@@ -6445,6 +6453,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
         if step is not None:
             self.optimizer_steps += 1
+            bf16_round_step.set(self.optimizer_steps)
         return step
 
     def _stack_rollout_batch(
@@ -6676,21 +6685,27 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         return training_device_spec(self.device, self.vllm_config, self.colocated)
 
     def _start_learn_phases(self) -> PhaseTimer:
-        """Open the timing window of one ``learn`` on this agent's device.
+        """Activate this agent's bf16 rounding and open the timing window of one ``learn``.
+
+        Agents in one process share the rounding state, so each ``learn`` sets it first.
+        Inside the window the optimizer is the only writer of the masters, so each
+        local master's compute cast is rounded once per optimizer step.
 
         :return: Timer whose marks charge time to :data:`LEARN_PHASES`.
         :rtype: PhaseTimer
         """
+        activate_bf16_rounding(self.actor, self.optimizer_steps, reuse_roundings=True)
         phase_timer = self.shard_runtime.phase_timer
         phase_timer.start(self.device)
         return phase_timer
 
     def _learn_phase_seconds(self) -> dict[str, float]:
-        """Close the timing window opened by :meth:`_start_learn_phases`.
+        """Close the window opened by :meth:`_start_learn_phases`.
 
         :return: ``learn_phase_<phase>_s`` for every phase in :data:`LEARN_PHASES`.
         :rtype: dict[str, float]
         """
+        stop_reusing_roundings()
         phase_timer = self.shard_runtime.phase_timer
         phase_timer.mark("other")
         seconds = phase_timer.stop()

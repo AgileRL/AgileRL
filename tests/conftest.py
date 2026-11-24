@@ -138,6 +138,13 @@ _DIST_ENV_VARS = (
 _WORKER_MASTER_PORT = os.environ.get("MASTER_PORT") if _xdist_worker_id else None
 
 
+def _reset_bf16_rounding() -> None:
+    """Drop the shared bf16 draw so the next test starts on round-to-nearest."""
+    from agilerl.utils.stochastic_round import bf16_round_step
+
+    bf16_round_step.set(None)
+
+
 def _reset_distributed_env() -> None:
     """Clear distributed launch env vars leaked by GPU / LLM tests.
 
@@ -270,12 +277,14 @@ def cleanup():
     _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
+    _reset_bf16_rounding()
 
     yield
 
     _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
+    _reset_bf16_rounding()
 
     # Only clear CUDA cache if CUDA was actually used
     if torch.cuda.is_available() and torch.cuda.is_initialized():
