@@ -13,11 +13,7 @@ from pydantic import ValidationError
 from agilerl.arena.models import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvSpec
-from agilerl.arena.models.manifest import (
-    REWARD_FILE_AT_SUBMIT,
-    TrainingManifest,
-    async_rollout,
-)
+from agilerl.arena.models.manifest import REWARD_FILE_AT_SUBMIT, TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.arena.models.training import (
@@ -89,10 +85,6 @@ def training_defaults(manifest: TrainingManifest) -> dict[str, Any]:
             mode="json", exclude_none=True
         ),
     }
-    if async_rollout(manifest):
-        defaults["rollout_version_stamp"] = training.model_copy(
-            update={"rollout_mode": "async"}
-        ).effective_rollout_version_stamp()
     if training.model_fields_set & {"num_epochs", "max_steps"}:
         return defaults
     environment = manifest.environment
