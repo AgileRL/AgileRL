@@ -2000,6 +2000,14 @@ class TestDistributedTrainerOverhead:
         ).nccl_group_bytes == (820 * MiB)
         assert DeviceSpec(total_bytes=24 * GiB).nccl_group_bytes == 820 * MiB
 
+    def test_cross_node_all_to_all_bytes_are_measured_for_l4_only(self):
+        l4 = DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4")
+        h100 = DeviceSpec(total_bytes=80 * GiB, name="NVIDIA H100 80GB HBM3")
+
+        assert l4.nccl_cross_node_all_to_all_bytes == 2560 * MiB
+        assert h100.nccl_cross_node_all_to_all_bytes is None
+        assert DeviceSpec(total_bytes=24 * GiB).nccl_cross_node_all_to_all_bytes is None
+
 
 class TestAlgorithmTerms:
     """PPO, SFT, and DPO structure."""
@@ -3824,6 +3832,14 @@ class TestTrainingSettingsExpertShardGpusProperty:
 
         assert settings.expert_shard_gpus == 8
 
+    def test_expert_group_wider_than_the_shard_group_holds_each_expert_once(self):
+        settings = TrainingSettings(
+            n_training_gpus=16, fsdp=FSDPConfig(ep=16, cp=4, shard_group_size=8)
+        )
+
+        assert settings.dense_fsdp_gpus == 8
+        assert settings.expert_shard_gpus == 16
+
 
 class TestTrainingExpertShards:
     def test_expert_resident_bytes_follow_ep_times_leftover(self, device):
@@ -3843,6 +3859,27 @@ class TestTrainingExpertShards:
         assert component(leftover, "base_weights").n_bytes == pytest.approx(
             component(filled, "base_weights").n_bytes + routed // 4 * 2, abs=8
         )
+
+    def test_expert_group_of_whole_shard_groups_splits_experts_over_ep(self, device):
+        # Arrange: dense HSDP over 8-GPU groups in both; ep=16 spans both groups.
+        common = {"n_training_gpus": 16, "max_model_len": 1024, "algorithm": "sft"}
+        group_settings = TrainingSettings(
+            fsdp=pinned_fsdp(ep=8, shard_group_size=8), **common
+        )
+        wide_settings = TrainingSettings(
+            fsdp=pinned_fsdp(ep=16, shard_group_size=8), **common
+        )
+        arch = MOE_MODEL.arch
+        routed = arch.moe_layers * formulas.routed_expert_params_per_layer(arch)
+
+        # Act
+        group = estimate_training(MOE_MODEL, device, group_settings)
+        wide = estimate_training(MOE_MODEL, device, wide_settings)
+
+        # Assert: experts stay unsharded by FSDP, so only their EP split moves.
+        assert component(group, "base_weights").n_bytes - component(
+            wide, "base_weights"
+        ).n_bytes == pytest.approx(routed * 2 / 8 - routed * 2 / 16, abs=8)
 
     def test_offloaded_shard_splits_dense_over_dp_shard_and_experts_over_the_group(
         self, device

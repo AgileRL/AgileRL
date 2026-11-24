@@ -164,8 +164,8 @@ class ParallelMesh:
     ``dp_replicate`` when HSDP. ``ep``, ``tp``, and ``cp`` are ``None``
     when that degree is 1. ``edp_shard`` is leftover FSDP in the EP region,
     2-D with ``dp_replicate`` when HSDP, and ``None`` when its shard axis
-    would be size 1. ``*_replicas`` join ranks that hold
-    the same EP or TP shard.
+    would be size 1, as when ``ep`` spans several shard groups. ``*_replicas``
+    join ranks that hold the same EP or TP shard.
     """
 
     dp_shard: DeviceMesh
@@ -239,15 +239,19 @@ class ParallelMesh:
 
 def _mesh_degrees(
     world_size: int, shard_group_size: int | None, ep: int, tp: int, cp: int
-) -> tuple[int, int, int]:
-    """Split the world into replicate, dense-shard and expert-shard degrees.
+) -> tuple[int, int, int, int]:
+    """Split the world into dense and expert replicate and shard degrees.
+
+    The expert group either fits in one shard group, with leftover expert
+    FSDP filling it, or holds whole shard groups, with experts unsharded by
+    FSDP and replicated over ``world_size // ep`` ranks.
 
     :param world_size: Trainer ranks.
     :param shard_group_size: Ranks per weight-shard group; ``None`` is the world.
     :param ep: Expert-parallel degree.
     :param tp: Tensor-parallel degree.
     :param cp: Context-parallel degree.
-    :return: ``(dp_replicate, dp_shard, edp_shard)``.
+    :return: ``(dp_replicate, dp_shard, edp_shard, ep_replicate)``.
     :raises ValueError: A degree does not divide its region.
     """
     inner = world_size if shard_group_size is None else shard_group_size
@@ -261,14 +265,16 @@ def _mesh_degrees(
         msg = f"shard group ({inner}) must be divisible by cp * tp ({cp} * {tp})"
         raise ValueError(msg)
     dp_shard = inner // (cp * tp)
-    inner_region = dp_shard * cp * tp
-    if inner_region % ep != 0:
-        msg = (
-            f"ep ({ep}) must divide dp_shard * cp * tp "
-            f"({dp_shard} * {cp} * {tp} = {inner_region})"
-        )
-        raise ValueError(msg)
-    return dp_replicate, dp_shard, inner_region // ep
+    if inner % ep == 0:
+        return dp_replicate, dp_shard, inner // ep, dp_replicate
+    if ep % inner == 0 and world_size % ep == 0:
+        return dp_replicate, dp_shard, 1, world_size // ep
+    msg = (
+        f"ep ({ep}) must divide dp_shard * cp * tp "
+        f"({dp_shard} * {cp} * {tp} = {inner}), or be a multiple of it that "
+        f"divides world_size ({world_size})"
+    )
+    raise ValueError(msg)
 
 
 def build_parallel_mesh(
@@ -304,7 +310,7 @@ def build_parallel_mesh(
         raise RuntimeError(msg)
     if world_size is None:
         world_size = dist.get_world_size()
-    dp_replicate, _, _ = _mesh_degrees(world_size, shard_group_size, ep, tp, cp)
+    dp_replicate, _, _, _ = _mesh_degrees(world_size, shard_group_size, ep, tp, cp)
     if dp_replicate == 1 and ep == 1 and tp == 1 and cp == 1:
         return None
     if device_type is None:
@@ -325,7 +331,7 @@ def _new_parallel_mesh(
     cp: int,
     device_type: str,
 ) -> ParallelMesh:
-    dp_replicate, dp_shard, edp_shard = _mesh_degrees(
+    dp_replicate, dp_shard, edp_shard, ep_replicate = _mesh_degrees(
         world_size, shard_group_size, ep, tp, cp
     )
     world = init_device_mesh(device_type, (world_size,), mesh_dim_names=("world",))
@@ -353,7 +359,7 @@ def _new_parallel_mesh(
     )
     if ep > 1:
         sparse_degrees = {
-            MeshAxisName.DP_REPLICATE: dp_replicate,
+            MeshAxisName.DP_REPLICATE: ep_replicate,
             MeshAxisName.EDP_SHARD: edp_shard,
             MeshAxisName.EP: ep,
         }
@@ -364,7 +370,7 @@ def _new_parallel_mesh(
         )
         sparse = _unflatten_world(world, sparse_names, sparse_sizes)
         mesh.ep = sparse[MeshAxisName.EP]
-        if edp_shard > 1 and dp_replicate > 1:
+        if edp_shard > 1 and ep_replicate > 1:
             mesh.edp_shard = sparse[MeshAxisName.DP_REPLICATE, MeshAxisName.EDP_SHARD]
         elif edp_shard > 1:
             mesh.edp_shard = sparse[MeshAxisName.EDP_SHARD]

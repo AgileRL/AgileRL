@@ -1309,6 +1309,7 @@ def trainer_distributed_bytes(device: DeviceSpec, settings: TrainingSettings) ->
         1 if fsdp is None else fsdp.tp,
         device.gpus_per_node,
         1 if fsdp is None else fsdp.cp,
+        device.nccl_cross_node_all_to_all_bytes,
     )
 
 
