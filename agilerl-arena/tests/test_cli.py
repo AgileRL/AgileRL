@@ -583,6 +583,24 @@ class TestManifestCommands:
             "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
         ]
 
+    def test_validate_rejects_lora_target_modules(self, runner):
+        manifest = (
+            "algorithm: {name: GRPO}\n"
+            "environment: {env_type: rollout, entrypoint: 'envs:MyEnv'}\n"
+            "network:\n"
+            "  pretrained_model_name_or_path: Qwen/Qwen3.5-0.8B\n"
+            "  max_context_length: 1024\n"
+            "  lora_config: {target_modules: [q_proj, k_proj, v_proj, o_proj]}\n"
+        )
+
+        result = runner.invoke(main, ["manifest", "validate", "-"], input=manifest)
+
+        assert result.exit_code == 1
+        assert (
+            "network.lora_config.target_modules: LoRA target modules are chosen "
+            "by Arena; remove target_modules."
+        ) in result.output
+
     def test_validate_json_invalid_verdict_has_the_same_keys(self, runner):
         result = runner.invoke(
             main,
