@@ -27,6 +27,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    ValidationInfo,
     field_serializer,
     model_validator,
 )
@@ -151,6 +152,10 @@ def _copy_when_unset(
             f"{value!r} from another section."
         )
         raise ValueError(msg)
+
+
+# Validation context key: the reward file is added at submit, so its absence is not an error.
+REWARD_FILE_AT_SUBMIT = "reward_file_at_submit"
 
 
 class DeferredNetworkSpec(BaseModel):
@@ -700,11 +705,12 @@ class TrainingManifest(BaseModel):
         raise ValueError(msg)
 
     @model_validator(mode="after")
-    def _check_dataset_rollout_rubric(self) -> Self:
+    def _check_dataset_rollout_rubric(self, info: ValidationInfo) -> Self:
         """A rollout over dataset rows needs a rubric, unless OPD trains on its teacher alone."""
         environment = self.environment
         if (
-            not isinstance(environment, LLMEnvSpec)
+            (info.context or {}).get(REWARD_FILE_AT_SUBMIT)
+            or not isinstance(environment, LLMEnvSpec)
             or not environment.dataset_backed_rollout
             or environment.rubric_file_path is not None
             or isinstance(self.algorithm, OPDSpec)

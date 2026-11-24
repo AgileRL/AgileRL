@@ -15,7 +15,6 @@ from pydantic import AliasChoices, BaseModel
 
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
-    GRPOSpec,
     LLMAlgorithmSpec,
     MultiAgentAlgorithmSpec,
     RolloutLLMSpec,
@@ -28,6 +27,12 @@ from agilerl.arena.models.hpo import require_mutation_range_inside_field
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
 from agilerl.arena.models.manifest_rules import async_rollout_algorithm
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.arena.models.training import (
+    DATASET_LLM_NUM_EPOCHS,
+    LLM_EVALUATION_INTERVAL,
+    LLM_REPORTING_INTERVAL,
+    ROLLOUT_LLM_MAX_STEPS,
+)
 
 SCHEMA_ID = "https://schemas.agilerl.com/training-manifest/v1.json"
 
@@ -135,13 +140,13 @@ def environment_without_generative_source_if() -> dict[str, Any]:
     }
 
 
-def dataset_backed_grpo_rollout_if() -> dict[str, Any]:
-    def grpo_family(spec: type[AlgoSpec]) -> bool:
-        return issubclass(spec, GRPOSpec)
+def dataset_backed_rollout_if() -> dict[str, Any]:
+    def rollout_llm(spec: type[AlgoSpec]) -> bool:
+        return issubclass(spec, RolloutLLMSpec)
 
     return {
         "allOf": [
-            algorithm_name_if(registered_algorithm_names(grpo_family)),
+            algorithm_name_if(registered_algorithm_names(rollout_llm)),
             environment_rollout_type_if(),
             environment_dataset_identity_if(),
             environment_without_generative_source_if(),
@@ -239,7 +244,9 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            "then": training_then({"reporting_interval": {"default": 1}}),
+            "then": training_then(
+                {"reporting_interval": {"default": LLM_REPORTING_INTERVAL}}
+            ),
         },
         {
             "if": algorithm_name_if(classic_names),
@@ -260,15 +267,17 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            "then": training_then({"evaluation_interval": {"default": 10}}),
+            "then": training_then(
+                {"evaluation_interval": {"default": LLM_EVALUATION_INTERVAL}}
+            ),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(rollout_llm)),
-            "then": training_then({"max_steps": {"default": 200}}),
+            "then": training_then({"max_steps": {"default": ROLLOUT_LLM_MAX_STEPS}}),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
-            "then": training_then({"num_epochs": {"default": 1}}),
+            "then": training_then({"num_epochs": {"default": DATASET_LLM_NUM_EPOCHS}}),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
@@ -283,10 +292,10 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             "then": training_then({"experience_sharing": {"default": True}}),
         },
         {
-            "if": dataset_backed_grpo_rollout_if(),
+            "if": dataset_backed_rollout_if(),
             "then": training_then(
                 {
-                    "num_epochs": {"default": 1},
+                    "num_epochs": {"default": DATASET_LLM_NUM_EPOCHS},
                     "max_steps": {"default": None},
                 }
             ),
@@ -319,15 +328,6 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         {
             "if": environment_dataset_identity_if(),
             "then": environment_then({"train_test_split": {"default": 0.9}}),
-        },
-        {
-            "if": {
-                "allOf": [
-                    environment_dataset_identity_if(),
-                    environment_rollout_type_if(),
-                ]
-            },
-            "then": environment_then({"rubric_name": {"default": "reward_fn"}}),
         },
         {
             "if": environment_dataset_type_if(),
