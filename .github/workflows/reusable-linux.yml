@@ -93,10 +93,6 @@ jobs:
                   SELECTED_TESTS: ${{ inputs.tests }}
               run: python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))' > .ci-selected-tests.txt
             - name: Run CPU shard
-              env:
-                  # Feedback-frame tests pull real tokenizers (Gemma is gated);
-                  # they skip on jobs without this token.
-                  HF_TOKEN: ${{ secrets.HF_TOKEN }}
               run: |
                   rm -f .coverage .coverage.*
                   uv run --no-sync python scripts/pytest_shard.py run \
@@ -120,13 +116,6 @@ jobs:
                   name: junit-linux-cpu-${{ matrix.python-version }}-${{ matrix.shard }}
                   path: junit-cpu.xml
                   if-no-files-found: ignore
-            - name: Upload coverage reports to Codecov
-              if: inputs.coverage && matrix.python-version == '3.13'
-              uses: codecov/codecov-action@v3
-              with:
-                  flags: cpu-${{ matrix.python-version }}-${{ matrix.shard }}
-              env:
-                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
             - name: Upload 3.13 coverage data
               if: inputs.coverage && matrix.python-version == '3.13'
               uses: actions/upload-artifact@v4
@@ -286,13 +275,6 @@ jobs:
                     -n auto --dist loadgroup \
                     --durations=15 \
                     ${{ inputs.coverage && matrix.python-version == '3.13' && '--cov --cov-context=test --cov-report=xml' || '' }}
-            - name: Upload coverage reports to Codecov
-              if: inputs.coverage && matrix.python-version == '3.13'
-              uses: codecov/codecov-action@v3
-              with:
-                  flags: gpu-${{ matrix.python-version }}-${{ matrix.shard }}
-              env:
-                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
             - name: Upload 3.13 coverage data
               if: inputs.coverage && matrix.python-version == '3.13'
               uses: actions/upload-artifact@v4
@@ -311,6 +293,10 @@ jobs:
 
     coverage:
         needs: [cpu, gpu]
+        permissions:
+            contents: read
+            # Codecov upload authenticates with the run's OIDC token.
+            id-token: write
         # Fork PRs skip gpu, which uploads no coverage parts.
         if: >-
             inputs.coverage
@@ -359,6 +345,9 @@ jobs:
                   test "$index" -ge "${#shards[@]}"
                   uv run --no-sync coverage combine
                   uv run --no-sync coverage json --rcfile=pyproject.toml -o framework-coverage.json
+            - name: Write the coverage report
+              if: github.event_name == 'schedule'
+              run: uv run --no-sync coverage xml --rcfile=pyproject.toml -o coverage.xml
             - name: Build the test map
               run: uv run --no-sync python scripts/build_test_map.py --data .coverage --out test-map.json
             - uses: actions/upload-artifact@v4
@@ -370,3 +359,13 @@ jobs:
                   name: test-map
                   path: test-map.json
                   retention-days: 30
+            # Nightly on main only. A rejected OIDC upload must not fail the
+            # workflow: CI durations promote only when it succeeds.
+            - name: Upload coverage to Codecov
+              if: github.event_name == 'schedule'
+              continue-on-error: true
+              uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+              with:
+                  files: coverage.xml
+                  disable_search: true
+                  use_oidc: true
