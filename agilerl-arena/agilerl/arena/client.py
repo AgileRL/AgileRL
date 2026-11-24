@@ -1745,16 +1745,25 @@ class ArenaClient:
         logger.info("Metrics saved to %s", path)
         return path
 
-    def stop_experiment(self, experiment_name: str) -> JSONValue:
+    def stop_experiment(
+        self, experiment_name: str, project: str | None = None
+    ) -> JSONValue:
         """Stop a running experiment in Arena.
 
         :param experiment_name: Experiment name to halt.
         :type experiment_name: str
+        :param project: Project the experiment is in; defaults to the saved
+            default project.
+        :type project: str | None
         """
+        payload: dict[str, Any] = {"experiment_name": experiment_name.strip()}
+        resolved_project = self._resolve_project(project)
+        if resolved_project is not None:
+            payload["project"] = resolved_project
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/stop",
-            json={"experiment_name": experiment_name.strip()},
+            json=payload,
         )
 
     # -------------------------------------------------------------------------
