@@ -274,6 +274,24 @@ class TestParallelLayouts:
         # 24 does not divide 256 experts, and 16 does not divide 24 trainers.
         assert {layout.ep for layout in on_three} == {1, 2, 4, 8}
 
+    def test_an_expert_group_over_nodes_is_tried_with_node_shard_groups_first(self):
+        arch = catalog_model_spec("deepseek-ai/DeepSeek-V4-Flash-0731").arch
+
+        layouts = parallel_layouts(arch, 16, 8, open_fsdp(), True, True)
+
+        wide = layouts.index(ParallelLayout(ep=16))
+        assert layouts[wide - 1] == ParallelLayout(ep=16, shard_group_size=8)
+        assert ParallelLayout(ep=8, shard_group_size=8) not in layouts
+
+    def test_a_set_shard_group_adds_no_node_shard_groups(self):
+        arch = catalog_model_spec("deepseek-ai/DeepSeek-V4-Flash-0731").arch
+
+        layouts = parallel_layouts(
+            arch, 16, 8, open_fsdp(shard_group_size=16), True, True
+        )
+
+        assert {layout.shard_group_size for layout in layouts} == {16}
+
     def test_tensor_context_groups_stay_on_a_node_and_expert_groups_span_whole_nodes(
         self,
     ):
@@ -367,15 +385,20 @@ class TestParallelLayouts:
         assert {layout.ep for layout in layouts} == {2}
 
     def test_a_pinned_shard_group_skips_degrees_it_cannot_hold(self):
-        arch = MOE_MODEL.arch.model_copy(update={"tensor_parallel_plan": False})
+        # ep 3 and 6 neither divide the 4-GPU shard group nor hold whole groups.
+        arch = MOE_MODEL.arch.model_copy(
+            update={"tensor_parallel_plan": False, "n_experts": 12}
+        )
 
         layouts = parallel_layouts(
-            arch, 8, 8, open_fsdp(shard_group_size=2), True, False
+            arch, 12, 12, open_fsdp(shard_group_size=4), True, False
         )
 
         assert layouts == [
-            ParallelLayout(shard_group_size=2),
-            ParallelLayout(ep=2, shard_group_size=2),
+            ParallelLayout(shard_group_size=4),
+            ParallelLayout(ep=2, shard_group_size=4),
+            ParallelLayout(ep=4, shard_group_size=4),
+            ParallelLayout(ep=12, shard_group_size=4),
         ]
 
     def test_a_pinned_degree_that_does_not_divide_the_trainers_gives_none(self):
@@ -422,6 +445,30 @@ class TestLayoutRuns:
     ):
         # 2 tensor and 3 expert ranks need a multiple of 6 trainers.
         assert layout_runs(n_gpus, layout, False) is expected
+
+    @pytest.mark.parametrize(
+        ("n_gpus", "layout", "ranks_fixed", "expected"),
+        [
+            (16, ParallelLayout(ep=16, cp=4, shard_group_size=8), True, True),
+            (32, ParallelLayout(ep=16, shard_group_size=8), True, True),
+            (24, ParallelLayout(ep=16, shard_group_size=8), True, False),
+            (24, ParallelLayout(ep=12, shard_group_size=8), True, False),
+            (16, ParallelLayout(ep=16, shard_group_size=8), False, True),
+            (8, ParallelLayout(ep=16, shard_group_size=8), False, False),
+        ],
+        ids=[
+            "spans-world",
+            "two-expert-replicas",
+            "world-not-a-multiple",
+            "not-whole-shard-groups",
+            "open-fits",
+            "open-over",
+        ],
+    )
+    def test_an_expert_group_may_hold_whole_shard_groups(
+        self, n_gpus, layout, ranks_fixed, expected
+    ):
+        assert layout_runs(n_gpus, layout, ranks_fixed) is expected
 
 
 class TestOffNodeReason:
@@ -724,6 +771,30 @@ class TestLeastCrossNodePlan:
         assert plan == ParallelLayout(ep=4)
         assert priced == [ParallelLayout(ep=4)]
 
+    def test_a_higher_degree_with_node_shard_groups_is_priced(self):
+        # Arrange: EP 8 with 4-GPU shard groups keeps the dense gathers on a node.
+        layouts = [
+            ParallelLayout(ep=4),
+            ParallelLayout(ep=8, shard_group_size=4),
+            ParallelLayout(ep=8),
+        ]
+        seconds = {
+            ParallelLayout(ep=4): 460.0,
+            ParallelLayout(ep=8, shard_group_size=4): 160.0,
+            ParallelLayout(ep=8): 222.0,
+        }
+
+        # Act
+        plan = least_cross_node_plan(
+            layouts,
+            lambda layout: layout,
+            lambda _layout, _plan: 1.0,
+            lambda layout, _plan: seconds[layout],
+        )
+
+        # Assert
+        assert plan == ParallelLayout(ep=8, shard_group_size=4)
+
     def test_the_first_plan_wins_a_tie(self):
         layouts = [ParallelLayout(ep=4), ParallelLayout(ep=16)]
 
@@ -972,6 +1043,29 @@ class TestTrainingMemoryFromManifest:
 
         with pytest.raises(TrainerSplitError, match="No training layout can run"):
             training_memory_from_manifest(manifest, model, gpu.device_spec())
+
+    def test_l4_saved_moe_collectives_take_the_expert_group_across_nodes(self):
+        # Arrange: Qwen3.6-35B-A3B on 8 trainers over two 4-GPU L4 nodes.
+        doc = copy.deepcopy(MANIFEST)
+        doc["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.6-35B-A3B"
+        doc["network"]["max_context_length"] = 4096
+        doc["network"]["lora_config"] = {"target_parameters": []}
+        doc["training"]["training_gpus_per_agent"] = 8
+        manifest = TrainingManifest.model_validate(doc)
+        gpu = lookup_gpu("NVIDIA L4")
+        assert gpu is not None
+        device = gpu.device_spec().model_copy(update={"gpus_per_node": 4})
+        model = catalog_model(manifest.algorithm)
+        assert model is not None
+
+        # Act
+        plan = training_memory_from_manifest(manifest, model, device)
+
+        # Assert
+        assert plan.fsdp is not None
+        assert (plan.fsdp.ep, plan.fsdp.cp) == (8, 4)
+        assert plan.fsdp.save_moe_collectives is True
+        assert plan.breakdown.fits_with_buffer
 
     def test_a_set_cpu_offload_keeps_the_search_off_expert_parallel(self):
         # Arrange: ep=1 fits only without the buffer, so the search goes on;

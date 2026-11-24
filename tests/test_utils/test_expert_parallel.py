@@ -2712,10 +2712,11 @@ def _hsdp_ep_step_worker(
     shard_group_size: int = 2,
     train_base_experts: bool = False,
     cp: int = 1,
+    ep: int = 2,
 ) -> None:
     """One FSDPRuntime step on HSDP + EP (+ TP, CP) matches a dense SGD step."""
     # Arrange
-    ep, rows_per_shard = 2, 6
+    rows_per_shard = 6
     model = _HsdpMoeModel(_lora_routed_model(("actor",)))
     model.layers[0].lin.weight.requires_grad_(False)
     base_experts = [
@@ -2801,7 +2802,7 @@ def _hsdp_ep_step_worker(
     dist.all_reduce(shard_losses)
     assert torch.allclose(shard_losses / (world_size // cp), ref_loss, rtol=1e-5)
     leftover_dp = 1 if mesh.edp_shard is None else int(mesh.edp_shard.size())
-    assert leftover_dp == shard_group_size // ep
+    assert leftover_dp == max(shard_group_size // ep, 1)
     checked = 0
     for name, param in model.named_parameters():
         value = _full_value(param.detach())
@@ -2809,7 +2810,10 @@ def _hsdp_ep_step_worker(
             assert param.grad is None, name
             assert torch.equal(value, initial[name].reshape(value.shape)), name
             if isinstance(param, DTensor):
+                names = param.device_mesh.mesh_dim_names
                 for dim, placement in enumerate(param.placements):
+                    if names[dim] == "ep":
+                        continue
                     if _spans_shard_groups(param.device_mesh, dim, shard_group_size):
                         assert isinstance(placement, Replicate), (name, dim)
             continue
@@ -2891,6 +2895,94 @@ class TestFSDPRuntimeBackwardHsdpExpertParallel:
             ),
             8,
         )
+
+    def test_expert_group_spanning_shard_groups_matches_dense_step(self):
+        run_ranks(partial(_hsdp_ep_step_worker, tp=1, ep=4), 4)
+
+    def test_trainable_experts_on_a_group_spanning_shard_groups_match_dense_step(
+        self,
+    ):
+        run_ranks(partial(_hsdp_ep_step_worker, tp=1, ep=4, train_base_experts=True), 4)
+
+    def test_context_parallel_shard_groups_under_one_expert_group_match_dense_step(
+        self,
+    ):
+        run_ranks(partial(_hsdp_ep_step_worker, tp=1, cp=2, ep=4), 4)
+
+    def test_tensor_parallel_shard_groups_under_one_expert_group_match_dense_step(
+        self,
+    ):
+        run_ranks(partial(_hsdp_ep_step_worker, tp=2, ep=4), 4)
+
+    def test_replicated_expert_groups_over_shard_groups_match_dense_step(self):
+        run_ranks(partial(_hsdp_ep_step_worker, tp=1, ep=4, train_base_experts=True), 8)
+
+
+def _exported_state(
+    shard_group_size: int | None,
+) -> tuple[nn.Module, dict, FSDPRuntime]:
+    world_size = dist.get_world_size()
+    config = FSDPConfig(
+        ep=world_size,
+        shard_group_size=shard_group_size,
+        param_dtype="float32",
+        reduce_dtype="float32",
+        routed_expert_chunk_mib=64,
+    )
+    mesh = build_parallel_mesh(
+        world_size=world_size,
+        ep=world_size,
+        shard_group_size=shard_group_size,
+        device_type="cpu",
+    )
+    model = _HsdpMoeModel(_lora_routed_model(("actor",)))
+    for param in model.parameters():
+        dist.broadcast(param.data, src=0)
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(model, "cpu", config, parallel_mesh=mesh)
+    runtime = FSDPRuntime(config)
+    shared = [runtime.export_model_state(model)]
+    dist.broadcast_object_list(shared, src=0)
+    return model, shared[0], runtime
+
+
+def _hsdp_wide_ep_checkpoint_worker(rank: int, world_size: int) -> None:
+    """Export and import round-trip when the expert group spans shard groups."""
+    # Arrange
+    _, plain_state, _ = _exported_state(None)
+    model, state, runtime = _exported_state(2)
+    restored = _HsdpMoeModel(_lora_routed_model(("actor",)))
+    with torch.no_grad():
+        for param in restored.parameters():
+            param.zero_()
+    mesh = build_parallel_mesh(
+        world_size=world_size, ep=world_size, shard_group_size=2, device_type="cpu"
+    )
+    assert mesh is not None
+    assert mesh.edp_shard is None
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(
+            restored, "cpu", runtime.config, parallel_mesh=mesh
+        )
+
+    # Act
+    runtime.import_model_state(restored, state, strict=True)
+
+    # Assert
+    assert set(state) == set(plain_state)
+    for name, value in plain_state.items():
+        assert torch.equal(state[name], value), name
+    for name, param in restored.named_parameters():
+        assert torch.equal(
+            _full_value(param.detach()),
+            _full_value(model.get_parameter(name).detach()),
+        ), name
+
+
+@pytest.mark.multi_rank
+class TestFSDPRuntimeModelStateHsdpWideExpertParallel:
+    def test_export_and_import_round_trip(self):
+        run_ranks(_hsdp_wide_ep_checkpoint_worker, 4)
 
 
 def _ep_adamw_step(model: nn.Module, fused: bool) -> list[nn.Parameter]:

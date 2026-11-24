@@ -347,6 +347,60 @@ def _hsdp_ep_spans_inner_worker(rank: int, world_size: int) -> None:
     assert int(mesh.ep_replicas.size()) == world_size // 4
 
 
+def _hsdp_ep_spans_shard_groups_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    shard_group_size, ep = 2, 4
+
+    # Act
+    mesh = build_parallel_mesh(
+        world_size=world_size,
+        ep=ep,
+        shard_group_size=shard_group_size,
+        device_type="cpu",
+    )
+
+    # Assert
+    assert mesh is not None
+    assert mesh.dp_shard.mesh_dim_names == ("dp_replicate", "dp_shard")
+    assert _groups(mesh.dp_shard["dp_shard"]) == _consecutive_groups(
+        world_size, shard_group_size
+    )
+    assert _groups(mesh.dp_shard["dp_replicate"]) == _hsdp_replica_groups(
+        world_size, shard_group_size
+    )
+    assert _groups(mesh.ep) == _consecutive_groups(world_size, ep)
+    assert mesh.edp_shard is None
+    assert _groups(mesh.ep_replicas) == _strided_groups(world_size, ep)
+
+
+def _hsdp_ep_spans_world_worker(rank: int, world_size: int) -> None:
+    # Act
+    mesh = build_parallel_mesh(
+        world_size=world_size,
+        ep=world_size,
+        cp=2,
+        shard_group_size=world_size // 2,
+        device_type="cpu",
+    )
+
+    # Assert
+    assert mesh is not None
+    assert mesh.dp_shard.mesh_dim_names == ("dp_replicate", "dp_shard_cp")
+    assert _groups(mesh.dp_shard["dp_shard_cp"]) == _consecutive_groups(
+        world_size, world_size // 2
+    )
+    assert _groups(mesh.ep) == {tuple(range(world_size))}
+    assert mesh.edp_shard is None
+    assert int(mesh.ep_replicas.size()) == 1
+
+
+def _ep_not_whole_shard_groups_worker(rank: int, world_size: int) -> None:
+    with pytest.raises(ValueError, match="or be a multiple of it"):
+        build_parallel_mesh(
+            world_size=world_size, ep=3, shard_group_size=2, device_type="cpu"
+        )
+
+
 def _ep_does_not_divide_inner_worker(rank: int, world_size: int) -> None:
     with pytest.raises(ValueError, match="must divide dp_shard"):
         build_parallel_mesh(world_size=world_size, ep=3, device_type="cpu")
@@ -389,6 +443,15 @@ class TestBuildParallelMesh:
 
     def test_ep_that_does_not_divide_inner_raises(self):
         run_ranks(_ep_does_not_divide_inner_worker, 4)
+
+    def test_hsdp_ep_group_holds_whole_shard_groups(self):
+        run_ranks(_hsdp_ep_spans_shard_groups_worker, 8)
+
+    def test_hsdp_ep_group_spans_the_world_with_cp(self):
+        run_ranks(_hsdp_ep_spans_world_worker, 8)
+
+    def test_ep_that_is_not_whole_shard_groups_raises(self):
+        run_ranks(_ep_not_whole_shard_groups_worker, 6)
 
     def test_same_degrees_reuse_the_process_groups(self):
         run_ranks(_mesh_reuse_worker, 8)

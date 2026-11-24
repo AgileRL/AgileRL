@@ -122,6 +122,11 @@ class TestFSDPConfig:
 
         assert config.shard_group_size == 8
 
+    def test_accepts_ep_that_is_a_multiple_of_the_shard_group(self) -> None:
+        config = FSDPConfig(ep=16, cp=4, shard_group_size=8)
+
+        assert (config.ep, config.shard_group_size) == (16, 8)
+
     def test_accepts_shard_group_divisible_by_tp_times_cp(self) -> None:
         config = FSDPConfig(tp=2, cp=2, shard_group_size=8)
 
@@ -131,6 +136,7 @@ class TestFSDPConfig:
         ("size", "kwargs", "match"),
         [
             (8, {"ep": 3, "tp": 1}, r"shard_group_size=8 must be divisible by ep=3"),
+            (8, {"ep": 12}, r"shard_group_size=8 must be divisible by ep=12"),
             (
                 8,
                 {"ep": 1, "tp": 3},

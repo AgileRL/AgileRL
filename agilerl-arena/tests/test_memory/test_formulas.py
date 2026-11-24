@@ -4354,6 +4354,8 @@ class TestTrainerNcclBytes:
             (16, 8, 8, 1, 8, 0.14 + 0.06 + 1.13 + 0.06 + 1.13 + 1.1),  # HSDP x EP
             # HSDP x EP with on-node leftover ranks and cross-node replicas.
             (16, 8, 4, 1, 8, 0.14 + 0.06 + 1.13 + 0.06 + 1.0 + 1.1 + 0.65 + 0.06),
+            # HSDP per node with one EP group of both nodes.
+            (16, 8, 16, 1, 8, 0.14 + 0.06 + 1.13 + 0.06 + 0.06 + 0.54),
         ],
     )
     def test_charges_each_group_by_size_and_node_span(
@@ -4362,6 +4364,23 @@ class TestTrainerNcclBytes:
         nccl = trainer_nccl_bytes(self.GROUP, n_gpus, shard, ep, tp, gpus_per_node)
 
         assert nccl == pytest.approx(fraction * self.GROUP, abs=1)
+
+    def test_measured_cross_node_all_to_all_bytes_replace_the_fraction(self):
+        # Arrange
+        measured = 2560 * MiB
+
+        # Act
+        nccl = trainer_nccl_bytes(self.GROUP, 8, 8, 8, 1, 4, 1, measured)
+
+        # Assert
+        assert nccl == pytest.approx(
+            (0.14 + 0.06 + 0.06) * self.GROUP + measured, abs=1
+        )
+
+    def test_measured_cross_node_bytes_leave_an_on_node_expert_group_alone(self):
+        nccl = trainer_nccl_bytes(self.GROUP, 8, 8, 4, 1, 4, 1, 2560 * MiB)
+
+        assert nccl == trainer_nccl_bytes(self.GROUP, 8, 8, 4, 1, 4)
 
     @pytest.mark.parametrize(
         ("cp", "tp", "fraction"),
