@@ -702,10 +702,19 @@ def experiment_list(config: CommandConfig, project: str | None) -> None:
         rows = client.list_experiments(project=project)
     emit_result(
         rows,
+        display=lambda rows: [_experiment_row_for_display(row) for row in rows],
         empty_message=(
             "No experiments yet. Submit one with: arena experiments submit <manifest>"
         ),
     )
+
+
+def _experiment_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
+    """Show the server's ``status_label`` (e.g. "Waiting for capacity") as the status."""
+    shown = {key: value for key, value in row.items() if key != "status_label"}
+    if "status_label" in row:
+        shown["status"] = row["status_label"]
+    return shown
 
 
 @experiment.command("resume")

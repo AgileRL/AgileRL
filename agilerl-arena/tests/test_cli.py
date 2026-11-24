@@ -1721,6 +1721,45 @@ class TestExperimentListCommand:
             result = runner.invoke(main, ["experiments", "list"])
         assert result.exit_code != 0
 
+    def test_table_shows_the_status_label_and_json_keeps_both(
+        self, runner, mock_client
+    ):
+        mock_client.list_experiments.return_value = [
+            {
+                "experiment_name": "grpo-v1",
+                "status": "Queued",
+                "status_label": "Waiting for capacity",
+            }
+        ]
+        with _patched_arena_client(mock_client):
+            table = runner.invoke(main, ["experiments", "list", "--project", "proj1"])
+            as_json = runner.invoke(
+                main, ["--json", "experiments", "list", "--project", "proj1"]
+            )
+
+        assert table.exit_code == 0
+        assert "Waiting for capacity" in table.output
+        assert "Queued" not in table.output
+        assert "status_label" not in table.output
+        assert json.loads(as_json.output) == mock_client.list_experiments.return_value
+
+    def test_table_keeps_status_when_there_is_no_label(self, runner, mock_client):
+        mock_client.list_experiments.return_value = [
+            {"experiment_name": "grpo-v2", "status": "Running"},
+            {
+                "experiment_name": "grpo-v3",
+                "status": "Pending",
+                "status_label": "Scheduled",
+            },
+        ]
+        with _patched_arena_client(mock_client):
+            table = runner.invoke(main, ["experiments", "list"])
+
+        assert table.exit_code == 0
+        assert "Running" in table.output
+        assert "Scheduled" in table.output
+        assert "Pending" not in table.output
+
 
 class TestExperimentResumeCommand:
     def test_resume(self, runner, mock_client):
