@@ -311,7 +311,7 @@ metrics programmatically. ``--overwrite`` (``overwrite=True`` in Python) replace
 Deploy the Trained Model
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Once training is complete, deploy the best checkpoint to an inference endpoint:
+Once training is complete, deploy a checkpoint to an inference endpoint. Without a checkpoint, Arena deploys the one with the most steps:
 
 .. tab-set::
    :sync-group: interface
@@ -321,13 +321,13 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
 
       .. code-block:: python
 
-         # Deploy the best checkpoint
+         # Deploy the checkpoint with the most steps
          client.deploy_agent(experiment_name="gsm8k-grpo-v1")
 
-         # Or deploy a specific checkpoint
+         # Or deploy a specific checkpoint, by its steps from list_checkpoints
          client.deploy_agent(
              experiment_name="gsm8k-grpo-v1",
-             checkpoint="step_500",
+             checkpoint="500",
          )
 
    .. tab-item:: CLI
@@ -335,11 +335,11 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
 
       .. code-block:: bash
 
-         # Deploy the best checkpoint
+         # Deploy the checkpoint with the most steps
          arena agent deploy gsm8k-grpo-v1
 
-         # Deploy a specific checkpoint
-         arena agent deploy gsm8k-grpo-v1 --checkpoint step_500
+         # Deploy a specific checkpoint, by its steps from `arena experiments checkpoints`
+         arena agent deploy gsm8k-grpo-v1 --checkpoint 500
 
 Interact with the Deployed Model
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

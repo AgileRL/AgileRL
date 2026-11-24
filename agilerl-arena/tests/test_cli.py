@@ -337,16 +337,26 @@ class TestLoadCliPlugins:
 
 class TestManifestCommands:
     def test_validate_reports_a_valid_file(self, runner, tmp_path):
-        path = tmp_path / "dqn.yaml"
-        path.write_text(
-            "algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
-            encoding="utf-8",
-        )
+        path = tmp_path / "grpo.yaml"
+        path.write_text(_llm_manifest("Qwen/Qwen3.5-0.8B"), encoding="utf-8")
 
         result = runner.invoke(main, ["manifest", "validate", str(path)])
 
         assert result.exit_code == 0
-        assert "valid (DQN)" in result.output
+        assert "valid (GRPO)" in result.output
+
+    def test_validate_rejects_classic_rl(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-"],
+            input="algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
+        )
+
+        assert result.exit_code == 1
+        assert (
+            "algorithm.name: Classic RL is no longer supported in Arena"
+            in result.output
+        )
 
     def test_validate_json_reports_an_invalid_manifest(self, runner):
         result = runner.invoke(
@@ -372,11 +382,7 @@ class TestManifestCommands:
         result = runner.invoke(
             main,
             ["manifest", "validate", "-"],
-            input=(
-                "algorithm: {name: DQN}\n"
-                "environment: {name: CartPole-v1}\n"
-                "training: {hpo: true}\n"
-            ),
+            input=_llm_manifest("Qwen/Qwen3.5-0.8B") + "training: {hpo: true}\n",
         )
 
         assert result.exit_code == 1
@@ -504,9 +510,8 @@ class TestManifestCommands:
             _llm_manifest("Qwen/Qwen3.5-0.8B"),
             _llm_manifest("./checkpoints/mine"),
             _llm_manifest("/mnt/checkpoints/mine"),
-            "algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
         ],
-        ids=["live", "relative-path", "absolute-path", "not-llm"],
+        ids=["live", "relative-path", "absolute-path"],
     )
     def test_validate_json_has_no_warning_to_report(self, runner, manifest):
         result = runner.invoke(
@@ -599,16 +604,13 @@ class TestManifestCommands:
         assert json.loads(result.output)["ok"] is True
 
     def test_validate_payload_prints_resolved_manifest(self, runner, tmp_path):
-        path = tmp_path / "dqn.yaml"
-        path.write_text(
-            "algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
-            encoding="utf-8",
-        )
+        path = tmp_path / "grpo.yaml"
+        path.write_text(_llm_manifest("Qwen/Qwen3.5-0.8B"), encoding="utf-8")
 
         result = runner.invoke(main, ["manifest", "validate", str(path), "--payload"])
 
         assert result.exit_code == 0
-        assert '"name": "DQN"' in result.output
+        assert '"name": "GRPO"' in result.output
 
     def test_validate_unreadable_file_exits_failed(self, runner):
         result = runner.invoke(main, ["manifest", "validate", "/does/not/exist.yaml"])
@@ -1531,6 +1533,14 @@ class TestManifestTemplateCommand:
         assert kwargs["env_name"] == "ticket-sim"
         assert kwargs["env_version"] == "v1"
         assert kwargs["env_entrypoint"] == "ticket_sim:TicketEnv"
+
+    def test_classic_rl_says_arena_no_longer_runs_it(self, runner):
+        result = runner.invoke(
+            main, ["manifest", "template", "PPO", "--env", "my-gym-env"]
+        )
+
+        assert result.exit_code != 0
+        assert "Classic RL is no longer supported in Arena" in result.output
 
     def test_rejects_an_unknown_section(self, runner):
         result = runner.invoke(
