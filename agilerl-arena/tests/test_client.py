@@ -2736,9 +2736,18 @@ class TestListResources:
         result = api_key_client.list_resources()
 
         api_key_client._request.assert_called_once_with(
-            "GET", "/api/cli/v1/resources/list"
+            "GET", "/api/cli/v1/resources/list", params=None
         )
         assert result == body
+
+    def test_sends_the_algorithm(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"gpuTypes": []})
+
+        api_key_client.list_resources(algorithm="SUPERVISED")
+
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/resources/list", params={"algorithm": "SUPERVISED"}
+        )
 
 
 class TestDownloadExperimentMetrics:

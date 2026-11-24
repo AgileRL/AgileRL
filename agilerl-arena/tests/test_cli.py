@@ -901,8 +901,18 @@ class TestResourcesListCommand:
         # Arrange
         mock_client.list_resources.return_value = {
             "gpuTypes": [
-                {"gpuType": "h100-80", "gpusPerNode": [1, 4, 8], "devOnly": False},
-                {"gpuType": "l4", "gpusPerNode": [1], "devOnly": False},
+                {
+                    "gpuType": "h100-80",
+                    "gpusPerNode": [8],
+                    "numGpus": [8, 16, 32],
+                    "devOnly": False,
+                },
+                {
+                    "gpuType": "b200",
+                    "gpusPerNode": [1, 8],
+                    "numGpus": [1, 2, 4, 8],
+                    "devOnly": False,
+                },
             ]
         }
 
@@ -913,10 +923,28 @@ class TestResourcesListCommand:
         # Assert
         assert result.exit_code == 0
         assert "GPU type" in result.output
+        assert "--num-gpus" in result.output
         assert "GPUs per node" in result.output
-        assert "h100-80" in result.output
-        assert "1, 4, 8" in result.output
+        h100_line = next(
+            line for line in result.output.splitlines() if "h100-80" in line
+        )
+        b200_line = next(line for line in result.output.splitlines() if "b200" in line)
+        assert "8, 16, 32" in h100_line
+        assert "1, 2, 4, 8" in b200_line
+        assert "1, 8" in b200_line
         assert "yes" not in result.output
+        mock_client.list_resources.assert_called_once_with(algorithm=None)
+
+    def test_passes_the_algorithm(self, runner, mock_client):
+        mock_client.list_resources.return_value = {"gpuTypes": []}
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["resources", "list", "--algorithm", "SUPERVISED"]
+            )
+
+        assert result.exit_code == 0
+        mock_client.list_resources.assert_called_once_with(algorithm="SUPERVISED")
 
     def test_marks_dev_only_gpu_types(self, runner, mock_client):
         mock_client.list_resources.return_value = {

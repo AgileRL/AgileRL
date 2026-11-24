@@ -79,7 +79,7 @@ See `agilerl/arena/memory/README.md`.
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
 
-# List the GPU types you can train on and their GPUs per node:
+# List the GPU types you can train on and the --num-gpus values each takes:
 arena resources list
 
 # Pick a GPU type and count; Arena uses the fewest nodes that fit:
