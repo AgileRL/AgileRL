@@ -1919,6 +1919,44 @@ class TestArenaClientQuoteExperiment:
             )
 
 
+class TestArenaClientQuoteResume:
+    def test_returns_the_quote_for_the_resume_body(self, api_key_client):
+        # Arrange
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=QUOTE)
+
+        _quote_transport(api_key_client, handler)
+
+        # Act
+        quote = api_key_client.quote_resume(
+            "exp1", max_steps=1000, checkpoint="best", project="proj"
+        )
+
+        # Assert
+        assert quote == QUOTE
+        assert requests[0].url.path == "/api/cli/v1/experiments/jobs/resume/quote"
+        assert json.loads(requests[0].content) == {
+            "experiment_name": "exp1",
+            "max_steps": 1000,
+            "checkpoint": "best",
+            "project": "proj",
+        }
+
+    def test_server_without_resume_quotes_raises_404(self, api_key_client):
+        _quote_transport(
+            api_key_client,
+            lambda _: httpx.Response(404, json={"error": "not_found"}),
+        )
+
+        with pytest.raises(ArenaAPIError) as raised:
+            api_key_client.quote_resume("exp1", max_steps=1000)
+
+        assert raised.value.status_code == 404
+
+
 class TestExperimentMethods:
     def test_list_experiments(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"name": "exp1"}])

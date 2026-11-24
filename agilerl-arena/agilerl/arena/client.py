@@ -287,6 +287,30 @@ def _response_error(
     return error_cls.from_response_body(raw, status_code=status_code)
 
 
+def _resume_payload(
+    experiment_name: str,
+    max_steps: int | None,
+    checkpoint: str | None,
+    new_name: str | None,
+    project: str | None,
+) -> dict[str, Any]:
+    """Resume request body; the server rejects explicit nulls."""
+    payload: dict[str, Any] = {"experiment_name": experiment_name}
+    payload.update(
+        {
+            key: value
+            for key, value in (
+                ("max_steps", max_steps),
+                ("checkpoint", checkpoint),
+                ("new_name", new_name),
+                ("project", project),
+            )
+            if value is not None
+        }
+    )
+    return payload
+
+
 class ArenaClient:
     """Client for the Arena RLOps platform.
 
@@ -1621,23 +1645,39 @@ class ArenaClient:
         :returns: A dictionary containing the resume result.
         :rtype: dict[str, Any]
         """
-        payload: dict[str, Any] = {"experiment_name": experiment_name}
-        payload.update(
-            {
-                key: value
-                for key, value in (
-                    ("max_steps", max_steps),
-                    ("checkpoint", checkpoint),
-                    ("new_name", new_name),
-                    ("project", project),
-                )
-                if value is not None
-            }
-        )
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/resume",
-            json=payload,
+            json=_resume_payload(
+                experiment_name, max_steps, checkpoint, new_name, project
+            ),
+        )
+
+    def quote_resume(
+        self,
+        experiment_name: str,
+        max_steps: int | None = None,
+        checkpoint: str | None = None,
+        new_name: str | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Price a resume without starting it.
+
+        A resume runs on the experiment's own hardware. Arguments match
+        :meth:`resume_experiment`.
+
+        :returns: The fields :meth:`quote_experiment` returns, for ``max_steps``
+            steps on that hardware.
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: With status 404 from an Arena server that
+            cannot price a resume before it starts.
+        """
+        return self._request(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume/quote",
+            json=_resume_payload(
+                experiment_name, max_steps, checkpoint, new_name, project
+            ),
         )
 
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:

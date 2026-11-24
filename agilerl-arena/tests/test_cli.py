@@ -78,6 +78,7 @@ def mock_client() -> MagicMock:
             "quote_experiment",
             "list_experiments",
             "resume_experiment",
+            "quote_resume",
             "stop_experiment",
             "list_checkpoints",
             "get_experiment_status",
@@ -1991,6 +1992,10 @@ class TestExperimentListCommand:
 
 
 class TestExperimentResumeCommand:
+    @pytest.fixture(autouse=True)
+    def quoted(self, mock_client):
+        mock_client.quote_resume.return_value = dict(SUBMIT_QUOTE)
+
     def test_resume(self, runner, mock_client):
         mock_client.resume_experiment.return_value = {"resumed": True}
         with _patched_arena_client(mock_client):
@@ -2038,6 +2043,114 @@ class TestExperimentResumeCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "resume", "my-exp"])
         assert result.exit_code != 0
+
+
+class TestExperimentResumePricePreview:
+    @pytest.fixture(autouse=True)
+    def quoted(self, mock_client):
+        mock_client.quote_resume.return_value = dict(SUBMIT_QUOTE)
+        mock_client.resume_experiment.return_value = {"resumed": True}
+
+    @staticmethod
+    def interactive(answer: bool = True):
+        return patch(
+            "agilerl.arena.submit_quote.stdin_is_a_terminal", return_value=answer
+        )
+
+    def test_prints_hardware_rate_and_total_before_resuming(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 0
+        assert "Hourly rate:     $25.60 per hour" in result.stderr
+        assert (
+            "Estimated total: $288.00 for about 11.2 h (1,000 steps)" in result.stderr
+        )
+        mock_client.quote_resume.assert_called_once_with(
+            experiment_name="my-exp",
+            max_steps=1000,
+            checkpoint=None,
+            new_name=None,
+            project=None,
+        )
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_declining_stops_before_anything_is_billed(self, runner, mock_client):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main,
+                ["experiments", "resume", "my-exp", "--max-steps", "1000"],
+                input="n\n",
+            )
+
+        assert result.exit_code == 1
+        assert "Resume and start billing?" in result.stderr
+        mock_client.resume_experiment.assert_not_called()
+
+    def test_accepting_resumes(self, runner, mock_client):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main,
+                ["experiments", "resume", "my-exp", "--max-steps", "1000"],
+                input="y\n",
+            )
+
+        assert result.exit_code == 0
+        mock_client.resume_experiment.assert_called_once()
+
+    @pytest.mark.parametrize("flag", ["--yes", "-y"])
+    def test_yes_resumes_without_asking(self, runner, mock_client, flag):
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000", flag]
+            )
+
+        assert result.exit_code == 0
+        assert "Hourly rate:" in result.stderr
+        assert "Resume and start billing?" not in result.stderr
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_non_interactive_prints_and_resumes_without_asking(
+        self, runner, mock_client
+    ):
+        with _patched_arena_client(mock_client), self.interactive(answer=False):
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 0
+        assert "Resume and start billing?" not in result.stderr
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_server_without_resume_quotes_resumes_as_before(self, runner, mock_client):
+        mock_client.quote_resume.side_effect = ArenaAPIError(
+            "Not Found", status_code=404
+        )
+
+        with _patched_arena_client(mock_client), self.interactive():
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 0
+        assert "cannot price a run before it starts" in result.stderr
+        mock_client.resume_experiment.assert_called_once()
+
+    def test_a_rejected_quote_stops_the_resume(self, runner, mock_client):
+        mock_client.quote_resume.side_effect = ArenaAPIError(
+            "Halt the experiment before resuming", status_code=400
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "resume", "my-exp", "--max-steps", "1000"]
+            )
+
+        assert result.exit_code == 1
+        assert "Halt the experiment before resuming" in result.output
+        mock_client.resume_experiment.assert_not_called()
 
 
 class TestExperimentStopCommand:
