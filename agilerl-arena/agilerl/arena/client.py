@@ -80,6 +80,8 @@ DATASET_CATEGORIES = frozenset(
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
 JSONL_CONTENT_TYPE = "application/x-ndjson"
+# Experiment statuses that can still produce new log lines.
+ACTIVE_EXPERIMENT_STATUSES = frozenset({"Pending", "Queued", "Running", "Stopping"})
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -1651,6 +1653,120 @@ class ArenaClient:
             "/api/cli/v1/experiments/jobs/checkpoints",
             params={"experiment_name": experiment_name},
         )
+
+    def get_experiment_status(
+        self, experiment_name: str, project: str | None = None
+    ) -> dict[str, Any]:
+        """Return an experiment's status and, when it failed, why.
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
+        :returns: ``experiment_name``, ``status``, ``failure_reason`` (``None``
+            unless the run failed) and ``last_modified``.
+        :rtype: dict[str, Any]
+        """
+        return self._request(
+            "GET",
+            "/api/cli/v1/experiments/status",
+            params=self._experiment_params(experiment_name, project),
+        )
+
+    def get_experiment_logs(
+        self,
+        experiment_name: str,
+        *,
+        tail: int | None = None,
+        after: int | None = None,
+        limit: int | None = None,
+        level: Literal["info", "warning", "error"] | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one page of an experiment's training logs (the web Log view).
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
+        :param tail: Return the newest ``tail`` lines (1-1000). Not with ``after``.
+        :type tail: int | None
+        :param after: Return lines after this line ``timestamp`` (Unix microseconds),
+            oldest first. Pass the previous page's ``next_after``.
+        :type after: int | None
+        :param limit: Lines per page when not tailing (1-1000, server default 500).
+        :type limit: int | None
+        :param level: Lowest severity to return.
+        :type level: Literal["info", "warning", "error"] | None
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
+        :returns: The status fields of :meth:`get_experiment_status` plus ``lines``
+            (``timestamp``, ``severity``, ``message``, ``event_type``),
+            ``next_after`` and ``has_more``.
+        :rtype: dict[str, Any]
+        """
+        params = self._experiment_params(experiment_name, project)
+        optional = {"tail": tail, "after": after, "limit": limit, "level": level}
+        params.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
+        return self._request("GET", "/api/cli/v1/experiments/logs", params=params)
+
+    def iter_experiment_logs(
+        self,
+        experiment_name: str,
+        *,
+        tail: int | None = None,
+        follow: bool = False,
+        level: Literal["info", "warning", "error"] | None = None,
+        project: str | None = None,
+        poll_interval: float = 5.0,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield pages of an experiment's training logs until there are no more.
+
+        With ``follow``, keep polling while the experiment is pending or running,
+        and stop once it has ended and a poll brings no new lines.
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
+        :param tail: Start with the newest ``tail`` lines instead of the first line.
+        :type tail: int | None
+        :param follow: Keep polling for new lines while the experiment runs.
+        :type follow: bool
+        :param level: Lowest severity to return.
+        :type level: Literal["info", "warning", "error"] | None
+        :param project: Project, when the experiment name exists in more than one.
+        :type project: str | None
+        :param poll_interval: Seconds between polls when following.
+        :type poll_interval: float
+        :returns: Pages as returned by :meth:`get_experiment_logs`; the last one
+            carries the final ``status`` and ``failure_reason``.
+        :rtype: Iterator[dict[str, Any]]
+        """
+        page = self.get_experiment_logs(
+            experiment_name, tail=tail, level=level, project=project
+        )
+        yield page
+        while True:
+            active = page.get("status") in ACTIVE_EXPERIMENT_STATUSES
+            if not page["has_more"]:
+                if not follow or (not active and not page["lines"]):
+                    return
+                time.sleep(poll_interval)
+            page = self.get_experiment_logs(
+                experiment_name,
+                after=page["next_after"],
+                level=level,
+                project=project,
+            )
+            yield page
+
+    def _experiment_params(
+        self, experiment_name: str, project: str | None
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"experiment_name": experiment_name}
+        resolved_project = self._resolve_project(project)
+        if resolved_project is not None:
+            params["project"] = resolved_project
+        return params
 
     def preview_experiment_metrics_csv(
         self,

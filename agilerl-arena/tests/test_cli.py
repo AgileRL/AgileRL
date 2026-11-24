@@ -80,6 +80,8 @@ def mock_client() -> MagicMock:
             "resume_experiment",
             "stop_experiment",
             "list_checkpoints",
+            "get_experiment_status",
+            "iter_experiment_logs",
             "download_experiment_metrics",
             "preview_experiment_metrics_csv",
             "deploy_agent",
@@ -2026,6 +2028,122 @@ class TestExperimentStopCommand:
             )
         assert result.exit_code == 0
         mock_client.stop_experiment.assert_called_once_with("my-exp", project="proj1")
+
+
+class TestExperimentStatusCommand:
+    def test_prints_the_failure_reason(self, runner, mock_client):
+        mock_client.get_experiment_status.return_value = {
+            "experiment_name": "my-exp",
+            "status": "Failed",
+            "failure_reason": "Installing the run's Python packages failed.",
+            "last_modified": "2026-11-23T10:00:00+00:00",
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "status", "my-exp"])
+
+        assert result.exit_code == 0, result.output
+        assert "Installing the run's Python packages failed." in result.output
+        mock_client.get_experiment_status.assert_called_once_with(
+            "my-exp", project=None
+        )
+
+    def test_json_keeps_every_field(self, runner, mock_client):
+        status = {
+            "experiment_name": "my-exp",
+            "status": "Running",
+            "failure_reason": None,
+        }
+        mock_client.get_experiment_status.return_value = status
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "experiments", "status", "my-exp"])
+
+        assert json.loads(result.output) == status
+
+
+def _log_page(lines, *, status="Failed", failure_reason=None):
+    return {
+        "experiment_name": "my-exp",
+        "status": status,
+        "failure_reason": failure_reason,
+        "lines": lines,
+        "next_after": None,
+        "has_more": False,
+    }
+
+
+class TestExperimentLogsCommand:
+    def test_prints_lines_then_the_failure_reason(self, runner, mock_client):
+        mock_client.iter_experiment_logs.return_value = iter(
+            [
+                _log_page(
+                    [
+                        {
+                            "timestamp": 1_763_892_000_000_000,
+                            "severity": "ERROR",
+                            "message": "boom",
+                        }
+                    ],
+                    failure_reason="Training ran out of GPU memory.",
+                )
+            ]
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "logs", "my-exp", "--tail", "20", "--follow"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "2025-11-23 10:00:00 ERROR   boom" in result.output
+        assert "Failed: Training ran out of GPU memory." in result.output
+        mock_client.iter_experiment_logs.assert_called_once_with(
+            "my-exp", tail=20, follow=True, level=None, project=None
+        )
+
+    def test_a_run_that_failed_before_training_says_why(self, runner, mock_client):
+        mock_client.iter_experiment_logs.return_value = iter(
+            [
+                _log_page(
+                    [], failure_reason="Installing the run's Python packages failed."
+                )
+            ]
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "logs", "my-exp"])
+
+        assert "No log lines for my-exp yet." in result.output
+        assert "Failed: Installing the run's Python packages failed." in result.output
+
+    def test_json_is_one_object_per_line_then_a_summary(self, runner, mock_client):
+        line = {"timestamp": 1, "severity": "INFO", "message": "step 1"}
+        mock_client.iter_experiment_logs.return_value = iter(
+            [_log_page([line], status="Succeeded")]
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "experiments", "logs", "my-exp"])
+
+        objects = [json.loads(text) for text in result.output.splitlines()]
+        assert objects == [
+            line,
+            {
+                "experiment_name": "my-exp",
+                "status": "Succeeded",
+                "failure_reason": None,
+            },
+        ]
+
+    def test_tail_is_bounded(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "logs", "my-exp", "--tail", "0"]
+            )
+
+        assert result.exit_code != 0
+        mock_client.iter_experiment_logs.assert_not_called()
 
 
 class TestExperimentCheckpointsCommand:
