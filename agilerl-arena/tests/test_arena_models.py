@@ -48,10 +48,13 @@ from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
 from agilerl.arena.models.verdict import (
+    LORA_TARGET_MODULES_FIELD,
+    LORA_TARGET_MODULES_MESSAGE,
     errors,
     loc_to_path,
     model_warnings,
     read_manifest,
+    sets_lora_target_modules,
     verdict,
 )
 
@@ -840,6 +843,98 @@ class TestVerdict:
         manifest = TrainingManifest.model_validate(_manifest())
 
         assert model_warnings(manifest) == []
+
+
+def _grpo_manifest(**lora_sections) -> dict:
+    """A minimal Qwen3.5 GRPO manifest with optional ``lora_config`` sections."""
+    algorithm = {"name": "GRPO", "group_size": 4, "batch_size": 2}
+    network = {
+        "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+        "max_context_length": 1024,
+    }
+    if "algorithm" in lora_sections:
+        algorithm["lora_config"] = lora_sections["algorithm"]
+    if "network" in lora_sections:
+        network["lora_config"] = lora_sections["network"]
+    return _manifest(
+        algorithm=algorithm,
+        environment={
+            "env_type": "rollout",
+            "dataset": "openai/gsm8k",
+            "reward_file_path": "reward.py",
+            "prompt_template": {"user_0": "{question}"},
+        },
+        network=network,
+        training={"max_steps": 100},
+        replay_buffer={"kind": "llm"},
+    )
+
+
+class TestSetsLoraTargetModules:
+    @pytest.mark.parametrize(
+        "lora_sections",
+        [
+            {"network": {"target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]}},
+            {"algorithm": {"target_modules": ["q_proj"]}},
+        ],
+        ids=["network-list", "algorithm-list"],
+    )
+    def test_manifest_naming_target_modules_sets_them(self, lora_sections) -> None:
+        manifest = TrainingManifest.model_validate(_grpo_manifest(**lora_sections))
+
+        assert sets_lora_target_modules(manifest) is True
+
+    @pytest.mark.parametrize(
+        "lora_sections",
+        [
+            {},
+            {"network": {"lora_r": 8, "lora_alpha": 16}},
+            {"network": {"target_modules": "all-linear"}},
+        ],
+        ids=["no-lora-config", "rank-only", "all-linear"],
+    )
+    def test_manifest_without_target_modules_does_not_set_them(
+        self, lora_sections
+    ) -> None:
+        manifest = TrainingManifest.model_validate(_grpo_manifest(**lora_sections))
+
+        assert sets_lora_target_modules(manifest) is False
+
+    def test_non_llm_manifest_does_not_set_them(self) -> None:
+        manifest = TrainingManifest.model_validate(_manifest())
+
+        assert sets_lora_target_modules(manifest) is False
+
+
+class TestVerdictRejectLoraTargets:
+    def test_submit_rejects_a_module_list(self) -> None:
+        document = _grpo_manifest(network={"target_modules": ["q_proj", "v_proj"]})
+
+        result = verdict(document, submit=True)
+
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": LORA_TARGET_MODULES_FIELD,
+                "message": LORA_TARGET_MODULES_MESSAGE,
+                "kind": "lora_target_modules_unavailable",
+            }
+        ]
+
+    def test_stored_run_keeps_a_module_list(self) -> None:
+        # The platform validates web-app run specs, which carry the catalog modules.
+        document = _grpo_manifest(network={"target_modules": ["q_proj", "v_proj"]})
+
+        assert verdict(document)["ok"] is True
+
+    def test_submit_accepts_a_manifest_without_target_modules(self) -> None:
+        assert verdict(_grpo_manifest(), submit=True)["ok"] is True
+
+    def test_submit_accepts_the_default_payload(self) -> None:
+        payload = verdict(_grpo_manifest(), submit=True)["payload"]
+
+        assert payload["network"]["lora_config"]["target_modules"] == "all-linear"
+        assert verdict(payload, submit=True)["ok"] is True
 
 
 class TestSchemaPackageVersion:
