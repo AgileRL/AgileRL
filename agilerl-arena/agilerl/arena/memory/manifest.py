@@ -37,6 +37,7 @@ from agilerl.arena.memory.resolve.batch import (
 )
 from agilerl.arena.memory.resolve.fsdp import (
     MemoryPins,
+    StepTiming,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
     lightest_training_memory,
@@ -851,6 +852,7 @@ def training_memory_from_manifest(
     device: DeviceSpec,
     adapter_sync: bool = False,
     nccl_reshard: bool = False,
+    timing: StepTiming | None = None,
 ) -> TrainingMemoryPlan:
     """The training-memory plan one trainer rank of the manifest runs with.
 
@@ -866,6 +868,8 @@ def training_memory_from_manifest(
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
     :param nccl_reshard: Async weight sync refits merged weights over ``nccl_reshard``.
+    :param timing: Ranks each layout's plans by learn seconds with their
+        traffic between nodes (:func:`resolve_training_memory`).
     :return: The plan :func:`resolve_training_memory` picks at that layout.
     :raises TrainingMemoryUnfitError: When nothing fits one GPU.
     :raises TrainerSplitError: When no layout splits across the trainer ranks.
@@ -888,6 +892,7 @@ def training_memory_from_manifest(
             device,
             adapter_sync,
             nccl_reshard,
+            timing,
         ),
         lambda layout, plan: cross_node_expert_bytes(
             model.arch, plan, layout, trainers, node
@@ -969,10 +974,11 @@ def _layout_plan(
     device: DeviceSpec,
     adapter_sync: bool,
     nccl_reshard: bool,
+    timing: StepTiming | None,
 ) -> TrainingMemoryPlan:
     """The plan at the manifest's own ``fsdp`` layout: DDP or FSDP and its speed rungs."""
     settings, pins, mini = _layout_inputs(manifest, adapter_sync, nccl_reshard)
-    return resolve_training_memory(model, device, settings, pins, mini)
+    return resolve_training_memory(model, device, settings, pins, mini, timing)
 
 
 def apply_training_memory(spec: LLMAlgorithmSpec, plan: TrainingMemoryPlan) -> None:

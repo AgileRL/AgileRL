@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from agilerl.arena.cli import main
 from agilerl.arena.client import ArenaClient
+from agilerl.arena.models.verdict import read_manifest, verdict
 from agilerl.arena.stream import NDJsonStream
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "docs" / "_static" / "examples"
@@ -51,6 +52,17 @@ class TestDocsExampleManifests:
 
         assert result == {"job_id": 1}
 
+    @pytest.mark.parametrize("manifest", MANIFESTS, ids=lambda path: path.name)
+    def test_example_passes_manifest_validate(self, manifest):
+        document = read_manifest(str(manifest))
+        if manifest.name in REWARD_FILES:
+            document["environment"].setdefault("rubric_file_path", "reward.py")
+
+        result = verdict(document, submit=True)
+
+        assert result["ok"] is True
+        assert result["warnings"] == []
+
     def test_gsm8k_example_validates_as_written(self):
         manifest = EXAMPLES_DIR / "gsm8k_grpo.yaml"
 
@@ -58,9 +70,9 @@ class TestDocsExampleManifests:
             main, ["manifest", "validate", "--json", str(manifest)]
         )
 
-        verdict = json.loads(result.output)
-        assert verdict["ok"] is True
-        assert verdict["warnings"] == []
+        verdict_document = json.loads(result.output)
+        assert verdict_document["ok"] is True
+        assert verdict_document["warnings"] == []
 
     def test_gsm8k_example_targets_registered_dataset(self, client):
         manifest = EXAMPLES_DIR / "gsm8k_grpo.yaml"

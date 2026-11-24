@@ -14,6 +14,7 @@ import pytest
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.estimator import estimate_training
+from agilerl.arena.memory.lora_formulas import trained_param_counts
 from agilerl.arena.memory.resolve import fsdp as fsdp_module
 from agilerl.arena.memory.resolve.batch import (
     ROW_FILL,
@@ -24,10 +25,13 @@ from agilerl.arena.memory.resolve.batch import (
 )
 from agilerl.arena.memory.resolve.fsdp import (
     RESIDENCIES,
+    CrossNodeSeconds,
     MemoryPins,
+    StepTiming,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
     buffer_room,
+    cross_node_seconds,
     gather_cost,
     learn_cost,
     lightest_training_memory,
@@ -35,7 +39,12 @@ from agilerl.arena.memory.resolve.fsdp import (
     resolve_training_memory,
     routed_chunks_per_pass,
 )
-from agilerl.arena.memory.resolve.learn_costs import SM80_LEARN_COSTS, SM90_LEARN_COSTS
+from agilerl.arena.memory.resolve.learn_costs import (
+    SM80_LEARN_COSTS,
+    SM90_LEARN_COSTS,
+    LearnCosts,
+)
+from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GiB,
@@ -60,6 +69,7 @@ from tests.test_memory.test_estimator import (
     training_gpu,
 )
 from tests.test_memory.test_formulas import NEMOTRON_NANO_MAMBA, QWEN_05B
+from tests.test_memory.test_resolve_parallel import MOE_EXPERT_BYTES, moe_plan
 
 DENSE_MODEL = ModelSpec(model_id="Qwen/Qwen2.5-0.5B-Instruct", arch=QWEN_05B)
 
@@ -365,6 +375,316 @@ class TestResolveTrainingMemoryOptimizerOffloadSeconds:
         assert plan.optimizer_offload_seconds == pytest.approx(
             seconds_per_gib * moved / GiB
         )
+
+
+# One byte per second between nodes for gathers, two for routed tokens.
+UNIT_RATES = replace(
+    SM90_LEARN_COSTS,
+    cross_node_gather_bytes_per_second=1.0,
+    cross_node_exchange_bytes_per_second=2.0,
+)
+# Every MOE_MODEL weight in bf16, routed experts included.
+MOE_TOTAL_BYTES = formulas.param_counts(MOE_MODEL.arch, MOE_MODEL.n_params).total * 2
+
+
+def full_shard_reduce_scatter(plan: TrainingMemoryPlan, ep: int) -> float:
+    """Bytes a 16-rank shard group over two nodes reduce-scatters: 15 of 16 fp32 pieces."""
+    dense, _ = trained_param_counts(MOE_MODEL.arch, plan.settings, ep)
+    return dense * 4 * 15 / 16
+
+
+# Backward hides every MOE_MODEL block's reduce-scatter but the last one.
+HIDDEN_SHARE = 1 - 1 / MOE_MODEL.arch.n_layers
+
+
+class TestRingGatherBytes:
+    def test_each_group_leaves_once_when_the_stride_divides_the_node(self):
+        # 16 ranks at stride 4 on 8-GPU nodes: 4 rings, each carrying 3 of 4 pieces.
+        assert fsdp_module._ring_gather_bytes(16.0, 4, 4, 8) == pytest.approx(48.0)
+
+    def test_a_stride_off_the_node_counts_the_rings_that_leave(self):
+        # EP 5, 40 trainers, 8-GPU nodes: 5 groups of 8, each leaving once
+        # with 7 of 8 pieces.
+        gathered = 40.0
+
+        assert fsdp_module._ring_gather_bytes(gathered, 8, 5, 8) == pytest.approx(
+            5 * 7 / 8 * gathered
+        )
+
+    def test_a_group_that_stays_on_the_node_sends_nothing(self):
+        # Stride 5, pairs: offsets 0, 1 and 2 sit on the node; 3 and 4 cross.
+        assert fsdp_module._ring_gather_bytes(10.0, 2, 5, 8) == pytest.approx(10.0)
+
+    def test_a_wide_stride_counts_the_busiest_node(self):
+        # Stride 10 on 8-GPU nodes, pairs: 10 groups cross, and one node sits in 8.
+        assert fsdp_module._ring_gather_bytes(8.0, 2, 10, 8) == pytest.approx(32.0)
+
+    def test_one_rank_sends_nothing(self):
+        assert fsdp_module._ring_gather_bytes(10.0, 1, 5, 8) == 0.0
+
+    def test_a_group_inside_one_node_sends_nothing(self):
+        assert fsdp_module._ring_gather_bytes(10.0, 4, 2, 8) == 0.0
+
+
+class TestCrossNodeSeconds:
+    def test_expert_fsdp_across_nodes_rings_dense_and_expert_pieces(self):
+        # Arrange: 16 trainers on two 8-GPU nodes at EP 4. The dense weights
+        # ring over all 16 ranks; each expert quarter rings over r, r+4, r+8,
+        # r+12, leaving each node once per group, 4 groups per node.
+        plan = moe_plan(ParallelLayout(ep=4), tokens=4 * 1024)
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, plan, 16, 8, 0.0, UNIT_RATES)
+
+        # Assert: forward and backward gathers x 4 micro-batches, each moving
+        # 15/16 of the dense bytes and 4 groups x 3 pieces of a sixteenth of
+        # the experts.
+        per_gather = (MOE_TOTAL_BYTES - MOE_EXPERT_BYTES) * 15 / 16 + (
+            4 * 3 * MOE_EXPERT_BYTES / 16
+        )
+        hidden = full_shard_reduce_scatter(plan, 4) * HIDDEN_SHARE
+        assert seconds.gathers == pytest.approx(2 * 4 * per_gather + hidden)
+        assert seconds.exchange == 0.0
+
+    def test_no_grad_sweeps_gather_once_per_micro_batch(self):
+        layout = ParallelLayout(ep=4)
+        plain = moe_plan(layout, tokens=4 * 1024, reshard_after_forward=False)
+
+        kept = cross_node_seconds(MOE_MODEL, plain, 16, 8, 0.0, UNIT_RATES)
+        scored = cross_node_seconds(MOE_MODEL, plain, 16, 8, 1.0, UNIT_RATES)
+
+        hidden = full_shard_reduce_scatter(plain, 4) * HIDDEN_SHARE
+        assert scored.gathers - hidden == pytest.approx(2 * (kept.gathers - hidden))
+
+    def test_an_expert_group_over_both_nodes_gathers_only_dense_weights(self):
+        # Arrange: EP 16 holds every expert once.
+        plan = moe_plan(ParallelLayout(ep=16), tokens=4 * 1024)
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, plan, 16, 8, 1.0, UNIT_RATES)
+
+        # Assert: 4 micro-batches x 3 gathers of 15/16 of the dense bytes;
+        # 8 ranks x 4096 tokens x 6 experts x 2688 hidden x 2 bytes x 2 MoE
+        # layers, half to the other node, over 4 exchanges plus 2 per sweep.
+        dense = (MOE_TOTAL_BYTES - MOE_EXPERT_BYTES) * 15 / 16
+        exchange = 8 * 4096 * 6 * 2688 * 2 * 2 / 2 * 6
+        hidden = full_shard_reduce_scatter(plan, 16) * HIDDEN_SHARE
+        assert seconds.gathers == pytest.approx(4 * 3 * dense + hidden)
+        assert seconds.exchange == pytest.approx(exchange / 2.0)
+
+    def test_the_recompute_exchanges_unless_moe_collectives_are_saved(self):
+        # Arrange: every block checkpointed.
+        layout = ParallelLayout(ep=16)
+        recomputed = moe_plan(layout, tokens=4 * 1024, gradient_checkpointing=True)
+        assert recomputed.fsdp is not None
+        saved = replace(
+            recomputed, fsdp=replace(recomputed.fsdp, save_moe_collectives=True)
+        )
+
+        # Act
+        redone = cross_node_seconds(MOE_MODEL, recomputed, 16, 8, 0.0, UNIT_RATES)
+        kept = cross_node_seconds(MOE_MODEL, saved, 16, 8, 0.0, UNIT_RATES)
+
+        # Assert: 6 exchanges against forward's and backward's 4.
+        assert redone.exchange == pytest.approx(1.5 * kept.exchange)
+
+    def test_nothing_crosses_on_one_node(self):
+        plan = moe_plan(ParallelLayout(ep=4), tokens=4 * 1024)
+
+        seconds = cross_node_seconds(MOE_MODEL, plan, 8, 8, 1.0, UNIT_RATES)
+
+        assert seconds == CrossNodeSeconds()
+
+    def test_pinned_ep_off_the_node_gathers_one_ring_per_group(self):
+        # Arrange: EP 5 on 40 trainers and 8-GPU nodes. Five groups of eight,
+        # and each leaves a node once.
+        plan = moe_plan(ParallelLayout(ep=5), tokens=1024, reshard_after_forward=False)
+        dense, expert = trained_param_counts(MOE_MODEL.arch, plan.settings, 5)
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, plan, 40, 8, 0.0, UNIT_RATES)
+
+        # Assert: one forward gather. Expert rings send 7/8 of the expert
+        # bytes; the dense ring is the 40-rank stride-1 gather.
+        assert expert == 0
+        expert_ring = 7 / 8 * MOE_EXPERT_BYTES
+        dense_ring = (MOE_TOTAL_BYTES - MOE_EXPERT_BYTES) * 39 / 40
+        reduce_scatter = dense * 4 * 39 / 40
+        assert seconds.exchange == 0.0
+        assert seconds.gathers == pytest.approx(
+            expert_ring + dense_ring + reduce_scatter * HIDDEN_SHARE
+        )
+        assert seconds.grad_sync == pytest.approx(
+            reduce_scatter / MOE_MODEL.arch.n_layers
+        )
+
+    def test_backward_hides_all_but_the_last_blocks_reduce_scatter(self):
+        # Arrange: one 16-rank shard group over two nodes, fp32 reduce.
+        plan = moe_plan(ParallelLayout(ep=16), tokens=4 * 1024)
+        reduce_scatter = full_shard_reduce_scatter(plan, 16)
+        gathers_only = (MOE_TOTAL_BYTES - MOE_EXPERT_BYTES) * 15 / 16 * 4 * 2
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, plan, 16, 8, 0.0, UNIT_RATES)
+
+        # Assert: the ring leaves each node once with 15 of 16 pieces; the
+        # step waits on the last of the blocks' shares.
+        assert reduce_scatter > 0
+        assert seconds.grad_sync == pytest.approx(
+            reduce_scatter / MOE_MODEL.arch.n_layers
+        )
+        assert seconds.gathers - gathers_only == pytest.approx(
+            reduce_scatter * HIDDEN_SHARE
+        )
+
+    def test_hsdp_on_a_node_all_reduces_each_slice_over_its_replicas(self):
+        # Arrange: two 8-rank shard groups, one per node, so only the replica
+        # all-reduce of each rank's eighth crosses: pairs r and r+8.
+        plan = moe_plan(ParallelLayout(ep=4, shard_group_size=8), tokens=4 * 1024)
+        dense, _ = trained_param_counts(MOE_MODEL.arch, plan.settings, 4)
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, plan, 16, 8, 1.0, UNIT_RATES)
+
+        # Assert: 8 pairs per node, each all-reducing an eighth: twice the
+        # half a pair's ring sends, in each block's post-backward hook.
+        all_reduce = 2 * 8 * dense * 4 / 8 / 2
+        assert seconds.exchange == 0.0
+        assert seconds.gathers == pytest.approx(all_reduce * HIDDEN_SHARE)
+        assert seconds.grad_sync == pytest.approx(all_reduce / MOE_MODEL.arch.n_layers)
+
+    def test_expert_lora_all_reduces_over_the_ranks_holding_the_same_experts(self):
+        # Arrange: expert LoRA at EP 8 on 16 trainers, replicas r and r+8.
+        plan = moe_plan(ParallelLayout(ep=8, shard_group_size=8), tokens=4 * 1024)
+        plain = cross_node_seconds(MOE_MODEL, plan, 16, 8, 0.0, UNIT_RATES)
+        lora = replace(
+            plan,
+            settings=plan.settings.model_copy(
+                update={"lora_packed_target_matrices": 2}
+            ),
+        )
+        _, expert = trained_param_counts(MOE_MODEL.arch, lora.settings, 8)
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, lora, 16, 8, 0.0, UNIT_RATES)
+
+        # Assert: 8 pairs per node all-reduce an eighth of the expert LoRA,
+        # after backward, so the step waits on all of it.
+        assert expert > 0
+        assert seconds.grad_sync - plain.grad_sync == pytest.approx(
+            2 * 8 * expert * 4 / 8 / 2
+        )
+
+    def test_an_unmeasured_gpu_class_prices_nothing(self):
+        plan = moe_plan(ParallelLayout(ep=16), tokens=4 * 1024)
+        unmeasured = LearnCosts(
+            recompute_cost=0.3,
+            micro_batch_overhead_tokens=0,
+            reshard_gather_tokens=0,
+            routed_chunk_tokens=0,
+        )
+
+        seconds = cross_node_seconds(MOE_MODEL, plan, 16, 8, 1.0, unmeasured)
+
+        assert seconds == CrossNodeSeconds()
+
+    def test_ddp_all_reduces_every_fp32_grad_and_gathers_nothing(self):
+        # Arrange
+        plan = replace(moe_plan(ParallelLayout(), tokens=4096), fsdp=None)
+        dense, _ = trained_param_counts(MOE_MODEL.arch, plan.settings, 1)
+
+        # Act
+        seconds = cross_node_seconds(MOE_MODEL, plan, 16, 8, 1.0, UNIT_RATES)
+
+        # Assert: a 16-rank ring all-reduce, twice a reduce-scatter's bytes.
+        assert seconds.gathers == 0.0
+        assert seconds.exchange == 0.0
+        assert seconds.grad_sync == pytest.approx(2 * dense * 4 * 15 / 16)
+
+
+# 16 trainers over two 8-GPU H100 nodes, room for DDP and FSDP.
+TWO_NODE_H100 = budget_device(60 * GiB).model_copy(
+    update={"compute_capability": (9, 0), "gpus_per_node": 8}
+)
+
+
+class TestResolveTrainingMemoryCrossNode:
+    def test_without_timing_the_plan_prices_no_traffic(self):
+        plan = resolve_training_memory(
+            DENSE_MODEL, TWO_NODE_H100, dense_settings(16), MemoryPins(), 32
+        )
+
+        assert plan.cross_node == CrossNodeSeconds()
+
+    def test_timing_prices_the_chosen_plans_gathers(self):
+        # Arrange: compute far slower than the gathers, so the pick holds.
+        timing = StepTiming(unit_step_seconds=1e3, no_grad_sweeps=0.0)
+        untimed = resolve_training_memory(
+            DENSE_MODEL, TWO_NODE_H100, dense_settings(16), MemoryPins(), 32
+        )
+
+        # Act
+        plan = resolve_training_memory(
+            DENSE_MODEL, TWO_NODE_H100, dense_settings(16), MemoryPins(), 32, timing
+        )
+
+        # Assert
+        assert plan.describe() == untimed.describe()
+        assert plan.fsdp is not None
+        assert plan.cross_node.gathers > 0
+        assert plan.cross_node == cross_node_seconds(
+            DENSE_MODEL, plan, 16, 8, 0.0, SM90_LEARN_COSTS
+        )
+
+    def test_gathers_slower_than_compute_move_the_search_to_ddp(self):
+        # Arrange: compute nearly free, so every gather between nodes counts.
+        timing = StepTiming(unit_step_seconds=1e-3, no_grad_sweeps=1.0)
+        untimed = resolve_training_memory(
+            DENSE_MODEL, TWO_NODE_H100, dense_settings(16), MemoryPins(), 32
+        )
+
+        # Act
+        plan = resolve_training_memory(
+            DENSE_MODEL, TWO_NODE_H100, dense_settings(16), MemoryPins(), 32, timing
+        )
+
+        # Assert: FSDP without timing, DDP gathering nothing with it; only its
+        # gradient all-reduce crosses nodes.
+        assert untimed.fsdp is not None
+        assert plan.fsdp is None
+        assert plan.cross_node.gathers == 0.0
+        assert plan.cross_node.grad_sync > 0.0
+
+
+class TestStepTimingLearnSeconds:
+    def test_gathers_hide_behind_longer_compute(self):
+        # Arrange
+        timing = StepTiming(unit_step_seconds=10.0, no_grad_sweeps=0.0)
+        plan = replace(
+            moe_plan(ParallelLayout(ep=4), tokens=100.0),
+            cost=150.0,
+            optimizer_offload_seconds=0.5,
+            cross_node=CrossNodeSeconds(gathers=4.0, exchange=2.0, grad_sync=1.0),
+        )
+
+        # Act
+        seconds = timing.learn_seconds(plan)
+
+        # Assert: 10 s x 1.5 learn cost ratio, then the exchange, gradient
+        # sync and offload.
+        assert seconds == pytest.approx(15.0 + 2.0 + 1.0 + 0.5)
+
+    def test_gathers_longer_than_compute_set_the_step(self):
+        timing = StepTiming(unit_step_seconds=1.0, no_grad_sweeps=0.0)
+        plan = replace(
+            moe_plan(ParallelLayout(ep=4), tokens=100.0),
+            cost=100.0,
+            cross_node=CrossNodeSeconds(gathers=9.0, exchange=0.0),
+        )
+
+        seconds = timing.learn_seconds(plan)
+
+        assert seconds == pytest.approx(9.0)
 
 
 class TestRoutedChunksPerPass:
