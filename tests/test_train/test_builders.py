@@ -30,6 +30,7 @@ from agilerl.arena.models.algorithms import (
 )
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.model_info import catalog_lora_modules
 from agilerl.arena.models.networks import (
     CosineLRScheduleConfig as CosineLRScheduleSpec,
 )
@@ -169,23 +170,33 @@ class TestAlgorithmBuildRuntime:
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
 class TestPeftLoraConfig:
-    def test_manifest_lora_becomes_the_peft_object(self):
+    def test_manifest_lora_trains_the_catalog_modules(self):
         from peft import LoraConfig
 
+        # Act
         lora = llm_builder.peft_lora_config(
-            LoraConfigDict(lora_r=8, lora_alpha=16, target_modules=["q_proj"])
+            {"lora_r": 8, "lora_alpha": 16, "target_modules": ["q_proj"]},
+            "Qwen/Qwen3.5-0.8B",
         )
+
+        # Assert
         assert isinstance(lora, LoraConfig)
         assert lora.r == 8
         assert lora.lora_alpha == 16
-        assert set(lora.target_modules) == {"q_proj"}
+        assert set(lora.target_modules) == set(
+            catalog_lora_modules("Qwen/Qwen3.5-0.8B")
+        )
+
+    def test_model_outside_the_catalog_raises(self):
+        with pytest.raises(ValueError, match="not in the Arena model catalog"):
+            llm_builder.peft_lora_config(LoraConfigDict(), "org/custom-model")
 
     def test_already_built_peft_config_is_returned(self):
         from peft import LoraConfig
 
         peft_lora = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
 
-        assert llm_builder.peft_lora_config(peft_lora) is peft_lora
+        assert llm_builder.peft_lora_config(peft_lora, "org/custom-model") is peft_lora
 
 
 class TestCosineLrScheduleConfig:
@@ -204,7 +215,7 @@ class TestCosineLrScheduleConfig:
 def test_peft_lora_config_needs_the_llm_extras(monkeypatch):
     monkeypatch.setattr(llm_builder, "HAS_LLM_DEPENDENCIES", False)
     with pytest.raises(ImportError, match="LLM dependencies are required"):
-        llm_builder.peft_lora_config(LoraConfigDict())
+        llm_builder.peft_lora_config(LoraConfigDict(), "Qwen/Qwen3.5-0.8B")
 
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
@@ -374,6 +385,15 @@ class TestLLMBuildGuards:
     def test_rejects_a_non_llm_spec(self):
         with pytest.raises(TypeError, match="not an LLMAlgorithmSpec"):
             LLMBuilder.build(DQNSpec(), tokenizer=MagicMock())
+
+    @requires_llm
+    def test_lora_without_a_model_id_names_the_missing_field(self, monkeypatch):
+        spec = GRPOSpec(group_size=2, lora_config={"lora_r": 8})
+
+        with pytest.raises(
+            ValueError, match="GRPOSpec has no pretrained_model_name_or_path"
+        ):
+            _build_llm_with_dummy_algo(spec, monkeypatch)
 
     def test_a_vllm_config_model_is_dumped_for_the_constructor(self, monkeypatch):
         """A manifest ``vllm_config`` section reaches the constructor as VLLMConfig."""

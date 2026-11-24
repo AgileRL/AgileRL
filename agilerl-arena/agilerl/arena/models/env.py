@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from agilerl.arena.models.prompt_template import check_row_placeholders
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 
 
@@ -987,7 +988,8 @@ class LLMEnvSpec(EnvSpecBase):
         description=(
             "Number of env hosts to serve the env on (Ray runtime only). Unset "
             "with no image or packages runs an entrypoint in-process in each "
-            "rollout slot."
+            "rollout slot, unless cpus_per_env_host, env_host_memory_bytes or "
+            "env_host_resource is set, which asks for one host."
         ),
     )
     env_image: str | None = Field(
@@ -1251,12 +1253,11 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if dataset is not None:
-            if (
-                self.prompt_template is None
-                and self.dataset_format != TRACES_DATASET_FORMAT
-            ):
-                msg = "Prompt template is required for dataset-backed rollout environments"
-                raise ValueError(msg)
+            if self.dataset_format != TRACES_DATASET_FORMAT:
+                if self.prompt_template is None:
+                    msg = "Prompt template is required for dataset-backed rollout environments"
+                    raise ValueError(msg)
+                check_row_placeholders(self.prompt_template, self.columns)
             if self.max_turns not in (None, 1):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
@@ -1399,6 +1400,16 @@ class LLMEnvSpec(EnvSpecBase):
                 self.env_sessions_per_host = 1
             if self.env_host_ready_timeout_s is None:
                 self.env_host_ready_timeout_s = ENV_POD_READY_TIMEOUT_S
+        elif (
+            self.env_hosts is None
+            and self.entrypoint is not None
+            and (
+                self.cpus_per_env_host is not None
+                or self.env_host_memory_bytes is not None
+                or self.env_host_resource is not None
+            )
+        ):
+            self.env_hosts = 1
         return self
 
     @model_validator(mode="after")

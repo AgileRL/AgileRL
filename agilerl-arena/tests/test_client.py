@@ -2284,38 +2284,22 @@ class TestExperimentMethods:
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()
 
-    def test_submit_experiment_rejects_a_lora_module_list(self, api_key_client):
-        # Arrange
-        api_key_client._open_stream = MagicMock()
-        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
-        manifest["network"]["lora_config"] = {
-            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
-        }
-
-        # Act / Assert
-        with pytest.raises(
-            ArenaValidationError,
-            match=re.escape(
-                "network.lora_config.target_modules: LoRA target modules are "
-                "chosen by Arena; remove target_modules."
-            ),
-        ):
-            api_key_client.submit_experiment(manifest=manifest, project="proj")
-        api_key_client._open_stream.assert_not_called()
-
-    def test_submit_experiment_accepts_all_linear_lora_targets(self, api_key_client):
+    def test_submit_experiment_drops_a_lora_module_list(self, api_key_client):
         # Arrange
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 5})
         )
         manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
-        payload = TrainingManifest.get_validated(manifest, mode="json")
+        manifest["network"]["lora_config"] = {
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
+        }
 
         # Act
-        result = api_key_client.submit_experiment(manifest=payload, project="proj")
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
 
         # Assert
-        assert payload["network"]["lora_config"]["target_modules"] == "all-linear"
+        sent = api_key_client._open_stream.call_args.kwargs["json"]["manifest"]
+        assert "target_modules" not in sent["network"]["lora_config"]
         assert result == {"job_id": 5}
 
     @pytest.mark.parametrize(
@@ -2598,6 +2582,45 @@ class TestArenaClientSubmitExperimentRewardFile:
             )
 
         api_key_client._open_stream.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "error"),
+        [
+            (
+                (
+                    "def RUBRIC(completion: str, answer: str, question: str) -> float:\n"
+                    "    return undefined_name + 1.0\n"
+                ),
+                r"reward\.py, line 2: NameError: name 'undefined_name' is not defined",
+            ),
+            (
+                (
+                    "def RUBRIC(completion: str, answer: str, question: str) -> float:\n"
+                    "    return 'high'\n"
+                ),
+                r"reward\.py, line 1: RUBRIC returned str 'high'; a reward must return a float",
+            ),
+        ],
+    )
+    def test_broken_reward_stops_the_quote_before_any_request(
+        self, api_key_client, tmp_path, source, error
+    ):
+        # Arrange
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text(source)
+        requests: list[httpx.Request] = []
+        _quote_transport(api_key_client, requests.append)
+
+        # Act
+        with pytest.raises(ArenaValidationError, match=error):
+            api_key_client.quote_experiment(
+                manifest=_rubric_rollout_manifest(),
+                project="proj",
+                reward_file=reward_path,
+            )
+
+        # Assert
+        assert requests == []
 
     def test_without_reward_file_still_requires_rubric_path(self, api_key_client):
         api_key_client._open_stream = MagicMock()

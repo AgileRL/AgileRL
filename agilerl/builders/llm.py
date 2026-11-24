@@ -20,6 +20,7 @@ from agilerl.arena.models.algorithms import (
 )
 from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.manifest import strips_multimodal_towers
+from agilerl.arena.models.model_info import catalog_lora_modules
 from agilerl.arena.models.networks import CosineLRScheduleConfig as CosineLRScheduleSpec
 from agilerl.arena.models.networks import LoraConfigDict, default_rollout_vllm_config
 from agilerl.builders.base import (
@@ -105,7 +106,7 @@ class LLMBuilder(AlgorithmBuilder):
         :type runtime: AlgorithmBuildRuntime | None
         :param actor_network: Pre-built or cloned actor. When provided it is
             handed to the constructor instead of loading the model from
-            ``pretrained_model_name_or_path``.
+            ``weights_path``, else ``pretrained_model_name_or_path``.
         :type actor_network: PreTrainedModel | PeftModel | None
         :param rollout_mode: ``training.rollout_mode``. Colocated runs vLLM in
             the trainer process.
@@ -141,7 +142,11 @@ class LLMBuilder(AlgorithmBuilder):
             )
 
         if kwargs.get("lora_config") is not None:
-            kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])
+            hub_id = spec.pretrained_model_name_or_path
+            if hub_id is None:
+                msg = f"{type(spec).__name__} has no pretrained_model_name_or_path."
+                raise ValueError(msg)
+            kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"], hub_id)
         if kwargs.get("cosine_lr_schedule_config") is not None:
             kwargs["cosine_lr_schedule_config"] = cosine_lr_schedule_config(
                 kwargs["cosine_lr_schedule_config"]
@@ -161,9 +166,7 @@ class LLMBuilder(AlgorithmBuilder):
             model_config = actor_network.config
             generation_config = getattr(actor_network, "generation_config", None)
         if model_config is None:
-            model_config, generation_config = load_pad_token_configs(
-                spec.pretrained_model_name_or_path
-            )
+            model_config, generation_config = load_pad_token_configs(spec.load_path)
 
         pad_token_id, pad_source = resolve_pad_token_id(
             tokenizer,
@@ -186,7 +189,7 @@ class LLMBuilder(AlgorithmBuilder):
             )
         kwargs = constructor_kwargs(algo_cls, kwargs)
         algo = algo_cls(
-            model_name=spec.pretrained_model_name_or_path,
+            model_name=spec.load_path,
             pad_token_id=pad_token_id,
             pad_token=tokenizer.pad_token,
             index=index,
@@ -203,13 +206,20 @@ class LLMBuilder(AlgorithmBuilder):
         return algo
 
 
-def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> LoraConfig:
+def peft_lora_config(
+    lora: LoraConfigDict | dict[str, Any] | LoraConfig, hub_id: str
+) -> LoraConfig:
     """Convert the manifest's LoRA section to the peft object the algorithm takes.
+
+    The adapter targets the catalog's modules for ``hub_id``; manifests name none.
 
     :param lora: The manifest's LoRA section, a mapping, or an already-built peft config.
     :type lora: LoraConfigDict | dict[str, Any] | LoraConfig
+    :param hub_id: The model's ``pretrained_model_name_or_path``.
+    :type hub_id: str
     :returns: A peft ``LoraConfig``.
     :raises ImportError: If the LLM extras are not installed.
+    :raises ValueError: If ``hub_id`` is not in the model catalog.
     """
     if not HAS_LLM_DEPENDENCIES:
         msg = "LLM dependencies are required to resolve LoRA configuration."
@@ -221,7 +231,7 @@ def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> Lora
         return lora
     peft_lora = LoraConfigDict.model_validate(lora).model_dump()
     peft_lora["r"] = peft_lora.pop("lora_r")
-    return PeftLoraConfig(**peft_lora)
+    return PeftLoraConfig(target_modules=catalog_lora_modules(hub_id), **peft_lora)
 
 
 def cosine_lr_schedule_config(schedule: CosineLRScheduleSpec) -> CosineLRScheduleConfig:

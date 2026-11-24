@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Collection
 
 from agilerl.arena.memory.specs import LoraTargetScope, ModelArch, PackedMoeDispatch
+from agilerl.arena.models.model_info import catalog_lora_modules
 
 # Module names that mean an adapter touches attention projections only.
 ATTENTION_MODULES = frozenset(
@@ -28,6 +29,15 @@ def lora_target_scope(
         and set(lora_target_modules) <= ATTENTION_MODULES
     )
     return "attention-only" if attention_only else "all-linear"
+
+
+def catalog_lora_scope(hub_id: str) -> LoraTargetScope:
+    """Layers the adapter Arena trains on a catalog model touches.
+
+    :param hub_id: The model's ``pretrained_model_name_or_path``.
+    :raises ValueError: The model is not in the catalog.
+    """
+    return lora_target_scope(catalog_lora_modules(hub_id))
 
 
 def packed_moe_dispatch(

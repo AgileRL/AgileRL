@@ -167,8 +167,10 @@ For standard RL algorithms, this section is validated against :class:`~agilerl.m
 **LLM Fine-tuning:**
 
 For LLM algorithms, the ``network`` section is validated against
-:class:`~agilerl.models.networks.FinetuningNetworkSpec`. ``pretrained_model_name_or_path`` can be
-any model available on Hugging Face or locally.
+:class:`~agilerl.models.networks.FinetuningNetworkSpec`. ``pretrained_model_name_or_path`` names a
+model from the Arena model catalog (``arena models supported``); for other weights of the same
+architecture, also set ``weights_path``. LoRA trains on the catalog's modules for the model, so
+``lora_config`` sets the rank and scaling, not the modules.
 
 .. code-block:: yaml
 
@@ -178,7 +180,6 @@ any model available on Hugging Face or locally.
      lora_config:
        lora_r: 16
        lora_alpha: 64
-       target_modules: [q_proj, k_proj, v_proj, o_proj]
        task_type: CAUSAL_LM
 
 1. ``mutation``

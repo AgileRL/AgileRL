@@ -51,6 +51,7 @@ from agilerl.arena.models import (
     TrainingManifest,
     __version__,
 )
+from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.verdict import (
@@ -61,6 +62,7 @@ from agilerl.arena.models.verdict import (
     submit_errors,
 )
 from agilerl.arena.output import StreamRichRenderer
+from agilerl.arena.reward_check import check_reward_file
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
 from agilerl.arena.utils import (
@@ -1441,7 +1443,8 @@ class ArenaClient:
         :param num_gpus: Total GPUs requested, or ``None``.
         :param project: Project name, or ``None`` for the default project.
         :param reward_file: Reward module the submit uploads, or ``None``. It
-            fills an unset rollout ``environment.rubric_file_path``.
+            fills an unset rollout ``environment.rubric_file_path`` and runs
+            through :func:`check_reward_file`.
         :return: The validated manifest payload and the resolved project name.
         """
         self._check_num_gpus(num_gpus)
@@ -1450,6 +1453,9 @@ class ArenaClient:
         self._check_runs_on_arena(training_manifest)
         self._check_model_status(training_manifest)
         self._check_submit_rules(training_manifest)
+        environment = training_manifest.environment
+        if reward_file is not None and isinstance(environment, LLMEnvSpec):
+            check_reward_file(reward_file, environment)
         resolved_project = self._resolve_project(project)
         if not resolved_project:
             msg = "No project specified."

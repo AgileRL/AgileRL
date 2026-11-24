@@ -71,7 +71,7 @@ from agilerl.arena.memory.resolve.sequences import (
     resolve_max_num_seqs,
 )
 from agilerl.arena.memory.resolve.training import (
-    lora_target_scope,
+    catalog_lora_scope,
     packed_moe_dispatch,
     sampling_support_width,
 )
@@ -734,7 +734,7 @@ def training_settings_from_spec(
         max_model_len=row_budget,
         micro_batch_size=micro_batch_size,
         lora_rank=lora.lora_r,
-        lora_target_scope=lora_target_scope(lora.target_modules),
+        lora_target_scope=catalog_lora_scope(spec.pretrained_model_name_or_path),
         lora_dropout=lora.lora_dropout,
         lora_packed_target_matrices=len(set(lora.target_parameters or ())),
         # Packed-expert adapters are sized on the split path.
@@ -1044,7 +1044,9 @@ def generation_settings_from_manifest(
         "max_lora_rank": resolve_max_lora_rank(lora.lora_r),
         "lora_packed_target_matrices": len(lora.target_parameters or []),
         "lora_sync_scope": (
-            lora_target_scope(lora.target_modules) if async_rollout(manifest) else None
+            catalog_lora_scope(spec.pretrained_model_name_or_path)
+            if async_rollout(manifest)
+            else None
         ),
         "weight_dtype": weight_dtype,
         "weight_quantization": weight_quantization,

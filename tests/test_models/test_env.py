@@ -579,7 +579,7 @@ class TestLLMEnvSpec:
             dataset="dataset.parquet",
             rubric_file_path="reward.py",
             rubric_name="reward_fn",
-            prompt_template={"role": "user", "content": "{q}"},
+            prompt_template={"role": "user", "content": "{question}"},
         )
         assert spec.train_test_split == 0.9
         assert spec.rubric_file_path == "reward.py"
@@ -594,7 +594,7 @@ class TestLLMEnvSpec:
             dataset="dataset.parquet",
             rubric_file_path="reward.py",
             rubric_name="reward_fn",
-            prompt_template={"role": "user", "content": "{q}"},
+            prompt_template={"role": "user", "content": "{question}"},
         )
         assert spec.num_envs == 1
         for field in ("custom", "default_type", "sync", "env_wrappers"):
@@ -858,7 +858,7 @@ class TestLLMEnvSpec:
             dataset="data.parquet",
             rubric_file_path="reward.py",
             rubric_name="reward_fn",
-            prompt_template={"role": "user", "content": "{q}"},
+            prompt_template={"role": "user", "content": "{question}"},
         )
         data = spec.model_dump()
         restored = LLMEnvSpec.model_validate(data)
@@ -1106,7 +1106,7 @@ class TestLLMEnvSpecSFT:
                     "env_type": "rollout",
                     "rubric_file_path": "r.py",
                     "rubric_name": "fn",
-                    "prompt_template": {"role": "user", "content": "{q}"},
+                    "prompt_template": {"role": "user", "content": "{question}"},
                 }
             )
 

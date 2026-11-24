@@ -301,13 +301,12 @@ class TestFinetuningNetworkSpec:
 
         assert dumped["lora_config"]["lora_r"] == 16
         assert dumped["lora_config"]["lora_alpha"] == 32
-        assert dumped["lora_config"]["target_modules"] == "all-linear"
+        assert "target_modules" not in dumped["lora_config"]
 
-    def test_lora_config_dict_serialize_set_target_modules(self):
-        """Line 363, 368, 372 of networks.py: _serialize_target_modules with set."""
-        lc = LoraConfigDict(target_modules={"a", "b"})
+    def test_lora_config_dict_drops_target_modules(self):
+        lc = LoraConfigDict.model_validate({"target_modules": {"a", "b"}})
         d = lc.model_dump(mode="json")
-        assert d["target_modules"] == ["a", "b"]
+        assert "target_modules" not in d
 
 
 class TestLLMEnvSpec:
@@ -1085,6 +1084,7 @@ class TestLLMAlgorithmSpecBuild:
         attrs = {
             "batch_size": 4,
             "pretrained_model_name_or_path": "gpt2",
+            "weights_path": None,
             "lora_config": None,
             "hp_config": None,
             "max_model_len": 512,

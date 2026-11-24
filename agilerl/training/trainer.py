@@ -843,7 +843,7 @@ class LocalTrainer(Trainer):
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
             msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
             raise TypeError(msg)
-        model_path = self.algorithm_spec.pretrained_model_name_or_path
+        model_path = self.algorithm_spec.load_path
         if model_path is None:
             msg = f"{type(self.algorithm_spec).__name__} has no pretrained_model_name_or_path."
             raise ValueError(msg)
