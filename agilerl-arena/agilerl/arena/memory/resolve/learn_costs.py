@@ -32,6 +32,11 @@ class LearnCosts:
     # Learn work per second per peak bf16 FLOP, over the A100's, for the GPU
     # split's learn time.
     peak_speed: float = 1.0
+    # Bytes per second one node sends the others, per direction, in an FSDP
+    # ring all-gather and in a routed-token exchange, over the pod network
+    # with NCCL's default socket settings. Zero leaves that traffic unpriced.
+    cross_node_gather_bytes_per_second: float = 0.0
+    cross_node_exchange_bytes_per_second: float = 0.0
 
 
 SM80_LEARN_COSTS = LearnCosts(
@@ -41,6 +46,10 @@ SM80_LEARN_COSTS = LearnCosts(
     # granite-3.1-3b-a800m GRPO LoRA under DDP, GC off: 64 MiB chunks
     # (15 per layer) learn 12% slower than 512 MiB chunks (2 per layer).
     routed_chunk_tokens=12,
+    # 2 x 4 L4, 671 MiB gathered per GPU: an 8-rank ring all-gather in 841 ms;
+    # token dispatch and combine at ep=8 at 1.29 GB/s. The A100 is unmeasured.
+    cross_node_gather_bytes_per_second=0.73e9,
+    cross_node_exchange_bytes_per_second=1.29e9,
 )
 """A100-80.
 
@@ -62,6 +71,10 @@ SM90_LEARN_COSTS = LearnCosts(
     # Qwen3-4B GRPO countdown LoRA at 4 trainers learns in 9.5 s, 1.25x the
     # time the A100 efficiencies predict.
     peak_speed=0.8,
+    # 2 x 8 H100: a 16-rank ring all-gather of 720 MiB per rank in 291 ms;
+    # token dispatch and combine at ep=16, 8192 tokens per GPU, at 3.4 GB/s.
+    cross_node_gather_bytes_per_second=2.43e9,
+    cross_node_exchange_bytes_per_second=3.4e9,
 )
 """H100 80GB HBM3: a micro-batch's host work is about 0.5 s, so fewer, larger micro-batches win."""
 

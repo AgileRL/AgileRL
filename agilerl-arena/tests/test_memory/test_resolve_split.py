@@ -22,6 +22,7 @@ from agilerl.arena.memory.resolve.decode_costs import (
     SM80_MERGED_DENSE_SPEEDUP,
     UNMEASURED_MERGED_DENSE_SPEEDUP,
 )
+from agilerl.arena.memory.resolve.fsdp import CrossNodeSeconds
 from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.resolve.split import (
     IDLE_GPU_TIE_SHARE,
@@ -43,9 +44,11 @@ from agilerl.arena.memory.resolve.split import (
     engine_steps,
     fullest_split_within,
     learn_forward_passes,
+    no_grad_sweeps,
     price_gpu_split,
     resident_sequences,
     split_workload_from_manifest,
+    step_timing,
     tensor_parallel_seconds,
     uncached_prefill_tokens,
 )
@@ -885,11 +888,136 @@ class TestPriceGpuSplit:
         assert offloaded.learn_seconds - on_gpu.learn_seconds == pytest.approx(2.0)
 
 
+class TestPriceGpuSplitCrossNode:
+    def _learn_seconds(self, cross_node: CrossNodeSeconds) -> float:
+        model = catalog_model(_manifest(_countdown_manifest(64)).algorithm)
+        workload = _workload(_countdown_manifest(64))
+        split = price_gpu_split(
+            model,
+            _device(),
+            workload,
+            4,
+            4,
+            1,
+            lambda _: TrainerCost(1.0, True, 0.0, cross_node),
+        )
+        assert split is not None
+        return split.learn_seconds
+
+    def test_gathers_shorter_than_compute_hide_behind_it(self) -> None:
+        # Arrange
+        compute = self._learn_seconds(CrossNodeSeconds())
+
+        # Act
+        learn = self._learn_seconds(CrossNodeSeconds(gathers=compute / 2))
+
+        # Assert
+        assert learn == pytest.approx(compute)
+
+    def test_gathers_longer_than_compute_set_the_learn_time(self) -> None:
+        compute = self._learn_seconds(CrossNodeSeconds())
+
+        learn = self._learn_seconds(CrossNodeSeconds(gathers=compute + 7.0))
+
+        assert learn == pytest.approx(compute + 7.0)
+
+    def test_the_token_exchange_adds_to_compute(self) -> None:
+        compute = self._learn_seconds(CrossNodeSeconds())
+
+        learn = self._learn_seconds(CrossNodeSeconds(gathers=1e-6, exchange=3.0))
+
+        assert learn == pytest.approx(compute + 3.0)
+
+    def test_gradient_sync_adds_to_compute(self) -> None:
+        compute = self._learn_seconds(CrossNodeSeconds())
+
+        learn = self._learn_seconds(CrossNodeSeconds(grad_sync=2.0))
+
+        assert learn == pytest.approx(compute + 2.0)
+
+
+class TestStepTiming:
+    def test_unit_seconds_are_the_splits_compute_at_a_learn_cost_ratio_of_one(
+        self,
+    ) -> None:
+        # Arrange: 16 trainers over two 8-GPU H100 nodes, one optimizer step.
+        raw = _countdown_manifest(64)
+        raw["training"]["training_gpus_per_agent"] = 16
+        manifest = _manifest(raw)
+        model = catalog_model(manifest.algorithm)
+        device = _device("H100-80").model_copy(update={"gpus_per_node": 8})
+        split = price_gpu_split(
+            model,
+            device,
+            split_workload_from_manifest(manifest),
+            16,
+            4,
+            1,
+            lambda _: TrainerCost(1.0, True),
+        )
+        assert split is not None
+
+        # Act
+        timing = step_timing(manifest, model, device)
+
+        # Assert
+        assert timing is not None
+        assert timing.unit_step_seconds == pytest.approx(split.learn_seconds)
+        assert timing.no_grad_sweeps == no_grad_sweeps(manifest.algorithm)
+
+    def test_trainers_on_one_node_need_no_timing(self) -> None:
+        raw = _countdown_manifest(64)
+        raw["training"]["training_gpus_per_agent"] = 8
+        manifest = _manifest(raw)
+        device = _device("H100-80").model_copy(update={"gpus_per_node": 8})
+
+        timing = step_timing(manifest, catalog_model(manifest.algorithm), device)
+
+        assert timing is None
+
+
+class TestNoGradSweeps:
+    def test_the_reference_is_one_sweep_per_optimizer_step(self) -> None:
+        # Arrange
+        raw = _countdown_manifest(64)
+        raw["algorithm"]["beta"] = 0.04
+        spec = _manifest(raw).algorithm
+        assert isinstance(spec, RolloutLLMSpec)
+
+        # Act
+        sweeps = no_grad_sweeps(spec)
+
+        # Assert
+        assert sweeps == 1.0
+
+    def test_update_epochs_spread_the_reference_over_more_steps(self) -> None:
+        raw = _countdown_manifest(64)
+        raw["algorithm"].update(beta=0.04, update_epochs=2)
+        spec = _manifest(raw).algorithm
+        assert isinstance(spec, RolloutLLMSpec)
+
+        sweeps = no_grad_sweeps(spec)
+
+        assert sweeps == 0.5
+
+    def test_no_reference_runs_no_sweep(self) -> None:
+        raw = _countdown_manifest(64)
+        raw["algorithm"]["beta"] = 0.0
+        spec = _manifest(raw).algorithm
+        assert isinstance(spec, RolloutLLMSpec)
+
+        sweeps = no_grad_sweeps(spec)
+
+        assert sweeps == 0.0
+
+
 class TestTrainerCostOf:
-    def test_carries_the_plans_offload_seconds_per_optimizer_step(self) -> None:
+    def test_carries_the_plans_offload_and_cross_node_seconds(self) -> None:
         # Arrange
         plan = replace(
-            plan_for(ParallelLayout(), 10, 100), optimizer_offload_seconds=0.3
+            plan_for(ParallelLayout(), 10, 100),
+            optimizer_offload_seconds=0.3,
+            cross_node=CrossNodeSeconds(1.0, 2.0),
         )
 
         # Act
@@ -899,6 +1027,7 @@ class TestTrainerCostOf:
         assert cost.optimizer_offload_seconds == 0.3
         assert cost.learn_cost_ratio == plan.learn_cost_ratio
         assert cost.fsdp is True
+        assert cost.cross_node == CrossNodeSeconds(1.0, 2.0)
 
     def test_optimizer_on_the_gpu_adds_nothing(self) -> None:
         # Arrange

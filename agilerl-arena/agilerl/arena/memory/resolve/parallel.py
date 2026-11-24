@@ -21,6 +21,7 @@ from agilerl.arena.memory.resolve.batch import TrainerSplitError
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
+    routed_token_bytes,
 )
 from agilerl.arena.memory.specs import DTYPE_BYTES, ModelArch
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
@@ -478,18 +479,14 @@ def cross_node_expert_bytes(
         recomputed = 0.0 if fsdp.save_moe_collectives is True else checkpointed_share
         # Dispatch and combine in forward and in backward, plus the recompute.
         exchanges = 4 + 2 * recomputed
-        # ``plan.tokens`` is the data-parallel shard, replicated across tensor parallel.
-        tokens = (
-            node
-            * plan.tokens
-            / (layout.cp * layout.tp)
-            * (arch.n_experts_per_tok or 1)
-            * arch.expert_width
-            * byte
-            * arch.moe_layers
-            * exchanges
-            * (layout.ep - node)
-            / layout.ep
+        tokens = exchanges * routed_token_bytes(
+            arch,
+            plan.tokens,
+            plan.settings.weight_dtype,
+            layout.tp,
+            layout.ep,
+            layout.cp,
+            node,
         )
     return weights + tokens
 
@@ -498,20 +495,25 @@ def least_cross_node_plan(
     layouts: Iterable[ParallelLayout],
     plan_at: Callable[[ParallelLayout], Plan | None],
     moved: Callable[[ParallelLayout, Plan], float],
+    score: Callable[[ParallelLayout, Plan], float] | None = None,
 ) -> Plan | None:
     """The first layout's plan, or a higher expert degree's when it moves fewer bytes between nodes.
 
     The first layout ``plan_at`` gives a plan for wins unless its plan moves
     routed-expert bytes between nodes. Then each later layout that differs
     only in a higher expert-parallel degree is priced, and the one moving the
-    fewest bytes wins; the earlier wins a tie.
+    fewest bytes wins, or with ``score`` the lowest score; the earlier wins a
+    tie.
 
     :param layouts: Layouts in the order to try them.
     :param plan_at: A layout's plan, or ``None`` when it does not fit.
     :param moved: Bytes a layout's plan moves between nodes
         (:func:`cross_node_expert_bytes`).
+    :param score: Ranks the priced layouts in place of ``moved``, for plans
+        priced in seconds; ``None`` ranks by ``moved``.
     :return: The chosen plan, or ``None`` when no layout fits.
     """
+    rank = moved if score is None else score
     first: ParallelLayout | None = None
     best: Plan | None = None
     least = 0.0
@@ -523,13 +525,12 @@ def least_cross_node_plan(
         plan = plan_at(layout)
         if plan is None:
             continue
-        traffic = moved(layout, plan)
         if first is None:
-            if traffic == 0:
+            if moved(layout, plan) == 0:
                 return plan
-            first, best, least = layout, plan, traffic
-        elif traffic < least:
-            best, least = plan, traffic
+            first, best, least = layout, plan, rank(layout, plan)
+        elif (value := rank(layout, plan)) < least:
+            best, least = plan, value
     return best
 
 

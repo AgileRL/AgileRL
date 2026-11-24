@@ -262,19 +262,14 @@ def adapter_state(
     """
     fsdp = settings.fsdp
     ep = 1 if fsdp is None else fsdp.ep
-    rank = settings.lora_rank
-    packed = settings.lora_packed_target_matrices
-    expert_lora = (
-        lora_formulas.packed_lora_param_count(arch, rank, packed) if ep > 1 else 0
-    )
-    dense_packed = 0 if ep > 1 else packed
-    per_adapter = lora_formulas.lora_param_count(
-        arch, rank, settings.lora_target_scope
-    ) + lora_formulas.packed_lora_param_count(arch, rank, dense_packed)
+    dense_packed = 0 if ep > 1 else settings.lora_packed_target_matrices
+    expert_lora, per_adapter = lora_formulas.adapter_params(arch, settings, ep)
     n_trained = settings.n_trained_adapters
     n_frozen = settings.n_resident_adapters - n_trained
     head = arch.hidden_size + 1 if settings.uses_critic else 0
-    trained = per_adapter * n_trained + head
+    trained, expert_trained_params = lora_formulas.trained_param_counts(
+        arch, settings, ep
+    )
     stored = formulas.ADAPTER_BYTES_PER_PARAM
     offload = fsdp is not None and bool(fsdp.cpu_offload)
     held_grad_bytes = None
@@ -313,12 +308,12 @@ def adapter_state(
     )
     # Fused AdamW steps without temporaries.
     adam = 0.0 if offload else formulas.ADAM_MOMENTS_PER_PARAM * step_grads
-    expert_trained = expert_lora * n_trained / ep
+    expert_trained = expert_trained_params / ep
     adapters += expert_trained * stored + expert_lora * n_frozen * compute_bytes / ep
     grads += expert_trained * stored
     step_grads += expert_trained * stored
     adam += expert_trained * formulas.ADAM_MOMENTS_PER_PARAM * stored
-    trained_params = trained + expert_lora * n_trained
+    trained_params = trained + expert_trained_params
     return AdapterState(
         compute_bytes=compute_bytes,
         adapters=adapters,

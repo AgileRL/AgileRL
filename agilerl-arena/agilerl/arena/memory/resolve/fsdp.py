@@ -8,24 +8,29 @@ import copy
 import logging
 import math
 from bisect import bisect_right
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from itertools import product
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
 from agilerl.arena.memory.estimator import (
+    FSDP_PARAM_BYTES,
     shared_training_estimate,
     training_tensor_parallel,
 )
 from agilerl.arena.memory.formulas import (
+    ADAPTER_BYTES_PER_PARAM,
     DEFAULT_ROUTED_CHUNK_BYTES,
     MAX_UNDERPREDICTION,
     ROUTED_CHUNK_MIB_CHOICES,
     checkpointed_blocks,
     moe_collectives_saveable,
+    param_counts,
     recommendation_fits,
+    routed_expert_params_per_layer,
 )
+from agilerl.arena.memory.lora_formulas import trained_param_counts
 from agilerl.arena.memory.resolve.batch import (
     ROW_FILL,
     micro_batch_row_candidates,
@@ -42,6 +47,7 @@ from agilerl.arena.memory.specs import (
     ModelArch,
     ModelSpec,
     TrainingSettings,
+    WeightDtype,
 )
 from agilerl.arena.memory.training_host import fixed_host_bytes
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
@@ -187,6 +193,282 @@ def routed_chunks_per_pass(
     return arch.moe_layers * math.ceil(routed_bytes / chunk_bytes)
 
 
+class CrossNodeSeconds(NamedTuple):
+    """Seconds one optimizer step on one rank spends on traffic between nodes."""
+
+    # FSDP weight all-gathers and the reduce-scatters backward hides, which
+    # overlap with compute.
+    gathers: float = 0.0
+    # Routed-token dispatch and combine, which the layer waits on.
+    exchange: float = 0.0
+    # Gradient sync the step waits on: the last block's reduce-scatter and
+    # the expert-LoRA and DDP all-reduces after backward.
+    grad_sync: float = 0.0
+
+
+@dataclass(frozen=True)
+class StepTiming:
+    """What the training-memory search needs to rank plans by learn seconds instead of learn work.
+
+    Given only when trainer ranks span nodes; ``None`` ranks by
+    :func:`learn_cost` alone.
+    """
+
+    # Compute seconds one optimizer step takes at a learn cost ratio of 1.
+    unit_step_seconds: float
+    # No-grad forwards over one optimizer step's tokens.
+    no_grad_sweeps: float
+
+    def learn_seconds(self, plan: TrainingMemoryPlan) -> float:
+        """Seconds one optimizer step takes: compute or weight gathers, whichever is longer, then the exchange, gradient sync and offload.
+
+        :param plan: A priced plan.
+        :return: Seconds.
+        """
+        traffic = plan.cross_node
+        return (
+            max(self.compute_seconds(plan.cost, plan.tokens), traffic.gathers)
+            + traffic.exchange
+            + traffic.grad_sync
+            + plan.optimizer_offload_seconds
+        )
+
+    def compute_seconds(self, cost: float, tokens: float) -> float:
+        """Compute seconds of one optimizer step of ``cost`` learn work over ``tokens`` tokens."""
+        return self.unit_step_seconds * cost / tokens
+
+
+def routed_token_bytes(
+    arch: ModelArch,
+    tokens: float,
+    weight_dtype: WeightDtype,
+    tp: int,
+    ep: int,
+    cp: int,
+    node: int,
+) -> float:
+    """Routed-token bytes one node sends the others in one dispatch or combine over an optimizer step's tokens.
+
+    :param arch: Model architecture.
+    :param tokens: Tokens one optimizer step trains on one data-parallel slice.
+    :param weight_dtype: Activation dtype name, as ``TrainingSettings.weight_dtype``.
+    :param tp: Tensor-parallel degree; each tensor-parallel rank routes its share of ``tokens``.
+    :param ep: Expert-parallel degree.
+    :param cp: Context-parallel degree.
+    :param node: GPUs on one node.
+    :return: Bytes; zero when the expert group stays on one node.
+    """
+    if ep <= node:
+        return 0.0
+    return (
+        node
+        * tokens
+        / (cp * tp)
+        * (arch.n_experts_per_tok or 1)
+        * arch.expert_width
+        * DTYPE_BYTES[weight_dtype]
+        * arch.moe_layers
+        * (ep - node)
+        / ep
+    )
+
+
+def _rings_leaving_node(group: int, stride: int, node: int) -> int:
+    """Rings that include the busiest node and a rank on another node.
+
+    :param group: Ranks in one ring.
+    :param stride: Rank distance between two members of a ring.
+    :param node: GPUs on one node.
+    :return: Ring count for the node that sits in the most rings.
+    """
+    span = group * stride
+    rings_per_node = [0] * ((span + node - 1) // node)
+    for offset in range(stride):
+        hosts = {(offset + step * stride) // node for step in range(group)}
+        if len(hosts) == 1:
+            continue
+        for host in hosts:
+            rings_per_node[host] += 1
+    return max(rings_per_node)
+
+
+def _ring_gather_bytes(
+    tensor_bytes: float, group: int, stride: int, node: int
+) -> float:
+    """Bytes the busiest node sends in a ring all-gather of a tensor sharded over ``group`` ranks ``stride`` apart.
+
+    Each group's ring leaves a node once and carries every piece but one.
+
+    :param tensor_bytes: Bytes of the whole gathered tensor.
+    :param group: Ranks the tensor is sharded over.
+    :param stride: Rank distance between two members of the group.
+    :param node: GPUs on one node.
+    :return: Bytes; zero when every group stays on one node.
+    """
+    if group <= 1 or group * stride <= node:
+        return 0.0
+    rings = _rings_leaving_node(group, stride, node)
+    return rings * (group - 1) * tensor_bytes / group
+
+
+def cross_node_seconds(
+    model: ModelSpec,
+    plan: TrainingMemoryPlan,
+    trainers: int,
+    node: int,
+    no_grad_sweeps: float,
+    costs: LearnCosts,
+) -> CrossNodeSeconds:
+    """Seconds one optimizer step spends on FSDP weight gathers and routed tokens crossing nodes.
+
+    Every micro-batch gathers the dense and expert weights in forward, again
+    in backward when weights reshard after forward, and once per no-grad
+    sweep. An expert group wider than a node sends routed tokens out and
+    back in forward, backward, each no-grad sweep and, unless MoE
+    collectives are saved, the checkpoint recompute. Once per optimizer step
+    the trained gradients sync: FSDP reduce-scatters them over the shard
+    group in its reduce dtype and all-reduces them over HSDP replicas, expert
+    LoRA all-reduces over the ranks holding the same experts, and DDP
+    all-reduces every fp32 gradient over all ranks. FSDP's per-block
+    reduce-scatters overlap with backward, so all but the last block's share
+    joins the gathers. Every collective is a ring, priced at the GPU class's measured all-gather rate between nodes
+    (the token exchange at its exchange rate).
+
+    :param model: Training-side model spec.
+    :param plan: The trainer plan; its ``fsdp`` holds the layout.
+    :param trainers: Trainer ranks, filling whole nodes from the first.
+    :param node: GPUs on one node.
+    :param no_grad_sweeps: No-grad forwards over one optimizer step's tokens.
+    :param costs: Learn-time constants of the training GPU.
+    :return: Gather, exchange and gradient-sync seconds; zero on one node.
+    """
+    micro_batch = (
+        plan.micro_batch_tokens_per_gpu
+        or plan.micro_batch_size_per_gpu * plan.settings.max_model_len
+    )
+    return _cross_node_seconds(
+        model,
+        plan.fsdp,
+        plan.settings,
+        plan.tokens,
+        math.ceil(plan.tokens / micro_batch),
+        plan.gradient_checkpointing,
+        plan.checkpoint_every_n_blocks,
+        trainers,
+        node,
+        no_grad_sweeps,
+        costs,
+    )
+
+
+def _cross_node_seconds(
+    model: ModelSpec,
+    fsdp: FSDPConfig | None,
+    settings: TrainingSettings,
+    tokens: float,
+    micro_batches: int,
+    gradient_checkpointing: bool,
+    every_n_blocks: int,
+    trainers: int,
+    node: int,
+    no_grad_sweeps: float,
+    costs: LearnCosts,
+) -> CrossNodeSeconds:
+    """:func:`cross_node_seconds` from a plan's fields, so the search can bound a candidate before pricing it."""
+    if trainers <= node:
+        return CrossNodeSeconds()
+    hidden_sync, grad_sync = _grad_sync_seconds(
+        model.arch, fsdp, settings, trainers, node, costs
+    )
+    if fsdp is None:
+        return CrossNodeSeconds(grad_sync=grad_sync)
+    arch = model.arch
+    byte = DTYPE_BYTES[settings.weight_dtype]
+    shard = fsdp.shard_group_size or trainers
+    total = param_counts(arch, model.n_params).total * byte
+    experts = (
+        arch.moe_layers * routed_expert_params_per_layer(arch) * byte
+        if arch.is_moe and fsdp.ep > 1
+        else 0.0
+    )
+    # The trainer mesh puts tensor parallel innermost for dense weights and
+    # expert parallel innermost for routed experts.
+    gather_bytes = _ring_gather_bytes(
+        (total - experts) / fsdp.tp, shard // fsdp.tp, fsdp.tp, node
+    ) + _ring_gather_bytes(experts / fsdp.ep, shard // fsdp.ep, fsdp.ep, node)
+    gathers = 0.0
+    if gather_bytes and costs.cross_node_gather_bytes_per_second:
+        backward = 0 if fsdp.reshard_after_forward is False else 1
+        gathers = (
+            micro_batches
+            * (1 + backward + no_grad_sweeps)
+            * gather_bytes
+            / costs.cross_node_gather_bytes_per_second
+        )
+    exchange = 0.0
+    token_bytes = (
+        routed_token_bytes(
+            arch, tokens, settings.weight_dtype, fsdp.tp, fsdp.ep, fsdp.cp, node
+        )
+        if arch.is_moe
+        else 0.0
+    )
+    if token_bytes and costs.cross_node_exchange_bytes_per_second:
+        # Saved MoE collectives let the checkpoint recompute skip the exchange.
+        recomputed = (
+            0.0
+            if fsdp.save_moe_collectives
+            else checkpointed_blocks(
+                arch.n_layers, gradient_checkpointing, every_n_blocks
+            )
+            / arch.n_layers
+        )
+        exchanges = 4 + 2 * recomputed + 2 * no_grad_sweeps
+        exchange = exchanges * token_bytes / costs.cross_node_exchange_bytes_per_second
+    return CrossNodeSeconds(gathers + hidden_sync, exchange, grad_sync)
+
+
+def _grad_sync_seconds(
+    arch: ModelArch,
+    fsdp: FSDPConfig | None,
+    settings: TrainingSettings,
+    trainers: int,
+    node: int,
+    costs: LearnCosts,
+) -> tuple[float, float]:
+    """Seconds the once-per-step gradient sync spends between nodes: the part backward hides, and the part it waits on.
+
+    FSDP2 reduce-scatters each block's gradients, and all-reduces them over
+    HSDP replicas, in that block's post-backward hook while earlier blocks
+    run backward, so only the last block's share is waited on. The expert-LoRA
+    and DDP all-reduces run after backward (``runtime.py`` ``sync_grads``).
+    """
+    rate = costs.cross_node_gather_bytes_per_second
+    if not rate:
+        return 0.0, 0.0
+    ep = 1 if fsdp is None else fsdp.ep
+    dense, expert = trained_param_counts(arch, settings, ep)
+    if fsdp is None:
+        # A ring all-reduce moves twice a ring reduce-scatter's bytes.
+        moved = 2 * _ring_gather_bytes(
+            dense * ADAPTER_BYTES_PER_PARAM, trainers, 1, node
+        )
+        return 0.0, moved / rate
+    reduce = FSDP_PARAM_BYTES[fsdp.reduce_dtype]
+    shard = fsdp.shard_group_size or trainers
+    dense_group = shard // fsdp.tp
+    dense_bytes = dense * reduce / fsdp.tp
+    per_block = _ring_gather_bytes(dense_bytes, dense_group, fsdp.tp, node)
+    # One rank's slice all-reduces over the ranks holding the same slice.
+    replicas = trainers // shard
+    per_block += 2 * _ring_gather_bytes(
+        dense_bytes / dense_group, replicas, shard, node
+    )
+    last_block = per_block / max(arch.n_layers, 1)
+    after = 2 * _ring_gather_bytes(expert * reduce / ep, trainers // ep, ep, node)
+    return (per_block - last_block) / rate, (last_block + after) / rate
+
+
 @dataclass(frozen=True)
 class MemoryPins:
     """Speed fields set before the search; ``None`` fields are searched.
@@ -242,6 +524,9 @@ class TrainingMemoryPlan:
     # Seconds one optimizer step spends moving CPU-kept AdamW state and stepping
     # it. Seconds, not tokens: the cost is host-link bytes, not model FLOPs.
     optimizer_offload_seconds: float
+    # Traffic between nodes per optimizer step; zero when searched without
+    # :class:`StepTiming`.
+    cross_node: CrossNodeSeconds = field(default_factory=CrossNodeSeconds)
 
     @property
     def learn_cost_ratio(self) -> float:
@@ -465,12 +750,14 @@ def resolve_training_memory(
     settings: TrainingSettings,
     pins: MemoryPins,
     mini_batch_rows: int,
+    timing: StepTiming | None = None,
 ) -> TrainingMemoryPlan:
     """The fastest plan that fits: DDP or FSDP, its speed rungs, then FSDP memory-only last resorts.
 
     Speed rungs are searched jointly and the fitting combination with the
-    lowest :func:`learn_cost` wins (ties go to less recompute, then fewer
-    gathers): the parallelism (DDP when the run's ``fsdp`` allows it, see
+    lowest :func:`learn_cost` wins, or with ``timing`` the fewest learn
+    seconds counting traffic between nodes (:func:`cross_node_seconds`;
+    ties go to less recompute, then fewer gathers): the parallelism (DDP when the run's ``fsdp`` allows it, see
     :func:`can_train_data_parallel`, or FSDP), the micro-batch (a token
     budget when ``settings`` packs, else rows; the largest that fits),
     checkpointing (off, every 4, 2 or 1 blocks; every block or none under
@@ -492,11 +779,13 @@ def resolve_training_memory(
     :param pins: Checkpointing and micro-batch values the search keeps. A
         token budget above the mini-batch's longest rows is cut to them.
     :param mini_batch_rows: Rows one optimizer step covers on one rank.
+    :param timing: Ranks plans by learn seconds and prices their traffic
+        between nodes; ``None`` ranks by learn work.
     :return: The chosen plan, with every field set; the caller's own copy.
     :raises TrainingMemoryUnfitError: When the lightest plan is over the GPU.
     """
     plan, fits, notes = _cached_training_memory(
-        model, device, TrainingSettingsKey.of(settings), pins, mini_batch_rows
+        model, device, TrainingSettingsKey.of(settings), pins, mini_batch_rows, timing
     )
     for message, args in notes:
         logger.info(message, *args)
@@ -523,7 +812,12 @@ def lightest_training_memory(
     :return: The plan, which may not fit; the caller's own copy.
     """
     plan, _, _ = _cached_training_memory(
-        model, device, TrainingSettingsKey.of(settings), pins, mini_batch_rows, True
+        model,
+        device,
+        TrainingSettingsKey.of(settings),
+        pins,
+        mini_batch_rows,
+        lightest_only=True,
     )
     return plan.detached()
 
@@ -536,10 +830,12 @@ def _cached_training_memory(
     key: TrainingSettingsKey,
     pins: MemoryPins,
     mini_batch_rows: int,
+    timing: StepTiming | None = None,
     lightest_only: bool = False,
 ) -> tuple[TrainingMemoryPlan, bool, tuple[LogNote, ...]]:
     """:func:`resolve_training_memory`'s search, run once per input.
 
+    :param timing: As in :func:`resolve_training_memory`.
     :param lightest_only: Skip the search and return the lightest plan.
     :return: The chosen plan and ``True``, or the lightest plan and ``False``
         when it is over the GPU, and the log records the search emits.
@@ -560,8 +856,39 @@ def _cached_training_memory(
     expert_lora = settings.lora_packed_target_matrices > 0
     notes: list[LogNote] = []
 
+    trainers = settings.n_training_gpus
+    node = device.gpus_per_node or trainers
+
     def passes_at(unit: int) -> int:
         return math.ceil(tokens / unit) if packed else mini_batch_rows // unit
+
+    def rank(plan: TrainingMemoryPlan) -> float:
+        return plan.cost if timing is None else timing.learn_seconds(plan)
+
+    def rank_bound(
+        cost: float, on: bool, stride: int, trial: FSDPConfig | None, passes: int
+    ) -> float:
+        # A candidate's fewest passes bound both its learn work and its gathers.
+        if timing is None:
+            return cost
+        traffic = _cross_node_seconds(
+            model,
+            trial,
+            settings,
+            tokens,
+            passes,
+            on,
+            stride,
+            trainers,
+            node,
+            timing.no_grad_sweeps,
+            costs,
+        )
+        return (
+            max(timing.compute_seconds(cost, tokens), traffic.gathers)
+            + traffic.exchange
+            + traffic.grad_sync
+        )
 
     def priced(
         on: bool,
@@ -604,7 +931,7 @@ def _cached_training_memory(
             DEFAULT_ROUTED_CHUNK_BYTES if chunk_mib is None else chunk_mib * MiB,
         )
         breakdown = shared_training_estimate(model, device, sized, orchestrated=True)
-        return TrainingMemoryPlan(
+        plan = TrainingMemoryPlan(
             gradient_checkpointing=on,
             checkpoint_every_n_blocks=stride,
             micro_batch_size_per_gpu=rows,
@@ -624,6 +951,14 @@ def _cached_training_memory(
             optimizer_offload_seconds=costs.optimizer_offload_seconds_per_gib
             * offloaded_optimizer_bytes(trial, breakdown)
             / GiB,
+        )
+        if timing is None:
+            return plan
+        return replace(
+            plan,
+            cross_node=cross_node_seconds(
+                model, plan, trainers, node, timing.no_grad_sweeps, costs
+            ),
         )
 
     def largest_fit(
@@ -700,15 +1035,21 @@ def _cached_training_memory(
         fewest_passes = passes_at(units[-1])
         candidates = [
             (
-                learn_cost(
-                    n_layers,
+                rank_bound(
+                    learn_cost(
+                        n_layers,
+                        on,
+                        stride,
+                        fewest_passes,
+                        tokens,
+                        residency,
+                        costs,
+                        fewest_chunks,
+                    ),
                     on,
                     stride,
+                    trial,
                     fewest_passes,
-                    tokens,
-                    residency,
-                    costs,
-                    fewest_chunks,
                 ),
                 index,
                 (on, stride, residency, trial),
@@ -722,8 +1063,8 @@ def _cached_training_memory(
             if best is not None and (bound, index) >= best[:2]:
                 break
             plan = largest_fit(*candidate, ddp_chunk)
-            if plan is not None and (best is None or (plan.cost, index) < best[:2]):
-                best = (plan.cost, index, plan)
+            if plan is not None and (best is None or (rank(plan), index) < best[:2]):
+                best = (rank(plan), index, plan)
         return None if best is None else best[2]
 
     def data_parallel(strides: list[tuple[bool, int]]) -> TrainingMemoryPlan | None:
@@ -782,7 +1123,7 @@ def _cached_training_memory(
                 )
             plan = cheapest(recompute, memory, None)
             # A fitting DDP plan beats every FSDP last resort.
-            if ddp is not None and (plan is None or ddp.cost <= plan.cost):
+            if ddp is not None and (plan is None or rank(ddp) <= rank(plan)):
                 return ddp
             if plan is not None:
                 return plan
