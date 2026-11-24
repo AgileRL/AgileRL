@@ -65,6 +65,8 @@ def mock_client() -> MagicMock:
             "logout",
             "get_current_user",
             "get_user_credits",
+            "get_credit_balance",
+            "get_credit_ledger",
             "list_resources",
             "list_environments",
             "environment_exists",
@@ -716,11 +718,180 @@ class TestUserCommands:
         assert json.loads(result.output) == user
         assert "Jane Doe" not in result.output
 
-    def test_user_credits(self, runner, mock_client):
-        mock_client.get_user_credits.return_value = {"credits": 1000}
+
+CREDIT_BALANCE = {
+    "balance": 423.81,
+    "accrued_cost": 16.8,
+    "balance_after_accrued": 407.01,
+    "accrued": [
+        {
+            "kind": "job",
+            "id": 1507,
+            "experiment_id": 1699,
+            "name": "gsm8k-grpo-v5",
+            "since": "2026-11-19T21:00:00",
+            "hourly_cost": 252.03,
+            "accrued_cost": 16.8,
+        }
+    ],
+}
+
+LEDGER = [
+    {
+        "time": "2026-11-19T21:18:55.617",
+        "kind": "Job",
+        "job_id": 1507,
+        "deployment_id": None,
+        "experiment_id": 1699,
+        "item": "gsm8k-grpo-v5",
+        "description": "job-1507 cost at 2026-11-19 20:00:00",
+        "amount": -16.8,
+        "balance": 423.81,
+    }
+]
+
+
+def _assert_table_columns(output: str, columns: list[str]) -> None:
+    header = next(
+        line for line in output.splitlines() if all(name in line for name in columns)
+    )
+    positions = [header.index(name) for name in columns]
+    assert positions == sorted(positions)
+
+
+class TestUserCreditsCommand:
+    def test_prints_balance_and_accrued_cost(self, runner, mock_client):
+        # Arrange
+        mock_client.get_credit_balance.return_value = CREDIT_BALANCE
+
+        # Act
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["user", "credits"])
-        assert result.exit_code == 0
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        assert "$423.81" in result.output
+        assert "Accrued, not charged:   $16.80" in result.output
+        assert "$407.01" in result.output
+        assert "gsm8k-grpo-v5" in result.output
+        assert "2026-11-19 21:00 UTC" in result.output
+        _assert_table_columns(
+            result.output,
+            ["kind", "id", "name", "since", "hourly_cost", "accrued_cost"],
+        )
+        assert "experiment_id" not in result.output
+        assert "1699" not in result.output
+
+    def test_json_keeps_the_bare_balance(self, runner, mock_client):
+        mock_client.get_credit_balance.return_value = CREDIT_BALANCE
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "user", "credits"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == 423.81
+
+    def test_older_server_prints_the_plain_balance(self, runner, mock_client):
+        # Arrange
+        mock_client.get_credit_balance.side_effect = ArenaAPIError(
+            "Not Found", status_code=404
+        )
+        mock_client.get_user_credits.return_value = 1000
+
+        # Act
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "user", "credits"])
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == 1000
+
+    def test_other_errors_are_not_hidden(self, runner, mock_client):
+        mock_client.get_credit_balance.side_effect = ArenaAPIError(
+            "boom", status_code=500
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["user", "credits"])
+
+        assert result.exit_code != 0
+        mock_client.get_user_credits.assert_not_called()
+
+    def test_ledger_table(self, runner, mock_client):
+        mock_client.get_credit_ledger.return_value = LEDGER
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["user", "credits", "--ledger"])
+
+        assert result.exit_code == 0, result.output
+        assert "gsm8k-grpo-v5" in result.output
+        assert "-$16.80" in result.output
+        assert "$423.81" in result.output
+        _assert_table_columns(
+            result.output,
+            ["time", "item", "kind", "amount", "balance", "description"],
+        )
+        assert "job_id" not in result.output
+        assert "deployment_id" not in result.output
+        assert "experiment_id" not in result.output
+        assert "1699" not in result.output
+        assert "None" not in result.output
+        mock_client.get_credit_ledger.assert_called_once_with(
+            job_id=None, deployment_id=None, limit=None
+        )
+
+    def test_ledger_filters_are_passed_through(self, runner, mock_client):
+        mock_client.get_credit_ledger.return_value = LEDGER
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "--json",
+                    "user",
+                    "credits",
+                    "--ledger",
+                    "--job",
+                    "1507",
+                    "--limit",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == LEDGER
+        mock_client.get_credit_ledger.assert_called_once_with(
+            job_id=1507, deployment_id=None, limit=5
+        )
+
+    def test_ledger_other_errors_are_not_hidden(self, runner, mock_client):
+        mock_client.get_credit_ledger.side_effect = ArenaAPIError(
+            "boom", status_code=500
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["user", "credits", "--ledger"])
+
+        assert result.exit_code != 0
+        assert "no credit ledger" not in result.output
+
+    def test_ledger_on_older_server_says_so(self, runner, mock_client):
+        mock_client.get_credit_ledger.side_effect = ArenaAPIError(
+            "Not Found", status_code=404
+        )
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["user", "credits", "--ledger"])
+
+        assert result.exit_code != 0
+        assert "no credit ledger" in result.output
+
+    def test_ledger_filters_need_ledger(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["user", "credits", "--job", "1"])
+
+        assert result.exit_code == 2
+        assert "need --ledger" in result.output
 
 
 class TestResourcesListCommand:

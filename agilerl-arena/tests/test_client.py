@@ -628,6 +628,20 @@ class TestUserMethods:
         api_key_client._request = MagicMock(return_value=100)
         assert api_key_client.get_user_credits() == 100
 
+    def test_get_credit_balance(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"balance": 5})
+        assert api_key_client.get_credit_balance() == {"balance": 5}
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/credit-usages/balance"
+        )
+
+    def test_get_credit_ledger_sends_only_set_filters(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[])
+        assert api_key_client.get_credit_ledger(deployment_id=329) == []
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/credit-usages/ledger", params={"deployment_id": 329}
+        )
+
 
 class TestSetStreamHandler:
     def test_default_handler_is_none(self, api_key_client):
