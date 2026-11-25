@@ -1043,6 +1043,7 @@ class TestRegisterClassesCommand:
         api.replace_class_availabilities.assert_called_once_with(
             "pool",
             [{"region": "eu-north1", "zones": ["fabric-2"], "enabled": True}],
+            cluster="test",
         )
 
     def test_recovers_stored_project_ids_instead_of_preparing(

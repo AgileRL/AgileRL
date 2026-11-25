@@ -125,6 +125,19 @@ class TestByocApi:
         assert delete.args[0]["path"].endswith("/classes/delete")
         assert delete.args[1] == {"name": "pool"}
 
+    def test_delete_without_cluster_rejects_duplicate_names(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = [
+            {"name": "pool"},
+            {"name": "pool"},
+        ]
+
+        with pytest.raises(ArenaAPIError, match="Multiple BYOC classes"):
+            byoc_api.delete_class("pool")
+
+        mock_client._invoke_manifest_command.assert_called_once()
+
     def test_fetch_bundle_returns_bytes_and_passes_query(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:
@@ -693,3 +706,95 @@ class TestByocApiPlatformScope:
 
         with pytest.raises(ArenaAPIError, match="Cluster not found"):
             ByocApi(http_client, platform=True).rotate_cluster_token("arena")
+
+
+CLASS_WRITE_CALLS: list[tuple[Callable[..., object], str]] = [
+    (
+        lambda api, **cluster: api.update_class("pool", 1, {}, {}, **cluster),
+        "/classes/update",
+    ),
+    (
+        lambda api, **cluster: api.replace_class_availabilities("pool", [], **cluster),
+        "/classes/update",
+    ),
+    (lambda api, **cluster: api.delete_class("pool", **cluster), "/classes/delete"),
+]
+
+
+class TestByocApiClassCluster:
+    @pytest.mark.parametrize(("call", "route"), CLASS_WRITE_CALLS)
+    def test_sends_the_cluster_name_and_id_in_the_query(
+        self, http_client: ArenaClient, call: Callable[..., object], route: str
+    ) -> None:
+        # Act
+        call(ByocApi(http_client), cluster="arena", cluster_id=7)
+
+        # Assert
+        sent = http_client._http.request.call_args.kwargs
+        assert http_client._http.request.call_args.args[1].endswith(route)
+        assert sent["params"] == {"name": "pool", "cluster": "arena", "cluster_id": 7}
+        assert "cluster" not in (sent.get("json") or {})
+
+    @pytest.mark.parametrize(("call", "route"), CLASS_WRITE_CALLS)
+    def test_omits_the_cluster_when_not_given(
+        self, http_client: ArenaClient, call: Callable[..., object], route: str
+    ) -> None:
+        call(ByocApi(http_client))
+
+        assert http_client._http.request.call_args.args[1].endswith(route)
+        assert http_client._http.request.call_args.kwargs["params"] == {"name": "pool"}
+
+    def test_sends_the_platform_scope_next_to_the_cluster(
+        self, http_client: ArenaClient
+    ) -> None:
+        ByocApi(http_client, platform=True).delete_class("pool", cluster="arena")
+
+        assert http_client._http.request.call_args.kwargs["params"] == {
+            "name": "pool",
+            "cluster": "arena",
+            "byocScope": "platform",
+        }
+
+    def test_delete_picks_one_of_two_same_named_classes_by_cluster(
+        self, http_client: ArenaClient
+    ) -> None:
+        # Arrange
+        rows = [{"name": "pool", "id": 1}, {"name": "pool", "id": 2}]
+        http_client._http.request.side_effect = lambda _method, path, **_kw: (
+            httpx.Response(200, json=rows if path.endswith("/list") else {})
+        )
+
+        # Act
+        ByocApi(http_client).delete_class("pool", cluster="arena")
+
+        # Assert
+        delete = http_client._http.request.call_args
+        assert delete.args[1].endswith("/classes/delete")
+        assert delete.kwargs["params"] == {"name": "pool", "cluster": "arena"}
+
+    def test_delete_with_cluster_skips_the_name_lookup(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        # Arrange
+        mock_client._invoke_manifest_command.return_value = {}
+
+        # Act
+        byoc_api.delete_class("pool", cluster="arena")
+
+        # Assert
+        mock_client._invoke_manifest_command.assert_called_once()
+        invoke, query = mock_client._invoke_manifest_command.call_args.args
+        assert invoke["path"].endswith("/classes/delete")
+        assert query == {"name": "pool", "cluster": "arena"}
+
+    def test_delete_with_cluster_id_skips_the_name_lookup(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {}
+
+        byoc_api.delete_class("pool", cluster_id=4)
+
+        invoke, query = mock_client._invoke_manifest_command.call_args.args
+        assert invoke["path"].endswith("/classes/delete")
+        assert query == {"name": "pool", "cluster_id": 4}
+        mock_client._invoke_manifest_command.assert_called_once()
