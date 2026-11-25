@@ -5,10 +5,7 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import click
@@ -26,34 +23,24 @@ from agilerl.arena.byoc.cluster_helm import (
     sync_storage_secret_endpoint,
 )
 from agilerl.arena.byoc.cluster_install_package import extract_cluster_install_package
-from agilerl.arena.byoc.cluster_token import resolve_cluster_kubeconfig
+from agilerl.arena.byoc.kube_target import (
+    kube_target,
+    kubeconfig_environment,
+    require_registered_cluster,
+)
 from agilerl.arena.byoc.upgrade_rbac import confirm_rbac_changes
 from agilerl.arena.client import ArenaClient
 
 
-@contextmanager
-def _kubeconfig_environment(kubeconfig_path: Path) -> Iterator[None]:
-    """Set ``KUBECONFIG`` only while Helm runs."""
-    old_value = os.environ.get("KUBECONFIG")
-    os.environ["KUBECONFIG"] = str(kubeconfig_path)
-    try:
-        yield
-    finally:
-        if old_value is None:
-            del os.environ["KUBECONFIG"]
-        else:
-            os.environ["KUBECONFIG"] = old_value
-
-
 def _installed_agent_release(
-    kubeconfig: Path | None,
+    kubeconfig: Path,
     cluster_name: str,
     agent_namespace: str | None,
 ) -> tuple[str, str]:
     """Return the installed agent Helm ``(release, namespace)``.
 
     :param kubeconfig: Kubeconfig used as ``KUBECONFIG`` for Helm.
-    :type kubeconfig: Path | None
+    :type kubeconfig: Path
     :param cluster_name: Registered cluster name.
     :type cluster_name: str
     :param agent_namespace: Explicit namespace, or ``None`` to search all of them.
@@ -75,12 +62,6 @@ def _installed_agent_release(
     }
     if (release, namespace) in installed:
         return release, namespace
-    if kubeconfig is None:
-        msg = (
-            "No kubeconfig found, so the installed agent Helm release could not "
-            "be discovered. Pass --kubeconfig."
-        )
-        raise click.ClickException(msg)
     msg = (
         f"Helm release {release!r} is not installed in namespace {namespace!r}. "
         "This command only upgrades an agent that is already installed."
@@ -93,6 +74,7 @@ def run_cluster_upgrade(
     *,
     name: str,
     kubeconfig: Path | None = None,
+    context: str | None = None,
     agent_namespace: str | None = None,
     helm_wait: bool = True,
     platform: bool = False,
@@ -113,6 +95,8 @@ def run_cluster_upgrade(
     :type name: str
     :param kubeconfig: Kubeconfig for the agent cluster.
     :type kubeconfig: Path | None
+    :param context: Kubernetes context to use.
+    :type context: str | None
     :param agent_namespace: Agent namespace. Helm's namespace when omitted.
     :type agent_namespace: str | None
     :param helm_wait: Wait for the agent Deployment when ``True``.
@@ -131,25 +115,23 @@ def run_cluster_upgrade(
         raise click.ClickException(msg)
     explicit_namespace = (agent_namespace or "").strip() or None
     api = ByocApi(client, platform=platform)
-    artifacts = api.fetch_cluster_install_artifacts(cluster_name)
-    agent_yaml = artifacts.get("agentHelmValuesYaml")
-    if not isinstance(agent_yaml, str) or not agent_yaml.strip():
-        msg = "Arena did not return agent Helm values."
-        raise click.ClickException(msg)
-    confirm_rbac_changes(artifacts, cluster_name, yes)
-    package_bytes = api.download_cluster_install_package(
-        cluster=cluster_name,
-        agent_helm_values_yaml=agent_yaml,
-    )
-    kubeconfig_path = resolve_cluster_kubeconfig(cluster_name, kubeconfig)
-    kubeconfig_cm = (
-        _kubeconfig_environment(kubeconfig_path)
-        if kubeconfig_path is not None
-        else nullcontext()
-    )
-    with kubeconfig_cm:
+    with (
+        kube_target(cluster_name, kubeconfig, context) as target,
+        kubeconfig_environment(target.kubeconfig),
+    ):
+        require_registered_cluster(api, cluster_name, target)
+        artifacts = api.fetch_cluster_install_artifacts(cluster_name)
+        agent_yaml = artifacts.get("agentHelmValuesYaml")
+        if not isinstance(agent_yaml, str) or not agent_yaml.strip():
+            msg = "Arena did not return agent Helm values."
+            raise click.ClickException(msg)
+        confirm_rbac_changes(artifacts, cluster_name, yes)
+        package_bytes = api.download_cluster_install_package(
+            cluster=cluster_name,
+            agent_helm_values_yaml=agent_yaml,
+        )
         release, namespace = _installed_agent_release(
-            kubeconfig_path,
+            target.kubeconfig,
             cluster_name,
             explicit_namespace,
         )

@@ -198,6 +198,12 @@ REGISTER_CLUSTER: ManifestInvoke = {
             "type": "json",
             "required": False,
         },
+        {
+            "name": "clusterUid",
+            "in": "body",
+            "type": "string",
+            "required": False,
+        },
     ],
 }
 
@@ -227,6 +233,7 @@ ROTATE_CLUSTER_TOKEN: ManifestInvoke = {
     "params": [
         {"name": "name", "in": "body", "type": "string", "required": True},
         {"name": "byocScope", "in": "body", "type": "string", "required": False},
+        {"name": "clusterUid", "in": "body", "type": "string", "required": False},
     ],
 }
 

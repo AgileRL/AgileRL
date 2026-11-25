@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,10 +23,13 @@ from agilerl.arena.byoc.cluster_token import (
     DEFAULT_CLUSTER_TOKEN_SECRET_NAME,
     apply_cluster_token_secret,
     cluster_token_secret_name,
-    resolve_cluster_kubeconfig,
     run_cluster_rotate_token,
 )
 from agilerl.arena.client import ArenaClient
+
+from .conftest import FAKE_CLUSTER_UID
+
+TOKEN_MODULE = "agilerl.arena.byoc.cluster_token"
 
 
 class TestClusterTokenSecretName:
@@ -70,54 +74,6 @@ class TestClusterTokenSecretName:
 
     def test_defaults_to_helm_release_secret(self) -> None:
         assert cluster_token_secret_name({}) == DEFAULT_CLUSTER_TOKEN_SECRET_NAME
-
-
-class TestResolveClusterKubeconfig:
-    def test_requires_explicit_file(self, tmp_path: Path) -> None:
-        missing = tmp_path / "missing"
-
-        with pytest.raises(click.ClickException, match="Kubeconfig is not a file"):
-            resolve_cluster_kubeconfig("prod", missing)
-
-    def test_uses_provisioned_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        kubeconfig = tmp_path / "arena-cluster-prod" / "kubeconfig"
-        kubeconfig.parent.mkdir()
-        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-
-        resolved = resolve_cluster_kubeconfig("prod", None)
-
-        assert resolved == kubeconfig.resolve()
-
-    def test_uses_kubeconfig_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        kubeconfig = tmp_path / "env-kubeconfig"
-        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
-
-        resolved = resolve_cluster_kubeconfig("prod", None)
-
-        assert resolved == kubeconfig.resolve()
-
-    def test_uses_home_kube_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        home = tmp_path / "home"
-        kubeconfig = home / ".kube" / "config"
-        kubeconfig.parent.mkdir(parents=True)
-        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("KUBECONFIG", raising=False)
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setenv("USERPROFILE", str(home))
-
-        resolved = resolve_cluster_kubeconfig("prod", None)
-
-        assert resolved == kubeconfig.resolve()
 
 
 class TestApplyClusterTokenSecret:
@@ -212,9 +168,11 @@ class TestApplyClusterTokenSecret:
 
 
 class TestRunClusterRotateToken:
-    def test_rotates_token_and_updates_secret(self, tmp_path: Path) -> None:
+    def test_rotates_token_for_the_target_and_updates_its_secret(
+        self, tmp_path: Path, fake_kube_target: Callable[..., MagicMock]
+    ) -> None:
         kubeconfig = tmp_path / "kubeconfig"
-        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+        resolve = fake_kube_target(TOKEN_MODULE)
         client = MagicMock(spec=ArenaClient)
         apply = MagicMock()
 
@@ -233,50 +191,55 @@ class TestRunClusterRotateToken:
                     },
                 },
             ) as rotate_mock,
+            patch(f"{TOKEN_MODULE}.apply_cluster_token_secret", apply),
             patch(
-                "agilerl.arena.byoc.cluster_token.apply_cluster_token_secret",
-                apply,
-            ),
-            patch(
-                "agilerl.arena.byoc.cluster_token.discover_agent_install",
+                f"{TOKEN_MODULE}.discover_agent_install",
                 return_value=(AGENT_RELEASE, AGENT_NAMESPACE),
             ),
         ):
-            token = run_cluster_rotate_token(client, name="prod", kubeconfig=kubeconfig)
+            token = run_cluster_rotate_token(
+                client, name="prod", kubeconfig=kubeconfig, context="corp"
+            )
 
         assert token == "rotated.tok"
-        rotate_mock.assert_called_once_with("prod")
+        resolve.assert_called_once_with("prod", kubeconfig, "corp")
+        rotate_mock.assert_called_once_with("prod", cluster_uid=FAKE_CLUSTER_UID)
         assert apply.call_args.kwargs["token"] == "rotated.tok"
         assert apply.call_args.kwargs["secret_name"] == "agent-token"
         assert apply.call_args.kwargs["namespace"] == AGENT_NAMESPACE
         assert apply.call_args.kwargs["agent_release"] == AGENT_RELEASE
-        assert apply.call_args.kwargs["kubeconfig_path"] == kubeconfig.resolve()
+        assert apply.call_args.kwargs["kubeconfig_path"] == (
+            tmp_path / "pinned-kubeconfig"
+        )
 
-    def test_discovers_agent_namespace_from_helm(self, tmp_path: Path) -> None:
-        kubeconfig = tmp_path / "kubeconfig"
-        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+    def test_discovers_agent_namespace_before_rotating(
+        self, tmp_path: Path, fake_kube_target: Callable[..., MagicMock]
+    ) -> None:
+        fake_kube_target(TOKEN_MODULE)
         client = MagicMock(spec=ArenaClient)
         apply = MagicMock()
+        order: list[str] = []
+
+        def discover(*_args: object, **_kwargs: object) -> tuple[str, str]:
+            order.append("discover")
+            return "prod", "arena-agent"
+
+        def rotate(*_args: object, **_kwargs: object) -> dict[str, str]:
+            order.append("rotate")
+            return {"token": "rotated.tok"}
 
         with (
             patch.object(ByocApi, "find_cluster", return_value={"name": "prod"}),
-            patch.object(
-                ByocApi,
-                "rotate_cluster_token",
-                return_value={"token": "rotated.tok"},
-            ),
+            patch.object(ByocApi, "rotate_cluster_token", side_effect=rotate),
+            patch(f"{TOKEN_MODULE}.apply_cluster_token_secret", apply),
             patch(
-                "agilerl.arena.byoc.cluster_token.apply_cluster_token_secret",
-                apply,
-            ),
-            patch(
-                "agilerl.arena.byoc.cluster_token.discover_agent_install",
-                return_value=("prod", "arena-agent"),
+                f"{TOKEN_MODULE}.discover_agent_install", side_effect=discover
             ) as discover_mock,
         ):
-            run_cluster_rotate_token(client, name="prod", kubeconfig=kubeconfig)
+            run_cluster_rotate_token(client, name="prod")
 
-        assert discover_mock.call_args.args[0] == kubeconfig.resolve()
+        assert order == ["discover", "rotate"]
+        assert discover_mock.call_args.args[0] == tmp_path / "pinned-kubeconfig"
         assert discover_mock.call_args.kwargs["cluster_name"] == "prod"
         assert discover_mock.call_args.kwargs["agent_namespace"] is None
         assert apply.call_args.kwargs["namespace"] == "arena-agent"
@@ -291,12 +254,19 @@ class TestRunClusterRotateToken:
             ):
                 run_cluster_rotate_token(client, name="missing")
 
-    def test_rejects_missing_token(self) -> None:
+    def test_rejects_missing_token(
+        self, fake_kube_target: Callable[..., MagicMock]
+    ) -> None:
+        fake_kube_target(TOKEN_MODULE)
         client = MagicMock(spec=ArenaClient)
 
         with (
             patch.object(ByocApi, "find_cluster", return_value={"name": "prod"}),
             patch.object(ByocApi, "rotate_cluster_token", return_value={}),
+            patch(
+                f"{TOKEN_MODULE}.discover_agent_install",
+                return_value=(AGENT_RELEASE, AGENT_NAMESPACE),
+            ),
         ):
             with pytest.raises(click.ClickException, match="returned no token"):
                 run_cluster_rotate_token(client, name="prod")

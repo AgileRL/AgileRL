@@ -36,11 +36,27 @@ from agilerl.arena.byoc.cluster_register import (
     ensure_resource_class,
     run_cluster_register,
 )
+from agilerl.arena.byoc.provisioning.providers.aws.gateway import (
+    WEBHOOK_CERT_DIRECTORY,
+    WEBHOOK_HELM_VALUES,
+)
+from agilerl.arena.byoc.provisioning.providers.base import EnsureGateway
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaAPIError
+
+from .conftest import FAKE_CLUSTER_UID
+
+COMMANDS = "agilerl.arena.byoc.commands"
+
+
+@pytest.fixture(autouse=True)
+def pinned_target(fake_kube_target: Callable[..., MagicMock]) -> MagicMock:
+    """Point every register install at a fixed context."""
+    return fake_kube_target(COMMANDS)
+
 
 NEBIUS_SPEC = """
 provider: nebius
@@ -676,18 +692,14 @@ class TestRunClusterRegister:
 
         assert install_mock.call_args.kwargs["agent_namespace"] == "arena-agent"
 
-    def test_install_prints_the_kubeconfig_helm_will_use(
-        self,
-        mock_client: MagicMock,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
+    def test_sends_the_cluster_uid_with_the_registration(
+        self, mock_client: MagicMock, tmp_path: Path
     ) -> None:
-        kubeconfig = tmp_path / "kubeconfig"
-        monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
         with (
             patch.object(ByocApi, "enable"),
-            patch.object(ByocApi, "register_cluster", return_value=ENTERPRISE_BUNDLE),
+            patch.object(
+                ByocApi, "register_cluster", return_value=ENTERPRISE_BUNDLE
+            ) as register_mock,
             patch(
                 "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
             ),
@@ -699,36 +711,10 @@ class TestRunClusterRegister:
                 skip_enable=True,
                 force=False,
                 install=True,
+                cluster_uid=FAKE_CLUSTER_UID,
             )
 
-        assert f"Using kubeconfig {kubeconfig}" in capsys.readouterr().out
-
-    def test_install_prints_the_default_kubeconfig_when_unset(
-        self,
-        mock_client: MagicMock,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        monkeypatch.delenv("KUBECONFIG", raising=False)
-        with (
-            patch.object(ByocApi, "enable"),
-            patch.object(ByocApi, "register_cluster", return_value=ENTERPRISE_BUNDLE),
-            patch(
-                "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
-            ),
-        ):
-            run_cluster_register(
-                mock_client,
-                name="prod-cluster",
-                output_dir=tmp_path,
-                skip_enable=True,
-                force=False,
-                install=True,
-            )
-
-        default = Path.home() / ".kube" / "config"
-        assert f"Using kubeconfig {default}" in capsys.readouterr().out
+        assert register_mock.call_args.kwargs["cluster_uid"] == FAKE_CLUSTER_UID
 
     def test_install_names_the_release_after_the_cluster(
         self,
@@ -1774,6 +1760,7 @@ nebius:
 
     def test_install_uses_cluster_kubeconfig_when_the_cluster_exists(
         self,
+        pinned_target: MagicMock,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
         tmp_path: Path,
@@ -1787,8 +1774,9 @@ nebius:
         kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
         seen: dict[str, str | None] = {}
 
-        def capture(*_args: object, **_kwargs: object) -> None:
+        def capture(*_args: object, **kwargs: object) -> None:
             seen["kubeconfig"] = os.environ.get("KUBECONFIG")
+            seen["cluster_uid"] = kwargs.get("cluster_uid")
 
         client = MagicMock()
         with (
@@ -1808,7 +1796,9 @@ nebius:
             )
 
         assert result.exit_code == 0, result.output
-        assert seen["kubeconfig"] == str(kubeconfig.resolve())
+        assert pinned_target.call_args.args[1:] == (kubeconfig.resolve(), None)
+        assert seen["kubeconfig"] == str(tmp_path / "pinned-kubeconfig")
+        assert seen["cluster_uid"] == FAKE_CLUSTER_UID
 
     def test_register_finishes_cluster_setup_when_the_cluster_exists(
         self,
@@ -1888,11 +1878,164 @@ nebius:
 
         assert result.exit_code == 0, result.output
         gateway.assert_called_once()
-        assert gateway.call_args.args[0].kubeconfig_path == kubeconfig.resolve()
+        assert gateway.call_args.args[0].kubeconfig_path == (
+            tmp_path / "pinned-kubeconfig"
+        )
         assert register.call_args.kwargs["gateway_api_parent_refs"] == refs
+
+    def test_install_configures_the_gateway_on_the_pinned_context(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gateway setup uses the pinned kubeconfig while that context is active."""
+        monkeypatch.chdir(tmp_path)
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(NEBIUS_SPEC, encoding="utf-8")
+        spec_kubeconfig = tmp_path / "arena-cluster-spec-cluster" / "kubeconfig"
+        spec_kubeconfig.parent.mkdir()
+        spec_kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+        other_kubeconfig = tmp_path / "other-kubeconfig"
+        other_kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+        seen: dict[str, object] = {}
+
+        def capture_gateway(query: EnsureGateway) -> list[dict[str, str]]:
+            seen["kubeconfig"] = query.kubeconfig_path
+            seen["env"] = os.environ.get("KUBECONFIG")
+            return [{"name": "arena"}]
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.NebiusProvider.ensure_gateway",
+                side_effect=capture_gateway,
+            ),
+            patch("agilerl.arena.byoc.commands.run_cluster_register"),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                [
+                    "--spec",
+                    str(spec_path),
+                    "--install",
+                    "--skip-enable",
+                    "--kubeconfig",
+                    str(other_kubeconfig),
+                    "--context",
+                    "other",
+                ],
+                obj=command_config,
+            )
+
+        pinned = tmp_path / "pinned-kubeconfig"
+        assert result.exit_code == 0, result.output
+        pinned_target.assert_called_once_with(
+            "spec-cluster", other_kubeconfig.resolve(), "other"
+        )
+        assert seen["kubeconfig"] == pinned
+        assert seen["env"] == str(pinned)
+
+    @pytest.mark.parametrize(
+        ("registered", "proceeds"),
+        [
+            (None, True),
+            ({"name": "spec-cluster", "clusterUid": None}, True),
+            ({"name": "spec-cluster", "clusterUid": FAKE_CLUSTER_UID}, True),
+            ({"name": "spec-cluster", "clusterUid": "another-uid"}, False),
+        ],
+    )
+    def test_install_checks_the_registered_uid_before_the_gateway(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        registered: dict[str, object] | None,
+        proceeds: bool,
+    ) -> None:
+        """A context Arena knows as another cluster stops before gateway setup."""
+        monkeypatch.chdir(tmp_path)
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(NEBIUS_SPEC, encoding="utf-8")
+        spec_kubeconfig = tmp_path / "arena-cluster-spec-cluster" / "kubeconfig"
+        spec_kubeconfig.parent.mkdir()
+        spec_kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+
+        with (
+            patch(
+                f"{COMMANDS}.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(f"{COMMANDS}.ByocApi.find_cluster", return_value=registered),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.NebiusProvider.ensure_gateway",
+                return_value=[{"name": "arena"}],
+            ) as gateway,
+            patch(f"{COMMANDS}.run_cluster_register") as register,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--spec", str(spec_path), "--install", "--skip-enable"],
+                obj=command_config,
+            )
+
+        assert (result.exit_code == 0) is proceeds, result.output
+        assert gateway.called is proceeds
+        assert register.called is proceeds
+        if not proceeds:
+            assert "another-uid" in result.output
+
+    def test_install_skips_the_gateway_when_the_spec_disables_it(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(
+            NEBIUS_SPEC.replace(
+                "  inference:\n    domain: inference.example.com\n",
+                "  inference:\n    domain: inference.example.com\n"
+                "  gateway:\n    enable: false\n",
+            ),
+            encoding="utf-8",
+        )
+        kubeconfig = tmp_path / "arena-cluster-spec-cluster" / "kubeconfig"
+        kubeconfig.parent.mkdir()
+        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.NebiusProvider.ensure_gateway",
+            ) as gateway,
+            patch("agilerl.arena.byoc.commands.run_cluster_register") as register,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--spec", str(spec_path), "--install", "--skip-enable"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        gateway.assert_not_called()
+        assert register.call_args.kwargs["gateway_api_parent_refs"] is None
 
     def test_install_fetches_cluster_kubeconfig_when_the_file_is_missing(
         self,
+        pinned_target: MagicMock,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
         tmp_path: Path,
@@ -1904,8 +2047,9 @@ nebius:
         fetched = tmp_path / "fetched-kubeconfig"
         seen: dict[str, str | None] = {}
 
-        def capture(*_args: object, **_kwargs: object) -> None:
+        def capture(*_args: object, **kwargs: object) -> None:
             seen["kubeconfig"] = os.environ.get("KUBECONFIG")
+            seen["cluster_uid"] = kwargs.get("cluster_uid")
 
         client = MagicMock()
         with (
@@ -1930,7 +2074,7 @@ nebius:
 
         assert result.exit_code == 0, result.output
         write_mock.assert_called_once()
-        assert seen["kubeconfig"] == str(fetched)
+        assert pinned_target.call_args.args[1:] == (fetched, None)
 
     def test_provisions_when_nebius_cluster_is_missing(
         self,
@@ -2346,6 +2490,115 @@ nebius:
         run_mock.assert_called_once()
 
 
+class TestAwsRegisterInstallWebhookCerts:
+    def test_second_install_reuses_the_webhook_ca_beside_the_durable_kubeconfig(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second AWS register --install reuses the CA next to the output kubeconfig."""
+        monkeypatch.chdir(tmp_path)
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(
+            """
+provider: aws
+name: eks-byoc
+terraform_state:
+  bucket: eks-tfstate
+arena:
+  storage:
+    bucket: eks-data
+    endpoint: https://s3.eu-west-1.amazonaws.com
+  inference:
+    domain: inference.example.com
+aws:
+  region: eu-west-1
+  object_storage:
+    size_gib: 1
+""",
+            encoding="utf-8",
+        )
+        output_dir = tmp_path / "arena-cluster-eks-byoc"
+        kubeconfig = output_dir / "kubeconfig"
+        kubeconfig.parent.mkdir()
+        kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+        pinned = tmp_path / "pinned-kubeconfig"
+        cert_dir = output_dir / WEBHOOK_CERT_DIRECTORY
+        helm_kubeconfigs: list[str] = []
+        helm_values: list[str] = []
+        gateway_kubeconfigs: list[Path] = []
+
+        def record_helm(
+            argv: list[str], env: dict[str, str], **_kwargs: object
+        ) -> None:
+            helm_kubeconfigs.append(env["KUBECONFIG"])
+            helm_values.append(argv[argv.index("-f") + 1])
+
+        def record_gateway(**kwargs: object) -> list[dict[str, str]]:
+            kubeconfig_path = kwargs["kubeconfig_path"]
+            assert isinstance(kubeconfig_path, Path)
+            gateway_kubeconfigs.append(kubeconfig_path)
+            return [{"name": "arena"}]
+
+        def invoke() -> None:
+            with (
+                patch(
+                    "agilerl.arena.byoc.commands.arena_client",
+                    return_value=client_context(MagicMock()),
+                ),
+                patch(
+                    "agilerl.arena.byoc.commands.ClusterProvisioner.cluster_exists",
+                    return_value=True,
+                ),
+                patch(
+                    "agilerl.arena.byoc.commands.ClusterProvisioner.ensure_post_apply",
+                ),
+                patch(
+                    "agilerl.arena.byoc.commands.ClusterProvisioner.status",
+                    return_value={
+                        "worker_node_group_ids": {},
+                        "vpc_id": "vpc-123",
+                    },
+                ),
+                patch(
+                    "agilerl.arena.byoc.provisioning.providers.aws.gateway.helm_available",
+                    return_value=True,
+                ),
+                patch(
+                    "agilerl.arena.byoc.provisioning.providers.aws.gateway._run",
+                    side_effect=record_helm,
+                ),
+                patch(
+                    "agilerl.arena.byoc.provisioning.providers.aws.gateway.configure_gateway_api",
+                    side_effect=record_gateway,
+                ),
+                patch("agilerl.arena.byoc.commands.run_cluster_register"),
+            ):
+                result = CliRunner().invoke(
+                    build_cluster_register_command(),
+                    ["--spec", str(spec_path), "--install", "--skip-enable"],
+                    obj=command_config,
+                )
+
+            assert result.exit_code == 0, result.output
+
+        invoke()
+        ca = (cert_dir / "ca.crt").read_bytes()
+
+        invoke()
+
+        values_path = str(cert_dir / WEBHOOK_HELM_VALUES)
+        assert (cert_dir / "ca.crt").read_bytes() == ca
+        assert (cert_dir / "tls.crt").is_file()
+        assert (cert_dir / "tls.key").is_file()
+        assert not (tmp_path / WEBHOOK_CERT_DIRECTORY).exists()
+        assert helm_kubeconfigs == [str(pinned.resolve()), str(pinned.resolve())]
+        assert helm_values == [values_path, values_path]
+        assert gateway_kubeconfigs == [pinned, pinned]
+
+
 class TestBundleHelmValuesYaml:
     def test_omits_storage_yaml_when_not_requested(self) -> None:
         agent_yaml, storage_yaml = _bundle_helm_values_yaml(
@@ -2710,6 +2963,104 @@ class TestEnsureResourceClassDescription:
         assert (
             "Updated availability for 'gpu': eu-north1 (4)." in capsys.readouterr().out
         )
+
+
+class TestRegisterKubeTarget:
+    @pytest.mark.parametrize(
+        ("flags", "expected"),
+        [
+            ([], (None, None)),
+            (["--context", "corp"], (None, "corp")),
+        ],
+    )
+    def test_install_resolves_the_named_context(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        flags: list[str],
+        expected: tuple[object, object],
+    ) -> None:
+        with (
+            patch(
+                f"{COMMANDS}.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(f"{COMMANDS}.run_cluster_register") as register,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--name", "corp-k8s", "--install", "--no-write", *flags],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        pinned_target.assert_called_once_with("corp-k8s", *expected)
+        assert register.call_args.kwargs["cluster_uid"] == FAKE_CLUSTER_UID
+
+    def test_register_without_install_never_touches_the_cluster(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        with (
+            patch(
+                f"{COMMANDS}.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(f"{COMMANDS}.run_cluster_register") as register,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--name", "corp-k8s"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        pinned_target.assert_not_called()
+        assert register.call_args.kwargs["cluster_uid"] is None
+
+    def test_rotate_token_install_sends_the_uid_of_the_named_context(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        def register(_client: object, **kwargs: object) -> None:
+            # The kept-token Secret check runs kubectl inside run_cluster_register.
+            seen["KUBECONFIG"] = os.environ.get("KUBECONFIG")
+            seen.update(kwargs)
+
+        with (
+            patch(
+                f"{COMMANDS}.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(f"{COMMANDS}.run_cluster_register", side_effect=register),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                [
+                    "--name",
+                    "corp-k8s",
+                    "--install",
+                    "--no-write",
+                    "--rotate-token",
+                    "--context",
+                    "corp",
+                ],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        pinned_target.assert_called_once_with("corp-k8s", None, "corp")
+        assert seen["rotate_token"] is True
+        assert seen["cluster_uid"] == FAKE_CLUSTER_UID
+        assert seen["KUBECONFIG"] == str(tmp_path / "pinned-kubeconfig")
 
 
 class TestEnsureResourceClassCluster:

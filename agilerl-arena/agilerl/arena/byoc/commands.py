@@ -6,11 +6,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -32,11 +31,17 @@ from agilerl.arena.byoc.cluster_register import (
     ensure_resource_class,
     run_cluster_register,
 )
-from agilerl.arena.byoc.cluster_token import (
-    resolve_cluster_kubeconfig,
-    run_cluster_rotate_token,
-)
+from agilerl.arena.byoc.cluster_token import run_cluster_rotate_token
 from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
+from agilerl.arena.byoc.kube_target import (
+    KubeTarget,
+    NoKubeContextError,
+    kube_target,
+    kube_target_options,
+    kubeconfig_environment,
+    require_registered_cluster,
+    require_same_cluster,
+)
 from agilerl.arena.byoc.provisioning.inference import normalize_inference_domain
 from agilerl.arena.byoc.provisioning.module_catalog import (
     open_module_catalog,
@@ -160,7 +165,12 @@ def _register_provisioned_cluster(config: CommandConfig, **fields: object) -> No
         else install_storage
     )
     with (
-        _kubeconfig_environment(outputs.kubeconfig_path),
+        _register_target(
+            str(registration["name"]),
+            outputs.kubeconfig_path,
+            cast("str | None", fields.get("kube_context")),
+            touches_cluster=install or storage_install,
+        ) as target,
         arena_client(config) as client,
     ):
         run_cluster_register(
@@ -203,9 +213,28 @@ def _register_provisioned_cluster(config: CommandConfig, **fields: object) -> No
                 worker_node_group_ids=outputs.worker_node_group_ids,
             ),
             yes=cast("bool", fields.get("yes", False)),
+            cluster_uid=None if target is None else target.cluster_uid,
             # The cluster was just provisioned, so it holds no agent token yet.
             rotate_token=True,
         )
+
+
+@contextmanager
+def _register_target(
+    name: str, kubeconfig: Path | None, context: str | None, touches_cluster: bool
+) -> Iterator[KubeTarget | None]:
+    """Pin kubectl and Helm to the cluster register installs on.
+
+    Yields ``None`` without resolving a context when nothing is installed.
+    """
+    if not touches_cluster:
+        yield None
+        return
+    with (
+        kube_target(name, kubeconfig, context) as target,
+        kubeconfig_environment(target.kubeconfig),
+    ):
+        yield target
 
 
 def _byoc_provider_with_module(
@@ -311,20 +340,6 @@ def _registration_values_from_spec(
         "byoc_scope": resolved.values.byoc_scope,
         "byoc_provider": get_provider(resolved.provider).registration_payload(resolved),
     }
-
-
-@contextmanager
-def _kubeconfig_environment(kubeconfig_path: Path) -> Iterator[None]:
-    """Set KUBECONFIG only while a Helm installation runs."""
-    old_value = os.environ.get("KUBECONFIG")
-    os.environ["KUBECONFIG"] = str(kubeconfig_path)
-    try:
-        yield
-    finally:
-        if old_value is None:
-            del os.environ["KUBECONFIG"]
-        else:
-            os.environ["KUBECONFIG"] = old_value
 
 
 def _apply_verbosity(verbose: bool) -> None:
@@ -531,6 +546,7 @@ def _cluster_register_options(command: click.Command) -> click.Command:
         help="Cloud cluster YAML file that supplies registration settings.",
     )(command)
     command = _cluster_registration_options(command)
+    command = kube_target_options(command)
     for declaration, kwargs in REGISTER_COMMAND_FLAGS:
         command = click.option(*declaration, **kwargs)(command)
     return click.argument(
@@ -668,6 +684,7 @@ def _provision_missing_cluster(
         charts_dir=charts,
         helm_wait=not cast("bool", options["no_helm_wait"]),
         state_dir=resolved_state,
+        kube_context=options["kube_context"],
     )
     return True
 
@@ -816,6 +833,49 @@ def _ensure_registered_ephemeral_regions(
     ensure_ephemeral_regions(cluster_spec)
 
 
+def _require_same_registered_cluster(
+    config: CommandConfig,
+    cluster_name: str,
+    fields: dict[str, object],
+    target: KubeTarget | None,
+) -> None:
+    """Stop before gateway setup or Helm when Arena stores another cluster UID.
+
+    A name Arena does not have yet is a first registration and goes ahead.
+    Without a target the command does not touch the cluster.
+    """
+    if target is None:
+        return
+    with arena_client(config) as client:
+        registered = ByocApi(
+            client, platform=fields.get("byoc_scope") == "platform"
+        ).find_cluster(cluster_name)
+    if registered is not None:
+        require_same_cluster(registered, cluster_name, target)
+
+
+def _ensure_spec_gateway(
+    cluster_spec: ClusterSpec,
+    target: KubeTarget,
+    values: dict[str, object] | None,
+    spec_kubeconfig: Path | None,
+    fields: dict[str, object],
+) -> None:
+    """Set up the spec's gateway on *target* and record its parent refs in *fields*."""
+    if not cluster_spec.arena.gateway.enable:
+        return
+    parent_refs = get_provider(cluster_spec.provider).ensure_gateway(
+        EnsureGateway(
+            cluster_spec,
+            target.kubeconfig,
+            values or {},
+            durable_kubeconfig=spec_kubeconfig,
+        )
+    )
+    if parent_refs is not None:
+        fields["gateway_api_parent_refs"] = parent_refs
+
+
 def _register_existing_cluster(
     config: CommandConfig,
     cluster_name: str,
@@ -850,42 +910,42 @@ def _register_existing_cluster(
             )
             attach_service_account_credentials(fields["byoc_provider"], values)
             attach_catalog_credentials(fields["byoc_provider"], values)
-    kubeconfig = _kubeconfig_for_register_install(
+    spec_kubeconfig = _kubeconfig_for_register_install(
         config, cluster_spec, registration, options, output_dir
     )
-    if (
-        kubeconfig is not None
-        and cluster_spec is not None
-        and cluster_spec.arena.gateway.enable
-    ):
-        parent_refs = get_provider(cluster_spec.provider).ensure_gateway(
-            EnsureGateway(cluster_spec, kubeconfig, values or {})
-        )
-        if parent_refs is not None:
-            fields["gateway_api_parent_refs"] = parent_refs
-    kubeconfig_cm = (
-        _kubeconfig_environment(kubeconfig) if kubeconfig is not None else nullcontext()
+    install = cast("bool", options["install"])
+    install_storage = cast("bool", options["install_storage"]) or bool(
+        registration is not None and registration["install_storage"]
     )
-    with kubeconfig_cm, arena_client(config) as client:
-        run_cluster_register(
-            client,
-            name=cluster_name,
-            output_dir=output_dir,
-            skip_enable=cast("bool", options["skip_enable"]),
-            force=cast("bool", options["force"]),
-            install=cast("bool", options["install"]),
-            install_storage=cast("bool", options["install_storage"])
-            or bool(registration is not None and registration["install_storage"]),
-            narrow_allowed_ips=cast("bool", options["narrow_allowed_ips"]),
-            no_write=cast("bool", options["no_write"]),
-            charts_dir=charts,
-            helm_wait=not cast("bool", options["no_helm_wait"]),
-            agent_namespace=cast("str", options["agent_namespace"]),
-            resource_classes=resource_classes,
-            yes=cast("bool", options.get("yes", False)),
-            rotate_token=cast("bool", options["rotate_token"]),
-            **fields,
-        )
+    with _register_target(
+        cluster_name,
+        cast("Path | None", options["kubeconfig"]) or spec_kubeconfig,
+        cast("str | None", options["kube_context"]),
+        touches_cluster=install or install_storage,
+    ) as target:
+        _require_same_registered_cluster(config, cluster_name, fields, target)
+        if target is not None and cluster_spec is not None:
+            _ensure_spec_gateway(cluster_spec, target, values, spec_kubeconfig, fields)
+        with arena_client(config) as client:
+            run_cluster_register(
+                client,
+                name=cluster_name,
+                output_dir=output_dir,
+                skip_enable=cast("bool", options["skip_enable"]),
+                force=cast("bool", options["force"]),
+                install=install,
+                install_storage=install_storage,
+                narrow_allowed_ips=cast("bool", options["narrow_allowed_ips"]),
+                no_write=cast("bool", options["no_write"]),
+                charts_dir=charts,
+                helm_wait=not cast("bool", options["no_helm_wait"]),
+                agent_namespace=cast("str", options["agent_namespace"]),
+                resource_classes=resource_classes,
+                yes=cast("bool", options.get("yes", False)),
+                rotate_token=cast("bool", options["rotate_token"]),
+                cluster_uid=None if target is None else target.cluster_uid,
+                **fields,
+            )
 
 
 def _run_register_command(config: CommandConfig, options: dict[str, object]) -> None:
@@ -995,20 +1055,22 @@ def _helm_releases_to_uninstall(
 
 
 def _installed_byoc_releases(
-    cluster_name: str, kubeconfig_path: Path | None
+    config: CommandConfig,
+    cluster_name: str,
+    target: KubeTarget | None,
+    platform: bool,
 ) -> list[tuple[str, str]]:
-    """Installed BYOC releases, or none with a note when they cannot be listed."""
-    if not helm_available():
-        click.echo("Could not check Helm releases: helm is not on PATH.")
+    """Installed BYOC releases on *target* once Arena confirms it is this cluster.
+
+    No target means the releases are not looked at, so there are none.
+    """
+    if target is None:
         return []
-    if kubeconfig_path is None:
-        click.echo(
-            "Could not check Helm releases: no kubeconfig. "
-            "Pass --kubeconfig, set KUBECONFIG, or run from the directory "
-            f"that contains arena-cluster-{cluster_name}/kubeconfig."
+    with arena_client(config) as client:
+        require_registered_cluster(
+            ByocApi(client, platform=platform), cluster_name, target
         )
-        return []
-    return list_installed_byoc_releases(kubeconfig_path, cluster_name=cluster_name)
+    return list_installed_byoc_releases(target.kubeconfig, cluster_name=cluster_name)
 
 
 def _wait_until_archived(api: ByocApi, cluster_name: str, timeout: float) -> None:
@@ -1065,6 +1127,38 @@ def _is_platform_spec(spec: ClusterSpec) -> bool:
     return spec.values.byoc_scope == "platform"
 
 
+@contextmanager
+def _unregister_target(
+    cluster_name: str,
+    kubeconfig: Path | None,
+    context: str | None,
+    uninstall_flagged: bool,
+    yes: bool,
+) -> Iterator[KubeTarget | None]:
+    """Yield the cluster whose Helm releases unregister may remove, or ``None``.
+
+    ``--yes`` without an uninstall flag never touches the cluster. Without any
+    kubeconfig the releases are left alone unless an uninstall flag asked for
+    them.
+    """
+    if yes and not uninstall_flagged:
+        yield None
+        return
+    if not helm_available():
+        click.echo("Could not check Helm releases: helm is not on PATH.")
+        yield None
+        return
+    with ExitStack() as stack:
+        target: KubeTarget | None = None
+        try:
+            target = stack.enter_context(kube_target(cluster_name, kubeconfig, context))
+        except NoKubeContextError as exc:
+            if uninstall_flagged:
+                raise
+            click.echo(f"Could not check Helm releases. {exc.message}")
+        yield target
+
+
 def build_cluster_unregister_command() -> click.Command:
     """``arena cluster unregister`` — remove a registered cluster by name.
 
@@ -1077,15 +1171,7 @@ def build_cluster_unregister_command() -> click.Command:
         context_settings={"max_content_width": 100},
     )
     @click.option("--name", required=True, help="Registered cluster name.")
-    @click.option(
-        "--kubeconfig",
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        default=None,
-        help=(
-            "Kubeconfig for the agent cluster. Defaults to "
-            "arena-cluster-NAME/kubeconfig when that file exists."
-        ),
-    )
+    @kube_target_options
     @click.option(
         "--stop-runs",
         is_flag=True,
@@ -1142,6 +1228,7 @@ def build_cluster_unregister_command() -> click.Command:
         config: CommandConfig,
         name: str,
         kubeconfig: Path | None,
+        kube_context: str | None,
         stop_runs: bool,
         force: bool,
         uninstall_helm: bool,
@@ -1162,36 +1249,44 @@ def build_cluster_unregister_command() -> click.Command:
         if not cluster_name:
             msg = "--name is required."
             raise click.ClickException(msg)
-        kubeconfig_path = resolve_cluster_kubeconfig(cluster_name, kubeconfig)
-        installed = _installed_byoc_releases(cluster_name, kubeconfig_path)
-        offered = [
-            pair for pair in installed if not keep_agent or pair[0] == STORAGE_RELEASE
-        ]
-        to_uninstall = _helm_releases_to_uninstall(
-            offered,
-            uninstall_helm=uninstall_helm,
-            uninstall_storage=uninstall_storage,
-            skip_prompts=yes,
-        )
-        if not yes and not click.confirm(
-            f"Unregister BYOC cluster {cluster_name!r} from Arena?",
-            default=False,
-        ):
-            click.echo("Aborted.")
-            return
-        with arena_client(config) as client:
-            api = ByocApi(client, platform=platform)
-            response = api.unregister_cluster(
-                cluster_name, stop_runs=stop_runs, force=force
+        with _unregister_target(
+            cluster_name,
+            kubeconfig,
+            kube_context,
+            uninstall_flagged=uninstall_helm or uninstall_storage,
+            yes=yes,
+        ) as target:
+            installed = _installed_byoc_releases(config, cluster_name, target, platform)
+            offered = [
+                pair
+                for pair in installed
+                if not keep_agent or pair[0] == STORAGE_RELEASE
+            ]
+            to_uninstall = _helm_releases_to_uninstall(
+                offered,
+                uninstall_helm=uninstall_helm,
+                uninstall_storage=uninstall_storage,
+                skip_prompts=yes,
             )
-            deregistering = response.get("status") == "Deregistering"
-            if deregistering:
-                _wait_until_archived(api, cluster_name, wait_timeout)
-        # Arena sends a cleanup command when the agent does not clean up.
-        agent_cleaned_up = deregistering and "cleanupCommand" not in response
-        click.echo(f"Unregistered BYOC cluster {cluster_name!r}.")
-        if to_uninstall and kubeconfig_path is not None:
-            uninstall_byoc_releases(to_uninstall, kubeconfig_path)
+            if not yes and not click.confirm(
+                f"Unregister BYOC cluster {cluster_name!r} from Arena?",
+                default=False,
+            ):
+                click.echo("Aborted.")
+                return
+            with arena_client(config) as client:
+                api = ByocApi(client, platform=platform)
+                response = api.unregister_cluster(
+                    cluster_name, stop_runs=stop_runs, force=force
+                )
+                deregistering = response.get("status") == "Deregistering"
+                if deregistering:
+                    _wait_until_archived(api, cluster_name, wait_timeout)
+            # Arena sends a cleanup command when the agent does not clean up.
+            agent_cleaned_up = deregistering and "cleanupCommand" not in response
+            click.echo(f"Unregistered BYOC cluster {cluster_name!r}.")
+            if target is not None and to_uninstall:
+                uninstall_byoc_releases(to_uninstall, target.kubeconfig)
         if any(release != STORAGE_RELEASE for release, _ in to_uninstall):
             return
         if agent_cleaned_up:
@@ -1211,15 +1306,7 @@ def build_cluster_rotate_token_command() -> click.Command:
 
     @click.command("rotate-token")
     @click.option("--name", required=True, help="Registered cluster name.")
-    @click.option(
-        "--kubeconfig",
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        default=None,
-        help=(
-            "Kubeconfig for the agent cluster. Defaults to "
-            "arena-cluster-NAME/kubeconfig when that file exists."
-        ),
-    )
+    @kube_target_options
     @click.option(
         "--agent-namespace",
         default=None,
@@ -1245,6 +1332,7 @@ def build_cluster_rotate_token_command() -> click.Command:
         config: CommandConfig,
         name: str,
         kubeconfig: Path | None,
+        kube_context: str | None,
         agent_namespace: str | None,
         secret_name: str | None,
         yes: bool,
@@ -1267,6 +1355,7 @@ def build_cluster_rotate_token_command() -> click.Command:
                 client,
                 name=cluster_name,
                 kubeconfig=kubeconfig,
+                context=kube_context,
                 secret_name=secret_name,
                 namespace=agent_namespace,
                 platform=platform,
@@ -1280,15 +1369,7 @@ def build_cluster_upgrade_command() -> click.Command:
 
     @click.command("upgrade")
     @click.option("--name", required=True, help="Registered cluster name.")
-    @click.option(
-        "--kubeconfig",
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        default=None,
-        help=(
-            "Kubeconfig for the agent cluster. Defaults to "
-            "arena-cluster-NAME/kubeconfig when that file exists."
-        ),
-    )
+    @kube_target_options
     @click.option(
         "--agent-namespace",
         default=None,
@@ -1315,6 +1396,7 @@ def build_cluster_upgrade_command() -> click.Command:
         config: CommandConfig,
         name: str,
         kubeconfig: Path | None,
+        kube_context: str | None,
         agent_namespace: str | None,
         no_helm_wait: bool,
         yes: bool,
@@ -1330,6 +1412,7 @@ def build_cluster_upgrade_command() -> click.Command:
                 client,
                 name=cluster_name,
                 kubeconfig=kubeconfig,
+                context=kube_context,
                 agent_namespace=agent_namespace,
                 helm_wait=not no_helm_wait,
                 platform=platform,
@@ -1952,8 +2035,8 @@ def build_cluster_provision_command() -> click.Command:
             click.echo(f"Module {installed.name} {installed.version}")
         if not register_and_install:
             click.echo(
-                f"Next: KUBECONFIG={outputs.kubeconfig_path} arena cluster "
-                f"register --spec {spec} --install"
+                f"Next: arena cluster register --spec {spec} --install "
+                f"--kubeconfig {outputs.kubeconfig_path}"
             )
             return
         _register_provisioned_cluster(

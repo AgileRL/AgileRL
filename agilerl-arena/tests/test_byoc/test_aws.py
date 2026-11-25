@@ -455,6 +455,7 @@ class TestAwsProvider:
             region="eu-west-1",
             vpc_id="vpc-123",
             tls_secret_name="arena-inference-tls",
+            webhook_cert_dir=outputs.kubeconfig_path.parent / WEBHOOK_CERT_DIRECTORY,
         )
         assert result.gateway_api_parent_refs == parent_refs
 
@@ -1224,6 +1225,7 @@ class TestCiliumNlbGateway:
                 region="eu-west-1",
                 vpc_id="vpc-123",
                 tls_secret_name="arena-inference-tls",
+                webhook_cert_dir=tmp_path / WEBHOOK_CERT_DIRECTORY,
                 run=run,
             )
 

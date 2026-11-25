@@ -130,6 +130,7 @@ class RegisterClusterFields(TypedDict):
     placement: NotRequired[str | None]
     byoc_scope: NotRequired[str | None]
     byoc_provider: NotRequired[dict[str, Any] | None]
+    cluster_uid: NotRequired[str | None]
     rotate_token: NotRequired[bool]
 
 
@@ -271,6 +272,7 @@ class ByocApi:
         placement = fields.get("placement")
         byoc_scope = fields.get("byoc_scope")
         byoc_provider = fields.get("byoc_provider")
+        cluster_uid = fields.get("cluster_uid")
         rotate_token = fields.get("rotate_token")
         wire_placement = None if placement is None else api_placement(placement)
         wire_scope = None if byoc_scope is None else api_byoc_scope(byoc_scope)
@@ -293,6 +295,7 @@ class ByocApi:
             ("placement", wire_placement),
             ("byocScope", wire_scope),
             ("byocProvider", byoc_provider),
+            ("clusterUid", cluster_uid),
             ("rotateToken", rotate_token),
         ]
         for key, value in optional_fields:
@@ -408,16 +411,24 @@ class ByocApi:
             raise ArenaAPIError(msg)
         return {str(key): value for key, value in result.items()}
 
-    def rotate_cluster_token(self, name: str) -> dict[str, Any]:
+    def rotate_cluster_token(
+        self, name: str, cluster_uid: str | None = None
+    ) -> dict[str, Any]:
         """Rotate the agent token for the BYOC cluster named *name*.
 
         :param name: The registered cluster name.
         :type name: str
+        :param cluster_uid: kube-system namespace UID the new token is for.
+            Arena refuses the rotation when it stores a different one.
+        :type cluster_uid: str | None
         :returns: Rotation bundle with the new token.
         :rtype: dict[str, Any]
         """
         logger.info("Rotating BYOC cluster token for %r…", name)
-        result = self._invoke(endpoints.ROTATE_CLUSTER_TOKEN, {"name": name})
+        args: dict[str, object] = {"name": name}
+        if cluster_uid is not None:
+            args["clusterUid"] = cluster_uid
+        result = self._invoke(endpoints.ROTATE_CLUSTER_TOKEN, args)
         if not isinstance(result, dict):
             msg = "Unexpected cluster token rotation response from Arena."
             raise ArenaAPIError(msg)
