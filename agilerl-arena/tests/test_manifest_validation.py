@@ -1731,6 +1731,58 @@ class TestSchema:
         assert payload["environment"]["screenshot_field"] == "page"
         assert payload["environment"]["goal_images_field"] == "task_images"
 
+    @pytest.mark.parametrize("name", ["AgentWorldModel", "VisualWebArena"])
+    def test_name_only_built_in_submits_only_authored_environment_keys(
+        self, name: str
+    ) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["environment"] = {"name": name, "env_type": "rollout"}
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert payload["environment"] == {"env_type": "rollout", "name": name}
+        errors = list(Draft202012Validator(manifest_schema()).iter_errors(payload))
+        assert not errors, [f"{list(e.path)}: {e.message}" for e in errors]
+
+    def test_name_only_built_in_keeps_environment_fields_the_manifest_sets(
+        self,
+    ) -> None:
+        authored = {
+            "name": "VisualWebArena",
+            "env_type": "rollout",
+            "num_envs": 4,
+            "max_turns": 5,
+            "segment_prompt_tokens": 1000,
+            "restart_keep_turns": 1,
+            "action_error_field": "error",
+            "repeat_system_prompt": True,
+            "strict_chat_template_boundary": False,
+        }
+        doc = copy.deepcopy(GRPO)
+        doc["environment"] = authored
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert payload["environment"] == authored
+
+    def test_a_built_in_with_a_source_still_submits_environment_defaults(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["environment"] = {
+            "name": "AgentWorldModel",
+            "env_type": "rollout",
+            "env_image": "awm:1",
+        }
+
+        environment = TrainingManifest.model_validate(doc).to_payload()["environment"]
+
+        assert environment["num_envs"] == 1
+        assert environment["strict_chat_template_boundary"] is True
+        assert environment["env_services"] == []
+        assert environment["restart_keep_turns"] == 0
+        assert environment["action_error_field"] == ""
+        assert environment["repeat_system_prompt"] is False
+        assert environment["env_image"] == "awm:1"
+
     @pytest.mark.parametrize("source", [DQN, GRPO], ids=["rl", "llm"])
     def test_the_payload_we_submit_satisfies_the_schema_we_publish(
         self, source: dict

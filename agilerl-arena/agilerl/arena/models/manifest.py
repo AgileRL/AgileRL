@@ -1039,6 +1039,11 @@ class TrainingManifest(BaseModel):
                 environment.pop("screenshot_field", None)
             if environment.get("goal_images_field") is None:
                 environment.pop("goal_images_field", None)
+            if (
+                isinstance(self.environment, LLMEnvSpec)
+                and self.environment.name_only_built_in
+            ):
+                self._drop_unset_built_in_environment_fields(environment)
         return payload
 
     def _resolve_lora_config(self, network: FinetuningNetworkSpec) -> None:
@@ -1074,6 +1079,22 @@ class TrainingManifest(BaseModel):
         algorithm.pop("weights_path", None)
         algorithm.pop("max_model_len", None)
         algorithm.pop("lora_config", None)
+
+    def _drop_unset_built_in_environment_fields(
+        self, environment: dict[str, Any]
+    ) -> None:
+        """Omit environment fields a name-only built-in left unset.
+
+        Ray deep-merges this document over the bundled profile, and a present
+        key replaces the profile value.
+
+        :param environment: The dumped ``environment`` section, edited in place.
+        :type environment: dict[str, Any]
+        """
+        authored = self.environment.model_fields_set
+        for field_name in type(self.environment).model_fields:
+            if field_name not in authored:
+                environment.pop(field_name, None)
 
     def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
         """Omit dumped training defaults that parsers treat as explicit choices.
