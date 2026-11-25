@@ -1055,7 +1055,7 @@ class TestRunClusterRegister:
         )
         assert "Created resource class 'arena-nebius-gpu'" in capsys.readouterr().out
 
-    def test_skips_resource_class_when_name_exists(
+    def test_confirms_a_matching_class_on_the_cluster(
         self,
         mock_client: MagicMock,
         tmp_path: Path,
@@ -1093,6 +1093,9 @@ class TestRunClusterRegister:
                 },
             ),
             patch.object(ByocApi, "create_class") as create_mock,
+            patch.object(
+                ByocApi, "update_class", return_value={"name": "arena-nebius-gpu"}
+            ) as update_mock,
             patch(
                 "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
             ),
@@ -1108,6 +1111,8 @@ class TestRunClusterRegister:
             )
 
         create_mock.assert_not_called()
+        update_mock.assert_called_once()
+        assert update_mock.call_args.kwargs["cluster"] == "prod-cluster"
         assert "already matches" in capsys.readouterr().out
 
     def test_leaves_the_class_when_gib_display_is_the_same_size(
@@ -1165,7 +1170,11 @@ class TestRunClusterRegister:
                 resource_classes=[resource_class],
             )
 
-        update_mock.assert_not_called()
+        update_mock.assert_called_once()
+        sent = update_mock.call_args.kwargs
+        assert sent["cluster"] == "prod-cluster"
+        assert sent["metadata"]["computeResource"]["memoryBytes"] == "59.6 GiB"
+        assert sent["metadata"]["computeResource"]["gpuMemoryBytes"] == "48 GB"
         assert "already matches" in capsys.readouterr().out
 
     def test_shows_a_real_memory_change(
@@ -1337,6 +1346,7 @@ class TestRunClusterRegister:
             metadata=resource_class.metadata,
             description="",
             availabilities=None,
+            cluster="prod-cluster",
         )
         assert "Updated resource class 'arena-nebius-gpu'" in capsys.readouterr().out
 
@@ -1408,6 +1418,7 @@ class TestRunClusterRegister:
             },
             description="NVIDIA L40S",
             availabilities=None,
+            cluster="prod-cluster",
         )
 
     def test_shows_a_gpu_memory_change(
@@ -2411,7 +2422,9 @@ class TestEnsureResourceClassDescription:
             name = ensure_resource_class(api, "cluster", resource, yes=True)
 
         assert name == "gpu"
-        api.update_class.assert_not_called()
+        api.update_class.assert_called_once()
+        assert api.update_class.call_args.kwargs["cluster"] == "cluster"
+        assert api.update_class.call_args.kwargs["description"] == "stored"
         api.create_class.assert_not_called()
 
     def test_replaces_availabilities_when_the_class_matches(
@@ -2497,7 +2510,7 @@ class TestEnsureResourceClassDescription:
         ensure_resource_class(api, "cluster", resource, yes=True)
 
         api.replace_class_availabilities.assert_called_once_with(
-            "gpu", [], enabled=False
+            "gpu", [], enabled=False, cluster="cluster"
         )
 
     def test_ignores_a_non_string_stored_description(self) -> None:
@@ -2542,7 +2555,8 @@ class TestEnsureResourceClassDescription:
             name = ensure_resource_class(api, "cluster", resource, yes=True)
 
         assert name == "gpu"
-        api.update_class.assert_not_called()
+        api.update_class.assert_called_once()
+        assert api.update_class.call_args.kwargs["cluster"] == "cluster"
         api.create_class.assert_not_called()
 
     def test_echoes_availability_after_updating(
@@ -2579,4 +2593,309 @@ class TestEnsureResourceClassDescription:
         ]
         assert (
             "Updated availability for 'gpu': eu-north1 (4)." in capsys.readouterr().out
+        )
+
+
+class TestEnsureResourceClassCluster:
+    def test_update_names_the_class_cluster(self, http_client: ArenaClient) -> None:
+        # Arrange
+        resource = ClusterResourceClass(
+            name="pool", num_nodes=2, node_selector={"pool": "a"}, metadata={}
+        )
+
+        # Act
+        ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        # Assert
+        update = http_client._http.request.call_args
+        assert update.args[1].endswith("/classes/update")
+        assert update.kwargs["params"] == {"name": "pool", "cluster": "arena"}
+
+    def test_availability_update_names_the_class_cluster(
+        self, http_client: ArenaClient
+    ) -> None:
+        # Arrange
+        stored = {
+            "name": "pool",
+            "num_nodes": 1,
+            "node_selector": {"pool": "a"},
+            "metadata": {},
+        }
+        http_client._http.request.side_effect = lambda method, path, **_kw: (
+            httpx.Response(200, json=[stored] if path.endswith("/list") else stored)
+        )
+        resource = ClusterResourceClass(
+            name="pool",
+            num_nodes=1,
+            node_selector={"pool": "a"},
+            metadata={},
+            availabilities=(),
+        )
+
+        # Act
+        ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        # Assert
+        update = http_client._http.request.call_args
+        assert update.args[1].endswith("/classes/update")
+        assert update.kwargs["params"] == {"name": "pool", "cluster": "arena"}
+        assert update.kwargs["json"] == {"availabilities": []}
+
+    def test_creates_the_class_when_the_update_is_not_on_this_cluster(
+        self, http_client: ArenaClient
+    ) -> None:
+        # Arrange
+        stored = {
+            "name": "pool",
+            "num_nodes": 1,
+            "node_selector": {"pool": "a"},
+            "metadata": {},
+        }
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=[stored])
+            if path.endswith("/classes/update"):
+                return httpx.Response(404, json={"error": "Resource class not found"})
+            if path.endswith("/classes/create"):
+                return httpx.Response(200, json={"name": "pool"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool",
+            num_nodes=2,
+            node_selector={"pool": "b"},
+            metadata={},
+        )
+
+        # Act
+        name = ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        # Assert
+        assert name == "pool"
+        calls = http_client._http.request.call_args_list
+        update = next(call for call in calls if call.args[1].endswith("/update"))
+        create = next(call for call in calls if call.args[1].endswith("/create"))
+        assert update.kwargs["params"] == {"name": "pool", "cluster": "arena"}
+        assert create.kwargs["json"]["clusterName"] == "arena"
+
+    def test_creates_when_a_matching_class_is_not_on_this_cluster(
+        self, http_client: ArenaClient
+    ) -> None:
+        stored = {
+            "name": "pool",
+            "num_nodes": 1,
+            "node_selector": {"pool": "a"},
+            "metadata": {},
+        }
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=[stored])
+            if path.endswith("/classes/update"):
+                return httpx.Response(404, json={"error": "Resource class not found"})
+            if path.endswith("/classes/create"):
+                return httpx.Response(200, json={"name": "pool"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool",
+            num_nodes=1,
+            node_selector={"pool": "a"},
+            metadata={},
+        )
+
+        name = ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        assert name == "pool"
+        calls = http_client._http.request.call_args_list
+        assert any(call.args[1].endswith("/update") for call in calls)
+        create = next(call for call in calls if call.args[1].endswith("/create"))
+        assert create.kwargs["json"]["clusterName"] == "arena"
+
+    def test_updates_when_the_class_name_is_shared(
+        self, http_client: ArenaClient
+    ) -> None:
+        rows = [{"name": "pool", "id": 1}, {"name": "pool", "id": 2}]
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=rows)
+            if path.endswith("/classes/update"):
+                return httpx.Response(200, json={"name": "pool"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool", num_nodes=1, node_selector={"pool": "a"}, metadata={}
+        )
+
+        name = ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        assert name == "pool"
+        update = http_client._http.request.call_args
+        assert update.args[1].endswith("/classes/update")
+        assert update.kwargs["params"] == {"name": "pool", "cluster": "arena"}
+
+    def test_shared_name_asks_before_updating_this_cluster(
+        self, http_client: ArenaClient, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Arrange
+        rows = [{"name": "pool", "id": 1}, {"name": "pool", "id": 2}]
+        http_client._http.request.side_effect = lambda _method, _path, **_kw: (
+            httpx.Response(200, json=rows)
+        )
+        resource = ClusterResourceClass(
+            name="pool", num_nodes=1, node_selector={"pool": "a"}, metadata={}
+        )
+
+        # Act
+        with patch(
+            "agilerl.arena.byoc.cluster_register.click.confirm", return_value=False
+        ) as confirm:
+            name = ensure_resource_class(ByocApi(http_client), "arena", resource)
+
+        # Assert
+        assert name == "pool"
+        assert confirm.call_args.args[0] == (
+            "Update resource class 'pool' on cluster 'arena'?"
+        )
+        sent = [call.args[1] for call in http_client._http.request.call_args_list]
+        assert all(path.endswith("/classes/list") for path in sent)
+        assert "Left resource class 'pool' unchanged." in capsys.readouterr().out
+
+    def test_creates_when_a_shared_name_is_missing_on_this_cluster(
+        self, http_client: ArenaClient
+    ) -> None:
+        rows = [{"name": "pool", "id": 1}, {"name": "pool", "id": 2}]
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=rows)
+            if path.endswith("/classes/update"):
+                return httpx.Response(404, json={"error": "Resource class not found"})
+            if path.endswith("/classes/create"):
+                return httpx.Response(200, json={"name": "pool"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool", num_nodes=1, node_selector={"pool": "a"}, metadata={}
+        )
+
+        name = ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        assert name == "pool"
+        calls = http_client._http.request.call_args_list
+        update = next(call for call in calls if call.args[1].endswith("/update"))
+        create = next(call for call in calls if call.args[1].endswith("/create"))
+        assert update.kwargs["params"] == {"name": "pool", "cluster": "arena"}
+        assert create.kwargs["json"]["clusterName"] == "arena"
+
+    def test_find_class_error_is_not_a_shared_name(self) -> None:
+        api = MagicMock()
+        api.find_class.side_effect = ArenaAPIError("boom", status_code=500)
+        resource = ClusterResourceClass(
+            name="pool", num_nodes=1, node_selector={}, metadata={}
+        )
+
+        with pytest.raises(ArenaAPIError, match="boom"):
+            ensure_resource_class(api, "arena", resource, yes=True)
+
+        api.update_class.assert_not_called()
+        api.create_class.assert_not_called()
+
+    def test_shared_name_update_error_is_not_a_missing_class(
+        self, http_client: ArenaClient
+    ) -> None:
+        rows = [{"name": "pool", "id": 1}, {"name": "pool", "id": 2}]
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=rows)
+            if path.endswith("/classes/update"):
+                return httpx.Response(400, json={"error": "unknown Nebius platform"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool", num_nodes=1, node_selector={"pool": "a"}, metadata={}
+        )
+
+        with pytest.raises(ArenaAPIError, match="unknown Nebius platform"):
+            ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        assert not any(
+            call.args[1].endswith("/create")
+            for call in http_client._http.request.call_args_list
+        )
+
+    def test_echoes_availability_when_a_shared_name_updates(
+        self, http_client: ArenaClient, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rows = [{"name": "pool", "id": 1}, {"name": "pool", "id": 2}]
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=rows)
+            if path.endswith("/classes/update"):
+                return httpx.Response(200, json={"name": "pool"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool",
+            num_nodes=1,
+            node_selector={"pool": "a"},
+            metadata={},
+            availabilities=(
+                ClassAvailability(
+                    region="eu-north1",
+                    zones=("fabric-2",),
+                    enabled=True,
+                    available=4,
+                ),
+            ),
+        )
+
+        name = ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        assert name == "pool"
+        assert (
+            "Updated availability for 'pool': eu-north1 (4)." in capsys.readouterr().out
+        )
+
+    def test_update_error_is_not_a_missing_class(
+        self, http_client: ArenaClient
+    ) -> None:
+        stored = {
+            "name": "pool",
+            "num_nodes": 1,
+            "node_selector": {"pool": "a"},
+            "metadata": {},
+        }
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            if path.endswith("/classes/list"):
+                return httpx.Response(200, json=[stored])
+            if path.endswith("/classes/update"):
+                return httpx.Response(400, json={"error": "unknown Nebius platform"})
+            raise AssertionError(path)
+
+        http_client._http.request.side_effect = respond
+        resource = ClusterResourceClass(
+            name="pool",
+            num_nodes=2,
+            node_selector={"pool": "b"},
+            metadata={},
+        )
+
+        with pytest.raises(ArenaAPIError, match="unknown Nebius platform"):
+            ensure_resource_class(ByocApi(http_client), "arena", resource, yes=True)
+
+        assert not any(
+            call.args[1].endswith("/create")
+            for call in http_client._http.request.call_args_list
         )

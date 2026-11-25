@@ -12,6 +12,7 @@ import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -19,7 +20,7 @@ import click
 import yaml
 from typing_extensions import NotRequired, Unpack
 
-from agilerl.arena.byoc.api import ByocApi
+from agilerl.arena.byoc.api import ByocApi, DuplicateNameError
 from agilerl.arena.byoc.cluster_helm import (
     AGENT_NAMESPACE,
     AGENT_RELEASE,
@@ -39,6 +40,7 @@ from agilerl.arena.byoc.provisioning.inference import (
 )
 from agilerl.arena.cli_manifest import write_text_atomic
 from agilerl.arena.client import ArenaClient
+from agilerl.arena.exceptions import ArenaAPIError
 
 logger = logging.getLogger("agilerl.arena.byoc")
 
@@ -477,52 +479,69 @@ def _stored_class_fields(
 
 def _update_existing_resource_class(
     api: ByocApi,
+    cluster_name: str,
     resource_class: ClusterResourceClass,
-    existing: dict[str, object],
+    existing: dict[str, object] | None,
     desired: dict[str, object],
     availability_body: list[dict[str, object]] | None,
     yes: bool,
 ) -> str:
-    """Update a stored class, or leave it when it already matches."""
-    current = _stored_class_fields(existing, resource_class)
-    desired_view = _align_same_memory(current, desired)
+    """Update the class on *cluster_name*, or confirm an unchanged class is there.
+
+    *existing* is the listed row, or ``None`` when several clusters list the name.
+    """
+    name = resource_class.name
     availabilities = resource_class.availabilities
-    if current == desired_view:
-        if availabilities is None:
-            click.echo(
-                f"Resource class {resource_class.name!r} already matches; "
-                "leaving it unchanged."
+    if existing is None:
+        click.echo(f"Resource class {name!r} is listed on more than one cluster.")
+        metadata = desired["metadata"]
+        prompt = f"Update resource class {name!r} on cluster {cluster_name!r}?"
+    else:
+        current = _stored_class_fields(existing, resource_class)
+        desired_view = _align_same_memory(current, desired)
+        metadata = desired_view["metadata"]
+        if current == desired_view:
+            if availabilities is None:
+                # The listed row may be on another cluster; a 404 here says so.
+                api.update_class(
+                    name=name,
+                    num_nodes=resource_class.num_nodes,
+                    node_selector=resource_class.node_selector,
+                    metadata=metadata,
+                    description=resource_class.description,
+                    cluster=cluster_name,
+                )
+                click.echo(f"Resource class {name!r} already matches.")
+                return name
+            api.replace_class_availabilities(
+                name,
+                _availability_body(availabilities),
+                **_enabled_arg(resource_class.enabled),
+                cluster=cluster_name,
             )
-            return resource_class.name
-        api.replace_class_availabilities(
-            resource_class.name,
-            _availability_body(availabilities),
-            **_enabled_arg(resource_class.enabled),
-        )
-        click.echo(f"Resource class {resource_class.name!r} already matches.")
-        _echo_availability(resource_class.name, availabilities, False)
-        return resource_class.name
-    click.echo(f"Resource class {resource_class.name!r} already exists:")
-    click.echo(_resource_class_diff(current, desired_view))
-    if not yes and not click.confirm(
-        f"Update resource class {resource_class.name!r}?",
-        default=False,
-    ):
-        click.echo(f"Left resource class {resource_class.name!r} unchanged.")
-        return resource_class.name
+            click.echo(f"Resource class {name!r} already matches.")
+            _echo_availability(name, availabilities, False)
+            return name
+        click.echo(f"Resource class {name!r} already exists:")
+        click.echo(_resource_class_diff(current, desired_view))
+        prompt = f"Update resource class {name!r}?"
+    if not yes and not click.confirm(prompt, default=False):
+        click.echo(f"Left resource class {name!r} unchanged.")
+        return name
     updated = api.update_class(
-        name=resource_class.name,
+        name=name,
         num_nodes=resource_class.num_nodes,
         node_selector=resource_class.node_selector,
-        metadata=desired_view["metadata"],
+        metadata=metadata,
         description=resource_class.description,
         availabilities=availability_body,
         **_enabled_arg(resource_class.enabled),
+        cluster=cluster_name,
     )
-    click.echo(f"Updated resource class {updated.get('name', resource_class.name)!r}.")
+    click.echo(f"Updated resource class {updated.get('name', name)!r}.")
     if availabilities is not None:
-        _echo_availability(resource_class.name, availabilities, False)
-    return resource_class.name
+        _echo_availability(name, availabilities, False)
+    return name
 
 
 def ensure_resource_class(
@@ -531,7 +550,7 @@ def ensure_resource_class(
     resource_class: ClusterResourceClass,
     yes: bool = False,
 ) -> str:
-    """Create the resource class, or update it after showing the diff."""
+    """Create the resource class on this cluster, or update it after showing the diff."""
     desired = _resource_class_fields(
         resource_class.num_nodes,
         resource_class.node_selector,
@@ -542,16 +561,27 @@ def ensure_resource_class(
     availability_body = (
         None if availabilities is None else _availability_body(availabilities)
     )
-    existing = api.find_class(resource_class.name)
-    if existing is not None:
-        return _update_existing_resource_class(
-            api,
-            resource_class,
-            existing,
-            desired,
-            availability_body,
-            yes,
-        )
+    # classes/list rows carry no cluster, so a listed name may be another cluster's.
+    try:
+        existing = api.find_class(resource_class.name)
+        listed = existing is not None
+    except DuplicateNameError:
+        existing = None
+        listed = True
+    if listed:
+        try:
+            return _update_existing_resource_class(
+                api,
+                cluster_name,
+                resource_class,
+                existing,
+                desired,
+                availability_body,
+                yes,
+            )
+        except ArenaAPIError as exc:
+            if exc.status_code != HTTPStatus.NOT_FOUND:
+                raise
     created = api.create_class(
         name=resource_class.name,
         num_nodes=resource_class.num_nodes,
