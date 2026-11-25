@@ -526,6 +526,16 @@ class ByocApi:
             raise ArenaAPIError(msg)
         return {str(key): value for key, value in result.items()}
 
+    def create_suggested_class(self, suggestion: Mapping[str, object]) -> None:
+        """Create the class one of :meth:`suggested_classes`' suggestions describes.
+
+        :param suggestion: A class create body from ``suggestions``.
+        :type suggestion: Mapping[str, object]
+        """
+        body = {key: value for key, value in suggestion.items() if value is not None}
+        logger.info("Creating suggested BYOC resource class %r…", body.get("name"))
+        self._invoke(endpoints.CREATE_CLASS, body)
+
     def update_class(
         self,
         name: str,

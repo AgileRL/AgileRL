@@ -168,9 +168,10 @@ the agent in place; `--rotate-token` issues a new token. It waits up to
 `--wait-timeout` seconds (default 900) for a heartbeat and a health report
 from after the new agent ReplicaSet is ready, prints that report, and exits
 non-zero if a health check is red. When Arena suggests resource classes for
-the cluster's GPU nodes, it prints them; create them from the cluster's page
-in Arena. If the agent has not reported nodes, or it needs an upgrade, it
-says so.
+the cluster's GPU nodes, it lists them and creates them with `--yes`, or after
+a prompt in a terminal; without either, create them from the cluster's page in
+Arena. It also names classes whose node selector matches no node, and says
+when the agent needs an upgrade to report its nodes.
 Connect needs `kubectl` and `helm` on `PATH` and a kubeconfig that can
 create cluster-scoped RBAC, which in practice is cluster-admin. For options
 connect does not have (inference domain, ingress, bundled MinIO, a cluster

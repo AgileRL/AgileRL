@@ -782,6 +782,7 @@ class TestClusterConnectCommand:
                     "--rotate-token",
                     "--wait-timeout",
                     "30",
+                    "--yes",
                 ],
                 obj=command_config,
             )
@@ -794,6 +795,7 @@ class TestClusterConnectCommand:
         assert options.storage_bucket == "arena-data"
         assert options.rotate_token is True
         assert options.wait_timeout == 30.0
+        assert options.yes is True
 
     def test_blank_name_is_rejected(self, command_config: CommandConfig) -> None:
         with patch(f"{COMMANDS}.run_cluster_connect") as connect:

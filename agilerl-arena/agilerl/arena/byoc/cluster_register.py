@@ -9,8 +9,9 @@ import difflib
 import logging
 import os
 import re
+import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -588,6 +589,90 @@ def ensure_resource_class(
     return resource_class.name
 
 
+def _suggestion_line(suggestion: Mapping[str, Any]) -> str:
+    """One line describing a suggested class."""
+    compute = suggestion["metadata"]["computeResource"]
+    selector = ", ".join(
+        f"{key}={value}" for key, value in suggestion["node_selector"].items()
+    )
+    return (
+        f"{suggestion['name']}: {suggestion['num_nodes']} node(s), "
+        f"{compute['numGpus']}x {compute['gpu']['type']}, {compute['numCpus']} CPUs, "
+        f"{compute['memoryBytes']} memory, node selector {selector}"
+    )
+
+
+def _echo_suggestion_notes(cluster_name: str, found: Mapping[str, Any]) -> None:
+    """Print classes without nodes and why suggestions may be missing."""
+    for row in found["classes_without_nodes"]:
+        click.echo(
+            f"No node matches the node selector of class {row['name']!r}; "
+            "its jobs stay pending."
+        )
+    if found["needs_agent_upgrade"]:
+        click.echo(
+            "Upgrade the agent to get class suggestions for every node: "
+            f"arena cluster upgrade --name {cluster_name}"
+        )
+    elif found["reported_at"] is None:
+        click.echo(
+            "The agent has not reported its nodes yet. Once it has, the cluster "
+            "page in Arena suggests classes for them."
+        )
+
+
+def offer_suggested_classes(api: ByocApi, cluster_name: str, yes: bool) -> list[str]:
+    """Show the classes Arena suggests from the cluster's nodes and create them.
+
+    :param api: BYOC API wrapper.
+    :type api: ByocApi
+    :param cluster_name: Registered cluster name.
+    :type cluster_name: str
+    :param yes: Create the suggestions without asking.
+    :type yes: bool
+    :returns: Names of the classes created.
+    :rtype: list[str]
+    """
+    try:
+        found = api.suggested_classes(cluster_name)
+    except ArenaAPIError as exc:
+        # Arena releases before class suggestions do not have the route.
+        if exc.status_code != HTTPStatus.NOT_FOUND:
+            raise
+        logger.info("Arena does not suggest classes; skipping suggestions.")
+        return []
+    _echo_suggestion_notes(cluster_name, found)
+    suggestions = found["suggestions"]
+    if not suggestions:
+        return []
+    click.echo("Suggested classes from the agent's node report:")
+    for suggestion in suggestions:
+        click.echo(f"  {_suggestion_line(suggestion)}")
+    if not yes:
+        if not sys.stdin.isatty():
+            click.echo(
+                "Re-run with --yes to create them, or create them on the cluster "
+                "page in Arena."
+            )
+            return []
+        if not click.confirm("Create these classes?", default=False):
+            return []
+    created = []
+    for suggestion in suggestions:
+        # The cluster is registered by now; one refused class must not stop the rest.
+        try:
+            api.create_suggested_class(suggestion)
+        except ArenaAPIError as exc:
+            click.echo(
+                f"Could not create resource class {suggestion['name']!r}: {exc}",
+                err=True,
+            )
+            continue
+        click.echo(f"Created resource class {suggestion['name']!r}.")
+        created.append(suggestion["name"])
+    return created
+
+
 class ClusterRegisterOptions(TypedDict):
     """Keyword fields for ``run_cluster_register``."""
 
@@ -621,6 +706,7 @@ class ClusterRegisterOptions(TypedDict):
     yes: NotRequired[bool]
     cluster_uid: NotRequired[str | None]
     rotate_token: NotRequired[bool]
+    suggest_classes: NotRequired[bool]
 
 
 @dataclass(frozen=True)
@@ -907,6 +993,10 @@ def run_cluster_register(
     :type cluster_uid: str | None
     :param rotate_token: Rotate the agent token of a cluster that is already registered.
     :type rotate_token: bool
+    :param suggest_classes: Offer the classes Arena suggests from the cluster's
+        nodes. ``arena cluster connect`` turns it off and offers them once the
+        agent has reported.
+    :type suggest_classes: bool
     :returns: None
     :rtype: None
     """
@@ -957,6 +1047,15 @@ def run_cluster_register(
         )
         for resource_class in options.get("resource_classes", ())
     ]
+    # A cluster spec lists its classes, and AgileRL's own clusters keep theirs in code.
+    if (
+        options.get("suggest_classes", True)
+        and not created_resource_classes
+        and options.get("byoc_scope") != "platform"
+    ):
+        created_resource_classes = offer_suggested_classes(
+            api, cluster_name, options.get("yes", False)
+        )
     _print_next_steps(
         output_dir=output_dir.expanduser().resolve(),
         installed=install,
