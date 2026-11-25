@@ -503,6 +503,21 @@ columns (granted with ``grant --table``):
      --source-table analytics.public.math_questions \
      --reward-file reward.py
 
+A built-in reward in the manifest replaces ``--reward-file``. This one scores
+the same check with no Python file:
+
+.. code-block:: yaml
+
+   environment:
+     reward:
+       type: numeric
+       answer_pattern: "<answer>(.*)</answer>"
+
+The types are ``exact_match``, ``numeric``, ``regex``, ``json_schema`` and
+``tool_call``. The Snowflake Native App takes no reward file: it runs only
+these, or a function of yours bound to its ``reward_function`` reference
+(``type: snowflake_function``).
+
 RL against an environment
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -537,8 +552,9 @@ and ``_WORKERS``).
    * - ``--source-query``
      - A query instead of a table. Pass at most one of the two.
    * - ``--reward-file``
-     - Python reward file. Required for GRPO and other RL over table rows.
-       The manifest needs no ``rubric_file_path``.
+     - Python reward file for GRPO and other RL over table rows, unless the
+       manifest sets ``environment.reward``. The manifest needs no
+       ``rubric_file_path``.
    * - ``--resume``
      - Start from the newest finished checkpoint of an earlier run.
    * - ``--checkpoint-steps``

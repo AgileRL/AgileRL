@@ -175,6 +175,8 @@ def _copy_when_unset(
 
 # Validation context key: the reward file is added at submit, so its absence is not an error.
 REWARD_FILE_AT_SUBMIT = "reward_file_at_submit"
+# Validation context key: the Snowflake app validates, and it refuses rubric files.
+IN_SNOWFLAKE_APP = "in_snowflake_app"
 
 
 class DeferredNetworkSpec(BaseModel):
@@ -795,13 +797,20 @@ class TrainingManifest(BaseModel):
             or not isinstance(environment, LLMEnvSpec)
             or not environment.dataset_backed_rollout
             or environment.rubric_file_path is not None
+            or environment.reward is not None
             or isinstance(self.algorithm, OPDSpec)
         ):
             return self
+        if (info.context or {}).get(IN_SNOWFLAKE_APP):
+            msg = (
+                "A dataset-backed rollout needs environment.reward; the Snowflake "
+                "app takes no rubric file. Only OPD may leave it unset, and then "
+                "every turn scores 0."
+            )
+            raise ValueError(msg)
         msg = (
-            "rubric_file_path is required for dataset-backed rollout "
-            "environments; only OPD may leave it unset, and then every turn "
-            "scores 0."
+            "A dataset-backed rollout needs reward or rubric_file_path; only "
+            "OPD may leave both unset, and then every turn scores 0."
         )
         raise ValueError(msg)
 

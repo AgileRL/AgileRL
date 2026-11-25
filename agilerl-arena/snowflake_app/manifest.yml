@@ -19,7 +19,7 @@ privileges:
     - CREATE COMPUTE POOL:
           description: Creates the Pulsar broker, Ray head and GPU worker compute pools that training and serving run on.
     - CREATE WAREHOUSE:
-          description: Creates one XSMALL warehouse for exporting the bound table and writing run metrics.
+          description: Creates one XSMALL warehouse for exporting the bound table, writing run metrics, and calling a reward function you bind.
     - CREATE EXTERNAL ACCESS INTEGRATION:
           description: Lets training reach Hugging Face for base model weights and the Arena host for run licensing. You approve each host.
     - EXECUTE TASK:
@@ -52,4 +52,12 @@ references:
               - READ
               - WRITE
           object_type: STAGE
+          register_callback: app_code.register_reference
+    - reward_function:
+          label: Reward function
+          description: A function of yours that scores completions during post-training, for manifests whose environment.reward is snowflake_function. The
+              app calls it with SQL and never reads its code.
+          privileges:
+              - USAGE
+          object_type: FUNCTION
           register_callback: app_code.register_reference

@@ -14,6 +14,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from agilerl.arena.models.prompt_template import check_row_placeholders
+from agilerl.arena.models.rewards import RewardSpec, check_reward_fields
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 
 
@@ -726,6 +727,10 @@ class LLMEnvSpec(EnvSpecBase):
             "judge is built with it. Needs rubric_file_path."
         ),
     )
+    reward: RewardSpec | None = Field(
+        default=None,
+        description="Built-in reward scoring each turn, in place of rubric_file_path.",
+    )
     max_reward: float | None = Field(
         default=None,
         description="Reward at which a rollout counts as solved, used for the success metric.",
@@ -1413,24 +1418,8 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
-    def _check_judge(self) -> Self:
-        if self.judge is not None and self.rubric_file_path is None:
-            msg = "judge is handed to a rubric; set rubric_file_path to a Rubric that takes it."
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_group_rubric(self) -> Self:
-        if self.group_rubric_name is not None and self.rubric_file_path is None:
-            msg = "group_rubric_name names a symbol in rubric_file_path; set it too."
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_rubric_name(self) -> Self:
-        if self.rubric_name is not None and self.rubric_file_path is None:
-            msg = "rubric_name names a symbol in rubric_file_path; set it too."
-            raise ValueError(msg)
+    def _check_reward_fields(self) -> Self:
+        check_reward_fields(self)
         return self
 
     @model_validator(mode="after")

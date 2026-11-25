@@ -797,7 +797,7 @@ class TestArenaAppErrors:
         # Assert
         assert result.stdout.strip() == repr(
             "ValueError: Unknown reference consumer_secret. "
-            "Bind source_table, source_view or export_stage.\n"
+            "Bind source_table, source_view, export_stage or reward_function.\n"
         )
 
     def test_errors_from_the_keys_module_hide_the_stack_too(self) -> None:

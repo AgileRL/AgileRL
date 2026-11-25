@@ -382,7 +382,7 @@ def render_transcript(
     return "\n\n".join(blocks)
 
 
-def _first_json_object(response: str) -> dict[str, Any] | None:
+def first_json_object(response: str) -> dict[str, Any] | None:
     """The first JSON object of a judge reply, or ``None``."""
     start = response.find("{")
     if start < 0:
@@ -404,13 +404,13 @@ def _finite_number(value: object) -> float | None:
 
 def verdict_score(response: str) -> float | None:
     """The ``score`` in the first JSON object of a judge reply, or ``None``."""
-    verdict = _first_json_object(response)
+    verdict = first_json_object(response)
     return None if verdict is None else _finite_number(verdict.get("score"))
 
 
 def verdict_reason(response: str) -> str | None:
     """The ``reason`` string in the first JSON object of a judge reply, or ``None``."""
-    verdict = _first_json_object(response)
+    verdict = first_json_object(response)
     reason = None if verdict is None else verdict.get("reason")
     return reason if isinstance(reason, str) else None
 
@@ -422,7 +422,7 @@ def verdict_reasons(response: str, count: int) -> list[str] | None:
     :param count: How many reasons the reply must hold.
     :return: The reasons; ``None`` when any is not a string or the count differs.
     """
-    verdict = _first_json_object(response)
+    verdict = first_json_object(response)
     raw = None if verdict is None else verdict.get("reasons")
     if not isinstance(raw, list) or len(raw) != count:
         return None
@@ -449,7 +449,7 @@ def verdict_scores(response: str, count: int) -> list[float] | None:
     :return: The scores; ``None`` when any is unreadable or the count differs.
         The ``scores`` array alone is read when the reply is cut off after it.
     """
-    verdict = _first_json_object(response)
+    verdict = first_json_object(response)
     raw = None if verdict is None else verdict.get("scores")
     if verdict is None:
         # A reply cut off after its scores, mid-reason, still holds a whole array.
