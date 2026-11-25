@@ -40,6 +40,10 @@ from agilerl.arena.memory.manifest import (
     training_plan_model,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model_spec
+from agilerl.arena.memory.resolve.lengths import (
+    ExpectedLengths,
+    expected_lengths_for_run,
+)
 from agilerl.arena.memory.resolve.run import (
     SearchCache,
     WeightSyncMode,
@@ -370,6 +374,7 @@ def _planned_layout(
     model: ModelSpec,
     device: DeviceSpec,
     num_gpus: int | None,
+    expected_lengths: ExpectedLengths | None,
 ) -> tuple[TrainingManifest, WeightSyncMode]:
     """The manifest as the run lays it out on ``num_gpus`` GPUs in nodes of ``device.gpus_per_node``, and its weight-sync mode, as :func:`check_tiers` picks them.
 
@@ -377,7 +382,8 @@ def _planned_layout(
     A searched split that fits writes its counts, engine width and layout
     (:func:`split_manifest`); otherwise the manifest's own counts are kept
     (:func:`kept_weight_sync_mode`). Without ``num_gpus`` no link is known:
-    merged sync over NIXL where the engines can serve it.
+    merged sync over NIXL where the engines can serve it. ``expected_lengths``
+    prices the split; ``None`` uses the generic defaults.
     """
     if num_gpus is None:
         return manifest, WeightSyncMode(True, "nixl")
@@ -389,7 +395,11 @@ def _planned_layout(
     if searches_gpu_split(manifest):
         try:
             laid_out, plan = split_manifest(
-                manifest, num_gpus, device, sync_link=sync_link
+                manifest,
+                num_gpus,
+                device,
+                sync_link=sync_link,
+                expected_lengths=expected_lengths,
             )
         except ValueError:
             # No split fits: check_tiers sizes the manifest's own counts.
@@ -405,6 +415,7 @@ def _planned_layout(
         num_gpus,
         sync_link,
         SearchCache(),
+        expected_lengths,
     )
     return manifest, mode
 
@@ -452,6 +463,7 @@ def _sized_run_config(
     model: ModelSpec,
     device: DeviceSpec,
     num_gpus: int | None,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> RunConfig:
     """The run config on ``num_gpus`` GPUs of ``device``, at the split, weight-sync mode, engine width and engines the run picks there.
 
@@ -460,10 +472,14 @@ def _sized_run_config(
     :param model: Training-side model, with the checkpoint's parameter count.
     :param num_gpus: GPUs in the allocation, in nodes of ``device.gpus_per_node``;
         ``None`` reads the engine layout from the manifest.
+    :param expected_lengths: Expected row lengths to pick the split at;
+        ``None`` uses the generic defaults.
     :raises ValueError: The run picks its engine layout from a GPU count and
         ``num_gpus`` is unset, or the node has too few GPUs.
     """
-    laid_out, mode = _planned_layout(manifest, model, device, num_gpus)
+    laid_out, mode = _planned_layout(
+        manifest, model, device, num_gpus, expected_lengths
+    )
     width, engines = _allocation_layout(laid_out, num_gpus, device, not mode.merged)
     return run_config_from_manifest(
         laid_out,
@@ -661,6 +677,7 @@ def estimate_manifest(
     gpus_per_node: int | None = None,
     config_path: str | None = None,
     catalog_only: bool = False,
+    expected_lengths_by_thinking: tuple[ExpectedLengths, ExpectedLengths] | None = None,
 ) -> EstimateOutcome:
     """Size a manifest on a device.
 
@@ -670,6 +687,10 @@ def estimate_manifest(
         ``num_gpus`` on one node.
     :param catalog_only: Size only models in ``SUPPORTED_MODEL_INFO``, from
         their bundled config, without reading a local checkpoint or the Hub.
+    :param expected_lengths_by_thinking: Lengths with thinking on, then off.
+        A single-turn run picks its split at the side
+        :func:`expected_lengths_for_run` takes; ``None``, or a multi-turn run,
+        uses the generic defaults.
     :raises EstimateUsageError: The arguments, manifest or model config cannot
         be sized.
     """
@@ -677,8 +698,15 @@ def estimate_manifest(
     manifest, model_config, model_spec = _estimate_model(
         manifest_source, config_path, catalog_only
     )
+    expected_lengths = (
+        None
+        if expected_lengths_by_thinking is None
+        else expected_lengths_for_run(manifest, *expected_lengths_by_thinking)
+    )
     try:
-        config = _sized_run_config(manifest, model_config, model_spec, device, num_gpus)
+        config = _sized_run_config(
+            manifest, model_config, model_spec, device, num_gpus, expected_lengths
+        )
     except KeyError as err:
         raise _missing_key_error(err) from err
     except ValueError as err:

@@ -23,16 +23,21 @@ from agilerl.arena.memory.resolve.decode_costs import (
     UNMEASURED_MERGED_DENSE_SPEEDUP,
 )
 from agilerl.arena.memory.resolve.fsdp import CrossNodeSeconds
-from agilerl.arena.memory.resolve.parallel import ParallelLayout
-from agilerl.arena.memory.resolve.split import (
-    IDLE_GPU_TIE_SHARE,
+from agilerl.arena.memory.resolve.lengths import (
+    DEFAULT_PROMPT_TOKENS,
+    DEFAULT_REASONING_TURN_TOKENS,
+    DEFAULT_TURN_TOKENS,
+    MULTI_TURN_DECODE_SHARE,
     MULTI_TURN_ROW_FILL,
     MULTI_TURN_TURN_DECODE_TOKENS,
     MULTI_TURN_TURN_SHARE,
+    ExpectedLengths,
+    expected_lengths_for_run,
+)
+from agilerl.arena.memory.resolve.parallel import ParallelLayout
+from agilerl.arena.memory.resolve.split import (
+    IDLE_GPU_TIE_SHARE,
     NGRAM_GENERATION_SPEEDUP,
-    SINGLE_TURN_DECODE_SHARE,
-    SINGLE_TURN_PROMPT_FILL,
-    SINGLE_TURN_REASONING_DECODE_SHARE,
     TIED_DROP_GENERATION_FACTOR,
     GpuSplit,
     SplitWorkload,
@@ -92,6 +97,30 @@ def _countdown_manifest(batch_size: int = 60) -> dict:
         },
         # The throughput fits trained every generated group.
         "replay_buffer": {"kind": "llm", "drop_uninformative_groups": False},
+    }
+
+
+def _gsm8k_manifest(max_context_length: int) -> dict:
+    """Single-turn GRPO on GSM8K with Qwen3-4B thinking and no ``max_output_tokens``."""
+    return {
+        "algorithm": {"name": "GRPO", "batch_size": 16, "group_size": 8, "fsdp": {}},
+        "environment": {
+            "env_type": "rollout",
+            "dataset": "openai/gsm8k",
+            "rubric_file_path": "gsm8k_reward.py",
+            "prompt_template": {
+                "system_prompt": "Answer in <answer> </answer> tags.",
+                "user_prompt": "{question}",
+            },
+            "max_reward": 4.0,
+        },
+        "network": {
+            "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+            "max_context_length": max_context_length,
+            "lora_config": {"lora_r": 16, "lora_alpha": 32},
+        },
+        "training": {"rollout_mode": "async", "max_steps": 1000, "pop_size": 1},
+        "replay_buffer": {"kind": "llm"},
     }
 
 
@@ -252,9 +281,10 @@ class TestChooseGpuSplit:
         )
 
     def test_merged_sync_over_tcp_takes_fewer_engines(self) -> None:
-        # Arrange: merged Qwen3.5-9B countdown weights on H100, which every
-        # engine reads out of trainer rank 0 over TCP.
+        # Arrange: merged Qwen3.5-9B countdown weights with 512-token answers
+        # on H100, which every engine reads out of trainer rank 0 over TCP.
         raw = _countdown_manifest(64)
+        raw["algorithm"]["max_output_tokens"] = 512
         raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-9B"
         model = catalog_model(_manifest(raw).algorithm)
         unpriced = _workload(raw, merged_lora_sync=True)
@@ -561,9 +591,11 @@ class TestChooseGpuSplit:
         assert split.generation_seconds == math.inf
 
     def test_trainer_counts_off_the_trainer_multiple_are_skipped(self) -> None:
-        # Arrange
-        model = catalog_model(_manifest(_countdown_manifest()).algorithm)
-        any_count = _workload(_countdown_manifest(120), merged_lora_sync=False)
+        # Arrange: countdown with 512-token answers.
+        raw = _countdown_manifest(120)
+        raw["algorithm"]["max_output_tokens"] = 512
+        model = catalog_model(_manifest(raw).algorithm)
+        any_count = _workload(raw, merged_lora_sync=False)
         even = any_count.model_copy(update={"trainer_multiple": 2})
 
         # Act
@@ -1374,22 +1406,19 @@ class TestChooseGpuSplitAlgorithmPasses:
 
 
 class TestSplitWorkloadFromManifest:
-    def test_single_turn_reasoning_model_decodes_most_of_the_output_cap(
-        self,
-    ) -> None:
-        # Act
-        workload = split_workload_from_manifest(
-            TrainingManifest.model_validate(_countdown_manifest())
-        )
+    def test_single_turn_reasoning_run_decodes_the_reasoning_default(self) -> None:
+        # Arrange: Qwen3-4B thinks, with room for the default turn.
+        raw = _countdown_manifest()
+        raw["algorithm"]["max_output_tokens"] = 8192
+        raw["network"]["max_context_length"] = 16384
 
-        # Assert: Qwen3-4B thinks; the prompt fills a fifth of the other 512.
+        # Act
+        workload = split_workload_from_manifest(TrainingManifest.model_validate(raw))
+
+        # Assert
         assert workload.turns == 1
-        assert workload.decode_tokens == math.ceil(
-            SINGLE_TURN_REASONING_DECODE_SHARE * 1024
-        )
-        assert workload.row_tokens == workload.decode_tokens + math.ceil(
-            SINGLE_TURN_PROMPT_FILL * 512
-        )
+        assert workload.decode_tokens == DEFAULT_REASONING_TURN_TOKENS
+        assert workload.row_tokens == workload.decode_tokens + DEFAULT_PROMPT_TOKENS
         assert workload.learn_passes == 3
         assert workload.rollout_batch_size is None
 
@@ -1401,7 +1430,7 @@ class TestSplitWorkloadFromManifest:
         ],
         ids=["non-reasoning-model", "thinking-off"],
     )
-    def test_single_turn_without_reasoning_decodes_a_smaller_share(
+    def test_single_turn_run_without_reasoning_decodes_the_default(
         self, model: str, chat_template_kwargs: dict
     ) -> None:
         # Arrange
@@ -1413,7 +1442,61 @@ class TestSplitWorkloadFromManifest:
         workload = split_workload_from_manifest(TrainingManifest.model_validate(raw))
 
         # Assert
-        assert workload.decode_tokens == math.ceil(SINGLE_TURN_DECODE_SHARE * 1024)
+        assert workload.decode_tokens == DEFAULT_TURN_TOKENS
+        assert workload.row_tokens == DEFAULT_TURN_TOKENS + DEFAULT_PROMPT_TOKENS
+
+    def test_default_turn_over_its_cap_decodes_the_cap(self) -> None:
+        # Arrange
+        raw = _countdown_manifest()
+        raw["algorithm"]["max_output_tokens"] = 128
+        assert DEFAULT_REASONING_TURN_TOKENS > 128
+
+        # Act
+        workload = split_workload_from_manifest(TrainingManifest.model_validate(raw))
+
+        # Assert
+        assert workload.decode_tokens == 128
+
+    def test_default_prompt_takes_what_the_decode_leaves_of_the_row(self) -> None:
+        # Arrange
+        raw = _countdown_manifest()
+        raw["algorithm"]["max_output_tokens"] = 512
+        raw["network"]["max_context_length"] = 640
+
+        # Act
+        workload = split_workload_from_manifest(TrainingManifest.model_validate(raw))
+
+        # Assert
+        assert workload.decode_tokens == 512
+        assert workload.row_tokens == 640
+
+    def test_unset_output_cap_prices_the_same_at_any_context(self) -> None:
+        # Act
+        long, short = (
+            split_workload_from_manifest(
+                TrainingManifest.model_validate(_gsm8k_manifest(context))
+            )
+            for context in (40960, 16384)
+        )
+
+        # Assert
+        assert long.decode_tokens == short.decode_tokens
+        assert long.decode_tokens == DEFAULT_REASONING_TURN_TOKENS
+        assert long.row_tokens == short.row_tokens
+        assert long.row_tokens == DEFAULT_REASONING_TURN_TOKENS + DEFAULT_PROMPT_TOKENS
+
+    def test_awm_manifest_decodes_the_multi_turn_default(self) -> None:
+        # Act: Qwen3.6-35B-A3B thinks; multi-turn ignores the single-turn defaults.
+        workload = split_workload_from_manifest(
+            TrainingManifest.model_validate(_awm_manifest())
+        )
+
+        # Assert
+        assert workload.turns == math.ceil(MULTI_TURN_TURN_SHARE * 20)
+        assert workload.decode_tokens == min(
+            math.ceil(MULTI_TURN_DECODE_SHARE * workload.row_tokens),
+            workload.turns * MULTI_TURN_TURN_DECODE_TOKENS,
+        )
 
     def test_multi_turn_spreads_the_row_over_several_turns(self) -> None:
         # Act
@@ -1438,6 +1521,148 @@ class TestSplitWorkloadFromManifest:
         assert workload.row_tokens == math.ceil(MULTI_TURN_ROW_FILL * 16384)
         assert workload.turns == math.ceil(MULTI_TURN_TURN_SHARE * 20)
         assert workload.decode_tokens == workload.turns * MULTI_TURN_TURN_DECODE_TOKENS
+        assert (workload.row_tokens, workload.decode_tokens, workload.turns) == (
+            7537,
+            1408,
+            4,
+        )
+
+    @pytest.mark.parametrize(
+        "chat_template_kwargs",
+        [{}, {"enable_thinking": False}],
+        ids=["thinking", "thinking-off"],
+    )
+    def test_multi_turn_default_ignores_reasoning(
+        self, chat_template_kwargs: dict
+    ) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        raw["environment"]["max_turns"] = 20
+        raw["environment"]["chat_template_kwargs"] = chat_template_kwargs
+
+        # Act
+        workload = split_workload_from_manifest(TrainingManifest.model_validate(raw))
+
+        # Assert
+        assert workload.decode_tokens == 4 * MULTI_TURN_TURN_DECODE_TOKENS
+
+    def test_no_expected_lengths_keeps_the_defaults(self) -> None:
+        # Arrange
+        manifest = TrainingManifest.model_validate(_countdown_manifest())
+
+        # Act
+        explicit = split_workload_from_manifest(manifest, expected_lengths=None)
+
+        # Assert
+        assert explicit == split_workload_from_manifest(manifest)
+
+    def test_expected_lengths_win_over_the_defaults(self) -> None:
+        # Arrange
+        manifest = TrainingManifest.model_validate(_countdown_manifest())
+        lengths = ExpectedLengths(
+            prompt_tokens=100, generated_tokens_per_turn=300, turns=1
+        )
+
+        # Act
+        workload = split_workload_from_manifest(manifest, expected_lengths=lengths)
+
+        # Assert
+        assert (workload.row_tokens, workload.decode_tokens, workload.turns) == (
+            400,
+            300,
+            1,
+        )
+
+    @pytest.mark.parametrize(
+        ("generated", "priced"),
+        [(950, 950), (5000, 1024)],
+        ids=["under-cap", "over-cap"],
+    )
+    def test_expected_turn_is_capped_at_the_cap(
+        self, generated: int, priced: int
+    ) -> None:
+        # Arrange: countdown's cap is 1024.
+        manifest = TrainingManifest.model_validate(_countdown_manifest())
+        lengths = ExpectedLengths(
+            prompt_tokens=100, generated_tokens_per_turn=generated, turns=1
+        )
+
+        # Act
+        workload = split_workload_from_manifest(manifest, expected_lengths=lengths)
+
+        # Assert
+        assert workload.decode_tokens == priced
+
+    def test_expected_turns_are_one_on_a_single_turn_env(self) -> None:
+        # Arrange
+        manifest = TrainingManifest.model_validate(_countdown_manifest())
+        lengths = ExpectedLengths(
+            prompt_tokens=100, generated_tokens_per_turn=300, turns=3
+        )
+
+        # Act
+        workload = split_workload_from_manifest(manifest, expected_lengths=lengths)
+
+        # Assert
+        assert (workload.decode_tokens, workload.turns) == (300, 1)
+
+    def test_expected_turns_are_capped_at_max_turns(self) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        raw["environment"]["max_turns"] = 20
+        lengths = ExpectedLengths(
+            prompt_tokens=200, generated_tokens_per_turn=100, turns=30
+        )
+
+        # Act
+        workload = split_workload_from_manifest(
+            TrainingManifest.model_validate(raw), expected_lengths=lengths
+        )
+
+        # Assert
+        assert (workload.row_tokens, workload.decode_tokens, workload.turns) == (
+            2200,
+            2000,
+            20,
+        )
+
+    @pytest.mark.parametrize(
+        ("turns", "rounded"), [(1.3, 1), (3.6, 4)], ids=["round-down", "round-up"]
+    )
+    def test_fractional_expected_turns_price_the_decode_at_the_mean(
+        self, turns: float, rounded: int
+    ) -> None:
+        # Arrange
+        lengths = ExpectedLengths(
+            prompt_tokens=200, generated_tokens_per_turn=100, turns=turns
+        )
+
+        # Act
+        workload = split_workload_from_manifest(
+            TrainingManifest.model_validate(_sudoku_manifest()),
+            expected_lengths=lengths,
+        )
+
+        # Assert
+        assert (workload.turns, workload.decode_tokens) == (
+            rounded,
+            math.ceil(100 * turns),
+        )
+
+    def test_expected_row_is_capped_at_the_row_budget(self) -> None:
+        # Arrange: 40 turns of 800 tokens are past Sudoku's 16384-token row.
+        lengths = ExpectedLengths(
+            prompt_tokens=200, generated_tokens_per_turn=800, turns=40
+        )
+
+        # Act
+        workload = split_workload_from_manifest(
+            TrainingManifest.model_validate(_sudoku_manifest()),
+            expected_lengths=lengths,
+        )
+
+        # Assert
+        assert workload.decode_tokens == workload.row_tokens == 16384
 
     def test_default_buffer_generates_more_groups_than_it_trains(self) -> None:
         # Arrange
@@ -1937,3 +2162,108 @@ class TestGpuCataloguePeakFigures:
         # Assert
         for _, gpu in GPU_CATALOGUE:
             assert (gpu.bf16_tflops is None) == (gpu.memory_gb_per_second is None)
+
+
+class TestExpectedLengths:
+    @pytest.mark.parametrize(
+        "bound",
+        ["generated_tokens_per_turn_low", "generated_tokens_per_turn_high"],
+    )
+    def test_one_range_end_alone_is_rejected(self, bound: str) -> None:
+        # Act / Assert
+        with pytest.raises(ValueError, match="or neither"):
+            ExpectedLengths(
+                prompt_tokens=100,
+                generated_tokens_per_turn=300,
+                turns=1,
+                **{bound: 300},
+            )
+
+    @pytest.mark.parametrize(
+        ("low", "high"), [(400, 600), (100, 200)], ids=["low-above", "high-below"]
+    )
+    def test_range_off_the_mean_is_rejected(self, low: float, high: float) -> None:
+        # Act / Assert
+        with pytest.raises(ValueError, match="does not hold"):
+            ExpectedLengths(
+                prompt_tokens=100,
+                generated_tokens_per_turn=300,
+                turns=1,
+                generated_tokens_per_turn_low=low,
+                generated_tokens_per_turn_high=high,
+            )
+
+    def test_range_may_meet_the_mean(self) -> None:
+        # Act
+        lengths = ExpectedLengths(
+            prompt_tokens=100,
+            generated_tokens_per_turn=300,
+            turns=1,
+            generated_tokens_per_turn_low=300,
+            generated_tokens_per_turn_high=300,
+        )
+
+        # Assert
+        assert lengths.generated_tokens_per_turn_low == 300
+
+
+THINKING_ON = ExpectedLengths(prompt_tokens=100, generated_tokens_per_turn=900, turns=1)
+THINKING_OFF = ExpectedLengths(
+    prompt_tokens=100, generated_tokens_per_turn=200, turns=1
+)
+
+
+class TestExpectedLengthsForRun:
+    def test_single_turn_reasoning_run_takes_thinking_on(self) -> None:
+        # Arrange: Qwen3-4B thinks; countdown's dataset env is single-turn.
+        manifest = TrainingManifest.model_validate(_countdown_manifest())
+
+        # Act / Assert
+        assert expected_lengths_for_run(manifest, THINKING_ON, THINKING_OFF) == (
+            THINKING_ON
+        )
+
+    @pytest.mark.parametrize(
+        ("model", "chat_template_kwargs"),
+        [
+            ("ibm-granite/granite-3.1-3b-a800m-instruct", {}),
+            ("Qwen/Qwen3-4B", {"enable_thinking": False}),
+        ],
+        ids=["non-reasoning-model", "thinking-off"],
+    )
+    def test_single_turn_run_without_reasoning_takes_thinking_off(
+        self, model: str, chat_template_kwargs: dict
+    ) -> None:
+        # Arrange
+        raw = _countdown_manifest()
+        raw["network"]["pretrained_model_name_or_path"] = model
+        raw["environment"]["chat_template_kwargs"] = chat_template_kwargs
+        manifest = TrainingManifest.model_validate(raw)
+
+        # Act / Assert
+        assert expected_lengths_for_run(manifest, THINKING_ON, THINKING_OFF) == (
+            THINKING_OFF
+        )
+
+    def test_dataset_backed_rollout_is_single_turn(self) -> None:
+        # Arrange: GSM8K names a dataset and leaves max_turns unset.
+        manifest = TrainingManifest.model_validate(_gsm8k_manifest(4096))
+
+        # Act / Assert
+        assert manifest.environment.max_turns == 1
+        assert expected_lengths_for_run(manifest, THINKING_ON, THINKING_OFF) == (
+            THINKING_ON
+        )
+
+    def test_multi_turn_run_has_no_lengths(self) -> None:
+        # Arrange
+        manifest = TrainingManifest.model_validate(_sudoku_manifest())
+
+        # Act / Assert
+        assert expected_lengths_for_run(manifest, THINKING_ON, THINKING_OFF) is None
+
+    def test_run_without_rollouts_has_no_lengths(self) -> None:
+        # Act / Assert
+        assert (
+            expected_lengths_for_run(_sft_manifest(), THINKING_ON, THINKING_OFF) is None
+        )
