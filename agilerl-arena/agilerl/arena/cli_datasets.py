@@ -34,24 +34,29 @@ def datasets_list(config: CommandConfig, search: str | None) -> None:
                 res.pop("description", None)
             emit_result(sort_dataset_search_by_downloads(result))
             return
-        emit_result(result, display=_rows_column)
+        emit_result(result, display=_dataset_table)
 
 
-def _rows_column(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dataset_table(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Show ``training_row_count`` under a short ``rows`` header.
 
-    The cell is empty until the rows are counted (``null``), and on servers
-    older than the field.
+    A missing value is an empty cell: a ``null`` field such as
+    ``hf_dataset_id`` on an uploaded dataset, rows not yet counted, or
+    ``training_row_count`` on servers older than the field.
     """
     return [
-        {key: value for key, value in dataset.items() if key != "training_row_count"}
-        | {"rows": _row_count_cell(dataset.get("training_row_count"))}
+        {
+            key: _cell(value)
+            for key, value in dataset.items()
+            if key != "training_row_count"
+        }
+        | {"rows": _cell(dataset.get("training_row_count"))}
         for dataset in datasets
     ]
 
 
-def _row_count_cell(count: int | None) -> int | str:
-    return "" if count is None else count
+def _cell(value: object) -> object:
+    return "" if value is None else value
 
 
 @datasets_group.command("exists")
