@@ -2714,6 +2714,7 @@ def test_provision_register_and_install_uses_spec_install_storage(
 
     assert result.exit_code == 0, result.output
     kwargs = run_mock.call_args.kwargs
+    assert kwargs["rotate_token"] is True
     assert kwargs["install_storage"] is True
     assert kwargs["storage_secret_name"] == DEFAULT_LAB_STORAGE_SECRET_NAME
     assert kwargs["byoc_provider"] == {

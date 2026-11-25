@@ -788,6 +788,41 @@ def _helm_value(values: dict[str, Any], keys: tuple[str, ...], default: str) -> 
     return default
 
 
+def agent_token_secret_name(agent_values: dict[str, Any]) -> str:
+    """Return the Secret the agent chart reads its cluster token from."""
+    existing = _helm_value(agent_values, ("existingClusterTokenSecret",), "")
+    return existing or _helm_value(
+        agent_values, ("clusterTokenSecret", "name"), CLUSTER_TOKEN_SECRET_NAME
+    )
+
+
+def secret_exists(name: str, namespace: str) -> bool:
+    """Return whether Kubernetes has the Secret; fail when kubectl cannot tell.
+
+    :param name: Secret name.
+    :param namespace: Namespace to look in.
+    :return: ``False`` only when Kubernetes answers NotFound.
+    """
+    if not shutil.which("kubectl"):
+        msg = f"kubectl not found on PATH; required to check Secret {name!r}."
+        raise click.ClickException(msg)
+    result = subprocess.run(
+        ["kubectl", "get", "secret", name, "-n", namespace, "-o", "name"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True
+    if "(NotFound)" in result.stderr:
+        return False
+    msg = (
+        f"Could not check Secret {name!r} in namespace {namespace!r}: "
+        f"{result.stderr.strip()}"
+    )
+    raise click.ClickException(msg)
+
+
 def _package_secret_file(package_root: Path, relative: str) -> Path | None:
     path = package_root / relative
     if path.is_file():

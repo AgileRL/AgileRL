@@ -201,6 +201,8 @@ def _register_provisioned_cluster(config: CommandConfig, **fields: object) -> No
                 worker_node_group_ids=outputs.worker_node_group_ids,
             ),
             yes=cast("bool", fields.get("yes", False)),
+            # The cluster was just provisioned, so it holds no agent token yet.
+            rotate_token=True,
         )
 
 
@@ -434,6 +436,17 @@ REGISTER_COMMAND_FLAGS = (
             "is_flag": True,
             "default": False,
             "help": "Do not persist Helm values or token files under --output-dir.",
+        },
+    ),
+    (
+        ("--rotate-token",),
+        {
+            "is_flag": True,
+            "default": False,
+            "help": (
+                "Issue a new agent token for a cluster that is already registered. "
+                "The previous token keeps working for 24 hours."
+            ),
         },
     ),
     (
@@ -868,6 +881,7 @@ def _register_existing_cluster(
             agent_namespace=cast("str", options["agent_namespace"]),
             resource_classes=resource_classes,
             yes=cast("bool", options.get("yes", False)),
+            rotate_token=cast("bool", options["rotate_token"]),
             **fields,
         )
 
@@ -911,7 +925,8 @@ def build_cluster_register_command() -> click.Command:
     def register_cmd(config: CommandConfig, **options: object) -> None:
         """Register a Kubernetes cluster and write Helm install bundles.
 
-        Re-running with the same ``--name`` updates the existing cluster (upsert).
+        Re-running with the same ``--name`` updates the existing cluster (upsert)
+        and keeps its agent token; ``--rotate-token`` issues a new one.
         Object storage is optional. ``--install`` deploys the agent chart.
         ``--install-storage`` requests bundled MinIO and installs that chart.
         ``--lab`` is ``--install-storage --narrow-allowed-ips``.
@@ -1180,6 +1195,12 @@ def build_cluster_upgrade_command() -> click.Command:
         default=False,
         help="Do not wait for the agent Deployment.",
     )
+    @click.option(
+        "--yes",
+        is_flag=True,
+        default=False,
+        help="Apply agent ClusterRole changes without prompting.",
+    )
     @_platform_option
     @click.pass_obj
     def upgrade_cmd(
@@ -1188,6 +1209,7 @@ def build_cluster_upgrade_command() -> click.Command:
         kubeconfig: Path | None,
         agent_namespace: str | None,
         no_helm_wait: bool,
+        yes: bool,
         platform: bool,
     ) -> None:
         """Upgrade the BYOC agent chart without changing cluster credentials."""
@@ -1203,6 +1225,7 @@ def build_cluster_upgrade_command() -> click.Command:
                 agent_namespace=agent_namespace,
                 helm_wait=not no_helm_wait,
                 platform=platform,
+                yes=yes,
             )
 
     return upgrade_cmd
