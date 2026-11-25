@@ -727,6 +727,34 @@ class TestByocApiPlatformScope:
             ByocApi(http_client, platform=True).rotate_cluster_token("arena")
 
 
+class TestByocApiClusterUid:
+    @staticmethod
+    def _sent_body(client: ArenaClient, route: str) -> dict[str, object]:
+        calls = [
+            c for c in client._http.request.call_args_list if c.args[1].endswith(route)
+        ]
+        assert calls, f"no request to {route}"
+        return calls[-1].kwargs["json"]
+
+    def test_rotate_sends_the_cluster_uid(self, http_client: ArenaClient) -> None:
+        ByocApi(http_client).rotate_cluster_token("arena", cluster_uid="uid-1")
+
+        body = self._sent_body(http_client, "/clusters/rotate-token")
+        assert body == {"name": "arena", "clusterUid": "uid-1"}
+
+    def test_rotate_without_a_uid_sends_none(self, http_client: ArenaClient) -> None:
+        ByocApi(http_client).rotate_cluster_token("arena")
+
+        body = self._sent_body(http_client, "/clusters/rotate-token")
+        assert body == {"name": "arena"}
+
+    def test_register_sends_the_cluster_uid(self, http_client: ArenaClient) -> None:
+        ByocApi(http_client).register_cluster(name="arena", cluster_uid="uid-1")
+
+        body = self._sent_body(http_client, "/clusters/register")
+        assert body["clusterUid"] == "uid-1"
+
+
 CLASS_WRITE_CALLS: list[tuple[Callable[..., object], str]] = [
     (
         lambda api, **cluster: api.update_class("pool", 1, {}, {}, **cluster),

@@ -619,6 +619,7 @@ class ClusterRegisterOptions(TypedDict):
     byoc_provider: NotRequired[dict[str, Any] | None]
     resource_classes: NotRequired[Sequence[ClusterResourceClass]]
     yes: NotRequired[bool]
+    cluster_uid: NotRequired[str | None]
     rotate_token: NotRequired[bool]
 
 
@@ -726,9 +727,6 @@ def _run_register_helm_install(
     install_token: str | None,
 ) -> None:
     """Install charts from local values or the Arena install package."""
-    configured = os.environ.get("KUBECONFIG", "").strip()
-    kubeconfig = configured or str(Path.home() / ".kube" / "config")
-    click.echo(f"Using kubeconfig {kubeconfig}")
     charts_dir = options.get("charts_dir")
     helm_wait = options.get("helm_wait", True)
     install = options.get("install", False)
@@ -868,6 +866,7 @@ def _submit_cluster_register(
         placement=options.get("placement"),
         byoc_scope=options.get("byoc_scope"),
         byoc_provider=options.get("byoc_provider"),
+        cluster_uid=options.get("cluster_uid"),
         rotate_token=options.get("rotate_token", False),
     )
 
@@ -903,6 +902,9 @@ def run_cluster_register(
     :type agent_namespace: str
     :param resource_classes: GPU classes to create for the registered cluster.
     :type resource_classes: Sequence[ClusterResourceClass]
+    :param cluster_uid: kube-system namespace UID of the cluster the charts
+        install on. Arena stores it, or refuses one that differs from its record.
+    :type cluster_uid: str | None
     :param rotate_token: Rotate the agent token of a cluster that is already registered.
     :type rotate_token: bool
     :returns: None

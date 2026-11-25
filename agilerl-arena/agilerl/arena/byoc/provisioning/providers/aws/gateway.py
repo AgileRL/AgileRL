@@ -59,6 +59,7 @@ def configure_eks_gateway(
     region: str,
     vpc_id: str,
     tls_secret_name: str | None,
+    webhook_cert_dir: Path,
     run: KubectlRun = subprocess.run,
 ) -> list[dict[str, str]]:
     """Install the load balancer controller and a Cilium Gateway on an NLB."""
@@ -67,7 +68,7 @@ def configure_eks_gateway(
         cluster_name=cluster_name,
         region=region,
         vpc_id=vpc_id,
-        cert_dir=kubeconfig_path.parent / WEBHOOK_CERT_DIRECTORY,
+        cert_dir=webhook_cert_dir,
         env=env,
         run=run,
     )

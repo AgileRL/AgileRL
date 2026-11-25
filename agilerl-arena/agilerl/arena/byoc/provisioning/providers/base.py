@@ -42,11 +42,13 @@ class InstallCni:
 
 @dataclass(frozen=True)
 class EnsureGateway:
-    """Gateway settings and the kubeconfig that receives them."""
+    """Gateway settings, the kubeconfig kubectl uses, and the durable kubeconfig."""
 
     spec: ClusterSpec
     kubeconfig_path: Path
     terraform_outputs: dict[str, object]
+    # Files that must outlive kubeconfig_path live beside this kubeconfig.
+    durable_kubeconfig: Path | None = None
 
 
 @dataclass(frozen=True)
