@@ -154,6 +154,8 @@ from agilerl.arena.byoc.provisioning.terraform import (
 )
 from agilerl.arena.config import CommandConfig
 
+from .conftest import FAKE_CLUSTER_UID
+
 
 def materialize_outputs(
     runner: TerraformRunner, work_dir: Path, output_dir: Path
@@ -2666,9 +2668,11 @@ def test_provision_prints_registration_command(
 def test_provision_register_and_install_uses_spec_install_storage(
     command_config: CommandConfig,
     client_context: Callable[[MagicMock], MagicMock],
+    fake_kube_target: Callable[..., MagicMock],
     tmp_path: Path,
 ) -> None:
     """Provision installs MinIO when the spec requests the lab storage chart."""
+    pinned_target = fake_kube_target("agilerl.arena.byoc.commands")
     spec_path = tmp_path / "cluster.yaml"
     write_spec(spec_path)
     spec_path.write_text(
@@ -2713,9 +2717,11 @@ def test_provision_register_and_install_uses_spec_install_storage(
         )
 
     assert result.exit_code == 0, result.output
+    assert pinned_target.call_args.args[1:] == (tmp_path / "kubeconfig", None)
     kwargs = run_mock.call_args.kwargs
     assert kwargs["rotate_token"] is True
     assert kwargs["install_storage"] is True
+    assert kwargs["cluster_uid"] == FAKE_CLUSTER_UID
     assert kwargs["storage_secret_name"] == DEFAULT_LAB_STORAGE_SECRET_NAME
     assert kwargs["byoc_provider"] == {
         "provider": "nebius",

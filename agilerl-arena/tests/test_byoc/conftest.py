@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import io
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,8 +16,42 @@ import httpx
 import pytest
 
 from agilerl.arena.byoc import ByocApi
+from agilerl.arena.byoc.kube_target import KubeTarget
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
+
+FAKE_CLUSTER_UID = "0f6b2c1e-8d4a-4b7e-9c3f-5a2d1e0b7c64"
+
+
+@pytest.fixture
+def fake_kube_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[..., MagicMock]:
+    """Return an installer that swaps ``kube_target`` in a module for a fixed target.
+
+    The installer takes the module path and an optional cluster UID and returns
+    the mock, called as ``kube_target(name, kubeconfig, context)``.
+    """
+
+    def install(module: str, cluster_uid: str = FAKE_CLUSTER_UID) -> MagicMock:
+        target = KubeTarget(
+            kubeconfig=tmp_path / "pinned-kubeconfig",
+            context="corp",
+            server="https://k8s.example:6443",
+            cluster_uid=cluster_uid,
+        )
+
+        @contextmanager
+        def resolve(
+            _name: str, _kubeconfig: Path | None, _context: str | None
+        ) -> Iterator[KubeTarget]:
+            yield target
+
+        mock = MagicMock(side_effect=resolve)
+        monkeypatch.setattr(f"{module}.kube_target", mock)
+        return mock
+
+    return install
 
 
 @pytest.fixture

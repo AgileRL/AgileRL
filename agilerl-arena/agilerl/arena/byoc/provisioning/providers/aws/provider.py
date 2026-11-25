@@ -33,6 +33,7 @@ from agilerl.arena.byoc.provisioning.providers.aws.filesystem import (
     ensure_efs_storage_class,
 )
 from agilerl.arena.byoc.provisioning.providers.aws.gateway import (
+    WEBHOOK_CERT_DIRECTORY,
     configure_eks_gateway,
     delete_eks_gateway,
 )
@@ -467,6 +468,8 @@ class AwsProvider:
             msg = "Terraform did not return the VPC id."
             raise click.ClickException(msg)
         values = _aws_values(spec)
+        # Pinned kubeconfig is deleted with its directory. The webhook CA stays beside the durable one.
+        cert_root = query.durable_kubeconfig or kubeconfig_path
         return configure_eks_gateway(
             kubeconfig_path=kubeconfig_path,
             gateway_name=arena.gateway.name,
@@ -476,6 +479,7 @@ class AwsProvider:
             vpc_id=vpc_id,
             tls_secret_name=arena.inference.tls_secret_name
             or DEFAULT_INFERENCE_TLS_SECRET_NAME,
+            webhook_cert_dir=cert_root.parent / WEBHOOK_CERT_DIRECTORY,
         )
 
     def import_ids(self, spec: ClusterSpec) -> dict[str, str]:

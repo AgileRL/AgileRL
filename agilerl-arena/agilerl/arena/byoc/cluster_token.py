@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -18,6 +17,7 @@ from agilerl.arena.byoc.cluster_helm import (
     agent_deployment_selector,
     discover_agent_install,
 )
+from agilerl.arena.byoc.kube_target import kube_target
 from agilerl.arena.byoc.provisioning.kubectl import (
     KubectlRun,
     apply_manifests,
@@ -84,43 +84,17 @@ def build_cluster_token_secret_manifest(
     }
 
 
-def resolve_cluster_kubeconfig(name: str, kubeconfig: Path | None) -> Path | None:
-    """Return an explicit kubeconfig, the provisioned default, or ``KUBECONFIG``."""
-    if kubeconfig is not None:
-        path = kubeconfig.expanduser().resolve()
-        if not path.is_file():
-            msg = f"Kubeconfig is not a file: {path}"
-            raise click.ClickException(msg)
-        return path
-    default = Path(f"arena-cluster-{name}") / "kubeconfig"
-    if default.is_file():
-        return default.resolve()
-    env = os.environ.get("KUBECONFIG", "").strip()
-    if env:
-        env_path = Path(env.split(os.pathsep, 1)[0]).expanduser()
-        if env_path.is_file():
-            return env_path.resolve()
-    home_kube = Path.home() / ".kube" / "config"
-    if home_kube.is_file():
-        return home_kube.resolve()
-    return None
-
-
 def apply_cluster_token_secret(
     token: str,
     secret_name: str,
     namespace: str,
-    kubeconfig_path: Path | None,
+    kubeconfig_path: Path,
     agent_release: str,
     run: KubectlRun = subprocess.run,
 ) -> None:
     """Create or replace the cluster-token Secret and restart the agent."""
     require_kubectl()
-    env = (
-        kubeconfig_env(kubeconfig_path)
-        if kubeconfig_path is not None
-        else os.environ.copy()
-    )
+    env = kubeconfig_env(kubeconfig_path)
     apply_manifests(
         [
             build_cluster_token_secret_manifest(
@@ -161,6 +135,7 @@ def run_cluster_rotate_token(
     client: ArenaClient,
     name: str,
     kubeconfig: Path | None = None,
+    context: str | None = None,
     secret_name: str | None = None,
     namespace: str | None = None,
     run: KubectlRun = subprocess.run,
@@ -168,9 +143,13 @@ def run_cluster_rotate_token(
 ) -> str:
     """Rotate the Arena cluster token and write it into the agent Secret.
 
+    Arena refuses the rotation when the target context is not the cluster it
+    has on record, so a wrong context never costs the agent its token.
+
     :param client: Authenticated Arena client.
     :param name: Registered cluster name.
-    :param kubeconfig: Optional kubeconfig for the target Kubernetes cluster.
+    :param kubeconfig: Kubeconfig for the target Kubernetes cluster.
+    :param context: Kubernetes context to use.
     :param secret_name: Secret to update; Helm default when omitted.
     :param namespace: Agent namespace; discovered from Helm when omitted.
     :param run: kubectl runner.
@@ -181,29 +160,31 @@ def run_cluster_rotate_token(
     if api.find_cluster(name) is None:
         msg = f"No registered BYOC cluster named {name!r}."
         raise click.ClickException(msg)
-    bundle = api.rotate_cluster_token(name)
-    token = _normalize_token(bundle.get("token"))
-    if token is None:
-        msg = (
-            f"Arena rotated cluster {name!r} but returned no token. "
-            "Retry rotate-token, or set clusterToken on the agent Helm release."
+    with kube_target(name, kubeconfig, context) as target:
+        agent_release, resolved_namespace = discover_agent_install(
+            target.kubeconfig,
+            cluster_name=name,
+            agent_namespace=namespace,
         )
-        raise click.ClickException(msg)
-    resolved_secret = (secret_name or "").strip() or cluster_token_secret_name(bundle)
-    kubeconfig_path = resolve_cluster_kubeconfig(name, kubeconfig)
-    agent_release, resolved_namespace = discover_agent_install(
-        kubeconfig_path,
-        cluster_name=name,
-        agent_namespace=namespace,
-    )
-    apply_cluster_token_secret(
-        token=token,
-        secret_name=resolved_secret,
-        namespace=resolved_namespace,
-        kubeconfig_path=kubeconfig_path,
-        agent_release=agent_release,
-        run=run,
-    )
+        bundle = api.rotate_cluster_token(name, cluster_uid=target.cluster_uid)
+        token = _normalize_token(bundle.get("token"))
+        if token is None:
+            msg = (
+                f"Arena rotated cluster {name!r} but returned no token. "
+                "Retry rotate-token, or set clusterToken on the agent Helm release."
+            )
+            raise click.ClickException(msg)
+        resolved_secret = (secret_name or "").strip() or cluster_token_secret_name(
+            bundle
+        )
+        apply_cluster_token_secret(
+            token=token,
+            secret_name=resolved_secret,
+            namespace=resolved_namespace,
+            kubeconfig_path=target.kubeconfig,
+            agent_release=agent_release,
+            run=run,
+        )
     click.echo(
         f"Rotated cluster token for {name!r} and updated secret "
         f"{resolved_secret!r} in namespace {resolved_namespace!r}."

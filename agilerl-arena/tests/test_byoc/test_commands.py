@@ -28,7 +28,6 @@ from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.commands import (
     _apply_verbosity,
     _byoc_provider_with_module,
-    _kubeconfig_environment,
     _load_destroy_target,
     _load_provisioning,
     _node_groups_for_classes,
@@ -44,6 +43,7 @@ from agilerl.arena.byoc.commands import (
     build_cluster_register_classes_command,
     build_cluster_status_command,
 )
+from agilerl.arena.byoc.kube_target import NoKubeContextError, kubeconfig_environment
 from agilerl.arena.byoc.provisioning.module_catalog import ModulePin, write_module_pin
 from agilerl.arena.byoc.provisioning.providers.nebius.platforms import GpuPreset
 from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
@@ -64,6 +64,7 @@ from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaAPIError
 
+COMMANDS = "agilerl.arena.byoc.commands"
 INSTALLED_BYOC_RELEASES = [
     ("arena-byoc-agent", "arena"),
     ("arena-byoc-storage", "storage"),
@@ -79,6 +80,24 @@ ARCHIVED = {
 DEREGISTERING = {"unregistered": False, "status": "Deregistering"}
 
 
+@pytest.fixture(autouse=True)
+def pinned_target(
+    fake_kube_target: Callable[..., MagicMock], monkeypatch: pytest.MonkeyPatch
+) -> MagicMock:
+    """Point every cluster command at a fixed context that Arena accepts."""
+    monkeypatch.setattr(f"{COMMANDS}.require_registered_cluster", MagicMock())
+    return fake_kube_target(COMMANDS)
+
+
+@pytest.fixture
+def no_kube_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No kubeconfig names a context for the command to use."""
+    monkeypatch.setattr(
+        f"{COMMANDS}.kube_target",
+        MagicMock(side_effect=NoKubeContextError("No Kubernetes context to use.")),
+    )
+
+
 @dataclass
 class UnregisterRun:
     """What ``arena cluster unregister`` printed and called."""
@@ -87,19 +106,20 @@ class UnregisterRun:
     unregister: MagicMock
     uninstall: MagicMock
     find_cluster: MagicMock
+    list_releases: MagicMock
 
 
 def run_unregister(
     command_config: CommandConfig,
     client_context: Callable[[MagicMock], MagicMock],
     args: list[str],
-    kubeconfig: Path | None = None,
     installed: list[tuple[str, str]] | None = None,
     response: dict[str, object] | None = None,
     input_text: str | None = None,
     still_listed: int = 0,
     unregister_error: Exception | None = None,
     uninstall_error: Exception | None = None,
+    helm: bool = True,
 ) -> UnregisterRun:
     """Run ``unregister --name prod-cluster`` plus *args* against mocks.
 
@@ -108,24 +128,20 @@ def run_unregister(
     """
     listed = [{"name": "prod-cluster", "status": "Deregistering"}] * still_listed
     with (
+        patch(f"{COMMANDS}.helm_available", return_value=helm),
         patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
+            f"{COMMANDS}.list_installed_byoc_releases",
             return_value=installed or [],
-        ),
+        ) as list_releases,
         patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
+            f"{COMMANDS}.uninstall_byoc_releases",
             side_effect=uninstall_error,
         ) as uninstall,
         patch(
-            "agilerl.arena.byoc.commands.arena_client",
+            f"{COMMANDS}.arena_client",
             return_value=client_context(MagicMock()),
         ),
-        patch("agilerl.arena.byoc.commands.time.sleep"),
+        patch(f"{COMMANDS}.time.sleep"),
         patch.object(
             ByocApi,
             "unregister_cluster",
@@ -140,15 +156,13 @@ def run_unregister(
             obj=command_config,
             input=input_text,
         )
-    return UnregisterRun(result, unregister, uninstall, find)
+    return UnregisterRun(result, unregister, uninstall, find, list_releases)
 
 
 @pytest.fixture
 def kubeconfig(tmp_path: Path) -> Path:
-    """A kubeconfig file for the agent cluster."""
-    path = tmp_path / "kubeconfig"
-    path.write_text("apiVersion: v1\n", encoding="utf-8")
-    return path
+    """The kubeconfig pinned to the agent cluster's context."""
+    return tmp_path / "pinned-kubeconfig"
 
 
 class TestClusterUnregister:
@@ -195,17 +209,43 @@ class TestClusterUnregister:
         assert run.result.exit_code == 0, run.result.output
         run.unregister.assert_called_once_with("prod-cluster", **sent)
 
+    @pytest.mark.parametrize(
+        ("flag", "sent"),
+        [
+            ("--stop-runs", {"stop_runs": True, "force": False}),
+            ("--force", {"stop_runs": False, "force": True}),
+        ],
+    )
+    def test_stop_runs_and_force_uninstall_on_the_named_context(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        pinned_target: MagicMock,
+        kubeconfig: Path,
+        flag: str,
+        sent: dict[str, bool],
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            [flag, "--context", "corp", "--uninstall-helm", "--yes"],
+            installed=AGENT_HELM_RELEASE,
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        pinned_target.assert_called_once_with("prod-cluster", None, "corp")
+        run.unregister.assert_called_once_with("prod-cluster", **sent)
+        run.uninstall.assert_called_once_with(AGENT_HELM_RELEASE, kubeconfig)
+
     def test_refusal_with_active_runs_is_shown(
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
-        kubeconfig: Path,
     ) -> None:
         run = run_unregister(
             command_config,
             client_context,
             ["--yes"],
-            kubeconfig=kubeconfig,
             installed=AGENT_HELM_RELEASE,
             unregister_error=ArenaAPIError(
                 'experiment 4 "run" (Running). Stop them first, or unregister '
@@ -227,7 +267,6 @@ class TestClusterUnregister:
             command_config,
             client_context,
             ["--uninstall-helm", "--yes"],
-            kubeconfig=kubeconfig,
             installed=INSTALLED_BYOC_RELEASES,
             response=DEREGISTERING,
             still_listed=2,
@@ -258,22 +297,23 @@ class TestClusterUnregister:
         assert "did not remove its job namespaces" in run.result.output
         assert "helm uninstall x" in run.result.output
 
-    def test_yes_alone_keeps_the_agent_and_prints_how_to_remove_it(
+    def test_yes_alone_never_touches_the_cluster_and_prints_how_to_remove_the_agent(
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
-        kubeconfig: Path,
+        pinned_target: MagicMock,
     ) -> None:
         run = run_unregister(
             command_config,
             client_context,
             ["--yes"],
-            kubeconfig=kubeconfig,
             installed=AGENT_HELM_RELEASE,
             response=DEREGISTERING,
         )
 
         assert run.result.exit_code == 0, run.result.output
+        pinned_target.assert_not_called()
+        run.list_releases.assert_not_called()
         run.uninstall.assert_not_called()
         assert "The agent removed its job namespaces." in run.result.output
         assert "helm uninstall arena-byoc-agent --namespace arena" in run.result.output
@@ -282,13 +322,11 @@ class TestClusterUnregister:
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
-        kubeconfig: Path,
     ) -> None:
         run = run_unregister(
             command_config,
             client_context,
             ["--yes", "--wait-timeout", "0"],
-            kubeconfig=kubeconfig,
             installed=AGENT_HELM_RELEASE,
             response=DEREGISTERING,
             still_listed=1,
@@ -309,7 +347,6 @@ class TestClusterUnregister:
             command_config,
             client_context,
             [],
-            kubeconfig=kubeconfig,
             installed=INSTALLED_BYOC_RELEASES,
             input_text="\n\ny\n",
         )
@@ -328,7 +365,6 @@ class TestClusterUnregister:
             command_config,
             client_context,
             ["--uninstall-helm", "--uninstall-storage", "--yes"],
-            kubeconfig=kubeconfig,
             installed=INSTALLED_BYOC_RELEASES,
         )
 
@@ -345,7 +381,6 @@ class TestClusterUnregister:
             command_config,
             client_context,
             ["--uninstall-helm", "--yes"],
-            kubeconfig=kubeconfig,
             installed=[("arena-byoc-agent", "arena-agent")],
         )
 
@@ -358,13 +393,11 @@ class TestClusterUnregister:
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
-        kubeconfig: Path,
     ) -> None:
         run = run_unregister(
             command_config,
             client_context,
             ["--keep-agent", "--yes"],
-            kubeconfig=kubeconfig,
             installed=AGENT_HELM_RELEASE,
             response=DEREGISTERING,
             still_listed=1,
@@ -384,17 +417,18 @@ class TestClusterUnregister:
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
-        kubeconfig: Path,
+        pinned_target: MagicMock,
     ) -> None:
         run = run_unregister(
             command_config,
             client_context,
-            ["--force", "--keep-agent", "--yes"],
-            kubeconfig=kubeconfig,
+            ["--force", "--keep-agent", "--context", "corp"],
             installed=[("prod-cluster", "arena-agent")],
+            input_text="y\n",
         )
 
         assert run.result.exit_code == 0, run.result.output
+        pinned_target.assert_called_once_with("prod-cluster", None, "corp")
         run.uninstall.assert_not_called()
         assert "did not remove its job namespaces" in run.result.output
         assert (
@@ -403,17 +437,78 @@ class TestClusterUnregister:
             "--selector=arena.agilerl.com/agent-namespace=arena-agent"
         ) in run.result.output
 
-    def test_without_kubeconfig_prints_arenas_cleanup_command(
+    @pytest.mark.usefixtures("no_kube_context")
+    def test_without_kube_context_prints_arenas_cleanup_command(
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
     ) -> None:
-        run = run_unregister(command_config, client_context, ["--force", "--yes"])
+        run = run_unregister(
+            command_config, client_context, ["--force"], input_text="y\n"
+        )
 
         assert run.result.exit_code == 0, run.result.output
-        assert "no kubeconfig" in run.result.output
+        assert (
+            "Could not check Helm releases. No Kubernetes context" in run.result.output
+        )
         run.uninstall.assert_not_called()
+        run.unregister.assert_called_once_with(
+            "prod-cluster", stop_runs=False, force=True
+        )
         assert ARCHIVED["cleanupCommand"] in run.result.output
+
+    def test_without_helm_skips_the_release_check(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        pinned_target: MagicMock,
+    ) -> None:
+        run = run_unregister(
+            command_config, client_context, [], input_text="y\n", helm=False
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        assert "helm is not on PATH" in run.result.output
+        pinned_target.assert_not_called()
+        run.uninstall.assert_not_called()
+        run.unregister.assert_called_once()
+
+    @pytest.mark.usefixtures("no_kube_context")
+    def test_uninstall_flag_needs_a_kube_context(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        run = run_unregister(
+            command_config, client_context, ["--uninstall-helm", "--yes"]
+        )
+
+        assert run.result.exit_code != 0
+        assert "No Kubernetes context" in run.result.output
+        run.unregister.assert_not_called()
+
+    def test_checks_the_cluster_uid_before_uninstalling(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        check = MagicMock(side_effect=click.ClickException("is not Arena cluster"))
+        monkeypatch.setattr(f"{COMMANDS}.require_registered_cluster", check)
+
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--context", "corp", "--stop-runs", "--uninstall-helm", "--yes"],
+            installed=AGENT_HELM_RELEASE,
+        )
+
+        assert run.result.exit_code != 0
+        assert "is not Arena cluster" in run.result.output
+        assert check.call_args.args[1] == "prod-cluster"
+        run.list_releases.assert_not_called()
+        run.uninstall.assert_not_called()
+        run.unregister.assert_not_called()
 
     def test_older_arena_archives_at_once(
         self,
@@ -425,7 +520,6 @@ class TestClusterUnregister:
             command_config,
             client_context,
             ["--uninstall-helm", "--yes"],
-            kubeconfig=kubeconfig,
             installed=AGENT_HELM_RELEASE,
             response={"unregistered": True},
         )
@@ -438,13 +532,11 @@ class TestClusterUnregister:
         self,
         command_config: CommandConfig,
         client_context: Callable[[MagicMock], MagicMock],
-        kubeconfig: Path,
     ) -> None:
         run = run_unregister(
             command_config,
             client_context,
             ["--uninstall-helm", "--yes"],
-            kubeconfig=kubeconfig,
             installed=AGENT_HELM_RELEASE,
             uninstall_error=click.ClickException("helm uninstall failed"),
         )
@@ -513,6 +605,8 @@ def test_cluster_rotate_token_passes_agent_namespace(
                 "prod-cluster",
                 "--agent-namespace",
                 "arena-agent",
+                "--context",
+                "corp",
                 "--yes",
             ],
             obj=command_config,
@@ -520,6 +614,7 @@ def test_cluster_rotate_token_passes_agent_namespace(
 
     assert result.exit_code == 0, result.output
     assert rotate_mock.call_args.kwargs["namespace"] == "arena-agent"
+    assert rotate_mock.call_args.kwargs["context"] == "corp"
 
 
 def test_cluster_group_includes_hardcoded_commands() -> None:
@@ -726,7 +821,7 @@ class TestKubeconfigEnvironment:
         monkeypatch.setenv("KUBECONFIG", "/old/config")
         kubeconfig = Path("/new/config")
 
-        with _kubeconfig_environment(kubeconfig):
+        with kubeconfig_environment(kubeconfig):
             assert os.environ["KUBECONFIG"] == str(kubeconfig)
 
         assert os.environ["KUBECONFIG"] == "/old/config"
@@ -963,7 +1058,7 @@ class TestKubeconfigEnvironmentUnset:
         monkeypatch.delenv("KUBECONFIG", raising=False)
         kubeconfig = Path("/new/config")
 
-        with _kubeconfig_environment(kubeconfig):
+        with kubeconfig_environment(kubeconfig):
             assert os.environ["KUBECONFIG"] == str(kubeconfig)
 
         assert "KUBECONFIG" not in os.environ

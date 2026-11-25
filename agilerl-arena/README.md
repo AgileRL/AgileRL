@@ -215,10 +215,21 @@ Helm found for that cluster. The Secret name comes from
 `existingClusterTokenSecret` in the agent Helm values, and is `cluster-token`
 otherwise. Pass `--agent-namespace` when Helm lists more than one agent install.
 
-Both commands resolve a kubeconfig in this order: `--kubeconfig`,
-`./arena-cluster-<name>/kubeconfig`, `KUBECONFIG`, `~/.kube/config`. They find
-Helm releases with `helm list --all-namespaces`, preferring a release named
-after the cluster and falling back to `arena-byoc-agent`.
+Every command that talks to Kubernetes (`register --install`,
+`register --install-storage`, `unregister`, `rotate-token`, `upgrade`) takes
+`--kubeconfig` and `--context`. Without `--context` it uses the current context
+of `--kubeconfig`, of `./arena-cluster-<name>/kubeconfig`, or of kubectl's own
+default (`KUBECONFIG`, `~/.kube/config`). That last one is used only after you
+confirm the context and API server it names; in a non-interactive shell the
+command stops and asks for `--context`. The commands find Helm releases with
+`helm list --all-namespaces`, preferring a release named after the cluster and
+falling back to `arena-byoc-agent`.
+
+Arena records each cluster's identity, the UID of its `kube-system` namespace.
+Registering with `--install` sends it, and the agent reports it on every
+heartbeat. A cluster registered before Arena kept identities takes the first one
+reported. After that, `rotate-token`, `upgrade` and `unregister` stop before
+they change anything when the context points at a different Kubernetes cluster.
 
 `unregister`, `rotate-token` and `upgrade` look the cluster up in your active
 org. `--platform` targets AgileRL's own platform clusters instead, which needs
@@ -285,8 +296,8 @@ and attach it to the cluster node groups.
 ```bash
 arena cluster plan --spec nebius-cluster.yaml
 arena cluster provision --spec nebius-cluster.yaml
-KUBECONFIG=./arena-cluster-arena-nebius/kubeconfig \
-  arena cluster register --spec nebius-cluster.yaml --install
+arena cluster register --spec nebius-cluster.yaml --install \
+  --kubeconfig ./arena-cluster-arena-nebius/kubeconfig
 ```
 
 Use `--register-and-install` on `provision` to run the last command
