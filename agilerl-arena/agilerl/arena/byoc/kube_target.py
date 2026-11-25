@@ -9,17 +9,19 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import click
 import yaml
 
 from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.provisioning.kubectl import kubeconfig_env, require_kubectl
+
+ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Command)
 
 
 class NoKubeContextError(click.ClickException):
@@ -58,10 +60,12 @@ def _kubectl(args: list[str], env: dict[str, str]) -> subprocess.CompletedProces
     )
 
 
-def _source_kubeconfig(name: str, kubeconfig: Path | None) -> Path | None:
+def _source_kubeconfig(name: str | None, kubeconfig: Path | None) -> Path | None:
     """Return the kubeconfig the user named, or the one provisioned for *name*."""
     if kubeconfig is not None:
         return kubeconfig.expanduser().resolve()
+    if name is None:
+        return None
     provisioned = provisioned_kubeconfig(name)
     if provisioned.is_file():
         return provisioned.resolve()
@@ -114,7 +118,7 @@ def _read_cluster_uid(kubeconfig: Path) -> str:
 
 @contextmanager
 def kube_target(
-    name: str, kubeconfig: Path | None, context: str | None
+    name: str | None, kubeconfig: Path | None, context: str | None
 ) -> Iterator[KubeTarget]:
     """Resolve the Kubernetes context for cluster *name* and read its identity.
 
@@ -122,7 +126,7 @@ def kube_target(
     of ``--kubeconfig``, of ``arena-cluster-NAME/kubeconfig``, or of kubectl's
     own default. That last one is used only after the user confirms it.
 
-    :param name: Registered Arena cluster name.
+    :param name: Arena cluster name, or ``None`` for a cluster not named yet.
     :param kubeconfig: ``--kubeconfig``, or ``None``.
     :param context: ``--context``, or ``None``.
     :return: The target, whose kubeconfig exists until the block exits.
@@ -145,7 +149,7 @@ def kube_target(
             server=server,
             cluster_uid=_read_cluster_uid(pinned),
         )
-        click.echo(f"Using Kubernetes {target.describe()}.")
+        click.echo(f"Using Kubernetes {target.describe()}.", err=True)
         yield target
 
 
@@ -190,7 +194,7 @@ def require_same_cluster(
         raise click.ClickException(msg)
 
 
-def kube_target_options(command: click.Command) -> click.Command:
+def kube_target_options(command: ClickDecorated) -> ClickDecorated:
     """Add ``--kubeconfig`` and ``--context`` to a command that talks to Kubernetes."""
     command = click.option(
         "--context",

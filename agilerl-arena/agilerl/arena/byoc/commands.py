@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
@@ -17,12 +18,18 @@ from typing import Any, cast
 import click
 
 from agilerl.arena.byoc.api import ByocApi
+from agilerl.arena.byoc.cluster_connect import (
+    ConnectOptions,
+    registered_cluster,
+    run_cluster_connect,
+)
 from agilerl.arena.byoc.cluster_helm import (
     AGENT_NAMESPACE,
     AGENT_RELEASE,
     STORAGE_RELEASE,
     helm_available,
     list_installed_byoc_releases,
+    normalize_agent_namespace,
     uninstall_byoc_releases,
 )
 from agilerl.arena.byoc.cluster_register import (
@@ -35,6 +42,7 @@ from agilerl.arena.byoc.cluster_smoke import run_cluster_smoke
 from agilerl.arena.byoc.cluster_token import run_cluster_rotate_token
 from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
 from agilerl.arena.byoc.kube_target import (
+    ClickDecorated,
     KubeTarget,
     NoKubeContextError,
     kube_target,
@@ -42,6 +50,14 @@ from agilerl.arena.byoc.kube_target import (
     kubeconfig_environment,
     require_registered_cluster,
     require_same_cluster,
+)
+from agilerl.arena.byoc.preflight import (
+    any_failed,
+    echo_checks,
+    own_agent_release,
+    preflight_report,
+    require_passed,
+    run_preflight,
 )
 from agilerl.arena.byoc.provisioning.inference import normalize_inference_domain
 from agilerl.arena.byoc.provisioning.module_catalog import (
@@ -91,6 +107,7 @@ from agilerl.arena.byoc.provisioning.terraform import (
 from agilerl.arena.cli_manifest import _parse_json_cli_value
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaAPIError
+from agilerl.arena.output import json_output_enabled
 
 logger = logging.getLogger("agilerl.arena.byoc")
 SENSITIVE_STATUS_OUTPUTS = frozenset(
@@ -998,6 +1015,167 @@ def build_cluster_register_command() -> click.Command:
         _run_register_command(config, options)
 
     return register_cmd
+
+
+def _agent_namespace_option(command: ClickDecorated) -> ClickDecorated:
+    """Add ``--agent-namespace`` for a command that installs or checks the agent."""
+    return click.option(
+        "--agent-namespace",
+        default=AGENT_NAMESPACE,
+        show_default=True,
+        help="Kubernetes namespace for the agent Helm release.",
+    )(command)
+
+
+def _ray_data_storage_class_option(command: ClickDecorated) -> ClickDecorated:
+    """Add ``--ray-data-storage-class-name``."""
+    return click.option(
+        "--ray-data-storage-class-name",
+        default=None,
+        help="StorageClass for Ray data. Defaults to the cluster's default StorageClass.",
+    )(command)
+
+
+def build_cluster_preflight_command() -> click.Command:
+    """``arena cluster preflight`` — check a cluster before connecting it."""
+
+    @click.command("preflight", context_settings={"max_content_width": 100})
+    @click.option(
+        "--name",
+        default=None,
+        help=(
+            "Arena cluster name. When Arena already has this cluster, its own agent "
+            "does not count as a second one."
+        ),
+    )
+    @kube_target_options
+    @_agent_namespace_option
+    @_ray_data_storage_class_option
+    @click.option(
+        "--json",
+        "as_json",
+        is_flag=True,
+        help="Print the report as one JSON document, for the Arena web wizard.",
+    )
+    @click.pass_obj
+    def preflight_cmd(
+        config: CommandConfig,
+        name: str | None,
+        kubeconfig: Path | None,
+        kube_context: str | None,
+        agent_namespace: str,
+        ray_data_storage_class_name: str | None,
+        as_json: bool,
+    ) -> None:
+        """Check that a Kubernetes cluster can run the Arena agent.
+
+        Read-only: changes nothing in Arena or the cluster. Exits non-zero when
+        a check fails.
+        """
+        namespace = normalize_agent_namespace(agent_namespace)
+        with (
+            kube_target(name, kubeconfig, kube_context) as target,
+            kubeconfig_environment(target.kubeconfig),
+        ):
+            own_release = None
+            if name is not None:
+                with arena_client(config) as client:
+                    registered = registered_cluster(ByocApi(client), name, target)
+                if registered is not None:
+                    own_release = own_agent_release(target.kubeconfig, namespace, name)
+            checks = run_preflight(
+                target.kubeconfig, namespace, own_release, ray_data_storage_class_name
+            )
+        if as_json or json_output_enabled():
+            report = preflight_report(
+                target.context, target.server, target.cluster_uid, checks
+            )
+            click.echo(json.dumps(report))
+            if any_failed(checks):
+                sys.exit(1)
+            return
+        echo_checks(checks)
+        require_passed(checks)
+
+    return preflight_cmd
+
+
+def build_cluster_connect_command() -> click.Command:
+    """``arena cluster connect`` — preflight, register, install and wait for the agent."""
+
+    @click.command("connect", context_settings={"max_content_width": 100})
+    @click.option("--name", required=True, help="Arena cluster name.")
+    @kube_target_options
+    @_agent_namespace_option
+    @click.option("--storage-endpoint", default=None, help="Object storage endpoint.")
+    @click.option("--storage-bucket", default=None, help="Object storage bucket.")
+    @click.option("--storage-prefix", default=None, help="Object storage prefix.")
+    @click.option(
+        "--storage-secret-name",
+        default=None,
+        help="Secret in the agent namespace that holds the storage credentials.",
+    )
+    @_ray_data_storage_class_option
+    @click.option(
+        "--rotate-token",
+        is_flag=True,
+        default=False,
+        help=(
+            "Issue a new agent token for a cluster that is already registered. "
+            "The previous token keeps working for 24 hours."
+        ),
+    )
+    @click.option(
+        "--wait-timeout",
+        type=click.FloatRange(min=0),
+        default=900.0,
+        show_default=True,
+        help="Seconds to wait for the agent to connect and send its health report.",
+    )
+    @click.pass_obj
+    def connect_cmd(
+        config: CommandConfig,
+        name: str,
+        kubeconfig: Path | None,
+        kube_context: str | None,
+        agent_namespace: str,
+        storage_endpoint: str | None,
+        storage_bucket: str | None,
+        storage_prefix: str | None,
+        storage_secret_name: str | None,
+        ray_data_storage_class_name: str | None,
+        rotate_token: bool,
+        wait_timeout: float,
+    ) -> None:
+        """Connect a Kubernetes cluster to Arena in one step.
+
+        Runs preflight and stops on a failed check, then registers the cluster
+        (an existing name keeps its token), installs the agent, and waits until
+        it connects and reports its health after the install finishes. Prints
+        the resource classes Arena suggests, or why it has none yet.
+        """
+        cluster_name = name.strip()
+        if not cluster_name:
+            msg = "--name is required."
+            raise click.ClickException(msg)
+        run_cluster_connect(
+            config,
+            ConnectOptions(
+                name=cluster_name,
+                kubeconfig=kubeconfig,
+                kube_context=kube_context,
+                agent_namespace=normalize_agent_namespace(agent_namespace),
+                storage_endpoint=storage_endpoint,
+                storage_bucket=storage_bucket,
+                storage_prefix=storage_prefix,
+                storage_secret_name=storage_secret_name,
+                ray_data_storage_class_name=ray_data_storage_class_name,
+                rotate_token=rotate_token,
+                wait_timeout=wait_timeout,
+            ),
+        )
+
+    return connect_cmd
 
 
 def _helm_releases_to_uninstall(

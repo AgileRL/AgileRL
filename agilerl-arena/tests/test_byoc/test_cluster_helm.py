@@ -228,7 +228,7 @@ def test_helm_upgrade_install_waits_only_on_named_deployment(tmp_path: Path) -> 
         ),
         patch("agilerl.arena.byoc.cluster_helm.subprocess.run") as run_mock,
     ):
-        run_mock.return_value = MagicMock(returncode=0)
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
         helm_upgrade_install(
             release="arena-byoc-agent",
             chart=chart,
@@ -243,8 +243,8 @@ def test_helm_upgrade_install_waits_only_on_named_deployment(tmp_path: Path) -> 
     assert "--wait" not in helm_cmd
     assert kubectl_cmd == [
         "kubectl",
-        "wait",
-        "--for=condition=available",
+        "rollout",
+        "status",
         "deployment",
         "--selector",
         "app.kubernetes.io/name=arena-byoc-agent",
@@ -291,9 +291,10 @@ def test_wait_for_deployments_raises_on_timeout() -> None:
         ),
         patch("agilerl.arena.byoc.cluster_helm.subprocess.run") as run_mock,
     ):
-        run_mock.return_value = MagicMock(returncode=1)
+        run_mock.return_value = MagicMock(returncode=1, stderr="error: timed out\n")
         with pytest.raises(
-            click.ClickException, match="Timed out waiting for deployments matching"
+            click.ClickException,
+            match="to finish rolling out",
         ):
             wait_for_deployments(
                 "app.kubernetes.io/name=arena-byoc-agent",
@@ -1729,11 +1730,39 @@ def test_wait_for_deployments_succeeds() -> None:
         patch("agilerl.arena.byoc.cluster_helm.shutil.which", return_value="kubectl"),
         patch("agilerl.arena.byoc.cluster_helm.subprocess.run") as run_mock,
     ):
-        run_mock.return_value = MagicMock(returncode=0)
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
         wait_for_deployments("app=agent", AGENT_NAMESPACE)
 
-    assert run_mock.call_args.args[0][0] == "kubectl"
-    assert "--for=condition=available" in run_mock.call_args.args[0]
+    assert run_mock.call_args.args[0] == [
+        "kubectl",
+        "rollout",
+        "status",
+        "deployment",
+        "--selector",
+        "app=agent",
+        "--namespace",
+        AGENT_NAMESPACE,
+        "--timeout=10m",
+    ]
+
+
+def test_wait_for_deployments_fails_when_nothing_matches() -> None:
+    with (
+        patch(
+            "agilerl.arena.byoc.cluster_helm.shutil.which",
+            return_value="/usr/bin/kubectl",
+        ),
+        patch("agilerl.arena.byoc.cluster_helm.subprocess.run") as run_mock,
+    ):
+        run_mock.return_value = MagicMock(
+            returncode=0,
+            stderr="No resources found in arena namespace.\n",
+        )
+        with pytest.raises(click.ClickException, match="No deployments matching"):
+            wait_for_deployments(
+                "app.kubernetes.io/name=arena-byoc-agent",
+                "arena",
+            )
 
 
 def test_copy_k8s_secret_raises_when_apply_fails() -> None:
