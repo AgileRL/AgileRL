@@ -1992,6 +1992,101 @@ nebius:
         if not proceeds:
             assert "another-uid" in result.output
 
+    def test_install_registers_an_org_that_has_not_enabled_byoc(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        http_client: ArenaClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Arena lists no clusters (404) until register enables the provider."""
+        monkeypatch.chdir(tmp_path)
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(NEBIUS_SPEC, encoding="utf-8")
+        spec_kubeconfig = tmp_path / "arena-cluster-spec-cluster" / "kubeconfig"
+        spec_kubeconfig.parent.mkdir()
+        spec_kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+        calls: list[str] = []
+
+        def respond(_method: str, path: str, **_kwargs: object) -> httpx.Response:
+            calls.append(path)
+            assert path in {"/api/byoc-clusters", "/api/cli/v1/byoc/clusters/list"}
+            return httpx.Response(404, json={"error": "Not Found"})
+
+        http_client._http.request.side_effect = respond
+
+        with (
+            patch(
+                f"{COMMANDS}.arena_client",
+                return_value=client_context(http_client),
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.NebiusProvider.ensure_gateway",
+                return_value=[{"name": "arena"}],
+            ) as gateway,
+            patch(
+                f"{COMMANDS}.run_cluster_register",
+                side_effect=lambda *_a, **_kw: calls.append("register"),
+            ) as register,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--spec", str(spec_path), "--install"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert calls == [
+            "/api/byoc-clusters",
+            "/api/cli/v1/byoc/clusters/list",
+            "register",
+        ]
+        gateway.assert_called_once()
+        assert register.call_args.kwargs["skip_enable"] is False
+        assert register.call_args.kwargs["cluster_uid"] == FAKE_CLUSTER_UID
+
+    def test_install_stops_when_the_cluster_lookup_fails(
+        self,
+        pinned_target: MagicMock,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(NEBIUS_SPEC, encoding="utf-8")
+        spec_kubeconfig = tmp_path / "arena-cluster-spec-cluster" / "kubeconfig"
+        spec_kubeconfig.parent.mkdir()
+        spec_kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+
+        with (
+            patch(
+                f"{COMMANDS}.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch(
+                f"{COMMANDS}.ByocApi.find_cluster",
+                side_effect=ArenaAPIError("boom", status_code=500),
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.NebiusProvider.ensure_gateway",
+            ) as gateway,
+            patch(f"{COMMANDS}.run_cluster_register") as register,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["--spec", str(spec_path), "--install"],
+                obj=command_config,
+            )
+
+        assert result.exit_code != 0
+        assert isinstance(result.exception, ArenaAPIError)
+        gateway.assert_not_called()
+        register.assert_not_called()
+
     def test_install_skips_the_gateway_when_the_spec_disables_it(
         self,
         command_config: CommandConfig,

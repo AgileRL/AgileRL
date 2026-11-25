@@ -1307,6 +1307,51 @@ class TestRecoverNebiusSpec:
         assert recovered.nebius.project_id == "project-stored"
         assert recovered.nebius.storage_project_id == "storage-stored"
 
+    def test_org_without_byoc_enabled_keeps_the_spec(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        spec = _nebius_spec(
+            project_id=None, storage_project_id=None, subnet_id=None, region="eu-north1"
+        )
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch.object(
+                ByocApi,
+                "stored_provider_config",
+                side_effect=ArenaAPIError("Not Found", status_code=404),
+            ),
+        ):
+            assert _recover_spec(command_config, spec) is spec
+
+    def test_other_lookup_errors_propagate(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        spec = _nebius_spec(
+            project_id=None, storage_project_id=None, subnet_id=None, region="eu-north1"
+        )
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch.object(
+                ByocApi,
+                "stored_provider_config",
+                side_effect=ArenaAPIError("boom", status_code=500),
+            ),
+            pytest.raises(ArenaAPIError, match="boom"),
+        ):
+            _recover_spec(command_config, spec)
+
 
 class TestSpecWithStoredNebiusConfig:
     def test_returns_spec_when_nothing_is_missing(self) -> None:
