@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from agilerl.arena.models import SUPPORTED_MODEL_INFO
+from agilerl.arena.models import SUPPORTED_MODEL_INFO, SFTSpec
 from agilerl.arena.models.defaults import default_verdict
 from agilerl.arena.models.manifest import REWARD_FILE_AT_SUBMIT
 from agilerl.arena.models.verdict import verdict
@@ -295,3 +297,214 @@ class TestDefaultVerdict:
         # Assert
         assert record["ok"] is True, record
         assert record["payload"]["environment"]["env_hosts"] == 1
+
+    @pytest.mark.parametrize(
+        ("name", "objective", "unused", "kept"),
+        [
+            ("SFT", "sft", {"beta", "answer_continuation"}, set()),
+            ("DPO", "preference", {"answer_continuation"}, {"beta"}),
+        ],
+    )
+    def test_dataset_algorithm_leaves_out_fields_it_does_not_use(
+        self, name: str, objective: str, unused: set[str], kept: set[str]
+    ) -> None:
+        # Arrange
+        environment = {
+            "name": "rows",
+            "env_type": "dataset",
+            "dataset": "rows",
+            "objective": objective,
+        }
+
+        # Act
+        record = default_verdict(document({"name": name}, environment))
+
+        # Assert
+        assert record["ok"] is True, record
+        algorithm = record["payload"]["algorithm"]
+        assert unused.isdisjoint(algorithm)
+        assert kept <= algorithm.keys()
+
+    def test_rollout_algorithm_keeps_answer_continuation(self) -> None:
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, dataset_rollout()))
+
+        # Assert
+        assert record["payload"]["algorithm"]["answer_continuation"] is False
+
+    def test_rejects_a_model_outside_the_catalog(self) -> None:
+        # Arrange
+        partial = document({"name": "GRPO"}, dataset_rollout())
+        partial["network"]["pretrained_model_name_or_path"] = "acme/not-a-model"
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": "Arena does not support the model 'acme/not-a-model'.",
+                "kind": "value_error",
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "model",
+        ["/models/my-model", "./checkpoints/mine", "~/models/mine"],
+    )
+    def test_accepts_a_path_when_the_context_length_is_set(self, model: str) -> None:
+        # Arrange
+        partial = document({"name": "GRPO"}, dataset_rollout())
+        partial["network"] = {
+            "pretrained_model_name_or_path": model,
+            "max_context_length": 1024,
+        }
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is True, record
+        network = record["payload"]["network"]
+        assert network["pretrained_model_name_or_path"] == model
+        assert network["max_context_length"] == 1024
+
+    def test_accepts_an_on_disk_checkout_when_the_context_length_is_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        checkout = tmp_path / "models" / "mine"
+        checkout.mkdir(parents=True)
+        (checkout / "config.json").write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        partial = document({"name": "GRPO"}, dataset_rollout())
+        partial["network"] = {
+            "pretrained_model_name_or_path": "models/mine",
+            "max_context_length": 1024,
+        }
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is True, record
+        assert (
+            record["payload"]["network"]["pretrained_model_name_or_path"]
+            == "models/mine"
+        )
+
+    def test_rejects_a_relative_name_with_no_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.chdir(tmp_path)
+        partial = document({"name": "GRPO"}, dataset_rollout())
+        partial["network"] = {
+            "pretrained_model_name_or_path": "models/mine",
+            "max_context_length": 1024,
+        }
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": "Arena does not support the model 'models/mine'.",
+                "kind": "value_error",
+            }
+        ]
+
+    def test_a_local_path_without_context_length_is_a_missing_field(self) -> None:
+        # Arrange
+        partial = document({"name": "GRPO"}, dataset_rollout())
+        partial["network"]["pretrained_model_name_or_path"] = "/models/my-model"
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "network.max_context_length",
+                "message": "Field required",
+                "kind": "missing",
+            }
+        ]
+
+    def test_rejects_sft_beta_outside_zero_to_one(self) -> None:
+        # Arrange
+        environment = {
+            "name": "rows",
+            "env_type": "dataset",
+            "dataset": "rows",
+            "objective": "sft",
+        }
+        partial = document({"name": "SFT", "beta": -1}, environment)
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "algorithm.beta",
+                "message": "Input should be greater than or equal to 0",
+                "kind": "greater_than_equal",
+            }
+        ]
+
+    def test_rejects_an_sft_beta_mutation_outside_zero_to_one(self) -> None:
+        # Arrange
+        environment = {
+            "name": "rows",
+            "env_type": "dataset",
+            "dataset": "rows",
+            "objective": "sft",
+        }
+        partial = document({"name": "SFT"}, environment)
+        partial["mutation"] = {"rl_hp_selection": {"beta": {"min": -1, "max": 2}}}
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "",
+                "message": (
+                    "Value error, mutation.rl_hp_selection cannot mutate 'beta': "
+                    "range [-1.0, 2.0] leaves the field limits (>= 0.0 and <= 1.0): "
+                    "min -1.0 is below 0.0; max 2.0 is above 1.0"
+                ),
+                "kind": "value_error",
+            }
+        ]
+
+
+class TestSFTSpecBeta:
+    def test_keeps_the_bounds_and_leaves_beta_out_of_the_dump(self) -> None:
+        # Act
+        low = SFTSpec(beta=0.0)
+        high = SFTSpec(beta=1.0)
+
+        # Assert
+        assert low.beta == 0.0
+        assert high.beta == 1.0
+        assert "beta" not in low.model_dump()
+        assert "beta" not in high.model_dump()
+
+    @pytest.mark.parametrize(
+        ("beta", "match"),
+        [(-1, "greater than or equal to 0"), (1.5, "less than or equal to 1")],
+    )
+    def test_rejects_a_value_outside_zero_to_one(self, beta: float, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            SFTSpec(beta=beta)

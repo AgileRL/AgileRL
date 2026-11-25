@@ -21,7 +21,7 @@ from agilerl.arena.models.training import (
     LLM_REPORTING_INTERVAL,
     ROLLOUT_LLM_MAX_STEPS,
 )
-from agilerl.arena.models.verdict import errors, failure, verdict
+from agilerl.arena.models.verdict import errors, failure, is_local_model_path, verdict
 
 
 def default_verdict(document: dict[str, Any]) -> dict[str, Any]:
@@ -49,6 +49,22 @@ def default_verdict(document: dict[str, Any]) -> dict[str, Any]:
                 {
                     "path": "algorithm.name",
                     "message": f"Arena builds defaults for LLM algorithms; {algorithm_name} is not one.",
+                    "kind": "value_error",
+                }
+            ]
+        )
+
+    model = draft.get("network", {}).get("pretrained_model_name_or_path")
+    if (
+        isinstance(model, str)
+        and model not in SUPPORTED_MODEL_INFO
+        and not is_local_model_path(model)
+    ):
+        return failure(
+            [
+                {
+                    "path": "network.pretrained_model_name_or_path",
+                    "message": f"Arena does not support the model '{model}'.",
                     "kind": "value_error",
                 }
             ]

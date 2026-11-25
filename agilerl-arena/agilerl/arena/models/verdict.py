@@ -105,6 +105,20 @@ def read_manifest(source: str) -> dict[str, Any]:
     return TrainingManifest.load(source)
 
 
+def is_local_model_path(model: str) -> bool:
+    """Whether *model* is a filesystem path or a checkout, not a Hub id.
+
+    :param model: ``pretrained_model_name_or_path``.
+    :type model: str
+    :returns: True for a ``.`` / ``/`` / ``~`` prefix, or a directory with ``config.json``.
+    :rtype: bool
+    """
+    return (
+        model.startswith((".", "/", "~"))
+        or (Path(model).expanduser() / "config.json").is_file()
+    )
+
+
 def model_warnings(manifest: TrainingManifest) -> list[str]:
     """Warn when an LLM manifest's model is outside the Arena catalog, deprecated or in preview.
 
@@ -123,11 +137,7 @@ def model_warnings(manifest: TrainingManifest) -> list[str]:
     if info is not None:
         notice = info.status_notice
         return [notice] if notice else []
-    # A path prefix, or a checkout that already has config.json, is not a Hub id.
-    if (
-        hub_id.startswith((".", "/", "~"))
-        or (Path(hub_id).expanduser() / "config.json").is_file()
-    ):
+    if is_local_model_path(hub_id):
         return []
     msg = (
         f"Model {hub_id} is not in the Arena supported model catalog; "
@@ -380,6 +390,7 @@ __all__ = [
     "failure",
     "hpo_fields",
     "is_classic_rl",
+    "is_local_model_path",
     "loc_to_path",
     "model_warnings",
     "read_manifest",
