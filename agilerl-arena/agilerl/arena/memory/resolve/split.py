@@ -57,6 +57,11 @@ from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
 )
 from agilerl.arena.memory.resolve.learn_costs import learn_costs
+from agilerl.arena.memory.resolve.lengths import (
+    ExpectedLengths,
+    default_row_lengths,
+    measured_row_lengths,
+)
 from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
     drafts_by_default,
@@ -87,12 +92,7 @@ from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import (
-    SUPPORTED_MODEL_INFO,
-    resolve_reasoning_parser,
-)
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 from agilerl.arena.models.training import LLMRolloutBufferSpec
 
@@ -118,23 +118,6 @@ MOE_DECODE_BANDWIDTH_EFFICIENCY = 0.3
 TURN_OVERHEAD_SECONDS = 3.5
 # A multi-turn wave's time over the mean episode's, from slow episodes.
 MULTI_TURN_STRAGGLER_FACTOR = 1.22
-# Share of max_output_tokens a single-turn completion decodes: 0.85-0.86 on
-# countdown with Qwen3-4B thinking, 0.28-0.44 with Granite MoEs, which do not.
-SINGLE_TURN_REASONING_DECODE_SHARE = 0.85
-SINGLE_TURN_DECODE_SHARE = 0.35
-# Share of the row budget past max_output_tokens a single-turn prompt fills:
-# 0.20-0.22 on countdown.
-SINGLE_TURN_PROMPT_FILL = 0.2
-# Share of the row budget a multi-turn row fills: 0.50-0.54 on Sudoku-v0-hard
-# (Qwen3-4B), 0.38-0.43 on AWM (Qwen3.6-35B-A3B).
-MULTI_TURN_ROW_FILL = 0.46
-# Share of a multi-turn row the model decodes; the rest is prompt and env text.
-MULTI_TURN_DECODE_SHARE = 0.5
-# Mean turns of an episode over the env's max_turns: 11-12 of 50 on
-# Sudoku-v0-hard, 2-5 of 20 on AWM, rising as the policy trains.
-MULTI_TURN_TURN_SHARE = 0.2
-# A turn's mean decoded tokens: 380-430 on Sudoku-v0-hard, 220-450 on AWM.
-MULTI_TURN_TURN_DECODE_TOKENS = 352
 # Multi-turn generation time without drafting over its time with n-gram drafts:
 # 1.9x on Sudoku at 4T4E on both A100 and H100 (about 2.7 tokens accepted per step).
 NGRAM_GENERATION_SPEEDUP = 1.9
@@ -1132,21 +1115,30 @@ def choose_gpu_split(
 
 
 def split_workload_from_manifest(
-    manifest: TrainingManifest, adapter_sync: bool = False
+    manifest: TrainingManifest,
+    adapter_sync: bool = False,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> SplitWorkload:
     """Expected lengths and batch constraints from a rollout manifest's budgets.
 
     :param manifest: Validated async rollout manifest.
     :param adapter_sync: Weight sync pushes the adapter even where the engines
         could serve merged weights.
-    :return: The workload at :func:`_expected_lengths`.
+    :param expected_lengths: Expected lengths (:func:`measured_row_lengths`);
+        ``None`` uses the generic defaults (:func:`default_row_lengths`).
+    :return: The workload at those lengths.
     :raises TypeError: When the algorithm does not generate rollouts.
     """
     spec = manifest.algorithm
     if not isinstance(spec, RolloutLLMSpec):
         msg = f"{spec.name} does not generate rollouts"
         raise TypeError(msg)
-    row_tokens, decode_tokens, turns = _expected_lengths(manifest, spec)
+    if expected_lengths is None:
+        row_tokens, decode_tokens, turns = default_row_lengths(manifest, spec)
+    else:
+        row_tokens, decode_tokens, turns = measured_row_lengths(
+            manifest, spec, expected_lengths
+        )
     vllm = spec.vllm_config
     fsdp = spec.fsdp
     fsdp_tp = 1 if fsdp is None else fsdp.tp
@@ -1197,56 +1189,6 @@ def split_workload_from_manifest(
         speculative_drafting=speculative_drafting(spec),
         max_num_batched_tokens=_pinned_max_num_batched_tokens(spec),
         teacher_engine_gpus=teacher_engine_gpus(spec),
-    )
-
-
-def _expected_lengths(
-    manifest: TrainingManifest, spec: RolloutLLMSpec
-) -> tuple[int, int, int]:
-    """Mean trained-row tokens, decoded tokens per row and turns from the budgets.
-
-    A single turn decodes a share of ``max_output_tokens`` that depends on
-    whether the model reasons, after a prompt filling a share of the rest of
-    the row. A multi-turn row fills :data:`MULTI_TURN_ROW_FILL` of its budget
-    over :data:`MULTI_TURN_TURN_SHARE` of ``max_turns``, or as many full turns
-    as the row holds when turns are unbounded.
-    """
-    row_budget = spec.max_row_tokens or spec.max_model_len
-    turn_tokens = min(spec.max_output_tokens or row_budget, row_budget)
-    env = manifest.environment
-    max_turns = env.max_turns if isinstance(env, LLMEnvSpec) else 1
-    if max_turns == 1:
-        share = (
-            SINGLE_TURN_REASONING_DECODE_SHARE
-            if _reasons(manifest, spec)
-            else SINGLE_TURN_DECODE_SHARE
-        )
-        decode_tokens = math.ceil(share * turn_tokens)
-        prompt_tokens = math.ceil(SINGLE_TURN_PROMPT_FILL * (row_budget - turn_tokens))
-        return decode_tokens + prompt_tokens, decode_tokens, 1
-    row_tokens = math.ceil(MULTI_TURN_ROW_FILL * row_budget)
-    turns = max(
-        2,
-        math.ceil(row_tokens / turn_tokens)
-        if max_turns is None
-        else math.ceil(MULTI_TURN_TURN_SHARE * max_turns),
-    )
-    decode_tokens = min(
-        math.ceil(MULTI_TURN_DECODE_SHARE * row_tokens),
-        turns * MULTI_TURN_TURN_DECODE_TOKENS,
-    )
-    return row_tokens, decode_tokens, turns
-
-
-def _reasons(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
-    """Whether rollouts reason: the model has a reasoning parser and thinking is not turned off."""
-    info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if info is None else info.model_type
-    env = manifest.environment
-    template = env.chat_template_kwargs if isinstance(env, LLMEnvSpec) else {}
-    return (
-        resolve_reasoning_parser(spec.vllm_engine_args, model_type) is not None
-        and template.get("enable_thinking") is not False
     )
 
 
