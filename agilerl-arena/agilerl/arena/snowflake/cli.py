@@ -167,7 +167,8 @@ snowflake_group.add_command(teardown_command)
     default=None,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Python reward function for RL over a table or query. Required "
-    "unless the run is OPD and the manifest names no rubric; every turn "
+    "unless the manifest sets environment.reward, or the run is OPD and the "
+    "manifest names no rubric; every turn "
     "then scores 0. A named rubric still needs this file. The manifest "
     "needs no rubric_file_path.",
 )

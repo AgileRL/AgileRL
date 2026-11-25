@@ -102,7 +102,7 @@ class TestManifest:
         assert "ingress=True" not in text
         assert not re.search(r"public[\"']?\s*:\s*true", text, re.IGNORECASE)
 
-    def test_references_read_a_table_or_view_and_write_one_stage(self) -> None:
+    def test_references_read_data_write_one_stage_and_use_one_function(self) -> None:
         references = {
             name: spec
             for entry in MANIFEST["references"]
@@ -118,8 +118,10 @@ class TestManifest:
             "source_table": ("TABLE", ["SELECT"]),
             "source_view": ("VIEW", ["SELECT"]),
             "export_stage": ("STAGE", ["READ", "WRITE"]),
+            "reward_function": ("FUNCTION", ["USAGE"]),
         }
         assert references["export_stage"].get("multi_valued", False) is False
+        assert references["reward_function"].get("multi_valued", False) is False
 
 
 class TestSetupScriptExternalAccess:

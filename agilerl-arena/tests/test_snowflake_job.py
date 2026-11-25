@@ -1037,6 +1037,23 @@ class TestSubmitJob:
 
         assert session.events == []
 
+    def test_dataset_rollout_with_a_built_in_reward_needs_no_reward_file(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        session = Session()
+        manifest = _dataset_rl()
+        del manifest["environment"]["reward_file_path"]
+        manifest["environment"]["reward"] = {"type": "exact_match"}
+
+        # Act
+        submit_job(session, _write(tmp_path, manifest), _settings(), RUN_ID)
+
+        # Assert
+        assert [item["name"] for item in session.puts] == ["manifest.yaml", "job.json"]
+        staged = yaml.safe_load(session.puts[0]["text"])
+        assert staged["environment"]["reward"] == {"type": "exact_match"}
+
     def test_opd_dataset_rollout_without_a_reward_file_submits(
         self, tmp_path: Path
     ) -> None:

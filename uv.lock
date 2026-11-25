@@ -3,19 +3,19 @@ revision = 5
 requires-python = ">=3.10, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
-    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version < '3.11' and sys_platform == 'win32'",
 ]
 supported-markers = [
@@ -134,6 +134,7 @@ all = [
     { name = "datasets" },
     { name = "flash-linear-attention", marker = "sys_platform == 'linux'" },
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
+    { name = "jsonschema" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "openenv" },
     { name = "peft" },
@@ -153,6 +154,7 @@ cpu = [
 cpu-llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
+    { name = "jsonschema" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "openenv" },
     { name = "peft" },
@@ -162,6 +164,7 @@ llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
     { name = "flash-linear-attention", marker = "sys_platform == 'linux'" },
+    { name = "jsonschema" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "openenv" },
     { name = "peft" },
@@ -225,6 +228,9 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.15.0" },
     { name = "hydra-core", specifier = ">=1.3.2,<1.4" },
     { name = "jax", extras = ["cpu"], specifier = ">=0.4.31" },
+    { name = "jsonschema", marker = "extra == 'all'", specifier = ">=4.0" },
+    { name = "jsonschema", marker = "extra == 'cpu-llm'", specifier = ">=4.0" },
+    { name = "jsonschema", marker = "extra == 'llm'", specifier = ">=4.0" },
     { name = "lazy-loader", specifier = ">=0.4" },
     { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.5" },
     { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'cpu-llm'", specifier = "==0.8.5" },
@@ -377,16 +383,16 @@ version = "3.12.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -1014,16 +1020,16 @@ version = "0.12.9"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/56/51/bd8b64bf700f5b1a956a60bb62276b79a094e8cd0ddc60b1b61c3edd496f/caio-0.12.9.tar.gz", hash = "sha256:99e99419b44ab5511f7468c6a452887dd125b8e4042672a7589f0cf01d254ea8", size = 84084, upload-time = "2026-09-26T09:51:49.433Z" }
@@ -1363,10 +1369,10 @@ version = "1.3.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -1428,10 +1434,10 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -1780,16 +1786,16 @@ version = "5.2.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -1924,16 +1930,16 @@ version = "2.9.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ef/4a/50822184bd67cc6493f0fb6a880749158fcd31ab3fa07409acfd91f9fc85/dnspython-2.9.0.tar.gz", hash = "sha256:b44dc6b18f07a8b1c56676a19fbfdb5209415b046a9cece286baafa87ff3f7f1", size = 423560, upload-time = "2026-10-09T00:07:24.352Z" }
@@ -2160,16 +2166,16 @@ version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -2203,16 +2209,16 @@ version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -2400,16 +2406,16 @@ version = "4.2.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d8/28/3893324bcadf8f89b1616637468d766af3f625008c0735bf704fdfa86617/filelock-4.2.4.tar.gz", hash = "sha256:c6d8663535e1650ee430507b4ffbac7b464dd64b7647ea0112a9f406499d163d", size = 652444, upload-time = "2026-10-19T01:57:51.001Z" }
@@ -2533,16 +2539,16 @@ version = "4.67.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/94/36/102e180f8f5dbaee88b26595b01ca8aa80bf4e62128d9aa94265b3996c96/fonttools-4.67.0.tar.gz", hash = "sha256:3cb57e6600ca77c0b1729cf8adc23bc0652633a37f18cfa934d9c7bc3de25519", size = 3750028, upload-time = "2026-10-14T13:20:28.294Z" }
@@ -2883,16 +2889,16 @@ version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2e/5f/6d93df326cbf8f9f7276be77f83c81a9c061f479abdd81f9bbec197d4b29/griffelib-2.4.0.tar.gz", hash = "sha256:a277a462c56ff4479efe5cbcb4f882dc9a63cfa5ab6404a3e60957c6c8d2f7c9", size = 244488, upload-time = "2026-10-19T16:26:53.583Z" }
@@ -3103,16 +3109,16 @@ version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -3206,16 +3212,16 @@ version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -3483,10 +3489,10 @@ version = "0.10.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -3508,10 +3514,10 @@ version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -3568,10 +3574,10 @@ version = "0.10.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -3604,10 +3610,10 @@ version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -4160,16 +4166,16 @@ version = "3.11.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -4219,16 +4225,16 @@ version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -4288,16 +4294,16 @@ version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -4385,16 +4391,16 @@ version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -4516,16 +4522,16 @@ version = "11.2.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/52/b8/c63995bebbb9ac9c059350e0fb8c82c2420c85aeca7d34e40aecf3df9281/more_itertools-11.2.1.tar.gz", hash = "sha256:cbf08fd0af284dc69718b9b76a8e6203df624d70209ea511e4219d350c856f63", size = 154133, upload-time = "2026-10-14T18:50:30.407Z" }
@@ -4841,10 +4847,10 @@ version = "3.6.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
@@ -4858,10 +4864,10 @@ version = "3.7"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/dc/76/3af777226b63a5e64a6b36b1ec5855c14e2b94a37096d4760e595fc43511/networkx-3.7.tar.gz", hash = "sha256:fd77a511bd90f39f3d016351345b52cf5319b813bdca01de3f755d3cca62e96a", size = 1866482, upload-time = "2026-09-21T16:45:16.974Z" }
@@ -5024,12 +5030,12 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
@@ -5450,16 +5456,16 @@ version = "2.54.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -6017,16 +6023,16 @@ version = "4.13.5"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/e6/d0abbb256b44e6a05748c6942511ff67db8dbb068de0c35b24bf1b395b09/platformdirs-4.13.5.tar.gz", hash = "sha256:05831adf87d392760f4b5c3a0a95579ab5a10b18b9b9bd43680dcb47544788a0", size = 62362, upload-time = "2026-10-19T01:02:11.778Z" }
@@ -6070,16 +6076,16 @@ version = "4.7.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -6402,16 +6408,16 @@ version = "26.0.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ec/34/17c34cb38e5d940e38f0f0d9fdfa0e8a506676409ea9b85aff7e3079f831/pyarrow-26.0.0.tar.gz", hash = "sha256:0cccd36e00ea3afeb52ded61f2721ce71f604853d70c45365c58324eb773d6ae", size = 1239433, upload-time = "2026-10-09T08:26:25.315Z" }
@@ -6691,16 +6697,16 @@ version = "2.16.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -6988,16 +6994,16 @@ version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -7123,16 +7129,16 @@ version = "1.1.10"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/bf/87bd96fd60abf241cae10e6f7fc3882c8a81ebdbe76f49f9c3116b5b38ab/pytimeparse-1.1.10.tar.gz", hash = "sha256:ecf0ee613a72cb0b1d3d5404bd398a64266576fc36ccf3149178af6f2ec6f736", size = 11613, upload-time = "2026-10-17T12:38:58.437Z" }
@@ -7659,16 +7665,16 @@ version = "2026.9.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/68/3bd46b8a5e01d3c2ebdf9c5e9497912e3fe0cde02bac21a7130ca866e403/rpds_py-2026.9.1.tar.gz", hash = "sha256:4793ef7f78268b124b73fa933440f01d258bbae01de9fa53e9080c9ab0425a12", size = 63948, upload-time = "2026-10-04T16:32:36.469Z" }
@@ -7862,10 +7868,10 @@ version = "1.17.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -7922,10 +7928,10 @@ version = "1.18.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8159,16 +8165,16 @@ version = "4.8.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8289,10 +8295,10 @@ version = "2.10"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
-    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version < '3.11' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/71/c3/1b817965ac12dc002d7c9cd7dfffdd7d4fbf9b45763ef2ffe7b86ee94670/soupsieve-2.10.tar.gz", hash = "sha256:49e9380d7d2905463583bafe285e818c7366a9ed7b3aee221c1ac79c905d8bc0", size = 124337, upload-time = "2026-09-24T02:36:35.048Z" }
@@ -8306,13 +8312,13 @@ version = "3.0.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5e/77/2dcfa996b01702ab8fd0763d84098f6a640d6162a328f1c04c2697579a1a/soupsieve-3.0.3.tar.gz", hash = "sha256:7dcf6022eed0399eb9934a75e020148f7a2024c37b7dfcd3cf2c5505d69c364e", size = 115923, upload-time = "2026-10-12T13:21:17.696Z" }
@@ -8359,16 +8365,16 @@ version = "8.2.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8423,16 +8429,16 @@ version = "2025.8.25"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8471,16 +8477,16 @@ version = "3.5.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8540,16 +8546,16 @@ version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8585,16 +8591,16 @@ version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8664,16 +8670,16 @@ version = "1.10.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -8862,16 +8868,16 @@ version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -9229,19 +9235,19 @@ version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
-    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version < '3.11' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -9288,14 +9294,14 @@ version = "2.13.0+cpu"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
+    "python_full_version < '3.11' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version < '3.11' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -9878,16 +9884,16 @@ version = "17.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and platform_machine != 's390x' and sys_platform == 'linux'",
+    "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.11.5' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/30/4b/4692be6d5bf739ed049b3813901c42091f8c054df89d5c089343823dea0d/websockets-17.3.tar.gz", hash = "sha256:1c7dd93a1c9f89297471493674b1fc1d9467cafd45374f2172213046bdb3a329", size = 188878, upload-time = "2026-10-19T16:58:05.813Z" }

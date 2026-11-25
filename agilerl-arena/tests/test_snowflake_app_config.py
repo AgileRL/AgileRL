@@ -376,6 +376,23 @@ class TestRegisterReference:
 
         assert session.statements == [statement]
 
+    @pytest.mark.parametrize(
+        ("operation", "statement"),
+        [
+            ("ADD", "SELECT SYSTEM$SET_REFERENCE('REWARD_FUNCTION', 'ref-1')"),
+            ("REMOVE", "SELECT SYSTEM$REMOVE_REFERENCE('REWARD_FUNCTION', 'ref-1')"),
+            ("CLEAR", "SELECT SYSTEM$REMOVE_ALL_REFERENCES('REWARD_FUNCTION')"),
+        ],
+    )
+    def test_reward_function_holds_one_function(
+        self, operation: str, statement: str
+    ) -> None:
+        session = FakeSession()
+
+        register_reference(session, "reward_function", operation, "ref-1")
+
+        assert session.statements == [statement]
+
     def test_refuses_an_unknown_reference(self) -> None:
         session = FakeSession()
 

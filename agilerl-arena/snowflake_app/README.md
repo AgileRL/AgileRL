@@ -157,8 +157,8 @@ integrations and pools after an upgrade, since setup never drops them:
 | `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | For keys AgileRL issues by hand. Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `AGILERL_APP_<APP>_ARENA_EAI` and requires `features.snowflakeTraining`; then sets the three secrets and lists `features.snowflakePricedGpuFamilies` when Arena sends it. Secret values are never logged, returned or quoted in errors. |
 | `app_code.set_pools(gpu_families, max_gpus, broker_family, head_family)` | `app_admin` | Creates or resizes `AGILERL_APP_<APP>_BROKER_POOL`, `AGILERL_APP_<APP>_HEAD_POOL` and one `AGILERL_APP_<APP>_GPU_<FAMILY>` per listed family (CLI defaults); drops the app's `AGILERL_APP_<APP>_GPU_*` pools of families no longer listed; refuses to shrink or drop under a running service; writes `setup.json`. A GPU family missing from the region, or listed with another GPU count per node than the app sizes (Snowflake reuses the AWS `GPU_R6K_G1_*` names on GCP for nodes with half the GPUs), is refused with the GPU families the app can size there. |
 | `app_code.gpu_families()` | `app_admin` | Lists the GPU families `set_pools` can use: returned by `SHOW COMPUTE POOL INSTANCE FAMILIES` with the GPU count per node the app sizes, and in `features.snowflakePricedGpuFamilies` when Arena sends it. Reads capabilities with the three Arena secrets through `AGILERL_APP_<APP>_ARENA_EAI`. |
-| `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`, and on `export_stage`, which holds one stage. |
-| `app_code.submit(manifest, gpus, source_reference, source_alias, gpu_family, reward_file, checkpoint_steps, resume_from)` | `app_admin` | `arena snowflake submit` on the app pools: the same broker, head and worker job services in `app_state`, with the head reading the `app_state` secrets through `AGILERL_APP_<APP>_ARENA_EAI`. `manifest` and `reward_file` are file contents. When capabilities list `features.snowflakePricedGpuFamilies`, an unpriced `gpu_family` is refused and an omitted one is picked from priced pools, before anything starts. A saved pool whose family this region lists with another GPU count per node is refused the same way. That read uses the three Arena secrets through `AGILERL_APP_<APP>_ARENA_EAI`. The job reads `SELECT * FROM reference('<source_reference>', '<source_alias>')`. Returns the run id, the service names and any manifest warnings. |
+| `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`, on `export_stage`, which holds one stage, and on `reward_function`, which holds one function. |
+| `app_code.submit(manifest, gpus, source_reference, source_alias, gpu_family, reward_file, checkpoint_steps, resume_from)` | `app_admin` | `arena snowflake submit` on the app pools: the same broker, head and worker job services in `app_state`, with the head reading the `app_state` secrets through `AGILERL_APP_<APP>_ARENA_EAI`. `manifest` is the file contents. `reward_file` is refused when set, with the two reward options; see Rewards. So is a manifest with `environment.rubric_file_path`, and one whose `environment.reward` is `snowflake_function` while nothing is bound to `reward_function`. When capabilities list `features.snowflakePricedGpuFamilies`, an unpriced `gpu_family` is refused and an omitted one is picked from priced pools, before anything starts. A saved pool whose family this region lists with another GPU count per node is refused the same way. That read uses the three Arena secrets through `AGILERL_APP_<APP>_ARENA_EAI`. The job reads `SELECT * FROM reference('<source_reference>', '<source_alias>')`. Returns the run id, the service names and any manifest warnings. |
 | `app_code.status(run_id)` | `app_user` | `arena snowflake status`. Refuses run ids with no `job.json` on `@app_state.runs`. |
 | `app_code.logs(run_id, role, instance)` | `app_user` | `arena snowflake logs`. |
 | `app_code.cancel(run_id)` | `app_admin` | `arena snowflake cancel`, then suspends the app's GPU pools that have no service or job left. |
@@ -187,8 +187,83 @@ an OPD `teacher.model` are both checked. `submit` also refuses
 engine forwards that flag to vLLM, which then loads the repo's `auto_map`
 modules. `false` does not let a remote-code family through. These checks run
 before the app runs any SQL or starts anything. These models still train on
-Arena, with the `arena` CLI, and on BYOC. The reward file is the buyer's own
-code and is not checked.
+Arena, with the `arena` CLI, and on BYOC.
+
+## Rewards
+
+For the same reason the app takes no reward file. A post-training run over a
+table scores each completion in one of two ways, set in the manifest's
+`environment.reward`.
+
+**Built-in rewards** run inside the app's image. Each scores the model's final
+answer, the text after any reasoning, against the row's `answer` column (map
+another column onto it with `environment.columns`), and gives 1 or 0:
+
+| `type` | Scores 1 when | Options |
+|---|---|---|
+| `exact_match` | the answer equals `answer` | `normalize` (default true: ignore case, extra spaces and a trailing full stop), `answer_pattern` |
+| `numeric` | the answer's number is within `tolerance` of `answer` | `tolerance` (default `1e-6`), `answer_pattern`; unset reads the last `\boxed{...}`, else the last number |
+| `regex` | the reply matches `pattern` | `pattern`, `full_match` |
+| `json_schema` | the reply's first JSON object is valid against `schema` | `schema` |
+| `tool_call` | the reply's first tool call (`{"name": ..., "arguments": {...}}`, bare or in `<tool_call>` tags) is the expected one | `name` and `required_arguments`; without `name`, `answer` holds the expected call and the name and arguments must equal it |
+
+`answer_pattern` is a regular expression whose first group is the answer, such
+as `'Answer: (.*)'`; the last match counts.
+
+```yaml
+environment:
+  env_type: rollout
+  prompt_template:
+    system_0: Solve the problem. End with "Answer: <number>".
+    user_1: "{question}"
+  reward:
+    type: numeric
+    answer_pattern: "Answer: (.*)"
+```
+
+**Your own reward** is a function in your account, bound to the app's
+`reward_function` reference. Snowflake runs it in your account under your
+ownership; the app calls it with SQL and never reads its code. It takes the
+prompt (the row's `question`), the final answer and the row's `answer` as
+text, and returns a FLOAT:
+
+```sql
+CREATE OR REPLACE FUNCTION my_db.rewards.score_answer(
+    prompt STRING, completion STRING, answer STRING)
+  RETURNS FLOAT
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.12'
+  HANDLER = 'score'
+AS $$
+import re
+
+def score(prompt, completion, answer):
+    numbers = re.findall(r"-?\d+(?:\.\d+)?", completion or "")
+    if not numbers or answer is None:
+        return 0.0
+    return 1.0 if abs(float(numbers[-1]) - float(answer)) < 1e-6 else 0.0
+$$;
+
+CALL <app>.app_code.register_reference('reward_function', 'ADD',
+  SYSTEM$REFERENCE('FUNCTION', 'my_db.rewards.score_answer(STRING, STRING, STRING)',
+    'PERSISTENT', 'USAGE'));
+```
+
+Then set `environment.reward` to `{type: snowflake_function}`. The function
+can also be bound in Snowsight on the app's references, and binding another
+replaces it. Any Snowflake function with that signature works: Python, SQL,
+Java, or one that calls `AI_COMPLETE` to grade with an LLM. A SQL function must
+cast its result (`... ::FLOAT`); `IFF(..., 1.0, 0.0)` is a NUMBER and the
+create fails.
+
+Each training process sends finished groups of completions to the function in
+one query on the app's XSMALL warehouse, and each result is that completion's
+reward. Groups that finish while a query runs share the next one. A query costs
+about the same whatever its size: about 1.3 s for a Python function and 0.15 s
+for a SQL one, from 64 to 2,048 rows. The first query after the warehouse
+resumes takes about 20 s. Queries are billed to your account like any query on
+the app's warehouse. A dropped connection is retried; a function that fails,
+returns NULL, or returns another number of rows stops the run with that error.
 
 ## Call a served agent
 
@@ -406,6 +481,9 @@ each hourly run suspend the app's GPU pools that have no service or job left.
   other procedures.
 - Reference `export_stage` (STAGE), READ and WRITE, single-valued, with the
   same callback. `export_model` copies trained models to it.
+- Reference `reward_function` (FUNCTION), USAGE, single-valued, with the same
+  callback. A run whose `environment.reward` is `snowflake_function` calls it;
+  see Rewards.
 - Application roles and external hosts are not manifest keys. The setup script
   creates them ([application roles](https://docs.snowflake.com/en/developer-guide/native-apps/creating-setup-script#about-application-roles),
   [app specifications](https://docs.snowflake.com/en/developer-guide/native-apps/requesting-app-specs-eai)):

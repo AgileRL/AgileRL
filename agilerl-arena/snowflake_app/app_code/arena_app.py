@@ -48,10 +48,13 @@ from app_trial import refuse_ended_trial
 
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import OPDSpec
+from agilerl.arena.models.env import LLMEnvSpec
+from agilerl.arena.models.manifest import IN_SNOWFLAKE_APP, TrainingManifest
 from agilerl.arena.models.model_info import (
     REMOTE_CODE_MODEL_TYPES,
     SUPPORTED_MODEL_INFO,
 )
+from agilerl.arena.models.rewards import SnowflakeFunctionReward
 from agilerl.arena.snowflake.account import blocking_services, shrink_message
 from agilerl.arena.snowflake.catalog import (
     PoolState,
@@ -117,6 +120,7 @@ from agilerl.arena.snowflake.publish import (
     wait_for_publish,
 )
 from agilerl.arena.snowflake.publish import unpublish as drop_served
+from agilerl.arena.snowflake.rewards import REWARD_REFERENCE
 from agilerl.arena.snowflake.setup import (
     ORG_KEY_PREFIX,
     family_listed,
@@ -134,12 +138,21 @@ from agilerl.arena.snowflake.setup_sql import (
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
 
 if TYPE_CHECKING:
-    from agilerl.arena.models.manifest import TrainingManifest
     from agilerl.arena.snowflake.catalog import GpuFamily
 
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
 # Single-valued, unlike the source references.
 EXPORT_REFERENCE = "EXPORT_STAGE"
+SINGLE_REFERENCES = (EXPORT_REFERENCE, REWARD_REFERENCE)
+REWARDS_DOCS = "https://docs.arena.agilerl.com/partners/snowflake-native-app-rewards/"
+REWARD_OPTIONS = (
+    "Snowflake does not let a Native App run code from outside its package, so "
+    "the app takes no reward file. Either pick a built-in reward in the manifest "
+    "(environment.reward with type exact_match, numeric, regex, json_schema or "
+    "tool_call), or write the reward as a function in your account, bind it to "
+    "the app's reward_function reference, and set environment.reward to "
+    f"{{type: snowflake_function}}. Examples: {REWARDS_DOCS}"
+)
 # snowflake-app-build replaces the tag with the release tag, as in manifest.yml.
 IMAGE = "/arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130"
 SETUP_PREFIX = f"@{APP_SCHEMA}.{RUNS_STAGE}/_arena"
@@ -238,8 +251,9 @@ def register_reference(
     """Bind, unbind, or clear a consumer object on a reference.
 
     Snowflake calls this when the consumer changes a ``source_table``,
-    ``source_view`` or ``export_stage`` binding. The source references are
-    multi-valued; ``export_stage`` holds one stage.
+    ``source_view``, ``export_stage`` or ``reward_function`` binding. The
+    source references are multi-valued; ``export_stage`` holds one stage and
+    ``reward_function`` one function.
 
     :param session: Procedure session.
     :param ref_name: Reference name from the manifest.
@@ -248,14 +262,14 @@ def register_reference(
     :raises ValueError: The reference or operation is unknown.
     """
     name = (ref_name or "").upper()
-    if name not in (*SOURCE_REFERENCES, EXPORT_REFERENCE):
+    if name not in (*SOURCE_REFERENCES, *SINGLE_REFERENCES):
         msg = (
             f"Unknown reference {ref_name}. "
-            "Bind source_table, source_view or export_stage."
+            "Bind source_table, source_view, export_stage or reward_function."
         )
         raise ValueError(msg)
     reference = string_literal(name)
-    add = "SET_REFERENCE" if name == EXPORT_REFERENCE else "ADD_REFERENCE"
+    add = "SET_REFERENCE" if name in SINGLE_REFERENCES else "ADD_REFERENCE"
     match (operation or "").upper():
         case "ADD":
             statement = (
@@ -548,13 +562,16 @@ def submit(
         when the manifest trains on no rows.
     :param source_alias: Alias of the bound object the run reads.
     :param gpu_family: GPU family. ``None`` picks one as ``arena snowflake submit`` does.
-    :param reward_file: Python source of the reward function, or ``None``.
+    :param reward_file: Refused unless ``None``: the app runs no code from
+        outside its package.
     :param checkpoint_steps: Training steps between checkpoints, or ``None``.
     :param resume_from: Run whose newest finished checkpoint the run starts
         from, or ``None``.
     :return: The run id, the service names, and any manifest warnings.
-    :raises ValueError: An argument is out of range, the source is not a bound
-        reference, a model is outside the catalog or runs remote code, the
+    :raises ValueError: An argument is out of range, a reward file is passed,
+        the source is not a bound reference, the manifest names a rubric file
+        or a snowflake_function reward with no function bound, a model is
+        outside the catalog or runs remote code, the
         pools are not set, Arena has no price for the family, or the manifest
         cannot run on them.
     :raises PermissionError: The trial has ended and the listing is not purchased.
@@ -566,6 +583,12 @@ def submit(
     if checkpoint_steps is not None and checkpoint_steps < 1:
         msg = "checkpoint_steps must be at least 1.\nNothing was started."
         raise ValueError(msg)
+    if reward_file is not None:
+        msg = (
+            "reward_file is not available in the Snowflake app.\n"
+            f"{REWARD_OPTIONS}\nNothing was started."
+        )
+        raise ValueError(msg)
     source = reference_source(source_reference, source_alias)
     with (
         tempfile.TemporaryDirectory() as tmp,
@@ -575,14 +598,10 @@ def submit(
         directory = Path(tmp)
         submitted = directory / "submitted.yaml"
         submitted.write_text(manifest, encoding="utf-8")
-        reward_path = None
-        if reward_file is not None:
-            reward_path = directory / "reward.py"
-            reward_path.write_text(reward_file, encoding="utf-8")
-        job_manifest = write_job_manifest(
-            submitted, source, reward_path is not None, directory
-        )
-        refuse_remote_code(load_manifest(job_manifest))
+        job_manifest = write_job_manifest(submitted, source, False, directory)
+        parsed = load_manifest(job_manifest, {IN_SNOWFLAKE_APP: True})
+        refuse_remote_code(parsed)
+        check_app_reward(session, parsed)
         refuse_ended_trial(session)
         profile = app_setup(session)
         pools = run_pools(session, profile, gpu_family)
@@ -599,7 +618,6 @@ def submit(
             gpus,
             family,
             checkpoint_steps,
-            reward_path,
             resume_from,
             claim_account(session),
         )
@@ -720,7 +738,6 @@ def submit_settings(
     gpus: int,
     family: str,
     checkpoint_steps: int | None,
-    reward_path: Path | None,
     resume_from: str | None,
     install: ClaimAccount,
 ) -> SubmitSettings:
@@ -732,7 +749,6 @@ def submit_settings(
     :param gpus: GPUs for the run.
     :param family: GPU family of the run's pool.
     :param checkpoint_steps: Training steps between checkpoints, or ``None``.
-    :param reward_path: Reward function file, or ``None``.
     :param resume_from: Run to resume from, or ``None``.
     :param install: Region and purchased flag the head sends with the run open.
     :return: The settings.
@@ -746,7 +762,7 @@ def submit_settings(
         source=source,
         external_access_integrations=profile.external_access_integrations,
         checkpoint_steps=checkpoint_steps,
-        reward_file=reward_path,
+        reward_file=None,
         gpus=gpus,
         gpu_family=family,
         gpus_per_node=pool.gpus_per_node,
@@ -810,6 +826,39 @@ def refuse_remote_code(manifest: TrainingManifest) -> None:
                 "'arena models supported'.\nNothing was started."
             )
             raise ValueError(msg)
+
+
+def check_app_reward(session: SnowflakeSession, manifest: TrainingManifest) -> None:
+    """Refuse a rubric file, and a ``snowflake_function`` reward with no function bound.
+
+    :param session: Procedure session.
+    :param manifest: The run's manifest.
+    :raises ValueError: The environment names a rubric file, or its reward is
+        ``snowflake_function`` and nothing is bound to ``reward_function``.
+    """
+    environment = manifest.environment
+    if not isinstance(environment, LLMEnvSpec):
+        return
+    if environment.rubric_file_path is not None:
+        msg = (
+            "environment.rubric_file_path is not available in the Snowflake app.\n"
+            f"{REWARD_OPTIONS}\nNothing was started."
+        )
+        raise ValueError(msg)
+    if not isinstance(environment.reward, SnowflakeFunctionReward):
+        return
+    [row] = collect(
+        session,
+        f"SELECT SYSTEM$GET_ALL_REFERENCES({string_literal(REWARD_REFERENCE)}) AS REFS",
+    )
+    if not json.loads(str(lowered(row)["refs"])):
+        msg = (
+            "environment.reward is snowflake_function, but no function is bound "
+            "to the app's reward_function reference. Bind one in Snowsight on the "
+            f"app's references, or with app_code.register_reference. Examples: "
+            f"{REWARDS_DOCS}\nNothing was started."
+        )
+        raise ValueError(msg)
 
 
 def reference_source(reference: str | None, alias: str | None) -> QuerySource | None:
