@@ -377,24 +377,31 @@ the CLI) and a GPU count as ``num_gpus`` (``--num-gpus``) when you submit. Pass 
 
          arena resources list --algorithm GRPO
 
-Example output from CLI command. Arena cloud L4 and A100 GPUs are not available for LLM training,
-so they are not listed:
+Example output from CLI command. ``--num-gpus`` lists the GPU counts a GRPO run takes on each type:
 
 .. list-table::
    :header-rows: 1
-   :widths: 20 20 10
+   :widths: 20 25 20 10
 
    * - GPU type
+     - ``--num-gpus``
      - GPUs per node
      - Dev only
-   * - gpu-b200-sxm-a
-     - 1, 8
+   * - a100-40
+     - 2, 4, 8, 16
+     - 1
      -
-   * - gpu-rtx6000-a
-     - 1, 8
+   * - a100-80
+     - 2, 4, 8, 16
+     - 1
      -
    * - h100-80
+     - 8, 16, 32, 64, 128
      - 8
+     -
+   * - l4
+     - 2, 4, 8, 16, 32, 64
+     - 1, 4
      -
 
 Job Submission
