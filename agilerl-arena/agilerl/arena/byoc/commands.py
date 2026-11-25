@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -19,6 +20,7 @@ import click
 from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.cluster_helm import (
     AGENT_NAMESPACE,
+    AGENT_RELEASE,
     STORAGE_RELEASE,
     helm_available,
     list_installed_byoc_releases,
@@ -928,7 +930,10 @@ def _helm_releases_to_uninstall(
     uninstall_storage: bool,
     skip_prompts: bool,
 ) -> list[tuple[str, str]]:
-    """Prompt for agent vs MinIO uninstall. MinIO is kept unless forced or confirmed."""
+    """Ask which releases to uninstall once Arena has removed the cluster.
+
+    The agent is uninstalled unless declined. MinIO is kept unless asked for.
+    """
     agent = [
         (release, namespace)
         for release, namespace in installed
@@ -947,8 +952,8 @@ def _helm_releases_to_uninstall(
         remove_agent = uninstall_helm
         if not remove_agent and not skip_prompts:
             remove_agent = click.confirm(
-                "Uninstall the Arena agent Helm release?",
-                default=False,
+                "Uninstall the Arena agent Helm release once Arena has removed the cluster?",
+                default=True,
             )
         if remove_agent:
             selected.extend(agent)
@@ -974,6 +979,62 @@ def _helm_releases_to_uninstall(
     return selected
 
 
+def _installed_byoc_releases(
+    cluster_name: str, kubeconfig_path: Path | None
+) -> list[tuple[str, str]]:
+    """Installed BYOC releases, or none with a note when they cannot be listed."""
+    if not helm_available():
+        click.echo("Could not check Helm releases: helm is not on PATH.")
+        return []
+    if kubeconfig_path is None:
+        click.echo(
+            "Could not check Helm releases: no kubeconfig. "
+            "Pass --kubeconfig, set KUBECONFIG, or run from the directory "
+            f"that contains arena-cluster-{cluster_name}/kubeconfig."
+        )
+        return []
+    return list_installed_byoc_releases(kubeconfig_path, cluster_name=cluster_name)
+
+
+def _wait_until_archived(api: ByocApi, cluster_name: str, timeout: float) -> None:
+    """Poll Arena every few seconds until the cluster leaves its active clusters.
+
+    :raises click.ClickException: If it is still there after *timeout* seconds.
+    """
+    poll_seconds = 5.0
+    click.echo(
+        "Waiting for the agent to stop the cluster's runs and delete its job namespaces…"
+    )
+    deadline = time.monotonic() + timeout
+    while api.find_cluster(cluster_name) is not None:
+        if time.monotonic() >= deadline:
+            msg = (
+                f"Cluster {cluster_name!r} is still Deregistering after {timeout:.0f}s: "
+                "its runs may still be stopping, or its agent may be offline. Re-run "
+                "this command to keep waiting, or add --force if the agent is offline."
+            )
+            raise click.ClickException(msg)
+        time.sleep(poll_seconds)
+
+
+def _agent_cleanup_command(
+    installed: list[tuple[str, str]], response: dict[str, Any]
+) -> str:
+    """Uninstall the agent (its hook deletes its job namespaces), else delete them by label."""
+    owner_label = "arena.agilerl.com/agent-namespace"
+    agent = [pair for pair in installed if pair[0] != STORAGE_RELEASE]
+    if not agent:
+        stored = response.get("cleanupCommand")
+        if isinstance(stored, str) and stored:
+            return stored
+        agent = [(AGENT_RELEASE, AGENT_NAMESPACE)]
+    release, namespace = agent[0]
+    return (
+        f"helm uninstall {release} --namespace {namespace} --timeout 10m || "
+        f"kubectl delete namespace --selector={owner_label}={namespace}"
+    )
+
+
 def _platform_option(command: click.Command) -> click.Command:
     """Add ``--platform`` to a command that names a registered cluster."""
     return click.option(
@@ -990,7 +1051,7 @@ def _is_platform_spec(spec: ClusterSpec) -> bool:
 
 
 def build_cluster_unregister_command() -> click.Command:
-    """``arena cluster unregister`` — archive a registered cluster by name.
+    """``arena cluster unregister`` — remove a registered cluster by name.
 
     :returns: The configured ``unregister`` Click command.
     :rtype: click.Command
@@ -1011,10 +1072,32 @@ def build_cluster_unregister_command() -> click.Command:
         ),
     )
     @click.option(
+        "--stop-runs",
+        is_flag=True,
+        default=False,
+        help="Stop the cluster's experiments and deployments first.",
+    )
+    @click.option(
+        "--force",
+        is_flag=True,
+        default=False,
+        help=(
+            "Archive the cluster now without waiting for its agent, for an agent that "
+            "is offline. Arena ends its runs. Uninstalling the agent release removes "
+            "its job namespaces; if the release stays, run the printed command."
+        ),
+    )
+    @click.option(
         "--uninstall-helm",
         is_flag=True,
         default=False,
         help="Uninstall the agent Helm release without prompting. Does not uninstall MinIO.",
+    )
+    @click.option(
+        "--keep-agent",
+        is_flag=True,
+        default=False,
+        help="Leave the agent Helm release installed.",
     )
     @click.option(
         "--uninstall-storage",
@@ -1026,10 +1109,17 @@ def build_cluster_unregister_command() -> click.Command:
         ),
     )
     @click.option(
+        "--wait-timeout",
+        type=click.FloatRange(min=0),
+        default=600.0,
+        show_default=True,
+        help="Seconds to wait for the agent to clean up.",
+    )
+    @click.option(
         "--yes",
         is_flag=True,
         default=False,
-        help="Unregister without prompting.",
+        help="Unregister without prompting. Uninstalls nothing without --uninstall-helm.",
     )
     @_platform_option
     @click.pass_obj
@@ -1037,48 +1127,66 @@ def build_cluster_unregister_command() -> click.Command:
         config: CommandConfig,
         name: str,
         kubeconfig: Path | None,
+        stop_runs: bool,
+        force: bool,
         uninstall_helm: bool,
+        keep_agent: bool,
         uninstall_storage: bool,
+        wait_timeout: float,
         yes: bool,
         platform: bool,
     ) -> None:
-        """Unregister a BYOC cluster from Arena by name."""
+        """Remove a BYOC cluster from Arena by name.
+
+        Arena refuses a cluster with runs unless --stop-runs stops them. Its
+        agent then deletes the job namespaces it created and Arena archives the
+        cluster and its classes and revokes its tokens. The agent Helm release
+        is uninstalled after that, unless declined.
+        """
         cluster_name = name.strip()
         if not cluster_name:
             msg = "--name is required."
             raise click.ClickException(msg)
         kubeconfig_path = resolve_cluster_kubeconfig(cluster_name, kubeconfig)
-        to_uninstall: list[tuple[str, str]] = []
-        if not helm_available():
-            click.echo("Could not check Helm releases: helm is not on PATH.")
-        elif kubeconfig_path is None:
-            click.echo(
-                "Could not check Helm releases: no kubeconfig. "
-                "Pass --kubeconfig, set KUBECONFIG, or run from the directory "
-                f"that contains arena-cluster-{cluster_name}/kubeconfig."
-            )
-        else:
-            to_uninstall.extend(
-                _helm_releases_to_uninstall(
-                    list_installed_byoc_releases(
-                        kubeconfig_path, cluster_name=cluster_name
-                    ),
-                    uninstall_helm=uninstall_helm,
-                    uninstall_storage=uninstall_storage,
-                    skip_prompts=yes,
-                )
-            )
+        installed = _installed_byoc_releases(cluster_name, kubeconfig_path)
+        offered = [
+            pair for pair in installed if not keep_agent or pair[0] == STORAGE_RELEASE
+        ]
+        to_uninstall = _helm_releases_to_uninstall(
+            offered,
+            uninstall_helm=uninstall_helm,
+            uninstall_storage=uninstall_storage,
+            skip_prompts=yes,
+        )
         if not yes and not click.confirm(
             f"Unregister BYOC cluster {cluster_name!r} from Arena?",
             default=False,
         ):
             click.echo("Aborted.")
             return
+        with arena_client(config) as client:
+            api = ByocApi(client, platform=platform)
+            response = api.unregister_cluster(
+                cluster_name, stop_runs=stop_runs, force=force
+            )
+            deregistering = response.get("status") == "Deregistering"
+            if deregistering:
+                _wait_until_archived(api, cluster_name, wait_timeout)
+        # Arena sends a cleanup command when the agent does not clean up.
+        agent_cleaned_up = deregistering and "cleanupCommand" not in response
+        click.echo(f"Unregistered BYOC cluster {cluster_name!r}.")
         if to_uninstall and kubeconfig_path is not None:
             uninstall_byoc_releases(to_uninstall, kubeconfig_path)
-        with arena_client(config) as client:
-            ByocApi(client, platform=platform).unregister_cluster(cluster_name)
-        click.echo(f"Unregistered BYOC cluster {cluster_name!r}.")
+        if any(release != STORAGE_RELEASE for release, _ in to_uninstall):
+            return
+        if agent_cleaned_up:
+            click.echo("The agent removed its job namespaces. To uninstall it, run:")
+        else:
+            click.echo(
+                "The agent did not remove its job namespaces. To remove them and "
+                "the agent, run:"
+            )
+        click.echo(f"  {_agent_cleanup_command(installed, response)}")
 
     return unregister_cmd
 
@@ -2116,8 +2224,12 @@ def _run_cluster_destroy(
         created_projects=created_projects,
     )
     if unregister:
+        # The cloud cluster and its agent are gone, so nothing is left for the
+        # agent to clean up and Arena ends the cluster's runs itself.
         with arena_client(config) as client:
-            ByocApi(client, platform=platform).unregister_cluster(cluster_spec.name)
+            ByocApi(client, platform=platform).unregister_cluster(
+                cluster_spec.name, force=True
+            )
         click.echo(f"Unregistered BYOC cluster {cluster_spec.name!r}.")
     _echo_destroy_result(
         cluster_spec,

@@ -196,8 +196,13 @@ Arena server with the enterprise BYOC cluster register API.
 ### Lifecycle
 
 `arena cluster unregister --name my-cluster` removes the Arena registration.
-`--uninstall-helm` also uninstalls the agent chart. Bundled MinIO
-(`arena-byoc-storage`) stays unless you pass `--uninstall-storage`.
+A cluster with runs is refused unless `--stop-runs` stops them. While Arena
+reports the cluster as Deregistering, the CLI waits for the agent to delete
+its job namespaces, then offers to uninstall the agent chart (default yes;
+`--uninstall-helm` skips the prompt, `--keep-agent` keeps it). `--force`
+removes a cluster whose agent is offline and prints a command that deletes
+what the agent left. Bundled MinIO (`arena-byoc-storage`) stays unless you pass
+`--uninstall-storage`.
 
 `arena cluster rotate-token --name my-cluster` rotates the Arena cluster token
 and writes it into the in-cluster Secret, then restarts the agent Deployment
@@ -396,7 +401,8 @@ arena cluster destroy --spec nebius-cluster.yaml --delete-storage
 arena cluster destroy --spec nebius-cluster.yaml --delete-storage-project
 ```
 
-`destroy` does not uninstall the BYOC Helm releases. Use `arena cluster
-unregister --name <name> --uninstall-helm` for that.
+`destroy` does not uninstall the BYOC Helm releases. `arena cluster
+unregister --name <name> --uninstall-helm` uninstalls the agent once Arena has
+archived the cluster.
 
 More CLI commands are in the published Arena docs and `arena --help`.

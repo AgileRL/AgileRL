@@ -211,6 +211,8 @@ UNREGISTER_CLUSTER: ManifestInvoke = {
     "params": [
         {"name": "name", "in": "body", "type": "string", "required": True},
         {"name": "byocScope", "in": "body", "type": "string", "required": False},
+        {"name": "stopRuns", "in": "body", "type": "bool", "required": False},
+        {"name": "force", "in": "body", "type": "bool", "required": False},
     ],
 }
 

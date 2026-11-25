@@ -9,12 +9,13 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import click
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from agilerl.arena.byoc import (
     ClusterDynamicGroup,
@@ -61,6 +62,7 @@ from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
+from agilerl.arena.exceptions import ArenaAPIError
 
 INSTALLED_BYOC_RELEASES = [
     ("arena-byoc-agent", "arena"),
@@ -69,156 +71,42 @@ INSTALLED_BYOC_RELEASES = [
 AGENT_HELM_RELEASE = [("arena-byoc-agent", "arena")]
 
 
-def test_cluster_unregister_requires_confirmation(
-    command_config: CommandConfig,
-) -> None:
-    with (
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=False),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=[],
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
-            obj=command_config,
-            input="\n",
-        )
-
-    assert result.exit_code == 0, result.output
-    assert "Aborted." in result.output
-    unregister_mock.assert_not_called()
+ARCHIVED = {
+    "unregistered": True,
+    "status": "Archived",
+    "cleanupCommand": "helm uninstall arena-byoc-agent --namespace arena --timeout 10m",
+}
+DEREGISTERING = {"unregistered": False, "status": "Deregistering"}
 
 
-def test_cluster_unregister_confirms_then_calls_api(
-    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
-) -> None:
-    client = MagicMock()
-    with (
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=False),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=[],
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
-            obj=command_config,
-            input="y\n",
-        )
+@dataclass
+class UnregisterRun:
+    """What ``arena cluster unregister`` printed and called."""
 
-    assert result.exit_code == 0, result.output
-    unregister_mock.assert_called_once_with("prod-cluster")
-    assert "Unregistered BYOC cluster 'prod-cluster'." in result.output
+    result: Result
+    unregister: MagicMock
+    uninstall: MagicMock
+    find_cluster: MagicMock
 
 
-def test_cluster_unregister_yes_skips_prompt(
-    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
-) -> None:
-    client = MagicMock()
-    with (
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=False),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=[],
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster", "--yes"],
-            obj=command_config,
-        )
-
-    assert result.exit_code == 0, result.output
-    assert "Unregister BYOC cluster" not in result.output
-    unregister_mock.assert_called_once_with("prod-cluster")
-
-
-def test_cluster_unregister_skips_helm_check_without_kubeconfig_or_helm(
-    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
-) -> None:
-    client = MagicMock()
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=None,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=False),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
-            obj=command_config,
-            input="y\n",
-        )
-
-    assert result.exit_code == 0, result.output
-    assert "helm is not on PATH" in result.output
-    uninstall_mock.assert_not_called()
-    unregister_mock.assert_called_once_with("prod-cluster")
-
-
-def test_cluster_unregister_skips_helm_check_without_kubeconfig(
-    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
-) -> None:
-    client = MagicMock()
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=None,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
-            obj=command_config,
-            input="y\n",
-        )
-
-    assert result.exit_code == 0, result.output
-    assert "no kubeconfig" in result.output
-    uninstall_mock.assert_not_called()
-    unregister_mock.assert_called_once_with("prod-cluster")
-
-
-def test_cluster_unregister_declines_helm_then_unregisters(
+def run_unregister(
     command_config: CommandConfig,
     client_context: Callable[[MagicMock], MagicMock],
-    tmp_path: Path,
-) -> None:
-    client = MagicMock()
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+    args: list[str],
+    kubeconfig: Path | None = None,
+    installed: list[tuple[str, str]] | None = None,
+    response: dict[str, object] | None = None,
+    input_text: str | None = None,
+    still_listed: int = 0,
+    unregister_error: Exception | None = None,
+    uninstall_error: Exception | None = None,
+) -> UnregisterRun:
+    """Run ``unregister --name prod-cluster`` plus *args* against mocks.
+
+    Arena answers *response* (``ARCHIVED`` by default) and keeps listing the
+    cluster for *still_listed* polls.
+    """
+    listed = [{"name": "prod-cluster", "status": "Deregistering"}] * still_listed
     with (
         patch(
             "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
@@ -227,260 +115,343 @@ def test_cluster_unregister_declines_helm_then_unregisters(
         patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
         patch(
             "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=INSTALLED_BYOC_RELEASES,
+            return_value=installed or [],
         ),
         patch(
             "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
+            side_effect=uninstall_error,
+        ) as uninstall,
         patch(
             "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
+            return_value=client_context(MagicMock()),
         ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
+        patch("agilerl.arena.byoc.commands.time.sleep"),
+        patch.object(
+            ByocApi,
+            "unregister_cluster",
+            return_value=response or ARCHIVED,
+            side_effect=unregister_error,
+        ) as unregister,
+        patch.object(ByocApi, "find_cluster", side_effect=[*listed, None]) as find,
     ):
         result = CliRunner().invoke(
             build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
+            ["--name", "prod-cluster", *args],
             obj=command_config,
-            input="n\nn\ny\n",
+            input=input_text,
         )
-
-    assert result.exit_code == 0, result.output
-    uninstall_mock.assert_not_called()
-    unregister_mock.assert_called_once_with("prod-cluster")
+    return UnregisterRun(result, unregister, uninstall, find)
 
 
-def test_cluster_unregister_accepts_helm_then_unregisters(
-    command_config: CommandConfig,
-    client_context: Callable[[MagicMock], MagicMock],
-    tmp_path: Path,
-) -> None:
-    client = MagicMock()
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=INSTALLED_BYOC_RELEASES,
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
-            obj=command_config,
-            input="y\nn\ny\n",
+@pytest.fixture
+def kubeconfig(tmp_path: Path) -> Path:
+    """A kubeconfig file for the agent cluster."""
+    path = tmp_path / "kubeconfig"
+    path.write_text("apiVersion: v1\n", encoding="utf-8")
+    return path
+
+
+class TestClusterUnregister:
+    def test_requires_confirmation(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        run = run_unregister(command_config, client_context, [], input_text="\n")
+
+        assert run.result.exit_code == 0, run.result.output
+        assert "Aborted." in run.result.output
+        run.unregister.assert_not_called()
+
+    def test_sends_no_flags_by_default(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        run = run_unregister(command_config, client_context, [], input_text="y\n")
+
+        assert run.result.exit_code == 0, run.result.output
+        run.unregister.assert_called_once_with(
+            "prod-cluster", stop_runs=False, force=False
         )
+        assert "Unregistered BYOC cluster 'prod-cluster'." in run.result.output
 
-    assert result.exit_code == 0, result.output
-    assert "checkpoints, metrics, and datasets" in result.output
-    uninstall_mock.assert_called_once_with(AGENT_HELM_RELEASE, kubeconfig)
-    unregister_mock.assert_called_once_with("prod-cluster")
-
-
-def test_cluster_unregister_uninstalls_agent_outside_default_namespace(
-    command_config: CommandConfig,
-    client_context: Callable[[MagicMock], MagicMock],
-    tmp_path: Path,
-) -> None:
-    client = MagicMock()
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=[("arena-byoc-agent", "arena-agent")],
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster", "--uninstall-helm", "--yes"],
-            obj=command_config,
-        )
-
-    assert result.exit_code == 0, result.output
-    uninstall_mock.assert_called_once_with(
-        [("arena-byoc-agent", "arena-agent")], kubeconfig
+    @pytest.mark.parametrize(
+        ("flag", "sent"),
+        [
+            ("--stop-runs", {"stop_runs": True, "force": False}),
+            ("--force", {"stop_runs": False, "force": True}),
+        ],
     )
-    unregister_mock.assert_called_once_with("prod-cluster")
+    def test_passes_stop_runs_and_force(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        flag: str,
+        sent: dict[str, bool],
+    ) -> None:
+        run = run_unregister(command_config, client_context, [flag, "--yes"])
 
+        assert run.result.exit_code == 0, run.result.output
+        run.unregister.assert_called_once_with("prod-cluster", **sent)
 
-def test_cluster_unregister_accepts_helm_declines_arena_skips_uninstall(
-    command_config: CommandConfig,
-    tmp_path: Path,
-) -> None:
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=INSTALLED_BYOC_RELEASES,
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster"],
-            obj=command_config,
-            input="y\nn\nn\n",
+    def test_refusal_with_active_runs_is_shown(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--yes"],
+            kubeconfig=kubeconfig,
+            installed=AGENT_HELM_RELEASE,
+            unregister_error=ArenaAPIError(
+                'experiment 4 "run" (Running). Stop them first, or unregister '
+                "with --stop-runs."
+            ),
         )
 
-    assert result.exit_code == 0, result.output
-    assert "Aborted." in result.output
-    uninstall_mock.assert_not_called()
-    unregister_mock.assert_not_called()
+        assert run.result.exit_code != 0
+        assert "--stop-runs" in str(run.result.exception)
+        run.uninstall.assert_not_called()
 
-
-def test_cluster_unregister_uninstall_helm_yes_skips_prompts(
-    command_config: CommandConfig,
-    client_context: Callable[[MagicMock], MagicMock],
-    tmp_path: Path,
-) -> None:
-    client = MagicMock()
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=INSTALLED_BYOC_RELEASES,
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster", "--uninstall-helm", "--yes"],
-            obj=command_config,
+    def test_waits_for_the_agent_then_uninstalls_it(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--uninstall-helm", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=INSTALLED_BYOC_RELEASES,
+            response=DEREGISTERING,
+            still_listed=2,
         )
 
-    assert result.exit_code == 0, result.output
-    assert "Uninstall the Arena agent Helm release?" not in result.output
-    assert "Unregister BYOC cluster" not in result.output
-    assert "Keeping MinIO storage Helm release" in result.output
-    uninstall_mock.assert_called_once_with(AGENT_HELM_RELEASE, kubeconfig)
-    unregister_mock.assert_called_once_with("prod-cluster")
+        assert run.result.exit_code == 0, run.result.output
+        assert "Waiting for the agent" in run.result.output
+        assert run.find_cluster.call_count == 3
+        assert "Keeping MinIO storage Helm release" in run.result.output
+        run.uninstall.assert_called_once_with(AGENT_HELM_RELEASE, kubeconfig)
+        assert "kubectl delete namespace" not in run.result.output
 
-
-def test_cluster_unregister_uninstall_storage_yes_removes_minio(
-    command_config: CommandConfig,
-    client_context: Callable[[MagicMock], MagicMock],
-    tmp_path: Path,
-) -> None:
-    client = MagicMock()
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=INSTALLED_BYOC_RELEASES,
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-        ) as uninstall_mock,
-        patch(
-            "agilerl.arena.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            [
-                "--name",
-                "prod-cluster",
-                "--uninstall-helm",
-                "--uninstall-storage",
-                "--yes",
-            ],
-            obj=command_config,
+    def test_older_agent_is_waited_for_then_cleaned_up_by_uninstall(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--yes"],
+            response={**DEREGISTERING, "cleanupCommand": "helm uninstall x"},
+            still_listed=1,
         )
 
-    assert result.exit_code == 0, result.output
-    assert "Keeping MinIO storage Helm release" not in result.output
-    uninstall_mock.assert_called_once_with(INSTALLED_BYOC_RELEASES, kubeconfig)
-    unregister_mock.assert_called_once_with("prod-cluster")
+        assert run.result.exit_code == 0, run.result.output
+        assert run.find_cluster.call_count == 2
+        assert "did not remove its job namespaces" in run.result.output
+        assert "helm uninstall x" in run.result.output
 
-
-def test_cluster_unregister_helm_uninstall_failure_skips_api(
-    command_config: CommandConfig,
-    tmp_path: Path,
-) -> None:
-    kubeconfig = tmp_path / "kubeconfig"
-    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
-    with (
-        patch(
-            "agilerl.arena.byoc.commands.resolve_cluster_kubeconfig",
-            return_value=kubeconfig,
-        ),
-        patch("agilerl.arena.byoc.commands.helm_available", return_value=True),
-        patch(
-            "agilerl.arena.byoc.commands.list_installed_byoc_releases",
-            return_value=INSTALLED_BYOC_RELEASES,
-        ),
-        patch(
-            "agilerl.arena.byoc.commands.uninstall_byoc_releases",
-            side_effect=click.ClickException("helm uninstall failed"),
-        ),
-        patch.object(ByocApi, "unregister_cluster") as unregister_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_unregister_command(),
-            ["--name", "prod-cluster", "--uninstall-helm", "--yes"],
-            obj=command_config,
+    def test_yes_alone_keeps_the_agent_and_prints_how_to_remove_it(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--yes"],
+            kubeconfig=kubeconfig,
+            installed=AGENT_HELM_RELEASE,
+            response=DEREGISTERING,
         )
 
-    assert result.exit_code != 0
-    assert "helm uninstall failed" in result.output
-    unregister_mock.assert_not_called()
+        assert run.result.exit_code == 0, run.result.output
+        run.uninstall.assert_not_called()
+        assert "The agent removed its job namespaces." in run.result.output
+        assert "helm uninstall arena-byoc-agent --namespace arena" in run.result.output
+
+    def test_gives_up_waiting_and_keeps_the_agent(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--yes", "--wait-timeout", "0"],
+            kubeconfig=kubeconfig,
+            installed=AGENT_HELM_RELEASE,
+            response=DEREGISTERING,
+            still_listed=1,
+        )
+
+        assert run.result.exit_code != 0
+        assert "still Deregistering" in run.result.output
+        assert "--force" in run.result.output
+        run.uninstall.assert_not_called()
+
+    def test_agent_is_uninstalled_by_default(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            [],
+            kubeconfig=kubeconfig,
+            installed=INSTALLED_BYOC_RELEASES,
+            input_text="\n\ny\n",
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        assert "checkpoints, metrics, and datasets" in run.result.output
+        run.uninstall.assert_called_once_with(AGENT_HELM_RELEASE, kubeconfig)
+
+    def test_uninstall_storage_removes_minio(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--uninstall-helm", "--uninstall-storage", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=INSTALLED_BYOC_RELEASES,
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        run.uninstall.assert_called_once_with(INSTALLED_BYOC_RELEASES, kubeconfig)
+
+    def test_uninstalls_an_agent_outside_the_default_namespace(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--uninstall-helm", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=[("arena-byoc-agent", "arena-agent")],
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        run.uninstall.assert_called_once_with(
+            [("arena-byoc-agent", "arena-agent")], kubeconfig
+        )
+
+    def test_kept_agent_after_a_finished_wait_says_namespaces_were_removed(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--keep-agent", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=AGENT_HELM_RELEASE,
+            response=DEREGISTERING,
+            still_listed=1,
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        assert run.find_cluster.call_count == 2
+        run.uninstall.assert_not_called()
+        assert "The agent removed its job namespaces. To uninstall it, run:" in (
+            run.result.output
+        )
+        assert (
+            "helm uninstall arena-byoc-agent --namespace arena --timeout 10m"
+        ) in run.result.output
+
+    def test_kept_agent_after_force_prints_its_cleanup_command(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--force", "--keep-agent", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=[("prod-cluster", "arena-agent")],
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        run.uninstall.assert_not_called()
+        assert "did not remove its job namespaces" in run.result.output
+        assert (
+            "helm uninstall prod-cluster --namespace arena-agent --timeout 10m || "
+            "kubectl delete namespace "
+            "--selector=arena.agilerl.com/agent-namespace=arena-agent"
+        ) in run.result.output
+
+    def test_without_kubeconfig_prints_arenas_cleanup_command(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        run = run_unregister(command_config, client_context, ["--force", "--yes"])
+
+        assert run.result.exit_code == 0, run.result.output
+        assert "no kubeconfig" in run.result.output
+        run.uninstall.assert_not_called()
+        assert ARCHIVED["cleanupCommand"] in run.result.output
+
+    def test_older_arena_archives_at_once(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--uninstall-helm", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=AGENT_HELM_RELEASE,
+            response={"unregistered": True},
+        )
+
+        assert run.result.exit_code == 0, run.result.output
+        run.find_cluster.assert_not_called()
+        run.uninstall.assert_called_once_with(AGENT_HELM_RELEASE, kubeconfig)
+
+    def test_helm_uninstall_failure_is_reported_after_arena_unregisters(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        kubeconfig: Path,
+    ) -> None:
+        run = run_unregister(
+            command_config,
+            client_context,
+            ["--uninstall-helm", "--yes"],
+            kubeconfig=kubeconfig,
+            installed=AGENT_HELM_RELEASE,
+            uninstall_error=click.ClickException("helm uninstall failed"),
+        )
+
+        assert run.result.exit_code != 0
+        assert "helm uninstall failed" in run.result.output
+        run.unregister.assert_called_once()
 
 
 def test_cluster_rotate_token_requires_confirmation(
