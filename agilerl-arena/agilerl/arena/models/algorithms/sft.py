@@ -24,6 +24,18 @@ class SFTSpec(LLMAlgorithmSpec):
         default=False,
         description=("Always off: SFT has no reference policy to hold in an adapter."),
     )
+    beta: float = Field(
+        default=0.001,
+        ge=0.0,
+        le=1.0,
+        exclude=True,
+        description="Unused: SFT has no reference policy to penalise against.",
+    )
+    answer_continuation: bool = Field(
+        default=False,
+        exclude=True,
+        description="Unused: SFT trains on dataset rows, with no rollout to continue.",
+    )
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
     objective: ClassVar[str] = "sft"

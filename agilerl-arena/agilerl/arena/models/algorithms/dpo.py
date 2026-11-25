@@ -32,6 +32,11 @@ class DPOSpec(LLMAlgorithmSpec):
             "which keeps the model fluent while preferences are optimized."
         ),
     )
+    answer_continuation: bool = Field(
+        default=False,
+        exclude=True,
+        description="Unused: DPO trains on dataset rows, with no rollout to continue.",
+    )
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
     objective: ClassVar[str] = "preference"

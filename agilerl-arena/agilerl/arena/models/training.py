@@ -20,6 +20,8 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.arena.models.visibility import AUTO, HIDDEN
+
 RolloutMode = Literal["colocated", "async"]
 RolloutVersionStamp = Literal["publish", "oldest_turn"]
 CheckpointExportFormat = Literal["adapter", "merged"]
@@ -285,6 +287,7 @@ class TrainingSpec(BaseModel):
     )
     evo_steps: int | None = Field(
         default=None,
+        json_schema_extra=AUTO,
         ge=1,
         validation_alias=AliasChoices("evo_steps", "metrics_interval"),
         description=(
@@ -294,6 +297,7 @@ class TrainingSpec(BaseModel):
     )
     pop_size: int = Field(
         default=1,
+        json_schema_extra=HIDDEN,
         ge=1,
         validation_alias=AliasChoices("pop_size", "population_size"),
         description=(
@@ -316,6 +320,7 @@ class TrainingSpec(BaseModel):
     )
     hpo: bool = Field(
         default=False,
+        json_schema_extra=HIDDEN,
         description=(
             "Mutate hyperparameters and architecture between evolution rounds. "
             "When false, the population trains without hyperparameter mutation."
@@ -498,6 +503,7 @@ class TrainingSpec(BaseModel):
     )
     rollout_version_stamp: RolloutVersionStamp | None = Field(
         default=None,
+        json_schema_extra=HIDDEN,
         description=(
             "Which weight version a published group is fenced by. "
             "'oldest_turn' ages a group by how long it ran, so long episodes "

@@ -44,6 +44,7 @@ from agilerl.arena.models.model_info import (
 )
 from agilerl.arena.models.networks import LoraConfigDict, NetworkSpec
 from agilerl.arena.models.registry import AgentType
+from agilerl.arena.models.visibility import AUTO
 
 FSDP_KNOWN_FIELDS = frozenset(field.name for field in fields(FSDPConfig)) - {
     "parallel_pins"
@@ -115,6 +116,11 @@ def reject_unstable_ou_noise(theta: float, dt: float, ou_noise: bool) -> None:
         return
     msg = "theta * dt must be <= 1 for stable OU noise"
     raise ValueError(msg)
+
+
+def drop_schema_default(schema: dict[str, Any]) -> None:
+    """Leave a field's default out of the published schema."""
+    schema.pop("default", None)
 
 
 class AlgorithmSpec(BaseModel):
@@ -235,6 +241,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     batch_size: int = Field(
         default=16,
         ge=1,
+        json_schema_extra=AUTO,
         description=(
             "Prompts sampled per step; the rollout batch is batch_size x group_size."
         ),
@@ -360,6 +367,8 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     max_model_len: int = Field(
         default=1024,
         ge=1,
+        # The network's context always replaces it; published, the default reads as the run's context.
+        json_schema_extra=drop_schema_default,
         description=(
             "Context window the run is sized for, prompt plus completion. "
             "Normally written as network.max_context_length."

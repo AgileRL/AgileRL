@@ -50,6 +50,7 @@ from agilerl.arena.models.networks import TARGET_MODULES_IGNORED, VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
 from agilerl.arena.models.verdict import (
+    ARENA_CHOSEN_MESSAGE,
     errors,
     loc_to_path,
     model_warnings,
@@ -973,6 +974,96 @@ class TestVerdictIgnoresLoraTargetModules:
         assert result["ok"] is True
         assert TARGET_MODULES_IGNORED not in result["warnings"]
         assert "target_modules" not in result["payload"]["network"]["lora_config"]
+
+
+class TestVerdictRejectsArenaChosenFields:
+    def test_submit_rejects_a_version_stamp_arena_did_not_choose(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["training"]["rollout_version_stamp"] = "publish"
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": "training.rollout_version_stamp",
+                "message": ARENA_CHOSEN_MESSAGE,
+                "kind": "arena_chosen_field",
+            }
+        ]
+
+    def test_submit_accepts_a_user_set_env_host_field_with_a_warning(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["environment"] = {
+            "env_type": "rollout",
+            "entrypoint": "tasks:Env",
+            "env_host_resource": "pool=cpu",
+        }
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is True, result
+        assert any(
+            warning.startswith("environment.env_host_resource overrides")
+            for warning in result["warnings"]
+        )
+
+    def test_a_platform_written_env_host_field_is_not_warned_about(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["environment"] = {
+            "env_type": "rollout",
+            "entrypoint": "tasks:Env",
+            "cpus_per_env_host": 7.0,
+        }
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is True, result
+        assert not any("overrides" in warning for warning in result["warnings"])
+
+    def test_a_population_is_reported_once_as_hpo(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["training"]["pop_size"] = 2
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert [e["kind"] for e in result["errors"]] == ["hpo_unavailable"]
+
+    def test_submit_accepts_a_user_set_engine_share(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["algorithm"]["vllm_config"] = {"gpu_memory_utilization": 0.5}
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is True
+        vllm_config = result["payload"]["algorithm"]["vllm_config"]
+        assert vllm_config["gpu_memory_utilization"] == 0.5
+
+    def test_a_stored_run_is_not_checked(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["training"]["rollout_version_stamp"] = "publish"
+
+        # Act
+        result = verdict(document)
+
+        # Assert
+        assert result["ok"] is True
 
 
 class TestSchemaPackageVersion:

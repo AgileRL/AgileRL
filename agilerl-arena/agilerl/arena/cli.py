@@ -37,6 +37,7 @@ from agilerl.arena.inference.cache import (
 )
 from agilerl.arena.memory.cli import memory_group
 from agilerl.arena.models import verdict as manifest_verdict
+from agilerl.arena.models.defaults import template_view
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.output import (
@@ -267,10 +268,8 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
         [
             "algorithm",
             "environment",
-            "mutation",
             "network",
             "replay_buffer",
-            "tournament_selection",
             "training",
         ]
     ),
@@ -299,6 +298,7 @@ def manifest_template(
             field=section,
             pretrained_model_name_or_path=model,
         )
+    spec = template_view(spec, section)
     if json_output_enabled():
         emit_json_result(spec)
     else:

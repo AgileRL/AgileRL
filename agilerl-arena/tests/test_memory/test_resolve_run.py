@@ -1611,22 +1611,23 @@ class TestResolveRunMemoryPrequantizedCheckpoint:
         assert plan.merged_lora_sync is False
 
     @pytest.mark.parametrize("hub_id", PREQUANTIZED_EXPERT_LORA_MODELS)
-    def test_vllm_default_budget_leaves_no_room_for_the_received_adapter(
+    def test_a_manifest_share_of_0_9_runs_at_the_catalogue_share(
         self, hub_id: str
     ) -> None:
         # Arrange: a 0.9 budget plus the received adapter and its expert copy
-        # outgrow one H100.
+        # would outgrow one H100; the catalogue share replaces it.
         manifest = _prequantized_manifest(
             hub_id, vllm_config={"gpu_memory_utilization": 0.9}
         )
 
-        # Act / Assert
-        with pytest.raises(
-            ValueError, match="a trainer and a rollout engine do not both fit"
-        ):
-            resolve_run_memory(
-                manifest, catalog_model(manifest.algorithm), _h100_nodes(), 24
-            )
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), _h100_nodes(), 24
+        )
+
+        # Assert
+        assert manifest.algorithm.vllm_config.gpu_memory_utilization == 0.85
+        assert plan.split is not None
 
     @pytest.mark.parametrize(
         "hub_id", ["deepseek-ai/DeepSeek-V4-Flash-0731", "zai-org/GLM-5.3-Flash"]
