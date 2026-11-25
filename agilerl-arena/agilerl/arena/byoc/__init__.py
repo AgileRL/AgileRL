@@ -11,9 +11,11 @@ The capability-gated command groups live in :mod:`group`, the Click commands in
 from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.cluster_register import run_cluster_register
 from agilerl.arena.byoc.commands import (
+    build_cluster_connect_command,
     build_cluster_destroy_command,
     build_cluster_generate_spec_command,
     build_cluster_plan_command,
+    build_cluster_preflight_command,
     build_cluster_provision_command,
     build_cluster_register_classes_command,
     build_cluster_register_command,
@@ -49,9 +51,11 @@ __all__ = [
     "ClusterDynamicGroup",
     "HelmInstaller",
     "SetupKind",
+    "build_cluster_connect_command",
     "build_cluster_destroy_command",
     "build_cluster_generate_spec_command",
     "build_cluster_plan_command",
+    "build_cluster_preflight_command",
     "build_cluster_provision_command",
     "build_cluster_register_classes_command",
     "build_cluster_register_command",

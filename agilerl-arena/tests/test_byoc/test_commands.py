@@ -19,7 +19,9 @@ from click.testing import CliRunner, Result
 
 from agilerl.arena.byoc import (
     ClusterDynamicGroup,
+    build_cluster_connect_command,
     build_cluster_plan_command,
+    build_cluster_preflight_command,
     build_cluster_register_command,
     build_cluster_rotate_token_command,
     build_cluster_unregister_command,
@@ -44,6 +46,7 @@ from agilerl.arena.byoc.commands import (
     build_cluster_status_command,
 )
 from agilerl.arena.byoc.kube_target import NoKubeContextError, kubeconfig_environment
+from agilerl.arena.byoc.preflight import CheckStatus, PreflightCheck
 from agilerl.arena.byoc.provisioning.module_catalog import ModulePin, write_module_pin
 from agilerl.arena.byoc.provisioning.providers.nebius.platforms import GpuPreset
 from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
@@ -617,6 +620,192 @@ def test_cluster_rotate_token_passes_agent_namespace(
     assert rotate_mock.call_args.kwargs["context"] == "corp"
 
 
+PREFLIGHT_PASS = PreflightCheck(
+    "kubernetes_version", CheckStatus.PASS, "Kubernetes 1.31"
+)
+PREFLIGHT_FAIL = PreflightCheck(
+    "one_agent", CheckStatus.FAIL, "Arena agents already in this cluster: b/x"
+)
+
+
+def run_preflight_command(
+    command_config: CommandConfig,
+    args: list[str],
+    checks: list[PreflightCheck],
+    registered: dict[str, object] | None = None,
+) -> tuple[Result, MagicMock]:
+    """Run ``arena cluster preflight`` with *checks* as the cluster's results."""
+    with (
+        patch(f"{COMMANDS}.run_preflight", return_value=checks) as preflight,
+        patch(f"{COMMANDS}.arena_client", return_value=MagicMock()),
+        patch(f"{COMMANDS}.registered_cluster", return_value=registered),
+        patch(
+            f"{COMMANDS}.own_agent_release",
+            side_effect=lambda _kubeconfig, _namespace, name: name,
+        ),
+    ):
+        result = CliRunner().invoke(
+            build_cluster_preflight_command(), args, obj=command_config
+        )
+    return result, preflight
+
+
+class TestClusterPreflightCommand:
+    def test_prints_the_table_and_exits_zero_when_nothing_failed(
+        self, command_config: CommandConfig, pinned_target: MagicMock, kubeconfig: Path
+    ) -> None:
+        result, preflight = run_preflight_command(
+            command_config, ["--context", "corp"], [PREFLIGHT_PASS]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Kubernetes 1.31" in result.output
+        pinned_target.assert_called_once_with(None, None, "corp")
+        assert preflight.call_args.args == (kubeconfig, "arena", None, None)
+
+    def test_failed_check_exits_non_zero(self, command_config: CommandConfig) -> None:
+        result, _ = run_preflight_command(
+            command_config, ["--context", "corp"], [PREFLIGHT_PASS, PREFLIGHT_FAIL]
+        )
+
+        assert result.exit_code == 1
+        assert "Preflight failed: one_agent." in result.output
+
+    def test_json_report_is_the_only_stdout(
+        self, command_config: CommandConfig
+    ) -> None:
+        result, _ = run_preflight_command(
+            command_config, ["--context", "corp", "--json"], [PREFLIGHT_FAIL]
+        )
+
+        assert result.exit_code == 1
+        report = json.loads(result.stdout)
+        assert report["context"] == "corp"
+        assert report["passed"] is False
+        assert report["checks"][0]["status"] == "fail"
+
+    def test_json_report_of_a_passing_cluster_exits_zero(
+        self, command_config: CommandConfig
+    ) -> None:
+        result, _ = run_preflight_command(
+            command_config, ["--context", "corp", "--json"], [PREFLIGHT_PASS]
+        )
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)["passed"] is True
+
+    def test_name_lets_the_clusters_own_agent_through(
+        self, command_config: CommandConfig
+    ) -> None:
+        result, preflight = run_preflight_command(
+            command_config,
+            [
+                "--name",
+                "corp-k8s",
+                "--context",
+                "corp",
+                "--agent-namespace",
+                "arena-agent",
+                "--ray-data-storage-class-name",
+                "fast",
+            ],
+            [PREFLIGHT_PASS],
+            {"name": "corp-k8s"},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert preflight.call_args.args[1:] == ("arena-agent", "corp-k8s", "fast")
+
+    def test_registered_name_keeps_an_installed_default_agent(
+        self, command_config: CommandConfig
+    ) -> None:
+        deployment = {
+            "metadata": {
+                "name": "arena-byoc-agent",
+                "namespace": "arena",
+                "labels": {
+                    "app.kubernetes.io/name": "arena-byoc-agent",
+                    "app.kubernetes.io/instance": "arena-byoc-agent",
+                },
+            }
+        }
+
+        def kubectl(*_args: object, **_kwargs: object) -> MagicMock:
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps({"items": [deployment]}),
+                stderr="",
+            )
+
+        with (
+            patch(
+                f"{COMMANDS}.run_preflight", return_value=[PREFLIGHT_PASS]
+            ) as preflight,
+            patch(f"{COMMANDS}.arena_client", return_value=MagicMock()),
+            patch(f"{COMMANDS}.registered_cluster", return_value={"name": "corp-k8s"}),
+            patch("agilerl.arena.byoc.preflight.subprocess.run", side_effect=kubectl),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_preflight_command(),
+                ["--name", "corp-k8s", "--context", "corp"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert preflight.call_args.args[2] == "arena-byoc-agent"
+
+    def test_name_arena_does_not_have_counts_every_agent(
+        self, command_config: CommandConfig
+    ) -> None:
+        result, preflight = run_preflight_command(
+            command_config,
+            ["--name", "corp-k8s", "--context", "corp"],
+            [PREFLIGHT_PASS],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert preflight.call_args.args[2] is None
+
+
+class TestClusterConnectCommand:
+    def test_passes_every_option(self, command_config: CommandConfig) -> None:
+        with patch(f"{COMMANDS}.run_cluster_connect") as connect:
+            result = CliRunner().invoke(
+                build_cluster_connect_command(),
+                [
+                    "--name",
+                    " corp-k8s ",
+                    "--context",
+                    "corp",
+                    "--storage-bucket",
+                    "arena-data",
+                    "--rotate-token",
+                    "--wait-timeout",
+                    "30",
+                ],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        options = connect.call_args.args[1]
+        assert options.name == "corp-k8s"
+        assert options.kube_context == "corp"
+        assert options.agent_namespace == "arena"
+        assert options.storage_bucket == "arena-data"
+        assert options.rotate_token is True
+        assert options.wait_timeout == 30.0
+
+    def test_blank_name_is_rejected(self, command_config: CommandConfig) -> None:
+        with patch(f"{COMMANDS}.run_cluster_connect") as connect:
+            result = CliRunner().invoke(
+                build_cluster_connect_command(), ["--name", " "], obj=command_config
+            )
+
+        assert result.exit_code != 0
+        assert "--name is required." in result.output
+        connect.assert_not_called()
+
+
 def test_cluster_group_includes_hardcoded_commands() -> None:
     cluster = ClusterDynamicGroup()
 
@@ -627,6 +816,8 @@ def test_cluster_group_includes_hardcoded_commands() -> None:
     assert "smoke" in cluster.commands
     assert "register" in cluster.commands
     assert "register-classes" in cluster.commands
+    assert "preflight" in cluster.commands
+    assert "connect" in cluster.commands
 
 
 def test_apply_verbosity_toggles_debug_level() -> None:
@@ -1115,6 +1306,51 @@ class TestRecoverNebiusSpec:
 
         assert recovered.nebius.project_id == "project-stored"
         assert recovered.nebius.storage_project_id == "storage-stored"
+
+    def test_org_without_byoc_enabled_keeps_the_spec(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        spec = _nebius_spec(
+            project_id=None, storage_project_id=None, subnet_id=None, region="eu-north1"
+        )
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch.object(
+                ByocApi,
+                "stored_provider_config",
+                side_effect=ArenaAPIError("Not Found", status_code=404),
+            ),
+        ):
+            assert _recover_spec(command_config, spec) is spec
+
+    def test_other_lookup_errors_propagate(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        spec = _nebius_spec(
+            project_id=None, storage_project_id=None, subnet_id=None, region="eu-north1"
+        )
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch.object(
+                ByocApi,
+                "stored_provider_config",
+                side_effect=ArenaAPIError("boom", status_code=500),
+            ),
+            pytest.raises(ArenaAPIError, match="boom"),
+        ):
+            _recover_spec(command_config, spec)
 
 
 class TestSpecWithStoredNebiusConfig:

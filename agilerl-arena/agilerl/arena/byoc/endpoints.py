@@ -259,6 +259,15 @@ GET_CLUSTER_SMOKE: ManifestInvoke = {
     ],
 }
 
+SUGGESTED_CLASSES: ManifestInvoke = {
+    "method": "GET",
+    "path": "/api/cli/v1/byoc/clusters/suggested-classes",
+    "responseKind": "json",
+    "params": [
+        {"name": "name", "in": "query", "type": "string", "required": True},
+    ],
+}
+
 INSTALL_CLUSTER_PACKAGE: ManifestInvoke = {
     "method": "POST",
     "path": "/api/cli/v1/byoc/clusters/install-package",
