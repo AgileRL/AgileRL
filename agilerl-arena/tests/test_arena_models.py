@@ -91,6 +91,29 @@ class TestJudgeSpec:
         with pytest.raises(ValidationError, match="http\\(s\\) URL"):
             JudgeSpec(model="m", base_url=base_url)
 
+    def test_accepts_a_bedrock_judge(self) -> None:
+        spec = JudgeSpec(provider="bedrock", model="deepseek.v3.2", region="us-east-1")
+
+        assert (spec.model, spec.region) == ("deepseek.v3.2", "us-east-1")
+
+    def test_a_bedrock_judge_needs_a_region(self) -> None:
+        with pytest.raises(ValidationError, match="needs region"):
+            JudgeSpec(provider="bedrock", model="deepseek.v3.2")
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"base_url": "http://judge:8000"}, {"api_key_env": "JUDGE_KEY"}],
+    )
+    def test_a_bedrock_judge_takes_no_endpoint_or_key(
+        self, kwargs: dict[str, str]
+    ) -> None:
+        with pytest.raises(ValidationError, match="no base_url or api_key_env"):
+            JudgeSpec(provider="bedrock", model="m", region="us-east-1", **kwargs)
+
+    def test_region_is_only_for_bedrock(self) -> None:
+        with pytest.raises(ValidationError, match="region is for bedrock judges"):
+            JudgeSpec(model="m", api_key_env="JUDGE_KEY", region="us-east-1")
+
     def test_an_anthropic_judge_rejects_a_temperature(self) -> None:
         with pytest.raises(ValidationError, match="no temperature"):
             JudgeSpec(
