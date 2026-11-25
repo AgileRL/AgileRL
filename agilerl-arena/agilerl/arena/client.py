@@ -1449,10 +1449,11 @@ class ArenaClient:
         """
         self._check_num_gpus(num_gpus)
         manifest = with_reward_file_path(manifest, reward_file)
-        training_manifest = TrainingManifest.get_validated(manifest, mode="python")
+        document = TrainingManifest.load(manifest)
+        training_manifest = TrainingManifest.get_validated(document, mode="python")
         self._check_runs_on_arena(training_manifest)
         self._check_model_status(training_manifest)
-        self._check_submit_rules(training_manifest)
+        self._check_submit_rules(training_manifest, document)
         environment = training_manifest.environment
         if reward_file is not None and isinstance(environment, LLMEnvSpec):
             check_reward_file(reward_file, environment)
@@ -1551,12 +1552,19 @@ class ArenaClient:
 
     @staticmethod
     def _check_runs_on_arena(manifest: TrainingManifest) -> None:
-        """Reject a classic RL manifest, or one that turns on HPO; Arena runs neither."""
+        """Reject a manifest Arena cannot run: classic RL, HPO, or a batch size or context outside its options."""
         failures = arena_failures(manifest)
         if failures:
-            paths = ", ".join(failure["path"] for failure in failures)
-            msg = f"{paths}: {failures[0]['message']}"
-            raise ArenaValidationError(msg)
+            paths_by_message: dict[str, list[str]] = {}
+            for failure in failures:
+                paths_by_message.setdefault(failure["message"], []).append(
+                    failure["path"]
+                )
+            lines = [
+                f"{', '.join(paths)}: {message}"
+                for message, paths in paths_by_message.items()
+            ]
+            raise ArenaValidationError("\n".join(lines))
 
     @staticmethod
     def _check_model_status(manifest: TrainingManifest) -> None:
@@ -1571,9 +1579,11 @@ class ArenaClient:
             raise ArenaValidationError(notice)
 
     @staticmethod
-    def _check_submit_rules(manifest: TrainingManifest) -> None:
+    def _check_submit_rules(
+        manifest: TrainingManifest, document: dict[str, Any]
+    ) -> None:
         """Reject what Arena refuses on submit that the manifest schema allows."""
-        failures = submit_errors(manifest)
+        failures = submit_errors(manifest, document)
         if failures:
             raise ArenaValidationError("\n".join(describe(f) for f in failures))
 

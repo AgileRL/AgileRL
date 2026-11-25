@@ -1762,6 +1762,36 @@ class TestArenaClientSubmitChecks:
 
         api_key_client._open_stream.assert_not_called()
 
+    def test_each_arena_failure_keeps_its_own_message(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _hpo_manifest()
+        manifest["algorithm"]["batch_size"] = 3
+
+        # Act
+        with pytest.raises(ArenaValidationError) as raised:
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        message = str(raised.value)
+        assert "training.hpo, mutation: HPO and populations aren't available" in message
+        assert "algorithm.batch_size: must be a power of 2" in message
+        api_key_client._open_stream.assert_not_called()
+
+    def test_arena_chosen_field_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        manifest = _hpo_manifest()
+        manifest["training"] = {"max_steps": 100, "rollout_version_stamp": "publish"}
+        del manifest["mutation"]
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"training\.rollout_version_stamp: Arena chooses this field",
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
     def test_classic_rl_manifest_is_rejected_before_any_request(self, api_key_client):
         api_key_client._open_stream = MagicMock()
 

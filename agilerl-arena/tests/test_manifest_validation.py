@@ -76,6 +76,7 @@ from agilerl.arena.models.schema import (
 from agilerl.arena.models.verdict import (
     CLASSIC_RL_UNAVAILABLE_MESSAGE,
     HPO_UNAVAILABLE_MESSAGE,
+    catalog_gpu_share_warnings,
     hpo_fields,
     is_classic_rl,
     verdict,
@@ -106,6 +107,15 @@ GRPO = {
     },
     "training": {"max_steps": 100},
 }
+
+
+def built_in_run(environment: dict) -> dict:
+    """GRPO on a bundled environment with a vision model and the gym's default context."""
+    doc = copy.deepcopy(GRPO)
+    doc["environment"] = environment
+    doc["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-0.8B"
+    doc["network"].pop("max_context_length", None)
+    return doc
 
 
 def manifest(base: dict, **overrides: dict) -> dict:
@@ -377,6 +387,123 @@ class TestResolution:
         assert validated.algorithm.vllm_config is not None
         assert validated.algorithm.vllm_config.max_num_seqs is None
         assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.9
+
+    @pytest.mark.parametrize(
+        "vllm_config",
+        [None, {"max_num_seqs": 8}, {"gpu_memory_utilization": 0.5}],
+        ids=["no_vllm_config", "share_unset", "share_set"],
+    )
+    def test_catalogue_engine_share_wins_over_the_manifest(
+        self, vllm_config: dict | None
+    ) -> None:
+        # Arrange
+        hub_id = "zai-org/GLM-5.3-Flash"
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 4096,
+            },
+        )
+        if vllm_config is not None:
+            doc["algorithm"]["vllm_config"] = vllm_config
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert
+        assert SUPPORTED_MODEL_INFO[hub_id].rollout_gpu_memory_utilization == 0.85
+        assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.85
+
+    def test_a_replaced_catalog_share_warns(self) -> None:
+        # Arrange
+        hub_id = "zai-org/GLM-5.3-Flash"
+        doc = manifest(
+            GRPO_ON_ARENA,
+            network={
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 4096,
+            },
+            algorithm={"vllm_config": {"gpu_memory_utilization": 0.5}},
+        )
+
+        # Act
+        record = verdict(doc)
+
+        # Assert
+        assert record["ok"], record
+        assert (
+            "algorithm.vllm_config.gpu_memory_utilization is 0.5 in the manifest; "
+            "Arena uses the catalog share 0.85."
+        ) in record["warnings"]
+
+    def test_an_unset_or_matching_catalog_share_does_not_warn(self) -> None:
+        # Arrange
+        hub_id = "zai-org/GLM-5.3-Flash"
+        unset = manifest(
+            GRPO_ON_ARENA,
+            network={
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 4096,
+            },
+        )
+        matching = manifest(
+            unset,
+            algorithm={"vllm_config": {"gpu_memory_utilization": 0.85}},
+        )
+
+        # Act
+        unset_record = verdict(unset)
+        matching_record = verdict(matching)
+
+        # Assert
+        assert unset_record["ok"], unset_record
+        assert matching_record["ok"], matching_record
+        assert not any(
+            "catalog share" in warning for warning in unset_record["warnings"]
+        )
+        assert not any(
+            "catalog share" in warning for warning in matching_record["warnings"]
+        )
+
+    def test_a_manifest_share_without_a_catalog_share_does_not_warn(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO_ON_ARENA,
+            algorithm={"vllm_config": {"gpu_memory_utilization": 0.5}},
+        )
+
+        # Act
+        record = verdict(doc)
+
+        # Assert
+        assert record["ok"], record
+        assert (
+            record["payload"]["algorithm"]["vllm_config"]["gpu_memory_utilization"]
+            == 0.5
+        )
+        assert not any("catalog share" in warning for warning in record["warnings"])
+
+    def test_catalog_share_warning_ignores_a_section_that_is_not_a_mapping(
+        self,
+    ) -> None:
+        # Arrange
+        classic = TrainingManifest.model_validate(DQN)
+        rollout = TrainingManifest.model_validate(GRPO_ON_ARENA)
+
+        # Act / Assert
+        assert catalog_gpu_share_warnings(classic, DQN) == []
+        assert catalog_gpu_share_warnings(rollout, {"algorithm": "GRPO"}) == []
+
+    def test_manifest_engine_share_is_kept_without_a_catalogue_share(self) -> None:
+        # Arrange
+        doc = manifest(GRPO, algorithm={"vllm_config": {"gpu_memory_utilization": 0.5}})
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert
+        assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.5
 
     def test_gym_num_envs_default_does_not_overwrite_ppo(self) -> None:
         validated = TrainingManifest.model_validate(
@@ -1735,8 +1862,7 @@ class TestSchema:
     def test_name_only_built_in_submits_only_authored_environment_keys(
         self, name: str
     ) -> None:
-        doc = copy.deepcopy(GRPO)
-        doc["environment"] = {"name": name, "env_type": "rollout"}
+        doc = built_in_run({"name": name, "env_type": "rollout"})
 
         payload = TrainingManifest.model_validate(doc).to_payload()
 
@@ -1758,20 +1884,16 @@ class TestSchema:
             "repeat_system_prompt": True,
             "strict_chat_template_boundary": False,
         }
-        doc = copy.deepcopy(GRPO)
-        doc["environment"] = authored
+        doc = built_in_run(authored)
 
         payload = TrainingManifest.model_validate(doc).to_payload()
 
         assert payload["environment"] == authored
 
     def test_a_built_in_with_a_source_still_submits_environment_defaults(self) -> None:
-        doc = copy.deepcopy(GRPO)
-        doc["environment"] = {
-            "name": "AgentWorldModel",
-            "env_type": "rollout",
-            "env_image": "awm:1",
-        }
+        doc = built_in_run(
+            {"name": "AgentWorldModel", "env_type": "rollout", "env_image": "awm:1"}
+        )
 
         environment = TrainingManifest.model_validate(doc).to_payload()["environment"]
 
@@ -1782,6 +1904,64 @@ class TestSchema:
         assert environment["action_error_field"] == ""
         assert environment["repeat_system_prompt"] is False
         assert environment["env_image"] == "awm:1"
+
+    def test_validating_a_manifest_instance_returns_it_unchanged(self) -> None:
+        # Arrange
+        manifest = TrainingManifest.model_validate(GRPO)
+
+        # Act
+        again = TrainingManifest.model_validate(manifest)
+
+        # Assert
+        assert again.to_payload() == manifest.to_payload()
+
+    def test_max_model_len_publishes_no_default(self) -> None:
+        # Arrange
+        grpo = next(
+            v
+            for v in manifest_schema()["properties"]["algorithm"]["oneOf"]
+            if v["title"] == "GRPO"
+        )
+
+        # Act
+        field = grpo["properties"]["max_model_len"]
+
+        # Assert
+        assert "default" not in field
+
+    def test_marked_fields_carry_their_visibility(self) -> None:
+        # Arrange
+        schema = manifest_schema()
+        grpo = next(
+            v
+            for v in schema["properties"]["algorithm"]["oneOf"]
+            if v["title"] == "GRPO"
+        )
+        defs = schema["$defs"]
+
+        # Act
+        tiers = {
+            "batch_size": grpo["properties"]["batch_size"].get("x-arena-visibility"),
+            "pop_size": defs["TrainingSpec"]["properties"]["pop_size"].get(
+                "x-arena-visibility"
+            ),
+            "env_port": defs["LLMEnvSpec"]["properties"]["env_port"].get(
+                "x-arena-visibility"
+            ),
+            "env_vars": defs["LLMEnvSpec"]["properties"]["env_vars"].get(
+                "x-arena-visibility"
+            ),
+            "mutation": schema["properties"]["mutation"].get("x-arena-visibility"),
+        }
+
+        # Assert
+        assert tiers == {
+            "batch_size": "auto",
+            "pop_size": "hidden",
+            "env_port": "advanced",
+            "env_vars": None,
+            "mutation": "hidden",
+        }
 
     @pytest.mark.parametrize("source", [DQN, GRPO], ids=["rl", "llm"])
     def test_the_payload_we_submit_satisfies_the_schema_we_publish(
@@ -1876,15 +2056,42 @@ class TestSchema:
         assert payload["tournament_selection"]["elitism"] is True
 
     def test_an_omitted_mutation_section_does_not_architecture_mutate(self) -> None:
-        # An omitted mutation section dumps as a no-op so LoRA policies are
-        # not architecture-mutated after arena submit.
-        for source in (DQN, GRPO):
-            payload = TrainingManifest.model_validate(source).to_payload()
-            probs = payload["mutation"]["probabilities"]
-            assert probs["no_mut"] == 1.0
-            assert probs["arch_mut"] == 0.0
-            assert probs["new_layer"] == 0.0
-            assert probs["params_mut"] == 0.0
+        # An omitted mutation section dumps as a no-op for a classic run.
+        payload = TrainingManifest.model_validate(DQN).to_payload()
+        probs = payload["mutation"]["probabilities"]
+        assert probs["no_mut"] == 1.0
+        assert probs["arch_mut"] == 0.0
+        assert probs["new_layer"] == 0.0
+        assert probs["params_mut"] == 0.0
+
+    def test_an_llm_payload_has_no_mutation_or_selection_section(self) -> None:
+        # Arrange
+        stored = manifest(
+            GRPO,
+            mutation={
+                "name": "Mutations",
+                "probabilities": {
+                    "no_mut": 1.0,
+                    "arch_mut": 0.0,
+                    "new_layer": 0.0,
+                    "params_mut": 0.0,
+                    "act_mut": 0.0,
+                    "rl_hp_mut": 0.0,
+                },
+                "rl_hp_selection": {},
+            },
+            tournament_selection={"name": "TournamentSelection"},
+        )
+
+        # Act
+        payloads = [
+            TrainingManifest.model_validate(source).to_payload()
+            for source in (GRPO, stored)
+        ]
+
+        # Assert
+        for payload in payloads:
+            assert {"mutation", "tournament_selection"}.isdisjoint(payload)
 
     def test_an_llm_run_keeps_its_reference_adapter(self) -> None:
         # The algorithm classes default this on for every LLM paradigm but SFT.
@@ -3901,9 +4108,15 @@ class TestHpoFields:
         assert hpo_fields(validated) == []
 
 
+# Arena takes a context from the catalog model's options; 512 is not one.
+GRPO_ON_ARENA = manifest(GRPO, network={"max_context_length": 1024})
+
+
 class TestVerdictHpo:
     def test_hpo_manifest_is_invalid(self) -> None:
-        result = verdict(manifest(GRPO, training={"hpo": True}, mutation=HPO_MUTATION))
+        result = verdict(
+            manifest(GRPO_ON_ARENA, training={"hpo": True}, mutation=HPO_MUTATION)
+        )
 
         assert result["ok"] is False
         assert [error["path"] for error in result["errors"]] == [
@@ -3915,13 +4128,13 @@ class TestVerdictHpo:
         }
 
     def test_manifest_without_hpo_is_valid(self) -> None:
-        result = verdict(GRPO)
+        result = verdict(GRPO_ON_ARENA)
 
         assert result["ok"] is True
         assert "errors" not in result
 
     def test_llm_population_is_invalid(self) -> None:
-        result = verdict(manifest(GRPO, training={"pop_size": 2}))
+        result = verdict(manifest(GRPO_ON_ARENA, training={"pop_size": 2}))
 
         assert result["ok"] is False
         assert result["errors"] == [
@@ -3934,6 +4147,38 @@ class TestVerdictHpo:
         assert "HPO and populations aren't available for LLM training on Arena" in (
             HPO_UNAVAILABLE_MESSAGE
         )
+
+
+class TestVerdictArenaOptions:
+    def test_stored_verdict_rejects_a_batch_size_outside_the_options(self) -> None:
+        result = verdict(manifest(GRPO_ON_ARENA, algorithm={"batch_size": 6}))
+
+        assert result["ok"] is False
+        assert [error["path"] for error in result["errors"]] == ["algorithm.batch_size"]
+
+    def test_stored_verdict_rejects_a_context_outside_the_options(self) -> None:
+        result = verdict(GRPO)
+
+        assert result["ok"] is False
+        assert [error["path"] for error in result["errors"]] == [
+            "network.max_context_length"
+        ]
+
+    def test_warns_when_the_context_is_the_filled_catalog_window(self) -> None:
+        document = copy.deepcopy(GRPO)
+        del document["network"]["max_context_length"]
+
+        result = verdict(document)
+
+        assert result["ok"] is True, result
+        assert any(
+            "full context window (32768 tokens)" in w for w in result["warnings"]
+        )
+
+    def test_no_context_warning_when_the_manifest_sets_it(self) -> None:
+        result = verdict(GRPO_ON_ARENA)
+
+        assert not any("full context window" in w for w in result["warnings"])
 
 
 class TestVerdictClassicRl:

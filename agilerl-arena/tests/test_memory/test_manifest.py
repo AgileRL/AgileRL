@@ -848,9 +848,9 @@ class TestGenerationSettings:
 
     @pytest.mark.parametrize(
         ("vllm_config", "expected"),
-        [({}, 0.85), ({"gpu_memory_utilization": 0.9}, 0.9)],
+        [({}, 0.85), ({"gpu_memory_utilization": 0.9}, 0.85)],
     )
-    def test_catalogue_rollout_share_fills_an_omitted_memory_share(
+    def test_catalogue_rollout_share_wins_over_the_manifest_share(
         self, vllm_config, expected
     ):
         # Arrange
