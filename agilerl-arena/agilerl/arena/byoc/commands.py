@@ -11,6 +11,7 @@ import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, cast
 
@@ -134,7 +135,13 @@ def _recover_spec(config: CommandConfig, spec: ClusterSpec) -> ClusterSpec:
     if not provider.needs_stored_config(spec):
         return spec
     with arena_client(config) as client:
-        stored = ByocApi(client).stored_provider_config(spec.name, provider.name)
+        try:
+            stored = ByocApi(client).stored_provider_config(spec.name, provider.name)
+        except ArenaAPIError as exc:
+            # Arena answers 404 until the org's BYOC provider is enabled.
+            if exc.status_code != HTTPStatus.NOT_FOUND:
+                raise
+            return spec
     if stored is None:
         return spec
     recovered = provider.recover(spec, stored)
@@ -848,9 +855,15 @@ def _require_same_registered_cluster(
     if target is None:
         return
     with arena_client(config) as client:
-        registered = ByocApi(
-            client, platform=fields.get("byoc_scope") == "platform"
-        ).find_cluster(cluster_name)
+        try:
+            registered = ByocApi(
+                client, platform=fields.get("byoc_scope") == "platform"
+            ).find_cluster(cluster_name)
+        except ArenaAPIError as exc:
+            # Arena answers 404 until the org's BYOC provider is enabled, which register does.
+            if exc.status_code != HTTPStatus.NOT_FOUND:
+                raise
+            return
     if registered is not None:
         require_same_cluster(registered, cluster_name, target)
 
