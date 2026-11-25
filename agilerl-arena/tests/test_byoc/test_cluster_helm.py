@@ -1365,6 +1365,8 @@ def test_uninstall_byoc_releases_runs_helm_uninstall(tmp_path: Path) -> None:
         AGENT_RELEASE,
         "--namespace",
         AGENT_NAMESPACE,
+        "--timeout",
+        "10m",
     ]
     assert run_mock.call_args_list[1].args[0] == [
         "helm",
@@ -1372,6 +1374,8 @@ def test_uninstall_byoc_releases_runs_helm_uninstall(tmp_path: Path) -> None:
         STORAGE_RELEASE,
         "--namespace",
         STORAGE_NAMESPACE,
+        "--timeout",
+        "10m",
     ]
     assert run_mock.call_args_list[0].kwargs["env"]["KUBECONFIG"] == str(
         kubeconfig.resolve()

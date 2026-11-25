@@ -380,16 +380,33 @@ class ByocApi:
             return None
         return {str(key): value for key, value in config.items()}
 
-    def unregister_cluster(self, name: str) -> object:
-        """Unregister the BYOC cluster named *name*.
+    def unregister_cluster(
+        self, name: str, stop_runs: bool = False, force: bool = False
+    ) -> dict[str, Any]:
+        """Unregister the BYOC cluster named *name*; flags left false are not sent.
 
         :param name: The registered cluster name.
         :type name: str
+        :param stop_runs: Stop the cluster's experiments and deployments first.
+        :type stop_runs: bool
+        :param force: Archive now without the agent and end its runs in Arena.
+        :type force: bool
         :returns: The decoded unregister response.
-        :rtype: object
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: If Arena answers with something other than an
+            object.
         """
         logger.info("Unregistering BYOC cluster %r…", name)
-        return self._invoke(endpoints.UNREGISTER_CLUSTER, {"name": name})
+        args: dict[str, object] = {"name": name}
+        if stop_runs:
+            args["stopRuns"] = True
+        if force:
+            args["force"] = True
+        result = self._invoke(endpoints.UNREGISTER_CLUSTER, args)
+        if not isinstance(result, dict):
+            msg = "Unexpected cluster unregister response from Arena."
+            raise ArenaAPIError(msg)
+        return {str(key): value for key, value in result.items()}
 
     def rotate_cluster_token(self, name: str) -> dict[str, Any]:
         """Rotate the agent token for the BYOC cluster named *name*.

@@ -4478,7 +4478,7 @@ class TestClusterDestroyCommand:
             not in result.output
         )
         assert "Destroy Nebius cluster" not in result.output
-        self.unregister_cluster.assert_called_once_with("arena-nebius")
+        self.unregister_cluster.assert_called_once_with("arena-nebius", force=True)
         destroy_mock.assert_called_once()
 
     def test_name_loads_the_cluster_stored_in_arena(

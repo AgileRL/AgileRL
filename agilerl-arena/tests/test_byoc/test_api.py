@@ -460,6 +460,25 @@ class TestByocApi:
         assert invoke["path"] == "/api/cli/v1/byoc/clusters/unregister"
         assert body == {"name": "prod-cluster"}
 
+    def test_unregister_cluster_sends_stop_runs_and_force(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"status": "Archived"}
+
+        result = byoc_api.unregister_cluster("prod-cluster", stop_runs=True, force=True)
+
+        _invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert body == {"name": "prod-cluster", "stopRuns": True, "force": True}
+        assert result == {"status": "Archived"}
+
+    def test_unregister_cluster_rejects_a_non_object_response(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = ["unexpected"]
+
+        with pytest.raises(ArenaAPIError, match="Unexpected cluster unregister"):
+            byoc_api.unregister_cluster("prod-cluster")
+
     def test_rotate_cluster_token_sends_json_name_body(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:
