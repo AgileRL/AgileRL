@@ -12,6 +12,7 @@ import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -19,16 +20,18 @@ import click
 import yaml
 from typing_extensions import NotRequired, Unpack
 
-from agilerl.arena.byoc.api import ByocApi
+from agilerl.arena.byoc.api import ByocApi, DuplicateNameError
 from agilerl.arena.byoc.cluster_helm import (
     AGENT_NAMESPACE,
     AGENT_RELEASE,
+    agent_token_secret_name,
     install_enterprise_agent_chart,
     install_from_install_package_root,
     install_lab_cluster_charts,
     normalize_agent_namespace,
     normalize_agent_release,
     resolve_install_release,
+    secret_exists,
 )
 from agilerl.arena.byoc.cluster_install_package import (
     extract_cluster_install_package,
@@ -39,6 +42,7 @@ from agilerl.arena.byoc.provisioning.inference import (
 )
 from agilerl.arena.cli_manifest import write_text_atomic
 from agilerl.arena.client import ArenaClient
+from agilerl.arena.exceptions import ArenaAPIError
 
 logger = logging.getLogger("agilerl.arena.byoc")
 
@@ -181,18 +185,6 @@ def _normalize_cluster_token(token: object) -> str | None:
     if isinstance(token, str) and token.strip():
         return token.strip()
     return None
-
-
-def _require_token_for_install(token: object) -> str:
-    normalized = _normalize_cluster_token(token)
-    if normalized:
-        return normalized
-    msg = (
-        "Cannot --install without an agent token. "
-        "Rotate token in Arena (Account → Enterprise K8s clusters), "
-        "then register again or set clusterToken on the agent Helm release."
-    )
-    raise click.ClickException(msg)
 
 
 def _agent_values_for_helm(
@@ -477,52 +469,69 @@ def _stored_class_fields(
 
 def _update_existing_resource_class(
     api: ByocApi,
+    cluster_name: str,
     resource_class: ClusterResourceClass,
-    existing: dict[str, object],
+    existing: dict[str, object] | None,
     desired: dict[str, object],
     availability_body: list[dict[str, object]] | None,
     yes: bool,
 ) -> str:
-    """Update a stored class, or leave it when it already matches."""
-    current = _stored_class_fields(existing, resource_class)
-    desired_view = _align_same_memory(current, desired)
+    """Update the class on *cluster_name*, or confirm an unchanged class is there.
+
+    *existing* is the listed row, or ``None`` when several clusters list the name.
+    """
+    name = resource_class.name
     availabilities = resource_class.availabilities
-    if current == desired_view:
-        if availabilities is None:
-            click.echo(
-                f"Resource class {resource_class.name!r} already matches; "
-                "leaving it unchanged."
+    if existing is None:
+        click.echo(f"Resource class {name!r} is listed on more than one cluster.")
+        metadata = desired["metadata"]
+        prompt = f"Update resource class {name!r} on cluster {cluster_name!r}?"
+    else:
+        current = _stored_class_fields(existing, resource_class)
+        desired_view = _align_same_memory(current, desired)
+        metadata = desired_view["metadata"]
+        if current == desired_view:
+            if availabilities is None:
+                # The listed row may be on another cluster; a 404 here says so.
+                api.update_class(
+                    name=name,
+                    num_nodes=resource_class.num_nodes,
+                    node_selector=resource_class.node_selector,
+                    metadata=metadata,
+                    description=resource_class.description,
+                    cluster=cluster_name,
+                )
+                click.echo(f"Resource class {name!r} already matches.")
+                return name
+            api.replace_class_availabilities(
+                name,
+                _availability_body(availabilities),
+                **_enabled_arg(resource_class.enabled),
+                cluster=cluster_name,
             )
-            return resource_class.name
-        api.replace_class_availabilities(
-            resource_class.name,
-            _availability_body(availabilities),
-            **_enabled_arg(resource_class.enabled),
-        )
-        click.echo(f"Resource class {resource_class.name!r} already matches.")
-        _echo_availability(resource_class.name, availabilities, False)
-        return resource_class.name
-    click.echo(f"Resource class {resource_class.name!r} already exists:")
-    click.echo(_resource_class_diff(current, desired_view))
-    if not yes and not click.confirm(
-        f"Update resource class {resource_class.name!r}?",
-        default=False,
-    ):
-        click.echo(f"Left resource class {resource_class.name!r} unchanged.")
-        return resource_class.name
+            click.echo(f"Resource class {name!r} already matches.")
+            _echo_availability(name, availabilities, False)
+            return name
+        click.echo(f"Resource class {name!r} already exists:")
+        click.echo(_resource_class_diff(current, desired_view))
+        prompt = f"Update resource class {name!r}?"
+    if not yes and not click.confirm(prompt, default=False):
+        click.echo(f"Left resource class {name!r} unchanged.")
+        return name
     updated = api.update_class(
-        name=resource_class.name,
+        name=name,
         num_nodes=resource_class.num_nodes,
         node_selector=resource_class.node_selector,
-        metadata=desired_view["metadata"],
+        metadata=metadata,
         description=resource_class.description,
         availabilities=availability_body,
         **_enabled_arg(resource_class.enabled),
+        cluster=cluster_name,
     )
-    click.echo(f"Updated resource class {updated.get('name', resource_class.name)!r}.")
+    click.echo(f"Updated resource class {updated.get('name', name)!r}.")
     if availabilities is not None:
-        _echo_availability(resource_class.name, availabilities, False)
-    return resource_class.name
+        _echo_availability(name, availabilities, False)
+    return name
 
 
 def ensure_resource_class(
@@ -531,7 +540,7 @@ def ensure_resource_class(
     resource_class: ClusterResourceClass,
     yes: bool = False,
 ) -> str:
-    """Create the resource class, or update it after showing the diff."""
+    """Create the resource class on this cluster, or update it after showing the diff."""
     desired = _resource_class_fields(
         resource_class.num_nodes,
         resource_class.node_selector,
@@ -542,16 +551,27 @@ def ensure_resource_class(
     availability_body = (
         None if availabilities is None else _availability_body(availabilities)
     )
-    existing = api.find_class(resource_class.name)
-    if existing is not None:
-        return _update_existing_resource_class(
-            api,
-            resource_class,
-            existing,
-            desired,
-            availability_body,
-            yes,
-        )
+    # classes/list rows carry no cluster, so a listed name may be another cluster's.
+    try:
+        existing = api.find_class(resource_class.name)
+        listed = existing is not None
+    except DuplicateNameError:
+        existing = None
+        listed = True
+    if listed:
+        try:
+            return _update_existing_resource_class(
+                api,
+                cluster_name,
+                resource_class,
+                existing,
+                desired,
+                availability_body,
+                yes,
+            )
+        except ArenaAPIError as exc:
+            if exc.status_code != HTTPStatus.NOT_FOUND:
+                raise
     created = api.create_class(
         name=resource_class.name,
         num_nodes=resource_class.num_nodes,
@@ -599,6 +619,7 @@ class ClusterRegisterOptions(TypedDict):
     byoc_provider: NotRequired[dict[str, Any] | None]
     resource_classes: NotRequired[Sequence[ClusterResourceClass]]
     yes: NotRequired[bool]
+    rotate_token: NotRequired[bool]
 
 
 @dataclass(frozen=True)
@@ -619,6 +640,22 @@ class RegisterBundle:
     def has_storage_values(self) -> bool:
         """Return whether Arena sent MinIO Helm values."""
         return isinstance(self.storage_values, dict)
+
+
+def _echo_upsert_token(bundle: dict[str, Any]) -> None:
+    """Say whether re-registering kept, rotated or issued the agent token."""
+    has_token = _normalize_cluster_token(bundle.get("token")) is not None
+    # An API without tokenRotated rotates on every re-register.
+    if bundle.get("tokenRotated", has_token):
+        click.echo(
+            "Rotated the agent token. The previous token keeps working for 24 hours."
+        )
+    elif has_token:
+        click.echo("Issued an agent token: the cluster had no active token.")
+    else:
+        click.echo(
+            "Kept the existing agent token. Pass --rotate-token to issue a new one."
+        )
 
 
 def _echo_register_bundle(
@@ -646,14 +683,10 @@ def _echo_register_bundle(
                 "storageHelmValues."
             )
             raise click.ClickException(msg)
-    token = bundle.get("token")
-    if upserted and isinstance(token, str) and token:
-        click.echo(
-            "Cluster token rotated for Helm install (previous token valid during grace)."
-        )
     cluster_name = _registered_cluster_name(bundle, name)
     if upserted:
         click.echo(f"Updated cluster {cluster_name!r}.")
+        _echo_upsert_token(bundle)
     else:
         click.echo(f"Registered cluster {cluster_name!r}.")
     scope = _registered_scope(bundle)
@@ -729,24 +762,25 @@ def _run_register_helm_install(
     )
 
 
-def _install_token(
-    bundle: RegisterBundle, options: ClusterRegisterOptions
-) -> str | None:
+def _install_token(bundle: RegisterBundle) -> str | None:
     """Return the token the agent chart installs with.
 
-    Re-registering a platform cluster returns no token, so its agent keeps
-    reading the token Secret it already has.
+    Without a token from Arena the install keeps the token Secret the agent
+    already reads, so that Secret must exist.
     """
-    existing_secret = bundle.agent_values.get("existingClusterTokenSecret")
-    if (
-        _normalize_cluster_token(bundle.token) is None
-        and options.get("byoc_scope") == "platform"
-        and isinstance(existing_secret, str)
-        and existing_secret
-    ):
-        click.echo(f"Keeping the agent's cluster token Secret {existing_secret!r}.")
-        return None
-    return _require_token_for_install(bundle.token)
+    token = _normalize_cluster_token(bundle.token)
+    if token is not None:
+        return token
+    secret = agent_token_secret_name(bundle.agent_values)
+    if not secret_exists(secret, bundle.agent_namespace):
+        msg = (
+            f"Arena kept the agent token of cluster {bundle.cluster_name!r}, but "
+            f"namespace {bundle.agent_namespace!r} has no token Secret {secret!r}. "
+            "Re-run with --rotate-token to issue a token this install can apply."
+        )
+        raise click.ClickException(msg)
+    click.echo(f"Keeping the agent's cluster token Secret {secret!r}.")
+    return None
 
 
 def _persist_and_install_registration(
@@ -756,7 +790,7 @@ def _persist_and_install_registration(
 ) -> None:
     """Write register files and optionally install Helm charts."""
     install = options.get("install", False)
-    install_token = _install_token(bundle, options) if install else None
+    install_token = _install_token(bundle) if install else None
     helm_charts = install or bundle.include_storage
     force = options["force"]
     charts_dir = options.get("charts_dir")
@@ -834,6 +868,7 @@ def _submit_cluster_register(
         placement=options.get("placement"),
         byoc_scope=options.get("byoc_scope"),
         byoc_provider=options.get("byoc_provider"),
+        rotate_token=options.get("rotate_token", False),
     )
 
 
@@ -868,6 +903,8 @@ def run_cluster_register(
     :type agent_namespace: str
     :param resource_classes: GPU classes to create for the registered cluster.
     :type resource_classes: Sequence[ClusterResourceClass]
+    :param rotate_token: Rotate the agent token of a cluster that is already registered.
+    :type rotate_token: bool
     :returns: None
     :rtype: None
     """

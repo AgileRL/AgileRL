@@ -12,6 +12,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from agilerl.arena.byoc.endpoints import DELETE_CLASS, UPDATE_CLASS
 from agilerl.arena.cli_manifest import (
     _manifest_spec_to_click_option,
     _parse_json_cli_value,
@@ -20,7 +21,7 @@ from agilerl.arena.cli_manifest import (
     pythonize_manifest_param_name,
     write_binary_atomic,
 )
-from agilerl.arena.client import ArenaClient
+from agilerl.arena.client import ArenaClient, ManifestInvoke
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaValidationError
 
@@ -137,8 +138,6 @@ class TestInvokeManifestCommand:
         self, api_key_client: ArenaClient
     ) -> None:
         """The classes/delete endpoint reads ``name`` from the query string."""
-        from agilerl.arena.byoc.endpoints import DELETE_CLASS
-
         with patch.object(
             api_key_client, "_request", return_value={"ok": True}
         ) as mocked:
@@ -151,8 +150,6 @@ class TestInvokeManifestCommand:
         self, api_key_client: ArenaClient
     ) -> None:
         """The classes/update endpoint reads ``name`` from the query string."""
-        from agilerl.arena.byoc.endpoints import UPDATE_CLASS
-
         with patch.object(
             api_key_client, "_request", return_value={"name": "pool"}
         ) as mocked:
@@ -178,8 +175,6 @@ class TestInvokeManifestCommand:
     def test_update_class_sends_availabilities_in_the_body(
         self, api_key_client: ArenaClient
     ) -> None:
-        from agilerl.arena.byoc.endpoints import UPDATE_CLASS
-
         availabilities = [
             {"region": "eu-north1", "zones": ["fabric-2"], "enabled": True}
         ]
@@ -196,6 +191,21 @@ class TestInvokeManifestCommand:
             "availabilities": availabilities,
             "enabled": False,
         }
+
+    @pytest.mark.parametrize("invoke", [UPDATE_CLASS, DELETE_CLASS])
+    def test_class_write_sends_the_cluster_in_the_query(
+        self, api_key_client: ArenaClient, invoke: ManifestInvoke
+    ) -> None:
+        with patch.object(
+            api_key_client, "_request", return_value={"name": "pool"}
+        ) as mocked:
+            api_key_client._invoke_manifest_command(
+                invoke, {"name": "pool", "cluster": "arena", "cluster_id": 7}
+            )
+
+        _args, kwargs = mocked.call_args
+        assert kwargs["params"] == {"name": "pool", "cluster": "arena", "cluster_id": 7}
+        assert not kwargs.get("json")
 
     def test_rejects_non_allowlisted_path(self, api_key_client: ArenaClient) -> None:
         invoke = {

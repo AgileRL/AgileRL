@@ -28,6 +28,10 @@ logger = logging.getLogger("agilerl.arena.byoc")
 PLATFORM_STAFF_ONLY = "Only AgileRL staff can manage platform clusters."
 
 
+class DuplicateNameError(ArenaAPIError):
+    """More than one listed BYOC row has the name being looked up."""
+
+
 def _named_item(items: object, name: str, kind: str) -> dict[str, Any] | None:
     """Return the single dict named *name* from a list payload, or ``None``.
 
@@ -39,7 +43,7 @@ def _named_item(items: object, name: str, kind: str) -> dict[str, Any] | None:
     :type kind: str
     :returns: The matching dictionary, or ``None`` if absent.
     :rtype: dict[str, Any] | None
-    :raises ArenaAPIError: If more than one item shares the same name.
+    :raises DuplicateNameError: If more than one item shares the same name.
     """
     if not isinstance(items, list):
         return None
@@ -48,7 +52,7 @@ def _named_item(items: object, name: str, kind: str) -> dict[str, Any] | None:
         return None
     if len(matches) > 1:
         msg = f"Multiple BYOC {kind} named {name!r}; resolve duplicates in Arena first."
-        raise ArenaAPIError(msg)
+        raise DuplicateNameError(msg)
     return {str(k): v for k, v in matches[0].items()}
 
 
@@ -64,9 +68,31 @@ def class_by_name(classes: object, name: str) -> dict[str, Any] | None:
     :type name: str
     :returns: The matching class dictionary, or ``None`` if no class matches.
     :rtype: dict[str, Any] | None
-    :raises ArenaAPIError: If more than one class shares the same name.
+    :raises DuplicateNameError: If more than one class shares the same name.
     """
     return _named_item(classes, name, kind="classes")
+
+
+def class_ref(
+    name: str, cluster: str | None, cluster_id: int | None
+) -> dict[str, object]:
+    """Return the query naming a class, plus its cluster when one is given.
+
+    :param name: The resource class name.
+    :type name: str
+    :param cluster: Name of the cluster the class belongs to.
+    :type cluster: str | None
+    :param cluster_id: Id of the cluster the class belongs to.
+    :type cluster_id: int | None
+    :returns: ``name`` with ``cluster`` and ``cluster_id`` when set.
+    :rtype: dict[str, object]
+    """
+    ref: dict[str, object] = {"name": name}
+    if cluster is not None:
+        ref["cluster"] = cluster
+    if cluster_id is not None:
+        ref["cluster_id"] = cluster_id
+    return ref
 
 
 def cluster_by_name(clusters: object, name: str) -> dict[str, Any] | None:
@@ -78,7 +104,7 @@ def cluster_by_name(clusters: object, name: str) -> dict[str, Any] | None:
     :type name: str
     :returns: The matching cluster dictionary, or ``None`` if absent.
     :rtype: dict[str, Any] | None
-    :raises ArenaAPIError: If more than one cluster shares the same name.
+    :raises DuplicateNameError: If more than one cluster shares the same name.
     """
     return _named_item(clusters, name, kind="clusters")
 
@@ -104,6 +130,7 @@ class RegisterClusterFields(TypedDict):
     placement: NotRequired[str | None]
     byoc_scope: NotRequired[str | None]
     byoc_provider: NotRequired[dict[str, Any] | None]
+    rotate_token: NotRequired[bool]
 
 
 class ByocApi:
@@ -194,19 +221,28 @@ class ByocApi:
         )
         return class_by_name(classes, name)
 
-    def delete_class(self, name: str) -> None:
+    def delete_class(
+        self, name: str, cluster: str | None = None, cluster_id: int | None = None
+    ) -> None:
         """Delete the resource class named *name* if it is registered in Arena.
 
         :param name: The resource class name to delete.
         :type name: str
+        :param cluster: Name of the class's cluster, needed when the class name
+            matches classes on more than one cluster.
+        :type cluster: str | None
+        :param cluster_id: Id of the class's cluster, needed when several
+            clusters share the cluster name.
+        :type cluster_id: int | None
         :returns: None
         :rtype: None
         """
-        if self.find_class(name) is None:
+        # classes/list rows carry no cluster; with one named, Arena resolves the class.
+        if cluster is None and cluster_id is None and self.find_class(name) is None:
             logger.info("No Arena resource class %r; skipping API delete.", name)
             return
         logger.info("Deleting BYOC resource class %r from Arena…", name)
-        self._invoke(endpoints.DELETE_CLASS, {"name": name})
+        self._invoke(endpoints.DELETE_CLASS, class_ref(name, cluster, cluster_id))
 
     def register_cluster(
         self, **fields: Unpack[RegisterClusterFields]
@@ -235,6 +271,7 @@ class ByocApi:
         placement = fields.get("placement")
         byoc_scope = fields.get("byoc_scope")
         byoc_provider = fields.get("byoc_provider")
+        rotate_token = fields.get("rotate_token")
         wire_placement = None if placement is None else api_placement(placement)
         wire_scope = None if byoc_scope is None else api_byoc_scope(byoc_scope)
         body: dict[str, Any] = {"name": name}
@@ -256,6 +293,7 @@ class ByocApi:
             ("placement", wire_placement),
             ("byocScope", wire_scope),
             ("byocProvider", byoc_provider),
+            ("rotateToken", rotate_token),
         ]
         for key, value in optional_fields:
             if value is None or value is False:
@@ -413,11 +451,13 @@ class ByocApi:
         description: str = "",
         availabilities: list[dict[str, object]] | None = None,
         enabled: bool | None = None,
+        cluster: str | None = None,
+        cluster_id: int | None = None,
     ) -> dict[str, Any]:
-        """Update a BYOC resource class."""
+        """Update a BYOC resource class, on *cluster* or *cluster_id* when given."""
         logger.info("Updating BYOC resource class %r…", name)
         body: dict[str, object] = {
-            "name": name,
+            **class_ref(name, cluster, cluster_id),
             "num_nodes": num_nodes,
             "node_selector": node_selector,
             "metadata": metadata,
@@ -439,10 +479,15 @@ class ByocApi:
         name: str,
         availabilities: list[dict[str, object]],
         enabled: bool | None = None,
+        cluster: str | None = None,
+        cluster_id: int | None = None,
     ) -> dict[str, Any]:
         """Replace Nebius region availability for a resource class."""
         logger.info("Updating availability for resource class %r…", name)
-        body: dict[str, object] = {"name": name, "availabilities": availabilities}
+        body: dict[str, object] = {
+            **class_ref(name, cluster, cluster_id),
+            "availabilities": availabilities,
+        }
         if enabled is not None:
             body["enabled"] = enabled
         result = self._invoke(endpoints.UPDATE_CLASS, body)

@@ -31,6 +31,7 @@ from agilerl.arena.byoc.cluster_helm import (
     _load_agent_values_yaml,
     _restart_agent_deployment,
     _storage_secret_endpoints,
+    agent_token_secret_name,
     discover_agent_namespace,
     ensure_agent_storage_secret,
     helm_available,
@@ -43,6 +44,7 @@ from agilerl.arena.byoc.cluster_helm import (
     resolve_helm_charts_root,
     resolve_install_release,
     run_agent_chart_validate,
+    secret_exists,
     sync_storage_secret_endpoint,
     uninstall_byoc_releases,
     wait_for_deployments,
@@ -1529,6 +1531,85 @@ def test_discover_agent_install_returns_matching_explicit_namespace(
 def test_kubectl_secret_exists_is_false_without_kubectl() -> None:
     with patch("agilerl.arena.byoc.cluster_helm.shutil.which", return_value=None):
         assert _kubectl_secret_exists("arena-storage", "arena") is False
+
+
+class TestSecretExists:
+    def test_true_when_kubectl_finds_the_secret(self) -> None:
+        found = MagicMock(returncode=0, stdout="secret/cluster-token\n", stderr="")
+        with (
+            patch(
+                "agilerl.arena.byoc.cluster_helm.shutil.which", return_value="kubectl"
+            ),
+            patch(
+                "agilerl.arena.byoc.cluster_helm.subprocess.run", return_value=found
+            ) as run_mock,
+        ):
+            assert secret_exists("cluster-token", "arena") is True
+        assert run_mock.call_args.args[0] == [
+            "kubectl",
+            "get",
+            "secret",
+            "cluster-token",
+            "-n",
+            "arena",
+            "-o",
+            "name",
+        ]
+
+    def test_false_only_on_not_found(self) -> None:
+        missing = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr='Error from server (NotFound): secrets "cluster-token" not found\n',
+        )
+        with (
+            patch(
+                "agilerl.arena.byoc.cluster_helm.shutil.which", return_value="kubectl"
+            ),
+            patch(
+                "agilerl.arena.byoc.cluster_helm.subprocess.run", return_value=missing
+            ),
+        ):
+            assert secret_exists("cluster-token", "arena") is False
+
+    def test_other_kubectl_failures_raise(self) -> None:
+        forbidden = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Unable to connect to the server: dial tcp: i/o timeout\n",
+        )
+        with (
+            patch(
+                "agilerl.arena.byoc.cluster_helm.shutil.which", return_value="kubectl"
+            ),
+            patch(
+                "agilerl.arena.byoc.cluster_helm.subprocess.run", return_value=forbidden
+            ),
+            pytest.raises(click.ClickException, match="Could not check Secret"),
+        ):
+            secret_exists("cluster-token", "arena")
+
+    def test_missing_kubectl_raises(self) -> None:
+        with (
+            patch("agilerl.arena.byoc.cluster_helm.shutil.which", return_value=None),
+            pytest.raises(click.ClickException, match="kubectl not found"),
+        ):
+            secret_exists("cluster-token", "arena")
+
+
+class TestAgentTokenSecretName:
+    @pytest.mark.parametrize(
+        ("agent_values", "expected"),
+        [
+            ({"existingClusterTokenSecret": "custom"}, "custom"),
+            ({"clusterTokenSecret": {"name": "named", "key": "k"}}, "named"),
+            ({}, "cluster-token"),
+        ],
+    )
+    def test_follows_the_chart_lookup_order(
+        self, agent_values: dict[str, object], expected: str
+    ) -> None:
+        assert agent_token_secret_name(agent_values) == expected
 
 
 def test_ensure_agent_storage_secret_requires_kubectl_when_secret_missing() -> None:

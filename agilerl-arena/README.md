@@ -152,7 +152,12 @@ Use the deployment URL from `arena agent list`.
 
 Register a Kubernetes cluster against Arena (enterprise BYOC) and
 write Helm values files locally. Re-running with the same cluster name updates
-the existing registration (upsert) instead of creating a duplicate.
+the existing registration (upsert) instead of creating a duplicate, and keeps
+its agent token. `--install` then leaves the agent's token Secret alone, and
+stops if the agent namespace has no token Secret yet. Pass `--rotate-token` to
+issue a new token; with `--install` the CLI writes it to that Secret. The old
+token keeps working for 24 hours. `arena cluster provision --register-and-install`
+always issues a new token, because the cluster it just provisioned holds none.
 `--byoc-scope` is `customer` (the default when omitted) or `platform`.
 A platform cluster shares the Arena catalog and bucket and needs a platform
 admin. Choosing platform uses ephemeral placement unless `--placement`
@@ -176,7 +181,7 @@ Without `--no-write`, the CLI writes into `--output-dir` (default
 
 - `agent-helm-values.yaml`
 - `storage-helm-values.yaml`, when Arena returns bundled MinIO values
-- `cluster-token.txt`, mode 0600
+- `cluster-token.txt`, mode 0600, when Arena returns a token
 
 Bundled MinIO is optional. `--lab` is shorthand for `--install-storage
 --narrow-allowed-ips`:
