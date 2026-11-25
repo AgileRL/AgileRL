@@ -16,6 +16,7 @@ from agilerl.arena.models.judge import ENV_VAR_NAME_PATTERN, JudgeSpec
 from agilerl.arena.models.prompt_template import check_row_placeholders
 from agilerl.arena.models.rewards import RewardSpec, check_reward_fields
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
+from agilerl.arena.models.visibility import ADVANCED, ADVANCED_PLATFORM_WRITTEN
 
 
 def reject_legacy_llm_env_spelling(
@@ -920,6 +921,7 @@ class LLMEnvSpec(EnvSpecBase):
 
     env_hosts: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
         ge=1,
         description=(
             "Number of env hosts to serve the env on (Ray runtime only). Unset "
@@ -937,12 +939,14 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_port: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
         ge=1,
         le=65535,
         description="TCP port the env_image server listens on.",
     )
     env_sessions_per_host: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         ge=1,
         description=(
             "Sessions per env_image Pod: one container each, serving on "
@@ -952,6 +956,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_session_ports: dict[str, int] = Field(
         default_factory=dict,
+        json_schema_extra=ADVANCED,
         description=(
             "Container environment set to base + session index in each session "
             "container, so sessions sharing a Pod bind distinct ports."
@@ -959,6 +964,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     cpus_per_env_host: float | None = Field(
         default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
         gt=0.0,
         description=(
             "CPUs reserved per env host; an env_image Pod requests them with no "
@@ -966,15 +972,20 @@ class LLMEnvSpec(EnvSpecBase):
         ),
     )
     env_host_memory_bytes: int | None = Field(
-        default=None, gt=0, description="Memory reserved per env host."
+        default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
+        gt=0,
+        description="Memory reserved per env host.",
     )
     env_host_memory_limit_bytes: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         gt=0,
         description="Memory limit per env_image Pod. Unset sets no limit.",
     )
     env_host_ready_timeout_s: float | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         gt=0.0,
         description=(
             "Seconds each env_image session Pod may take to become ready, "
@@ -983,6 +994,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_services: list[EnvServiceSpec] = Field(
         default_factory=list,
+        json_schema_extra=ADVANCED,
         description=(
             "Backing services the env_image sessions share, started with the "
             "job and deleted with it (Ray runtime on Kubernetes only)."
@@ -990,6 +1002,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_host_resource: str | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         description=(
             "Where env hosts land: a custom Ray resource, or (for env_image) "
             "the Pod nodeSelector — key=value, or a bare pool name."

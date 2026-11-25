@@ -17,15 +17,17 @@ from agilerl.arena.models import (
     LLMAlgorithmSpec,
     __version__,
 )
-from agilerl.arena.models.hpo import no_op_mutation_probabilities
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import (
     TrainingManifest,
     explicit_colocated_rollout,
+    mutates,
     validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import target_modules_warnings
 from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
+from agilerl.arena.models.visibility import arena_chosen_paths
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -35,6 +37,7 @@ HPO_UNAVAILABLE_MESSAGE = (
     "HPO and populations aren't available for LLM training on Arena. "
     "Remove training.hpo and the mutation section, and set training.pop_size to 1."
 )
+ARENA_CHOSEN_MESSAGE = "Arena chooses this field; remove it from the manifest."
 CLASSIC_RL_UNAVAILABLE_MESSAGE = (
     "Classic RL is no longer supported in Arena. Use the open-source AgileRL v2 "
     "release: https://github.com/AgileRL/AgileRL/releases/tag/v2.67.0"
@@ -105,6 +108,20 @@ def read_manifest(source: str) -> dict[str, Any]:
     return TrainingManifest.load(source)
 
 
+def is_local_model_path(model: str) -> bool:
+    """Whether *model* is a filesystem path or a checkout, not a Hub id.
+
+    :param model: ``pretrained_model_name_or_path``.
+    :type model: str
+    :returns: True for a ``.`` / ``/`` / ``~`` prefix, or a directory with ``config.json``.
+    :rtype: bool
+    """
+    return (
+        model.startswith((".", "/", "~"))
+        or (Path(model).expanduser() / "config.json").is_file()
+    )
+
+
 def model_warnings(manifest: TrainingManifest) -> list[str]:
     """Warn when an LLM manifest's model is outside the Arena catalog, deprecated or in preview.
 
@@ -123,17 +140,93 @@ def model_warnings(manifest: TrainingManifest) -> list[str]:
     if info is not None:
         notice = info.status_notice
         return [notice] if notice else []
-    # A path prefix, or a checkout that already has config.json, is not a Hub id.
-    if (
-        hub_id.startswith((".", "/", "~"))
-        or (Path(hub_id).expanduser() / "config.json").is_file()
-    ):
+    if is_local_model_path(hub_id):
         return []
     msg = (
         f"Model {hub_id} is not in the Arena supported model catalog; "
         f"see 'arena models supported'.{did_you_mean(hub_id, SUPPORTED_MODEL_INFO)}"
     )
     return [msg]
+
+
+def context_warnings(manifest: TrainingManifest) -> list[str]:
+    """Warn when Arena set the context to the model's whole window because the manifest left it unset.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one warning.
+    :rtype: list[str]
+    """
+    network = manifest.network
+    if not manifest.context_from_catalog or not isinstance(
+        network, FinetuningNetworkSpec
+    ):
+        return []
+    message = (
+        f"network.max_context_length is unset, so Arena used "
+        f"{network.pretrained_model_name_or_path}'s full context window "
+        f"({network.max_context_length} tokens). The run and its memory "
+        "estimate are sized for that; set a smaller network.max_context_length "
+        "if your prompts and completions are shorter."
+    )
+    return [message]
+
+
+def catalog_gpu_share_warnings(
+    manifest: TrainingManifest, document: dict[str, Any]
+) -> list[str]:
+    """Warn when a catalog rollout share replaces the share *document* sets.
+
+    :param manifest: *document*, validated.
+    :type manifest: TrainingManifest
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :returns: Zero or one warning.
+    :rtype: list[str]
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, RolloutLLMSpec) or algorithm.vllm_config is None:
+        return []
+    chosen = algorithm.vllm_config.gpu_memory_utilization
+    raw_algorithm = document.get("algorithm")
+    if not isinstance(raw_algorithm, dict):
+        return []
+    raw_vllm = raw_algorithm.get("vllm_config")
+    if not isinstance(raw_vllm, dict) or "gpu_memory_utilization" not in raw_vllm:
+        return []
+    set_share = raw_vllm["gpu_memory_utilization"]
+    if set_share is None or set_share == chosen:
+        return []
+    return [
+        (
+            "algorithm.vllm_config.gpu_memory_utilization is "
+            f"{set_share} in the manifest; Arena uses the catalog share {chosen}."
+        )
+    ]
+
+
+def override_warnings(
+    manifest: TrainingManifest,
+    document: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> list[str]:
+    """Warn for each advanced field *document* sets to a value Arena would not choose.
+
+    :param manifest: *document*, validated.
+    :type manifest: TrainingManifest
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :param context: The pydantic validation context *manifest* was validated with.
+    :type context: dict[str, Any] | None
+    :returns: One warning per field.
+    :rtype: list[str]
+    """
+    return [
+        f"{path} overrides the value Arena would choose for it. Leave it out to use Arena's."
+        for path in arena_chosen_paths(
+            TrainingManifest, document, manifest, context, tier="advanced"
+        )
+    ]
 
 
 def hpo_fields(manifest: TrainingManifest) -> list[str]:
@@ -148,11 +241,7 @@ def hpo_fields(manifest: TrainingManifest) -> list[str]:
     :rtype: list[str]
     """
     fields = ["training.hpo"] if manifest.training.hpo else []
-    mutation = manifest.mutation
-    if mutation is not None and (
-        mutation.rl_hp_selection
-        or mutation.probabilities != no_op_mutation_probabilities()
-    ):
+    if manifest.mutation is not None and mutates(manifest.mutation):
         fields.append("mutation")
     if (
         isinstance(manifest.algorithm, LLMAlgorithmSpec)
@@ -197,12 +286,16 @@ def arena_failures(manifest: TrainingManifest) -> list[dict[str, str]]:
             }
         ]
     return [
-        {
-            "path": field,
-            "message": HPO_UNAVAILABLE_MESSAGE,
-            "kind": "hpo_unavailable",
-        }
-        for field in hpo_fields(manifest)
+        *(
+            {
+                "path": field,
+                "message": HPO_UNAVAILABLE_MESSAGE,
+                "kind": "hpo_unavailable",
+            }
+            for field in hpo_fields(manifest)
+        ),
+        *batch_size_errors(manifest),
+        *context_length_errors(manifest),
     ]
 
 
@@ -296,21 +389,52 @@ def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     return []
 
 
-def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+def arena_chosen_errors(
+    manifest: TrainingManifest,
+    document: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """Fields Arena chooses that *document* sets to another value, less those :func:`hpo_fields` reports.
+
+    :param manifest: *document*, validated.
+    :type manifest: TrainingManifest
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :param context: The pydantic validation context *manifest* was validated with.
+    :type context: dict[str, Any] | None
+    :returns: One error record per field.
+    :rtype: list[dict[str, str]]
+    """
+    reported = set(hpo_fields(manifest))
+    return [
+        {"path": path, "message": ARENA_CHOSEN_MESSAGE, "kind": "arena_chosen_field"}
+        for path in arena_chosen_paths(TrainingManifest, document, manifest, context)
+        if path not in reported
+    ]
+
+
+def submit_errors(
+    manifest: TrainingManifest,
+    document: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     """What Arena refuses on submit that the manifest schema allows.
 
     ``arena experiments submit`` stops on these before it uploads, and
     ``arena manifest validate`` reports them.
 
-    :param manifest: A validated manifest.
+    :param manifest: *document*, validated.
     :type manifest: TrainingManifest
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :param context: The pydantic validation context *manifest* was validated with.
+    :type context: dict[str, Any] | None
     :returns: The error records, or an empty list.
     :rtype: list[dict[str, str]]
     """
     return [
-        *batch_size_errors(manifest),
-        *context_length_errors(manifest),
         *run_errors(manifest),
+        *arena_chosen_errors(manifest, document, context),
     ]
 
 
@@ -354,13 +478,16 @@ def verdict(
     else:
         failures = arena_failures(manifest)
         if submit:
-            failures += submit_errors(manifest)
+            failures += submit_errors(manifest, document, context)
         if not failures:
             return {
                 "ok": True,
                 "payload": manifest.to_payload(),
                 "warnings": [
                     *model_warnings(manifest),
+                    *context_warnings(manifest),
+                    *override_warnings(manifest, document, context),
+                    *catalog_gpu_share_warnings(manifest, document),
                     *target_modules_warnings(document),
                 ],
                 "manifest_version": __version__,
@@ -369,19 +496,24 @@ def verdict(
 
 
 __all__ = [
+    "ARENA_CHOSEN_MESSAGE",
     "CLASSIC_RL_UNAVAILABLE_MESSAGE",
     "EXIT_FAILED",
     "EXIT_INVALID",
     "EXIT_OK",
     "HPO_UNAVAILABLE_MESSAGE",
     "arena_failures",
+    "catalog_gpu_share_warnings",
+    "context_warnings",
     "describe",
     "errors",
     "failure",
     "hpo_fields",
     "is_classic_rl",
+    "is_local_model_path",
     "loc_to_path",
     "model_warnings",
+    "override_warnings",
     "read_manifest",
     "submit_errors",
     "target_modules_warnings",

@@ -35,6 +35,7 @@ from agilerl.arena.models.descriptions import (
     STRIDE_SIZE,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.visibility import AUTO, HIDDEN, HIDDEN_PLATFORM_WRITTEN
 
 TARGET_MODULES_IGNORED = (
     "lora_config.target_modules is ignored: Arena trains LoRA on the model "
@@ -761,13 +762,17 @@ class LoraConfigDict(BaseModel):
     # ["block_sparse_moe.experts.gate_up_proj", ...]; requires lora_dropout=0.
     target_parameters: list[str] | None = Field(
         default=None,
+        json_schema_extra=HIDDEN_PLATFORM_WRITTEN,
         description=(
             "Packed MoE expert parameter paths to adapt, e.g. "
             "block_sparse_moe.experts.gate_up_proj. Requires lora_dropout=0."
         ),
     )
     task_type: str = Field(
-        default="CAUSAL_LM", min_length=1, description="PEFT task type for the adapter."
+        default="CAUSAL_LM",
+        json_schema_extra=HIDDEN,
+        min_length=1,
+        description="PEFT task type for the adapter.",
     )
     lora_dropout: float = Field(
         default=0.0,
@@ -835,6 +840,7 @@ class VLLMConfig(BaseModel):
     )
     gpu_memory_utilization: float | None = Field(
         default=None,
+        json_schema_extra=AUTO,
         ge=0.0,
         le=1.0,
         description=(

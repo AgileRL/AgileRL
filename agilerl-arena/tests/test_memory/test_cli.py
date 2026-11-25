@@ -120,7 +120,7 @@ UNSET_WIDTH_MOE = {
     },
     "environment": {
         "env_type": "rollout",
-        "name": "AgentWorldModel",
+        "name": "ToolEnv",
         "env_url": "http://env.invalid:8000",
         "max_turns": 1,
     },

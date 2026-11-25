@@ -894,7 +894,7 @@ class TestTrainsExpertParallel:
 
 ROLLOUT_ENV = {
     "env_type": "rollout",
-    "name": "AgentWorldModel",
+    "name": "ToolEnv",
     "env_url": "http://env.invalid:8000",
     "max_turns": 1,
 }

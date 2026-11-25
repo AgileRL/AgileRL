@@ -28,7 +28,9 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    ModelWrapValidatorHandler,
     PlainSerializer,
+    PrivateAttr,
     ValidationInfo,
     field_serializer,
     model_validator,
@@ -42,6 +44,7 @@ from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
     records_sampling_supports,
 )
+from agilerl.arena.models.bundled_envs import apply_bundled_run_settings, manifest_model
 from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -75,6 +78,7 @@ from agilerl.arena.models.training import (
     LLMRolloutBufferSpec,
     TrainingSpec,
 )
+from agilerl.arena.models.visibility import HIDDEN_PLATFORM_WRITTEN
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +227,28 @@ class DeferredNetworkSpec(BaseModel):
         default=False,
         description="Whether the encoder architecture can be mutated during HPO.",
     )
+
+
+def fill_catalog_context_length(manifest: dict[str, Any]) -> bool:
+    """Fill an unset LLM context with the catalog model's whole context window.
+
+    :param manifest: Raw manifest document, updated in place.
+    :return: Whether the context was filled.
+    """
+    algorithm = manifest.get("algorithm")
+    network = manifest.get("network")
+    if not isinstance(network, dict) or not names_llm_algorithm(algorithm):
+        return False
+    if (
+        network.get("max_context_length") is not None
+        or algorithm.get("max_model_len") is not None
+    ):
+        return False
+    entry = SUPPORTED_MODEL_INFO.get(manifest_model(manifest))
+    if entry is None:
+        return False
+    network["max_context_length"] = entry.max_context_length
+    return True
 
 
 def _registered_algorithms() -> str:
@@ -389,6 +415,7 @@ class TrainingManifest(BaseModel):
     )
     mutation: MutationSpec | None = Field(
         default=None,
+        json_schema_extra=HIDDEN_PLATFORM_WRITTEN,
         description="What population-based HPO may change between evolution rounds.",
     )
     replay_buffer: BufferSpec | None = Field(
@@ -397,10 +424,36 @@ class TrainingManifest(BaseModel):
     )
     selection_strategy: SelectionSection | None = Field(
         default=None,
+        json_schema_extra=HIDDEN_PLATFORM_WRITTEN,
         validation_alias=AliasChoices("selection_strategy", "tournament_selection"),
         serialization_alias="tournament_selection",
         description="How the population is ranked and replaced at each evolution round.",
     )
+    # Whether Arena set network.max_context_length to the catalog model's window.
+    _context_from_catalog: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _fill_run_settings(
+        cls, data: object, handler: ModelWrapValidatorHandler[Self]
+    ) -> Self:
+        """Fill what a run leaves unset: bundled environment settings, then the catalog context."""
+        if not isinstance(data, dict):
+            return handler(data)
+        filled: dict[str, Any] = {str(key): value for key, value in data.items()}
+        for section in ("algorithm", "network"):
+            if isinstance(filled.get(section), dict):
+                filled[section] = {**filled[section]}
+        apply_bundled_run_settings(filled)
+        from_catalog = fill_catalog_context_length(filled)
+        manifest = handler(filled)
+        manifest._context_from_catalog = from_catalog
+        return manifest
+
+    @property
+    def context_from_catalog(self) -> bool:
+        """Whether network.max_context_length is the catalog window Arena filled in."""
+        return self._context_from_catalog
 
     @model_validator(mode="before")
     @classmethod
@@ -700,13 +753,19 @@ class TrainingManifest(BaseModel):
                 source_set=True,
             )
 
-        # Ray validates with training.rollout_mode dropped, so an async run
-        # starts the same default engine.
-        if (
-            isinstance(self.algorithm, RolloutLLMSpec)
-            and self.algorithm.vllm_config is None
-        ):
-            self.algorithm.vllm_config = default_rollout_vllm_config()
+        if isinstance(self.algorithm, RolloutLLMSpec):
+            # Ray validates with training.rollout_mode dropped, so an async run
+            # starts the same default engine.
+            if self.algorithm.vllm_config is None:
+                self.algorithm.vllm_config = default_rollout_vllm_config()
+            # A share the catalogue names for the model wins over the manifest's.
+            info = SUPPORTED_MODEL_INFO.get(
+                self.algorithm.pretrained_model_name_or_path or ""
+            )
+            if info is not None and info.rollout_gpu_memory_utilization is not None:
+                self.algorithm.vllm_config.gpu_memory_utilization = (
+                    info.rollout_gpu_memory_utilization
+                )
         return self
 
     @model_validator(mode="after")
@@ -999,20 +1058,7 @@ class TrainingManifest(BaseModel):
         :rtype: dict[str, Any]
         """
         payload = self.model_dump(mode="json", exclude_none=True, by_alias=True)
-        # Optional sections dump away under exclude_none. Mutation is filled as
-        # a no-op (architecture mutation off) plus rl_hp_selection, and
-        # tournament_selection with tournament_size / elitism, so those keys
-        # are present for later readers.
-        payload.setdefault(
-            "mutation",
-            MutationSpec(probabilities=no_op_mutation_probabilities()).model_dump(
-                mode="json", exclude_none=True
-            ),
-        )
-        payload.setdefault(
-            "tournament_selection",
-            TournamentSelectionSpec().model_dump(mode="json", exclude_none=True),
-        )
+        self._set_population_sections(payload)
         # The network has no safe default: the trainer infers the encoder from
         # the observation space, and inventing one here would pick an
         # architecture the run never asked for.
@@ -1054,6 +1100,34 @@ class TrainingManifest(BaseModel):
             ):
                 self._drop_unset_built_in_environment_fields(environment)
         return payload
+
+    def _set_population_sections(self, payload: dict[str, Any]) -> None:
+        """Give *payload* the mutation and selection sections its run reads.
+
+        :param payload: The dumped manifest, edited in place.
+        :type payload: dict[str, Any]
+        """
+        if isinstance(self.algorithm, LLMAlgorithmSpec):
+            # An LLM run without HPO or a population carries neither section.
+            if self.mutation is None or not mutates(self.mutation):
+                payload.pop("mutation", None)
+            if self.training.pop_size == 1:
+                payload.pop("tournament_selection", None)
+            return
+        # Optional sections dump away under exclude_none. Mutation is filled as
+        # a no-op (architecture mutation off) plus rl_hp_selection, and
+        # tournament_selection with tournament_size / elitism, so those keys
+        # are present for later readers.
+        payload.setdefault(
+            "mutation",
+            MutationSpec(probabilities=no_op_mutation_probabilities()).model_dump(
+                mode="json", exclude_none=True
+            ),
+        )
+        payload.setdefault(
+            "tournament_selection",
+            TournamentSelectionSpec().model_dump(mode="json", exclude_none=True),
+        )
 
     def _resolve_lora_config(self, network: FinetuningNetworkSpec) -> None:
         """Give the algorithm and network one LoRA config, the catalog default when neither sets one.
@@ -1131,6 +1205,14 @@ class TrainingManifest(BaseModel):
 def async_rollout(manifest: TrainingManifest) -> bool:
     """Whether the run generates on async rollout engines, as :func:`async_rollout_algorithm` decides."""
     return async_rollout_algorithm(type(manifest.algorithm))
+
+
+def mutates(mutation: MutationSpec) -> bool:
+    """Whether a mutation section changes anything between evolution rounds."""
+    return bool(
+        mutation.rl_hp_selection
+        or mutation.probabilities != no_op_mutation_probabilities()
+    )
 
 
 def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:

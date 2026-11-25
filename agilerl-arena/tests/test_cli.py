@@ -1904,6 +1904,36 @@ class TestManifestTemplateCommand:
         assert result.exit_code != 0
         assert "Classic RL is no longer supported in Arena" in result.output
 
+    def test_leaves_out_what_arena_chooses(self, runner, mock_client):
+        mock_client.get_default_run_spec.return_value = {
+            "algorithm": {"name": "GRPO", "batch_size": 16},
+            "training": {"max_steps": 100, "pop_size": 1, "hpo": False},
+            "mutation": {"rl_hp_selection": {}},
+            "tournament_selection": {"tournament_size": 2},
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["manifest", "template", "GRPO"])
+
+        assert result.exit_code == 0
+        assert yaml.safe_load(result.output) == {
+            "algorithm": {"name": "GRPO"},
+            "training": {"max_steps": 100},
+        }
+
+    def test_section_leaves_out_what_arena_chooses(self, runner, mock_client):
+        mock_client.get_default_run_spec.return_value = {
+            "lora_config": {"lora_r": 16, "task_type": "CAUSAL_LM"},
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["manifest", "template", "GRPO", "--section", "network"]
+            )
+
+        assert result.exit_code == 0
+        assert yaml.safe_load(result.output) == {"lora_config": {"lora_r": 16}}
+
     def test_rejects_an_unknown_section(self, runner):
         result = runner.invoke(
             main, ["manifest", "template", "GRPO", "--section", "nope"]
