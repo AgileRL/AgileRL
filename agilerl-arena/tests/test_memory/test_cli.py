@@ -35,6 +35,7 @@ from agilerl.arena.memory.cli import (
     main,
     memory_group,
     solve_main,
+    solve_manifest,
 )
 from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunEstimate
 from agilerl.arena.memory.generation import KV_MARGIN_BYTES
@@ -983,6 +984,21 @@ class TestSolveMain:
         assert "Training" in out
         assert "Generation" in out
 
+    def test_json_engine_reports_the_solved_engine_settings(
+        self, manifest_path, capsys
+    ):
+        code = run_solve(
+            manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert payload["engine"] == {
+            "tensor_parallel_size": 1,
+            "max_num_seqs": 8,
+            "gpu_memory_utilization": 0.85,
+        }
+
     def test_unset_width_is_resolved_at_each_candidate_context(
         self, tmp_path, moe_config_path, capsys
     ):
@@ -1146,6 +1162,50 @@ class TestSolveMain:
             "model config is missing 'Model config has neither num_hidden_layers "
             "nor a per-layer type list'"
         ) in capsys.readouterr().err
+
+
+class TestSolveManifest:
+    def test_catalog_only_sizes_from_the_catalog_not_a_local_checkpoint(
+        self, tmp_path, monkeypatch
+    ):
+        # Arrange: a broken local config shadows the catalog id.
+        model_id = MANIFEST["network"]["pretrained_model_name_or_path"]
+        local = tmp_path / model_id
+        local.mkdir(parents=True)
+        (local / "config.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        # Act
+        result = solve_manifest(
+            copy.deepcopy(MANIFEST), device_gb=24, catalog_only=True
+        )
+
+        # Assert
+        assert result.config.model.model_id == model_id
+        assert (result.field, result.value, result.limited_by, result.bound) == (
+            "max_model_len",
+            32768,
+            "bound",
+            32768,
+        )
+        with pytest.raises(EstimateUsageError, match="model config is missing"):
+            solve_manifest(copy.deepcopy(MANIFEST), device_gb=24)
+
+    def test_catalog_only_refuses_a_local_checkpoint(self, tmp_path):
+        # Arrange
+        (tmp_path / "config.json").write_text(Path(TINY_CONFIG).read_text())
+        doc = copy.deepcopy(MANIFEST)
+        doc["network"]["pretrained_model_name_or_path"] = str(tmp_path)
+
+        # Act / Assert
+        with pytest.raises(EstimateUsageError, match="is not a supported model"):
+            solve_manifest(doc, gpu="NVIDIA L4", catalog_only=True)
+
+    def test_zero_gpus_is_a_usage_error(self):
+        with pytest.raises(
+            EstimateUsageError, match=r"num_gpus must be at least 1, got 0\."
+        ):
+            solve_manifest(copy.deepcopy(MANIFEST), device_gb=24, num_gpus=0)
 
 
 class TestUnsetRubricPath:

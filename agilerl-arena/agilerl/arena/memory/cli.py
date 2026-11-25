@@ -866,27 +866,67 @@ def memory_solve(ctx: click.Context, **params: Any) -> None:
 def solve_main(request: SolveRequest) -> int:
     """Solve the manifest's max_model_len. Separated from Click so callers get a plain int."""
     try:
+        result = solve_manifest(
+            request.manifest_path,
+            gpu=request.gpu,
+            device_gb=request.device_gb,
+            num_gpus=request.num_gpus,
+            hi=request.hi,
+            config_path=request.config_path,
+        )
+    except CannotSolve as err:
+        print(str(err), file=sys.stderr)
+        return EXIT_OVER_BUDGET
+    except EstimateUsageError as err:
+        print(str(err), file=sys.stderr)
+        return EXIT_USAGE
+    _print_solve_result(result, request.as_json, request.no_color)
+    return EXIT_OK
+
+
+def solve_manifest(
+    manifest_source: str | dict[str, Any],
+    gpu: str | None = None,
+    device_gb: float | None = None,
+    num_gpus: int | None = None,
+    hi: int | None = None,
+    config_path: str | None = None,
+    catalog_only: bool = False,
+) -> SolveResult:
+    """The largest max_model_len the manifest fits on the device.
+
+    :param manifest_source: Manifest path, or the raw manifest document.
+    :param num_gpus: GPUs on the node, for the engine layout the run picks.
+    :param hi: Search ceiling; the checkpoint's RoPE limit also caps it.
+    :param catalog_only: Size only models in ``SUPPORTED_MODEL_INFO``, from
+        their bundled config, without reading a local checkpoint or the Hub.
+    :raises EstimateUsageError: The arguments, manifest or model config cannot
+        be sized.
+    :raises CannotSolve: No value fits.
+    """
+    if num_gpus is not None and num_gpus < 1:
+        msg = f"num_gpus must be at least 1, got {num_gpus}."
+        raise EstimateUsageError(msg)
+    try:
         device = _resolve_device(
-            request.gpu, request.device_gb, flag="--gpu", capacity_flag="--device-gb"
+            gpu, device_gb, flag="--gpu", capacity_flag="--device-gb"
         )
     except ValueError as err:
-        print(err, file=sys.stderr)
-        return EXIT_USAGE
+        raise EstimateUsageError(str(err)) from err
     if device is None:
-        print(NO_DEVICE_MESSAGE, file=sys.stderr)
-        return EXIT_USAGE
+        raise EstimateUsageError(NO_DEVICE_MESSAGE)
 
     try:
         build, arch_limit, widest = _manifest_config(
-            request.manifest_path,
+            manifest_source,
             device,
-            config_path=request.config_path,
-            num_gpus=request.num_gpus,
+            config_path=config_path,
+            num_gpus=num_gpus,
+            catalog_only=catalog_only,
         )
         config = build(None)
     except KeyError as err:
-        print(_missing_key_error(err), file=sys.stderr)
-        return EXIT_USAGE
+        raise _missing_key_error(err) from err
     except (
         OSError,
         ValueError,
@@ -894,45 +934,45 @@ def solve_main(request: SolveRequest) -> int:
         yaml.YAMLError,
         ArenaValidationError,
     ) as err:
-        print(str(err), file=sys.stderr)
-        return EXIT_USAGE
+        raise EstimateUsageError(str(err)) from err
 
-    bound = arch_limit if request.hi is None else min(request.hi, arch_limit)
+    bound = arch_limit if hi is None else min(hi, arch_limit)
     try:
-        result = solve(
+        return solve(
             config,
             "max_model_len",
             hi=bound,
             rebuild=build,
             widest_engine_width=widest,
         )
-    except CannotSolve as err:
-        print(str(err), file=sys.stderr)
-        return EXIT_OVER_BUDGET
+    except CannotSolve:
+        raise
     except ValueError as err:
-        print(str(err), file=sys.stderr)
-        return EXIT_USAGE
-    _print_solve_result(result, request.as_json, request.no_color)
-    return EXIT_OK
+        raise EstimateUsageError(str(err)) from err
+
+
+def solve_json_report(result: SolveResult) -> dict[str, Any]:
+    """The ``solve --json`` document for a solved run."""
+    return {
+        "field": result.field,
+        "value": result.value,
+        "limited_by": result.limited_by,
+        "bound": result.bound,
+        "model": result.config.model.model_id,
+        "unchecked_over_budget": list(result.unchecked_over_budget),
+        "engine": {
+            "tensor_parallel_size": result.config.generation.tensor_parallel_size,
+            "max_num_seqs": result.config.generation.max_num_seqs,
+            "gpu_memory_utilization": result.config.generation.gpu_memory_utilization,
+        },
+        "generation": result.estimate.generation.model_dump(by_alias=True),
+        "training": result.estimate.training.model_dump(by_alias=True),
+    }
 
 
 def _print_solve_result(result: SolveResult, as_json: bool, no_color: bool) -> None:
     if as_json:
-        payload = {
-            "field": result.field,
-            "value": result.value,
-            "limited_by": result.limited_by,
-            "bound": result.bound,
-            "model": result.config.model.model_id,
-            "unchecked_over_budget": list(result.unchecked_over_budget),
-            "engine": {
-                "tensor_parallel_size": result.config.generation.tensor_parallel_size,
-                "max_num_seqs": result.config.generation.max_num_seqs,
-            },
-            "generation": result.estimate.generation.model_dump(by_alias=True),
-            "training": result.estimate.training.model_dump(by_alias=True),
-        }
-        print(json.dumps(payload, indent=2))
+        print(json.dumps(solve_json_report(result), indent=2))
         return
 
     reason = "checkpoint / --hi cap" if result.limited_by == "bound" else "GPU memory"
@@ -959,24 +999,32 @@ def _print_solve_result(result: SolveResult, as_json: bool, no_color: bool) -> N
 
 
 def _manifest_config(
-    manifest_path: str,
+    manifest_source: str | dict[str, Any],
     device: DeviceSpec,
     *,
     config_path: str | None,
     num_gpus: int | None,
+    catalog_only: bool,
 ) -> tuple[Callable[[int | None], RunConfig], int, int | None]:
     """A run config builder at a ``max_model_len`` (``None``: the manifest's), the RoPE cap, and the engine width it keeps.
 
     :return: The builder, the cap, and the pinned engine width when every
         value keeps it and the engine count; ``None`` when a value can change them.
     """
-    manifest = _sized_manifest(manifest_path)
+    manifest = _sized_manifest(manifest_source)
     spec = llm_spec(manifest)
     resolved_id = spec.pretrained_model_name_or_path
     if resolved_id is None:
         msg = "manifest names no pretrained model."
         raise ValueError(msg)
-    model_config, model_spec = _model_spec_from_checkpoint(resolved_id, config_path)
+    if catalog_only:
+        if resolved_id not in SUPPORTED_MODEL_INFO:
+            msg = f"{resolved_id} is not a supported model."
+            raise ValueError(msg)
+        model_config = SUPPORTED_MODEL_INFO[resolved_id].config
+        model_spec = catalog_model_spec(resolved_id)
+    else:
+        model_config, model_spec = _model_spec_from_checkpoint(resolved_id, config_path)
     engine = spec.vllm_config if isinstance(spec, RolloutLLMSpec) else None
     kept_width = (
         None
