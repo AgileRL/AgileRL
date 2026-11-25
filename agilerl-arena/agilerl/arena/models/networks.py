@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, TypeVar, get_args, overload
 
@@ -37,14 +36,30 @@ from agilerl.arena.models.descriptions import (
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
-logger = logging.getLogger(__name__)
-
 TARGET_MODULES_IGNORED = (
     "lora_config.target_modules is ignored: Arena trains LoRA on the model "
     "catalog's modules for the model. Remove target_modules from the manifest."
 )
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def target_modules_warnings(document: dict[str, Any]) -> list[str]:
+    """Warn when the document names LoRA modules, which Arena ignores.
+
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :returns: Zero or one warning.
+    :rtype: list[str]
+    """
+    names_modules = any(
+        isinstance(section, dict)
+        and isinstance(section.get("lora_config"), dict)
+        and "target_modules" in section["lora_config"]
+        for section in (document.get("network"), document.get("algorithm"))
+    )
+    return [TARGET_MODULES_IGNORED] if names_modules else []
+
 
 MlpActivation = Literal[
     "Tanh",
@@ -769,9 +784,12 @@ class LoraConfigDict(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _drop_target_modules(cls, data: object) -> object:
-        """Drop ``target_modules``; saved run specs still carry it, so it is not refused."""
+        """Drop ``target_modules``; saved run specs still carry it, so it is not refused.
+
+        Callers warn about it once, from the raw document
+        (:func:`target_modules_warnings`).
+        """
         if isinstance(data, dict) and "target_modules" in data:
-            logger.warning(TARGET_MODULES_IGNORED)
             return {
                 key: value for key, value in data.items() if key != "target_modules"
             }

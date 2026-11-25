@@ -602,6 +602,7 @@ class TestManifestCommands:
 
         assert result.exit_code == 0
         assert "warning: lora_config.target_modules is ignored" in result.output
+        assert result.output.count("target_modules is ignored") == 1
 
     def test_validate_json_invalid_verdict_has_the_same_keys(self, runner):
         result = runner.invoke(
@@ -2118,6 +2119,58 @@ class TestExperimentResumeCommand:
             new_name="my-exp-2",
             project="proj",
         )
+
+    @pytest.mark.parametrize(
+        ("new_name_args", "line"),
+        [
+            ([], "Resume of 'my-exp' started.\n"),
+            (
+                ["--new-name", "my-exp-2"],
+                "Resume of 'my-exp' started as 'my-exp-2'.\n",
+            ),
+        ],
+        ids=["default-name", "new-name"],
+    )
+    def test_resume_names_the_run_instead_of_an_empty_table(
+        self, runner, mock_client, new_name_args, line
+    ):
+        mock_client.resume_experiment.return_value = [{"submissionId": None}]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "experiments",
+                    "resume",
+                    "--yes",
+                    "my-exp",
+                    "--max-steps",
+                    "1000",
+                    *new_name_args,
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert result.stdout.endswith(line)
+        assert "submissionId" not in result.stdout
+
+    def test_resume_json_prints_the_server_response(self, runner, mock_client):
+        mock_client.resume_experiment.return_value = [{"submissionId": None}]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "--json",
+                    "experiments",
+                    "resume",
+                    "--yes",
+                    "my-exp",
+                    "--max-steps",
+                    "1000",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout.splitlines()[-1]) == [{"submissionId": None}]
 
     def test_resume_missing_max_steps(self, runner, mock_client):
         with _patched_arena_client(mock_client):
