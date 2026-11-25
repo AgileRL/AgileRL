@@ -8,11 +8,11 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from agilerl.arena.models.judge import ENV_VAR_NAME_PATTERN, JudgeSpec
 from agilerl.arena.models.prompt_template import check_row_placeholders
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 
@@ -44,12 +44,13 @@ def reject_legacy_llm_env_spelling(
 
 
 DNS_LABEL_PATTERN = r"^[a-z]([-a-z0-9]*[a-z0-9])?$"
-ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 # Env Pods are I/O-bound; this fits beside Ray workers that request a node's CPUs.
 ENV_POD_DEFAULT_CPUS = 0.01
 # A multi-GB env image cold-pulls in minutes.
 ENV_POD_READY_TIMEOUT_S = 600.0
 DEFAULT_ADAPTIVE_TASK_SAMPLING = True
+# Arena fills a named built-in's source when the run starts.
+BUNDLED_ENVIRONMENTS = frozenset({"AgentWorldModel", "VisualWebArena"})
 
 
 class EnvContainerSpec(BaseModel):
@@ -193,78 +194,6 @@ class EnvHostVolume(BaseModel):
                 f"Host volume {self.name!r}: mount_path {self.mount_path!r} is in "
                 "/dev/shm, the containers' shared-memory mount; pick another path."
             )
-            raise ValueError(msg)
-        return self
-
-
-class JudgeSpec(BaseModel):
-    """The LLM a rubric's judge calls: provider, model, endpoint and limits."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    provider: Literal["openai", "anthropic"] = Field(
-        default="openai",
-        description=(
-            "API the judge speaks. openai covers any OpenAI-compatible endpoint: "
-            "OpenRouter, Together, Groq or self-hosted vLLM, through base_url."
-        ),
-    )
-    model: str = Field(min_length=1, description="Judge model id.")
-    base_url: str | None = Field(
-        default=None,
-        description=(
-            "http(s) endpoint. A URL with a path is the API root, used as given "
-            "(https://openrouter.ai/api/v1); a bare host gets the client's default "
-            "path. Unset uses the provider's hosted API, which needs api_key_env."
-        ),
-    )
-    api_key_env: str | None = Field(
-        default=None,
-        pattern=ENV_VAR_NAME_PATTERN,
-        description=(
-            "Name of the environment variable holding the API key; never the key "
-            "itself. Unset sends no key (a local endpoint)."
-        ),
-    )
-    max_concurrency: int = Field(
-        default=16, ge=1, description="Judge requests in flight per process."
-    )
-    timeout_s: float = Field(
-        default=120.0,
-        gt=0.0,
-        description="Seconds one request attempt may take; the provider SDK retries it.",
-    )
-    temperature: float = Field(
-        default=0.0,
-        ge=0.0,
-        description="Judge sampling temperature. Anthropic judges take none: leave it unset.",
-    )
-    max_tokens: int = Field(
-        default=4096,
-        ge=1,
-        description=(
-            "Verdict token budget. A thinking judge spends it on its thinking "
-            "too, so a low budget cuts the verdict off."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _check_endpoint(self) -> Self:
-        if self.base_url is None:
-            if self.api_key_env is None:
-                msg = f"The hosted {self.provider} API needs api_key_env."
-                raise ValueError(msg)
-        else:
-            url = urlsplit(self.base_url)
-            if url.scheme not in ("http", "https") or not url.hostname:
-                msg = f"judge base_url must be an http(s) URL, got {self.base_url!r}."
-                raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_temperature(self) -> Self:
-        if self.provider == "anthropic" and self.temperature != 0.0:
-            msg = "Anthropic judges take no temperature; leave it unset."
             raise ValueError(msg)
         return self
 
@@ -624,6 +553,8 @@ class LLMEnvSpec(EnvSpecBase):
       (or on env hosts under the hosting fields, which need the Ray runtime);
     * ``env_url`` — an OpenEnv service someone else hosts;
     * ``env_image`` — a prebuilt env image the Ray runtime runs as its own Pod.
+
+    A built-in (:data:`BUNDLED_ENVIRONMENTS`) may name no source.
 
     A ``dataset`` env is teacher-forced over the rows; ``objective`` picks the
     loss.
@@ -1100,6 +1031,18 @@ class LLMEnvSpec(EnvSpecBase):
         return self.env_type == "rollout" and self._named_dataset() is not None
 
     @property
+    def name_only_built_in(self) -> bool:
+        """Whether this rollout names a built-in and no source."""
+        if self.env_type != "rollout" or self.name not in BUNDLED_ENVIRONMENTS:
+            return False
+        return (
+            self._named_dataset() is None
+            and self.entrypoint is None
+            and self.env_url is None
+            and self.env_image is None
+        )
+
+    @property
     def sends_reasoning(self) -> bool:
         """Whether each turn's reasoning reaches the env or reward function."""
         if self.include_reasoning is not None:
@@ -1152,7 +1095,7 @@ class LLMEnvSpec(EnvSpecBase):
             "env_image": self.env_image,
         }
         named = [name for name, value in sources.items() if value is not None]
-        if len(named) != 1:
+        if len(named) != 1 and not self.name_only_built_in:
             got = ", ".join(named) or "none"
             msg = (
                 "A rollout environment needs exactly one source: dataset rows "
@@ -1450,10 +1393,12 @@ class LLMEnvSpec(EnvSpecBase):
                 else "response"
             )
         if self.env_type == "rollout":
-            if self.num_envs is None:
-                self.num_envs = 1
-            if self.strict_chat_template_boundary is None:
-                self.strict_chat_template_boundary = True
+            # Unset here: a submitted default replaces the bundled profile's value.
+            if not self.name_only_built_in:
+                if self.num_envs is None:
+                    self.num_envs = 1
+                if self.strict_chat_template_boundary is None:
+                    self.strict_chat_template_boundary = True
             env_backed = (
                 self.entrypoint is not None
                 or self.env_url is not None

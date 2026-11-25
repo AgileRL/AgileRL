@@ -1720,6 +1720,25 @@ class TestDatasetsListCommand:
         data_row = next(line for line in result.output.splitlines() if "my-ds" in line)
         assert data_row.split("│")[4].strip() == cell
 
+    @pytest.mark.parametrize("hf_dataset_id", [None, ""], ids=["null", "empty"])
+    def test_list_shows_a_missing_hf_dataset_id_as_an_empty_cell(
+        self, runner, mock_client, hf_dataset_id
+    ):
+        mock_client.list_datasets.return_value = [
+            {
+                "name": "my-ds",
+                "hf_dataset_id": hf_dataset_id,
+                "category": "sft",
+                "training_row_count": 24,
+            }
+        ]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["datasets", "list"])
+        assert result.exit_code == 0, result.output
+        data_row = next(line for line in result.output.splitlines() if "my-ds" in line)
+        assert data_row.split("│")[2].strip() == ""
+        assert "None" not in result.output
+
     def test_list_json_keeps_training_row_count(self, runner, mock_client):
         mock_client.list_datasets.return_value = DATASETS
         with _patched_arena_client(mock_client):

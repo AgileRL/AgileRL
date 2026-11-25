@@ -1124,6 +1124,76 @@ ZIM_VOLUME = {
 }
 
 
+class TestLLMEnvSpecRolloutSource:
+    @pytest.mark.parametrize("name", ["AgentWorldModel", "VisualWebArena"])
+    def test_built_in_by_name_needs_no_source(self, name: str) -> None:
+        # Act
+        spec = LLMEnvSpec(name=name, env_type="rollout", num_envs=2)
+
+        # Assert
+        assert spec.name == name
+        assert spec.env_image is None
+        assert spec.num_envs == 2
+
+    @pytest.mark.parametrize("name", ["AgentWorldModel", "VisualWebArena"])
+    def test_name_only_built_in_leaves_profile_fields_unset(self, name: str) -> None:
+        # Act
+        spec = LLMEnvSpec(name=name, env_type="rollout")
+
+        # Assert
+        assert spec.name_only_built_in is True
+        assert spec.num_envs is None
+        assert spec.strict_chat_template_boundary is None
+        assert "num_envs" not in spec.model_fields_set
+        assert "strict_chat_template_boundary" not in spec.model_fields_set
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            {"dataset": "rows", "prompt_template": {"user_0": "{question}"}},
+            {"entrypoint": "pkg.mod:Env"},
+            {"env_url": "http://env", "max_turns": 2},
+            {"env_image": "awm:1"},
+        ],
+    )
+    def test_built_in_with_a_source_is_not_name_only(self, source: dict) -> None:
+        spec = LLMEnvSpec(name="AgentWorldModel", env_type="rollout", **source)
+
+        assert spec.name_only_built_in is False
+        assert spec.num_envs == 1
+        assert spec.strict_chat_template_boundary is True
+
+    def test_a_dataset_named_like_a_built_in_is_not_name_only(self) -> None:
+        spec = LLMEnvSpec(
+            name="AgentWorldModel",
+            env_type="dataset",
+            objective="sft",
+            dataset="rows",
+        )
+
+        assert spec.name_only_built_in is False
+
+    def test_another_rollout_name_is_not_name_only(self) -> None:
+        spec = LLMEnvSpec(
+            name="NotABuiltIn", env_type="rollout", entrypoint="pkg.mod:Env"
+        )
+
+        assert spec.name_only_built_in is False
+
+    def test_other_name_without_a_source_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match=r"exactly one source.*Got none"):
+            LLMEnvSpec(name="NotABuiltIn", env_type="rollout")
+
+    def test_built_in_with_two_sources_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Got entrypoint, env_image"):
+            LLMEnvSpec(
+                name="AgentWorldModel",
+                env_type="rollout",
+                entrypoint="pkg.mod:make_env",
+                env_image="awm:1",
+            )
+
+
 class TestLLMEnvSpecEnvPods:
     def test_image_defaults_and_services_parse(self) -> None:
         from agilerl.arena.models.env import EnvServiceSpec
