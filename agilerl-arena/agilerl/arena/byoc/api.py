@@ -130,6 +130,7 @@ class RegisterClusterFields(TypedDict):
     placement: NotRequired[str | None]
     byoc_scope: NotRequired[str | None]
     byoc_provider: NotRequired[dict[str, Any] | None]
+    rotate_token: NotRequired[bool]
 
 
 class ByocApi:
@@ -270,6 +271,7 @@ class ByocApi:
         placement = fields.get("placement")
         byoc_scope = fields.get("byoc_scope")
         byoc_provider = fields.get("byoc_provider")
+        rotate_token = fields.get("rotate_token")
         wire_placement = None if placement is None else api_placement(placement)
         wire_scope = None if byoc_scope is None else api_byoc_scope(byoc_scope)
         body: dict[str, Any] = {"name": name}
@@ -291,6 +293,7 @@ class ByocApi:
             ("placement", wire_placement),
             ("byocScope", wire_scope),
             ("byocProvider", byoc_provider),
+            ("rotateToken", rotate_token),
         ]
         for key, value in optional_fields:
             if value is None or value is False:

@@ -27,6 +27,7 @@ from agilerl.arena.byoc.cluster_helm import (
 )
 from agilerl.arena.byoc.cluster_install_package import extract_cluster_install_package
 from agilerl.arena.byoc.cluster_token import resolve_cluster_kubeconfig
+from agilerl.arena.byoc.upgrade_rbac import confirm_rbac_changes
 from agilerl.arena.client import ArenaClient
 
 
@@ -95,10 +96,13 @@ def run_cluster_upgrade(
     agent_namespace: str | None = None,
     helm_wait: bool = True,
     platform: bool = False,
+    yes: bool = False,
 ) -> None:
     """Upgrade the installed BYOC agent chart without rotating credentials.
 
-    Credential Secrets from the install package are not applied. The storage
+    When the upgrade changes the agent's ClusterRoles, the changes are printed
+    and confirmed before anything is applied. Credential Secrets from the
+    install package are not applied. The storage
     chart is not installed or upgraded. When the chart will not recreate the
     object-storage Secret, ``storage.endpoint`` is copied into that Secret and
     the agent Deployment is restarted.
@@ -115,6 +119,8 @@ def run_cluster_upgrade(
     :type helm_wait: bool
     :param platform: Upgrade one of AgileRL's platform clusters.
     :type platform: bool
+    :param yes: Apply ClusterRole changes without asking.
+    :type yes: bool
     :returns: None
     :rtype: None
     :raises click.ClickException: If no agent Helm release is installed.
@@ -130,6 +136,7 @@ def run_cluster_upgrade(
     if not isinstance(agent_yaml, str) or not agent_yaml.strip():
         msg = "Arena did not return agent Helm values."
         raise click.ClickException(msg)
+    confirm_rbac_changes(artifacts, cluster_name, yes)
     package_bytes = api.download_cluster_install_package(
         cluster=cluster_name,
         agent_helm_values_yaml=agent_yaml,
