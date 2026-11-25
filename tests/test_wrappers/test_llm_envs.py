@@ -12,6 +12,7 @@ import torch
 pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
 from datasets import Dataset as HFDataset
+from tokenizers import AddedToken
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
@@ -30,7 +31,7 @@ from agilerl.llm_envs.chat_formats import (
     get_chat_format,
 )
 from agilerl.llm_envs.chat_transcript import (
-    _cut_kept_turn,
+    _decodes_template,
     _feedback_ids,
     _named_tool_results,
     _written_tool_calls,
@@ -39,9 +40,12 @@ from agilerl.llm_envs.chat_transcript import (
     template_reasoning_key,
 )
 from agilerl.llm_envs.dataset_env import (
+    NoFittingSamplesError,
+    NoValidSamplesError,
     _shared_turns_in_prompt,
     _shortened_prompts,
     fit_preference_pair,
+    no_rows_left,
     preference_collate_builder,
     sft_eval_sample,
     sft_messages,
@@ -154,7 +158,7 @@ class TestDatasetEnvPreferenceInit:
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
         with pytest.raises(
-            ValueError,
+            NoFittingSamplesError,
             match=r"No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
         ):
             DatasetEnv(
@@ -911,7 +915,57 @@ class TestEncodeChatTranscriptTemplateQuirks:
         ]
 
 
+class ReportsNotFast:
+    """Fast tokenizer that reports ``is_fast`` false, so turns are spliced."""
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._tokenizer = tokenizer
+
+    @property
+    def is_fast(self) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tokenizer, name)
+
+
+class EmptyOffsetMap:
+    """Fast tokenizer whose character offsets are empty, so turns are spliced."""
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._tokenizer = tokenizer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tokenizer, name)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs["return_offsets_mapping"] = False
+        encoding = self._tokenizer(*args, **kwargs)
+        encoding["offset_mapping"] = []
+        return encoding
+
+
 class TestEncodeChatTranscriptLayouts:
+    def test_a_slow_tokenizer_splices_the_same_transcript(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        expected = encode_chat_transcript(tokenizer, HI_HELLO, None, None)
+
+        ids, mask = encode_chat_transcript(
+            ReportsNotFast(tokenizer), HI_HELLO, None, None
+        )
+
+        assert (ids, mask) == expected
+
+    def test_offsets_that_disagree_with_the_ids_splice_the_same_transcript(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        expected = encode_chat_transcript(tokenizer, HI_HELLO, None, None)
+
+        ids, mask = encode_chat_transcript(
+            EmptyOffsetMap(tokenizer), HI_HELLO, None, None
+        )
+
+        assert (ids, mask) == expected
+
     def test_template_without_an_end_of_turn_token_ends_the_turn_with_eos(self):
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
@@ -2148,11 +2202,303 @@ GEMMA_GET_TEMPLATE = (
 """Gemma 4 layout: ``message.get('reasoning')`` and thought only after the last user."""
 
 
+QWEN_INLINE_THINK_TEMPLATE = QWEN_POSITION_TEMPLATE.replace(
+    "{%- set reasoning_content = message.reasoning_content "
+    "if message.reasoning_content is defined else '' -%}"
+    "{{- '<|im_start|>assistant\\n<think>\\n' + reasoning_content "
+    "+ '\\n</think>\\n\\n' + message.content }}",
+    "{%- set content = message.content -%}"
+    "{%- set reasoning_content = '' -%}"
+    "{%- if message.reasoning_content is string -%}"
+    "{%- set reasoning_content = message.reasoning_content -%}"
+    "{%- elif '</think>' in content -%}"
+    "{%- set reasoning_content = content.split('</think>')[0].rstrip('\\n')"
+    ".split('<think>')[-1].lstrip('\\n') -%}"
+    "{%- set content = content.split('</think>')[-1].lstrip('\\n') -%}"
+    "{%- endif -%}"
+    "{{- '<|im_start|>assistant\\n<think>\\n' + reasoning_content "
+    "+ '\\n</think>\\n\\n' + content }}",
+)
+"""Qwen3.5 layout that also splits a ``<think>`` block written into ``content``."""
+
+INLINE_THINK_HELLO = [
+    {"role": "user", "content": "Hi"},
+    {"role": "assistant", "content": "<think>\ngreet them back\n</think>\n\nHello"},
+]
+
+
 def _assert_transcript_is_the_template(tokenizer: Any, messages: list[dict]) -> None:
     """The encoded ids are one ``apply_chat_template`` of ``messages``."""
     ids, _ = encoded_row(tokenizer, messages)
     rendered = tokenizer.apply_chat_template(messages, tokenize=False)
     assert tokenizer.decode(ids) == rendered.removesuffix("\n")
+
+
+class TestEncodeChatTranscriptInlineThink:
+    def test_fixture_splits_content_unlike_the_position_template(self):
+        assert QWEN_INLINE_THINK_TEMPLATE != QWEN_POSITION_TEMPLATE
+
+    def test_inline_think_encodes_like_reasoning_content(self):
+        # Arrange
+        tokenizer = reasoning_tokenizer(QWEN_INLINE_THINK_TEMPLATE)
+
+        # Act
+        inline = encoded_row(tokenizer, INLINE_THINK_HELLO)
+        keyed = encoded_row(tokenizer, REASONED_HELLO)
+
+        # Assert
+        assert inline == keyed
+        assert trained_text(tokenizer, *inline) == [
+            "greet them back\n</think>\n\nHello<|im_end|>"
+        ]
+
+    def test_inline_think_transcript_is_the_template(self):
+        _assert_transcript_is_the_template(
+            reasoning_tokenizer(QWEN_INLINE_THINK_TEMPLATE), INLINE_THINK_HELLO
+        )
+
+    def test_inline_think_in_history_is_context(self):
+        # Arrange
+        tokenizer = reasoning_tokenizer(QWEN_INLINE_THINK_TEMPLATE)
+        messages = [
+            *INLINE_THINK_HELLO,
+            {"role": "user", "content": "Bye"},
+            {"role": "assistant", "content": "<think>\nwave\n</think>\n\nSee you"},
+        ]
+
+        # Act
+        ids, mask = encoded_row(tokenizer, messages)
+
+        # Assert
+        assert trained_text(tokenizer, ids, mask)[-1] == (
+            "wave\n</think>\n\nSee you<|im_end|>"
+        )
+
+    def test_a_template_without_a_reasoning_key_keeps_the_block_in_content(self):
+        # Arrange
+        tokenizer = reasoning_tokenizer(PREFILL_TEMPLATE)
+
+        # Act
+        ids, _ = encoded_row(tokenizer, INLINE_THINK_HELLO)
+
+        # Assert
+        assert "<think>\ngreet them back\n</think>" in tokenizer.decode(ids)
+
+
+PHI3_STYLE_TEMPLATE = (
+    "{% for m in messages %}"
+    "{% if m.role == 'user' %}<|user|>\n{{ m.content }}<|end|>\n"
+    "{% else %}<|assistant|>\n{{ m.content }}<|end|>\n{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}<|assistant|>\n{% endif %}"
+)
+"""Phi-3 layout: the user turn opens with its own token, not the assistant's."""
+
+MISTRAL_STYLE_TEMPLATE = (
+    "{% for m in messages %}"
+    "{% if m.role == 'user' %}[INST] {{ m.content }} [/INST]"
+    "{% else %}{{ m.content }}</s>{% endif %}"
+    "{% endfor %}"
+)
+"""Mistral layout: no generation prompt, so no token opens an assistant turn."""
+
+DIVERGENT_NO_OPENER_TEMPLATE = (
+    "{% for m in messages %}"
+    "{% if m.role == 'user' %}"
+    "{% if loop.last %}Q:{{ m.content }} [/INST]"
+    "{% else %}Asked:{{ m.content }} [/INST]{% endif %}"
+    "{% else %}{{ m.content }}</s>{% endif %}"
+    "{% endfor %}"
+)
+"""No generation prompt, and a user turn is rewritten once an assistant turn follows."""
+
+HARMONY_ANALYSIS_TEMPLATE = (
+    "{% for m in messages %}"
+    "{% if m.role == 'user' %}<|start|>user<|message|>{{ m.content }}<|end|>"
+    "{% else %}"
+    "{% if m.thinking %}<|start|>assistant<|channel|>analysis<|message|>"
+    "{{ m.thinking }}<|end|>{% endif %}"
+    "<|start|>assistant<|channel|>final<|message|>{{ m.content }}"
+    "{% if loop.last %}<|return|>{% else %}<|end|>{% endif %}"
+    "{% endif %}{% endfor %}"
+    "{% if add_generation_prompt %}<|start|>assistant{% endif %}"
+)
+"""gpt-oss layout: reasoning is its own analysis block before the final one."""
+
+TWO_EXCHANGES = [
+    {"role": "user", "content": "a"},
+    {"role": "assistant", "content": "b"},
+    {"role": "user", "content": "c"},
+    {"role": "assistant", "content": "d"},
+]
+
+
+class TestEncodeChatTranscriptTurnEnds:
+    def test_a_turn_ends_before_a_user_block_with_its_own_opener(self):
+        tokenizer = in_turn_tokenizer(
+            PHI3_STYLE_TEMPLATE, ["<|user|>", "<|assistant|>", "<|end|>"]
+        )
+
+        ids, mask = encoded_row(tokenizer, TWO_EXCHANGES)
+
+        assert trained_text(tokenizer, ids, mask) == ["b<|end|>", "d<|end|>"]
+
+    def test_a_terminator_that_is_not_special_and_holds_its_newline_closes_the_turn(
+        self,
+    ):
+        # Arrange: Phi-3.5 adds ``<|end|>`` unflagged, and it absorbs the newline after it.
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.add_tokens(["<|user|>", "<|assistant|>"], special_tokens=True)
+        tokenizer.add_tokens([AddedToken("<|end|>", rstrip=True, special=False)])
+        tokenizer.chat_template = PHI3_STYLE_TEMPLATE
+
+        # Act
+        ids, mask = encoded_row(tokenizer, TWO_EXCHANGES)
+
+        # Assert
+        assert trained_text(tokenizer, ids, mask) == [
+            "b<|end|>",
+            f"d<|end|>{tokenizer.eos_token}",
+        ]
+
+    def test_a_turn_without_an_opener_ends_at_its_terminator(self):
+        tokenizer = in_turn_tokenizer(
+            MISTRAL_STYLE_TEMPLATE, ["[INST]", "[/INST]", "</s>"]
+        )
+
+        ids, mask = encoded_row(tokenizer, TWO_EXCHANGES)
+
+        assert trained_text(tokenizer, ids, mask) == ["b</s>", "d</s>"]
+
+    def test_a_no_opener_template_cuts_the_turn_when_its_prefix_diverges(self):
+        tokenizer = in_turn_tokenizer(DIVERGENT_NO_OPENER_TEMPLATE, ["[/INST]", "</s>"])
+
+        ids, mask = encoded_row(tokenizer, HI_HELLO)
+
+        assert trained_text(tokenizer, ids, mask) == ["Hello</s>"]
+        _assert_transcript_is_the_template(tokenizer, HI_HELLO)
+
+    def test_analysis_and_final_blocks_are_one_turn_before_a_context_turn(self):
+        tokenizer = in_turn_tokenizer(HARMONY_ANALYSIS_TEMPLATE, HARMONY_STYLE_SPECIALS)
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b", "thinking": "r"},
+            {"role": "assistant", "content": "inserted"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+        ]
+
+        ids, mask = encode_chat_transcript(
+            tokenizer, chat_messages(messages), None, None, skipped=[2]
+        )
+
+        assert trained_text(tokenizer, ids, mask) == [
+            (
+                "<|channel|>analysis<|message|>r<|end|>"
+                "<|start|>assistant<|channel|>final<|message|>b<|end|>"
+            ),
+            "<|channel|>final<|message|>d<|return|>",
+        ]
+        assert "inserted" in tokenizer.decode(ids)
+
+
+class TestEncodeChatTranscriptCutEdges:
+    def test_an_empty_message_before_a_turn_still_opens_it(self):
+        tokenizer = reasoning_tokenizer()
+
+        ids, mask = encoded_row(
+            tokenizer,
+            [
+                {"role": "user", "content": ""},
+                {"role": "assistant", "content": "Hello"},
+            ],
+        )
+
+        assert trained_text(tokenizer, ids, mask) == ["Hello<|im_end|>"]
+
+    def test_back_to_back_turns_without_an_opener_are_rejected(self):
+        tokenizer = in_turn_tokenizer(
+            MISTRAL_STYLE_TEMPLATE, ["[INST]", "[/INST]", "</s>"]
+        )
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "assistant", "content": "inserted"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+        ]
+
+        with pytest.raises(ValueError, match="does not extend its generation prompt"):
+            encode_chat_transcript(
+                tokenizer, chat_messages(messages), None, None, skipped=[2]
+            )
+
+    def test_a_slow_tokenizer_cannot_splice_back_to_back_turns(self):
+        tokenizer = ReportsNotFast(reasoning_tokenizer())
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "assistant", "content": "inserted"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+        ]
+
+        with pytest.raises(ValueError, match="needs a fast tokenizer"):
+            encode_chat_transcript(
+                tokenizer, chat_messages(messages), None, None, skipped=[2]
+            )
+
+    def test_a_slow_tokenizer_ends_a_turn_without_a_special_token_with_eos(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+
+        ids, mask = encoded_row(ReportsNotFast(tokenizer), HI_HELLO)
+
+        assert trained_text(tokenizer, ids, mask) == [f"Hello\n\n{tokenizer.eos_token}"]
+
+    def test_a_slow_tokenizer_whose_splice_misses_the_render_is_rejected(self):
+        # Arrange: plain turns after a context turn splice, but not to the render.
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="needs a fast tokenizer"):
+            encode_chat_transcript(
+                ReportsNotFast(tokenizer),
+                chat_messages(TWO_EXCHANGES),
+                None,
+                None,
+                trained_from=2,
+            )
+
+    def test_a_turn_that_omits_a_special_prefill_is_rejected(self):
+        tokenizer = in_turn_tokenizer(
+            "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+            "{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n"
+            "{% endif %}",
+            ["<think>"],
+        )
+
+        with pytest.raises(ValueError, match="does not extend its generation prompt"):
+            encoded_row(tokenizer, HI_HELLO)
+
+    def test_a_tokenizer_without_eos_matches_the_render_alone(self):
+        class TextDecode:
+            eos_token = None
+
+            def decode(self, ids: list[int]) -> str:
+                return "Hello"
+
+        assert _decodes_template(TextDecode(), [1], "Hello")
+
+    def test_a_decode_that_is_not_text_does_not_match_the_template(self):
+        class ListDecode:
+            eos_token = None
+
+            def decode(self, ids: list[int]) -> list[int]:
+                return ids
+
+        assert not _decodes_template(ListDecode(), [1], "Hello")
 
 
 class TestEncodeChatTranscriptMatchesTheTemplate:
@@ -2330,23 +2676,6 @@ class TestEncodeChatTranscriptMatchesTheTemplate:
         assert "" not in tokenizer.decode(ids)
         assert ids[-1] == tokenizer.eos_token_id
         assert "greet them back" in "".join(trained_text(tokenizer, ids, mask))
-
-
-class TestCutKeptTurn:
-    def test_an_offset_map_that_differs_from_encode_raises(self):
-        tokenizer = reasoning_tokenizer()
-        encode = tokenizer.encode
-
-        def encode_with_an_extra_token(
-            text: str, *args: Any, **kwargs: Any
-        ) -> list[int]:
-            ids = encode(text, *args, **kwargs)
-            return [*ids, ids[-1]]
-
-        tokenizer.encode = encode_with_an_extra_token
-
-        with pytest.raises(ValueError, match="needs a fast tokenizer"):
-            _cut_kept_turn(tokenizer, "Hello<|im_end|>")
 
 
 class TestDatasetEnvSFTReasoningAndCuts:
@@ -2688,7 +3017,7 @@ class TestDatasetEnvPreferenceChatRows:
         }
 
         with pytest.raises(
-            ValueError,
+            NoValidSamplesError,
             match=r"No valid samples in the train dataset\. First error: ValueError: "
             r"The chosen messages must start with an assistant turn",
         ):
@@ -2818,3 +3147,22 @@ class TestDatasetEnvPreferenceStringRows:
             )
             == "no thanks" + tokenizer.eos_token
         )
+
+
+class TestNoRowsLeft:
+    def test_rows_that_all_failed_validation_are_a_data_error(self):
+        error = no_rows_left("train dataset", [ValueError("bad turn"), KeyError("x")])
+
+        assert isinstance(error, NoValidSamplesError)
+        assert str(error).endswith("First error: ValueError: bad turn")
+
+    def test_rows_that_were_all_too_long_are_a_context_error(self):
+        assert isinstance(no_rows_left("train dataset", []), NoFittingSamplesError)
+
+    def test_another_failure_stays_a_plain_error_from_its_cause(self):
+        cause = TypeError("unexpected keyword")
+
+        error = no_rows_left("train dataset", [cause, ValueError("bad")])
+
+        assert type(error) is ValueError
+        assert error.__cause__ is cause

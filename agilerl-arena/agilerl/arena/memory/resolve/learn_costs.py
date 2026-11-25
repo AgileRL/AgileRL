@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agilerl.arena.memory.specs import DeviceSpec
 
@@ -78,22 +78,38 @@ SM90_LEARN_COSTS = LearnCosts(
 )
 """H100 80GB HBM3: a micro-batch's host work is about 0.5 s, so fewer, larger micro-batches win."""
 
+L4_LEARN_COSTS = replace(
+    SM80_LEARN_COSTS,
+    # Qwen3.5 0.8B / 4B LoRA SFT on one GPU (arena-dev, November 2026): an
+    # A100-40 stepped 1.82x / 1.29x faster than an L4, not the 2.58x their
+    # peak bf16 predicts. Small steps keep a big GPU further below its peak
+    # (lower MFU), so the L4 learns 1.7x the A100's work per peak FLOP.
+    peak_speed=1.7,
+)
+"""L4: the A100 costs at its measured learn speed."""
+
 LEARN_COSTS_BY_CAPABILITY: dict[tuple[int, int], LearnCosts] = {
     (8, 0): SM80_LEARN_COSTS,
     (9, 0): SM90_LEARN_COSTS,
 }
 
+LEARN_COSTS_BY_GPU: dict[str, LearnCosts] = {"NVIDIA L4": L4_LEARN_COSTS}
+"""GPUs measured apart from others of their compute capability (L40S shares the L4's)."""
+
 
 def learn_costs(device: DeviceSpec) -> LearnCosts:
     """Learn-time constants for a training GPU.
 
-    An exact compute-capability row wins. Hopper and newer with no row use
-    the SM90 entry. A GPU below Hopper, or one with no capability, uses
-    :data:`SM80_LEARN_COSTS`.
+    A row for the GPU's name wins, then an exact compute-capability row.
+    Hopper and newer with no row use the SM90 entry. A GPU below Hopper, or
+    one with no capability, uses :data:`SM80_LEARN_COSTS`.
 
     :param device: The training GPU.
     :return: The learn costs for that GPU.
     """
+    named = LEARN_COSTS_BY_GPU.get(device.name or "")
+    if named is not None:
+        return named
     capability = device.compute_capability
     if capability is None:
         return SM80_LEARN_COSTS
