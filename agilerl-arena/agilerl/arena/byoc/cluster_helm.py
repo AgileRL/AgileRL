@@ -271,6 +271,9 @@ def uninstall_byoc_releases(
 ) -> None:
     """Uninstall each Helm release, failing the command on the first error.
 
+    The agent chart's uninstall hook deletes its job namespaces and can take
+    several minutes, so each uninstall waits up to ten.
+
     :param releases: ``(release, namespace)`` pairs to uninstall.
     :type releases: list[tuple[str, str]]
     :param kubeconfig: Kubeconfig used as ``KUBECONFIG`` for Helm.
@@ -283,7 +286,15 @@ def uninstall_byoc_releases(
     for release, namespace in releases:
         click.echo(f"Uninstalling Helm release {release} (namespace {namespace})…")
         result = subprocess.run(
-            ["helm", "uninstall", release, "--namespace", namespace],
+            [
+                "helm",
+                "uninstall",
+                release,
+                "--namespace",
+                namespace,
+                "--timeout",
+                "10m",
+            ],
             check=False,
             env=env,
         )
