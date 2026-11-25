@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -679,23 +680,25 @@ def wait_for_deployments(
     namespace: str,
     timeout: str = DEFAULT_HELM_WAIT_TIMEOUT,
 ) -> None:
-    """Block until Deployments matching *selector* report ``Available``.
+    """Block until Deployments matching *selector* finish rolling out.
 
     :param selector: Kubernetes label selector.
     :type selector: str
     :param namespace: Kubernetes namespace.
     :type namespace: str
-    :param timeout: ``kubectl wait --timeout`` value.
+    :param timeout: ``kubectl rollout status --timeout`` value.
     :type timeout: str
     :returns: None
     :rtype: None
-    :raises click.ClickException: If kubectl is missing or wait fails.
+    :raises click.ClickException: If kubectl is missing, the rollout does not
+        finish, or no Deployment matches *selector*.
     """
     _require_kubectl()
+    # Available stays true during a rolling update while the previous pod is ready.
     cmd = [
         "kubectl",
-        "wait",
-        "--for=condition=available",
+        "rollout",
+        "status",
         "deployment",
         "--selector",
         selector,
@@ -704,12 +707,19 @@ def wait_for_deployments(
         f"--timeout={timeout}",
     ]
     logger.info("Running %s", " ".join(cmd))
-    result = subprocess.run(cmd, check=False)
+    result = subprocess.run(cmd, check=False, stderr=subprocess.PIPE, text=True)
+    stderr = result.stderr
+    if stderr:
+        sys.stderr.write(stderr)
     if result.returncode != 0:
         msg = (
             f"Timed out waiting for deployments matching {selector!r} in namespace "
-            f"{namespace!r} (exit {result.returncode})"
+            f"{namespace!r} to finish rolling out (exit {result.returncode})"
         )
+        raise click.ClickException(msg)
+    # rollout status exits 0 when the selector matches nothing.
+    if f"No resources found in {namespace} namespace." in stderr:
+        msg = f"No deployments matching {selector!r} in namespace {namespace!r}"
         raise click.ClickException(msg)
 
 
@@ -727,7 +737,8 @@ def helm_upgrade_install(
 
     When *wait_for_selector* is set, Helm does not get ``--wait`` (that flag
     waits for every Deployment in the release, including env-validator and
-    reward-fn-val). Readiness is checked on matching Deployments only.
+    reward-fn-val). Matching Deployments are watched with ``kubectl rollout
+    status`` until the new ReplicaSet is ready.
 
     :param release: Helm release name.
     :type release: str
@@ -739,7 +750,7 @@ def helm_upgrade_install(
     :type values_file: Path
     :param wait: Wait for readiness when ``True``.
     :type wait: bool
-    :param timeout: Helm ``--timeout`` / kubectl wait timeout.
+    :param timeout: Helm ``--timeout`` / kubectl rollout status timeout.
     :type timeout: str
     :param extra_sets: Extra ``--set`` overrides applied after ``-f``.
     :type extra_sets: tuple[str, ...]

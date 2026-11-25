@@ -885,3 +885,27 @@ class TestByocApiClassCluster:
         assert invoke["path"].endswith("/classes/delete")
         assert query == {"name": "pool", "cluster_id": 4}
         mock_client._invoke_manifest_command.assert_called_once()
+
+
+class TestByocApiSuggestedClasses:
+    def test_gets_the_suggestions_for_the_named_cluster(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        found = {"suggestions": [], "classes_without_nodes": [], "reported_at": None}
+        mock_client._invoke_manifest_command.return_value = found
+
+        result = byoc_api.suggested_classes("corp-k8s")
+
+        invoke, query = mock_client._invoke_manifest_command.call_args.args
+        assert result == found
+        assert invoke["method"] == "GET"
+        assert invoke["path"] == "/api/cli/v1/byoc/clusters/suggested-classes"
+        assert query == {"name": "corp-k8s"}
+
+    def test_rejects_a_non_object_response(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = []
+
+        with pytest.raises(ArenaAPIError, match="Unexpected class suggestions"):
+            byoc_api.suggested_classes("corp-k8s")
