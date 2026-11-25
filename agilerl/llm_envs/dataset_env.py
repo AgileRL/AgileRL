@@ -69,6 +69,43 @@ def sft_required_columns(columns: Collection[str], response_column: str) -> set[
     return {"messages"} if "messages" in columns else {"prompt", response_column}
 
 
+class NoValidSamplesError(ValueError):
+    """Every row of a dataset split was rejected as invalid."""
+
+
+class NoFittingSamplesError(ValueError):
+    """Every row of a dataset split is longer than the max context length."""
+
+
+def no_rows_left(dataset_type: str, errors: list[Exception]) -> ValueError:
+    """The error for a split with no trainable row.
+
+    :param dataset_type: Name of the split, for messages.
+    :param errors: Why each rejected row failed; empty when every row was too long.
+    :return: :class:`NoFittingSamplesError` when no row failed,
+        :class:`NoValidSamplesError` when every failure is a row error, else a
+        plain ``ValueError`` from the first failure, which is not the data's fault.
+    """
+    if not errors:
+        return NoFittingSamplesError(
+            f"No samples left in the {dataset_type} after filtering by the max "
+            "context length constraint, use a larger max context length."
+        )
+    msg = (
+        f"No valid samples in the {dataset_type}. First error: {_described(errors[0])}"
+    )
+    if all(isinstance(error, (ValueError, KeyError)) for error in errors):
+        return NoValidSamplesError(msg)
+    error = ValueError(msg)
+    error.__cause__ = errors[0]
+    return error
+
+
+def _described(error: Exception) -> str:
+    """``Type: message`` of ``error``."""
+    return f"{type(error).__name__}: {error}"
+
+
 class DatasetEnv:
     """Dataset-backed LLM env for SFT and DPO (no generation).
 
@@ -329,8 +366,7 @@ class DatasetEnv:
             lambda x: len(self.tokenizer.encode(x["prompt"])) <= max_prompt_tokens,
         )
         if len(filtered_dataset) == 0:
-            msg = f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
-            raise ValueError(msg)
+            raise no_rows_left(dataset_type, [])
         if (dataset_difference := len(dataset) - len(filtered_dataset)) > 0:
             warnings.warn(
                 f"{dataset_difference} samples were filtered out of the {dataset_type} due to the max context length constraint.",
@@ -346,12 +382,12 @@ class DatasetEnv:
         :param dataset: Split to check.
         :param dataset_type: Name of the split, for messages.
         :return: The split without the dropped rows.
-        :raises ValueError: If no row is left.
+        :raises ValueError: If no row is left, see :func:`no_rows_left`.
         """
         kept: list[int] = []
         too_long = 0
         cut = 0
-        errors: list[str] = []
+        errors: list[Exception] = []
         for index, item in enumerate(dataset):
             # One malformed row must not stop a run; all of them failing raises below.
             try:
@@ -364,7 +400,7 @@ class DatasetEnv:
                     item.get(SKIPPED_TURNS) or (),
                 )
             except Exception as error:
-                errors.append(f"{type(error).__name__}: {error}")
+                errors.append(error)
                 continue
             fitted = self._fit_to_context(ids, mask)
             if fitted is None:
@@ -374,15 +410,10 @@ class DatasetEnv:
             if len(fitted[0]) < len(ids):
                 cut += 1
         if not kept:
-            msg = (
-                f"No valid samples in the {dataset_type}. First error: {errors[0]}"
-                if errors
-                else f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
-            )
-            raise ValueError(msg)
+            raise no_rows_left(dataset_type, errors)
         if errors:
             warnings.warn(
-                f"{len(errors)} invalid samples were dropped from the {dataset_type}. First error: {errors[0]}",
+                f"{len(errors)} invalid samples were dropped from the {dataset_type}. First error: {_described(errors[0])}",
                 stacklevel=2,
             )
         if too_long:
@@ -407,7 +438,7 @@ class DatasetEnv:
         :param dataset: Split to check.
         :param dataset_type: Name of the split, for messages.
         :return: The split without the pairs whose completions alone do not fit.
-        :raises ValueError: If no pair is left.
+        :raises ValueError: If no pair is left, see :func:`no_rows_left`.
         """
         tokenizer = inject_chat_template_kwargs(
             self.tokenizer, self.chat_template_kwargs
@@ -415,7 +446,7 @@ class DatasetEnv:
         chat_format = detect_chat_format(tokenizer)
         kept: list[int] = []
         shortened = 0
-        errors: list[str] = []
+        errors: list[Exception] = []
         for index, item in enumerate(dataset):
             # One malformed row must not stop a run; all of them failing raises below.
             try:
@@ -423,7 +454,7 @@ class DatasetEnv:
                     tokenizer, item, chat_format, self.max_context_length
                 )
             except Exception as error:
-                errors.append(f"{type(error).__name__}: {error}")
+                errors.append(error)
                 continue
             if fitted is None:
                 continue
@@ -431,15 +462,10 @@ class DatasetEnv:
             shortened += fitted.shortened
         dropped = len(dataset) - len(kept) - len(errors)
         if not kept:
-            msg = (
-                f"No valid samples in the {dataset_type}. First error: {errors[0]}"
-                if errors
-                else f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
-            )
-            raise ValueError(msg)
+            raise no_rows_left(dataset_type, errors)
         if errors:
             warnings.warn(
-                f"{len(errors)} invalid samples were dropped from the {dataset_type}. First error: {errors[0]}",
+                f"{len(errors)} invalid samples were dropped from the {dataset_type}. First error: {_described(errors[0])}",
                 stacklevel=2,
             )
         if shortened:

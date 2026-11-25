@@ -58,6 +58,7 @@ class ChatLetterTokenizer:
 
     eos_token = "\x02"
     eos_token_id = 2
+    is_fast = True
     unk_token_id = None
     unk_token = None
     all_special_ids: ClassVar[list[int]] = []
@@ -70,9 +71,18 @@ class ChatLetterTokenizer:
         return ids
 
     def __call__(
-        self, text: str, add_special_tokens: bool = True, **_kwargs: object
-    ) -> dict[str, list[int]]:
-        return {"input_ids": self.encode(text, add_special_tokens=add_special_tokens)}
+        self,
+        text: str,
+        add_special_tokens: bool = True,
+        return_offsets_mapping: bool = False,
+        **_kwargs: object,
+    ) -> dict[str, list[int] | list[tuple[int, int]]]:
+        encoding: dict[str, list[int] | list[tuple[int, int]]] = {
+            "input_ids": self.encode(text, add_special_tokens=add_special_tokens)
+        }
+        if return_offsets_mapping:
+            encoding["offset_mapping"] = [(pos, pos + 1) for pos in range(len(text))]
+        return encoding
 
     def decode(self, ids: Sequence[int], skip_special_tokens: bool = False) -> str:
         parts = []

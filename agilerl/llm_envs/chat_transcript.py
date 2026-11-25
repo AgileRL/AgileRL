@@ -12,6 +12,8 @@ import json
 import os
 import re
 import warnings
+from bisect import bisect_right
+from dataclasses import dataclass
 from functools import cache, lru_cache
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
@@ -34,6 +36,20 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 TURN_OPENER = {"role": "user", "content": "."}
+
+
+class UnplacedTurnError(ValueError):
+    """The template render holds no span an assistant turn can be cut from."""
+
+
+SLOW_TOKENIZER = (
+    "Cutting turns out of the chat template's render needs a fast tokenizer, "
+    "which gives each token's character span."
+)
+UNPLACED_TURN = (
+    "The chat template renders an assistant turn that does not extend "
+    "its generation prompt, so the turn's sampled tokens cannot be cut out."
+)
 
 
 def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -296,7 +312,7 @@ def encode_chat_transcript(
             raise ValueError(msg)
 
     render_messages = _messages_for_render(messages, chat_format)
-    spliced = _spliced_turn_ids(
+    ids, mask = _transcript_ids(
         tokenizer,
         render_messages,
         messages,
@@ -306,11 +322,43 @@ def encode_chat_transcript(
         chat_format,
         tools,
     )
+    if trained_from == 0:
+        return ids, mask
+    return _after_prompt_render(
+        tokenizer, render_messages[: trained_indices[0]], ids, mask, render_kwargs
+    )
+
+
+def _transcript_ids(
+    tokenizer: PreTrainedTokenizerBase,
+    render_messages: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    assistant_indices: list[int],
+    trained: Collection[int],
+    render_kwargs: dict[str, Any],
+    chat_format: ChatFormat | None,
+    tools: list[dict[str, Any]] | None,
+) -> tuple[list[int], list[bool]]:
+    """Ids and assistant mask of the conversation through its last assistant turn.
+
+    Cut from the template's render, else built turn by turn.
+
+    :raises ValueError: If a rollout could not frame the messages between two
+        turns, or neither way places every turn.
+    """
+    for previous, idx in pairwise(assistant_indices):
+        if idx > previous + 1:
+            _feedback_frame(
+                tokenizer,
+                render_messages[previous + 1 : idx],
+                render_kwargs,
+                chat_format,
+            )
     kept = assistant_indices[-1] + 1
     canonical = _render(tokenizer, render_messages[:kept], False, render_kwargs)
-    if spliced is not None and _decodes_template(tokenizer, spliced[0], canonical):
-        ids, mask = spliced
-    else:
+    try:
+        if not tokenizer.is_fast:
+            raise UnplacedTurnError(SLOW_TOKENIZER)
         ids, mask = _assemble_from_template(
             tokenizer,
             render_messages[:kept],
@@ -321,11 +369,25 @@ def encode_chat_transcript(
             tools,
             trained,
         )
-    if trained_from == 0:
-        return ids, mask
-    return _after_prompt_render(
-        tokenizer, render_messages[: trained_indices[0]], ids, mask, render_kwargs
-    )
+    except UnplacedTurnError:
+        # A slow tokenizer gives no character offsets, and a turn with no
+        # header of its own, after a tool result the chat format writes into
+        # the turn before (Gemma 4), has nothing to cut at: both are built
+        # turn by turn.
+        spliced = _spliced_turn_ids(
+            tokenizer,
+            render_messages,
+            messages,
+            assistant_indices,
+            trained,
+            render_kwargs,
+            chat_format,
+            tools,
+        )
+        if spliced is None or not _decodes_template(tokenizer, spliced[0], canonical):
+            raise
+        return spliced
+    return ids, mask
 
 
 def _render_kwargs(
@@ -570,59 +632,6 @@ def _decodes_template(
     return decoded in accepted
 
 
-def _with_payload_sentinel(message: dict[str, Any], sentinel: str) -> dict[str, Any]:
-    """``message`` with ``sentinel`` prepended to each non-empty string the template may emit."""
-    marked = dict(message)
-    content = marked.get("content")
-    if isinstance(content, str) and content:
-        marked["content"] = sentinel + content
-    calls = marked.get("tool_calls")
-    if calls:
-        marked["tool_calls"] = [_call_with_sentinel(call, sentinel) for call in calls]
-    for key in REASONING_KEYS:
-        value = marked.get(key)
-        if isinstance(value, str) and value.strip():
-            marked[key] = sentinel + value
-    return marked
-
-
-def _call_with_sentinel(call: dict[str, Any], sentinel: str) -> dict[str, Any]:
-    """``call`` with ``sentinel`` prepended to its function name."""
-    copied = dict(call)
-    function = copied.get("function")
-    if isinstance(function, dict):
-        function = dict(function)
-        name = function.get("name")
-        if isinstance(name, str) and name:
-            function["name"] = sentinel + name
-        copied["function"] = function
-        return copied
-    name = copied.get("name")
-    if isinstance(name, str) and name:
-        copied["name"] = sentinel + name
-    return copied
-
-
-def _payload_at(
-    tokenizer: PreTrainedTokenizerBase,
-    messages: list[dict[str, Any]],
-    render_kwargs: dict[str, Any],
-    text: str,
-    index: int,
-) -> int | None:
-    """Index of message ``index``'s first emitted field in ``text``, or ``None``."""
-    sentinel = f"\ue000{index:04d}"
-    marked = [
-        _with_payload_sentinel(message, sentinel) if j == index else message
-        for j, message in enumerate(messages)
-    ]
-    probed = _render(tokenizer, marked, False, render_kwargs)
-    pos = probed.find(sentinel)
-    if pos < 0 or not text.startswith(probed[:pos]):
-        return None
-    return pos
-
-
 def generation_prompt_addition(
     tokenizer: PreTrainedTokenizerBase,
     tools: list[dict[str, Any]] | None,
@@ -648,69 +657,298 @@ def _generation_addition(
     return prompted[len(os.path.commonprefix([prompted, plain])) :]
 
 
-def _block_token(tokenizer: PreTrainedTokenizerBase, addition: str) -> str:
-    """The first special token of the generation prompt, or ``""`` when it has none."""
-    ids = tokenizer.encode(addition, add_special_tokens=False)
-    specials = special_token_ids(tokenizer)
-    for token_id in ids:
-        if token_id in specials:
-            text = tokenizer.decode([token_id])
-            return text if isinstance(text, str) else ""
-    return ""
+def _common_length(left: str, right: str) -> int:
+    """Length of the longest common prefix of two strings, by halving slice compares."""
+    low, high = 0, min(len(left), len(right))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if left[low:middle] == right[low:middle]:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
-def _addition_end(
-    tokenizer: PreTrainedTokenizerBase, text: str, start: int, end: int, addition: str
-) -> tuple[int, str] | None:
-    """Where ``addition`` stops matching ``text``, and the unmatched tail.
+@dataclass(frozen=True)
+class TemplateRender:
+    """The template's render of the conversation: text, ids, and each id's character span."""
 
-    The tokenizer never splits an added token, so a match that stops inside one
-    backs up to its start: ``<t`` is shared by ``<think>`` and ``<tool_call>``,
-    but a turn that opens with ``<tool_call>`` holds the whole token.
+    text: str
+    ids: list[int]
+    starts: list[int]
+    ends: list[int]
+
+    def token_at(self, char: int) -> int:
+        """Index of the first id that ends after character ``char``."""
+        return bisect_right(self.ends, char)
+
+    def on_boundary(self, char: int) -> bool:
+        """Whether no id spans character ``char`` from before it."""
+        at = self.token_at(char)
+        return at == len(self.ids) or self.starts[at] >= char
+
+    def ids_between(
+        self, tokenizer: PreTrainedTokenizerBase, begin: int, end: int
+    ) -> list[int]:
+        """Ids of ``text[begin:end]``: the render's own ids when no id crosses either end."""
+        if self.on_boundary(begin) and self.on_boundary(end):
+            return self.ids[self.token_at(begin) : self.token_at(end)]
+        return tokenizer.encode(self.text[begin:end], add_special_tokens=False)
+
+
+def _rendered(tokenizer: PreTrainedTokenizerBase, text: str) -> TemplateRender:
+    """``text`` with its ids and their character spans, from one fast-tokenizer pass."""
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    spans = encoding["offset_mapping"]
+    if len(spans) != len(encoding["input_ids"]):
+        raise UnplacedTurnError(SLOW_TOKENIZER)
+    return TemplateRender(
+        text,
+        list(encoding["input_ids"]),
+        [begin for begin, _ in spans],
+        [end for _, end in spans],
+    )
+
+
+@dataclass(frozen=True)
+class TurnFrame:
+    """What every assistant turn the template renders opens with."""
+
+    # Text ``add_generation_prompt`` appends after one user message.
+    prompt: str
+    # ``prompt`` through its last special token.
+    header: str
+    # Text an assistant turn opens with: the block id and the assistant's
+    # name (``<|im_start|>assistant``), else ``prompt`` stripped.
+    opener: str
+    # The special id that opens ``prompt`` and every other block, and the id
+    # after it that names the assistant; ``None`` when ``prompt`` opens with
+    # no special token.
+    block: int | None
+    role: int | None
+
+
+def _turn_frame(
+    tokenizer: PreTrainedTokenizerBase,
+    render_kwargs: dict[str, Any],
+    specials: set[int],
+) -> TurnFrame:
+    """The generation prompt, its header, and the ids that open an assistant block."""
+    prompt = _generation_addition(tokenizer, render_kwargs)
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+    last = max((pos for pos, token in enumerate(ids) if token in specials), default=-1)
+    header = str(tokenizer.decode(ids[: last + 1]))
+    if not ids or ids[0] not in specials:
+        return TurnFrame(prompt, header, prompt.strip(), None, None)
+    opener = str(tokenizer.decode(ids[:2]))
+    return TurnFrame(prompt, header, opener, ids[0], ids[1] if len(ids) > 1 else None)
+
+
+class PrefixRenders:
+    """Renders of the messages before each index, with and without the generation prompt, made once."""
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        messages: list[dict[str, Any]],
+        render_kwargs: dict[str, Any],
+    ) -> None:
+        self._tokenizer = tokenizer
+        self._messages = messages
+        self.render_kwargs = render_kwargs
+        self._made: dict[tuple[int, bool], str] = {}
+
+    def message(self, index: int) -> dict[str, Any]:
+        """Message ``index``, as passed to the template."""
+        return self._messages[index]
+
+    def before(self, index: int, add_generation_prompt: bool) -> str:
+        """Render of the messages before ``index``."""
+        key = (index, add_generation_prompt)
+        if key not in self._made:
+            self._made[key] = _render(
+                self._tokenizer,
+                self._messages[:index],
+                add_generation_prompt,
+                self.render_kwargs,
+            )
+        return self._made[key]
+
+
+def _not_inside_added_token(
+    tokenizer: PreTrainedTokenizerBase, render: TemplateRender, char: int
+) -> int:
+    """``char``, or the start of the added token it falls strictly inside.
+
+    A turn opens with a whole added token: ``<t`` is shared by ``<think>`` and
+    ``<tool_call>``, but a turn that opens with ``<tool_call>`` holds all of it.
     """
-    limit = max(start, end)
-    for length in range(len(addition), 0, -1):
-        prefix = addition[:length]
-        at = text.rfind(prefix, start, limit)
-        if at < 0:
-            continue
-        shared = len(os.path.commonprefix([addition, text[at:]]))
-        cut = _added_token_start(tokenizer, text, at + shared)
-        return cut, addition[cut - at :]
-    return None
+    at = render.token_at(char)
+    if (
+        at < len(render.ids)
+        and render.starts[at] < char
+        and render.ids[at] in tokenizer.added_tokens_decoder
+    ):
+        return render.starts[at]
+    return char
 
 
-def _added_token_start(tokenizer: PreTrainedTokenizerBase, text: str, pos: int) -> int:
-    """Start of the added token in ``text`` that ``pos`` falls strictly inside, else ``pos``."""
-    for token in tokenizer.added_tokens_decoder.values():
-        content = token.content
-        for at in range(max(0, pos - len(content) + 1), pos):
-            if text.startswith(content, at):
-                return at
-    return pos
+def _content_end(text: str, message: dict[str, Any], cursor: int) -> int:
+    """Where ``message``'s content ends in ``text`` from ``cursor``, else ``0``."""
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return 0
+    at = text.find(content.strip(), cursor)
+    return 0 if at < 0 else at + len(content.strip())
 
 
-def _cut_kept_turn(
-    tokenizer: PreTrainedTokenizerBase, turn_text: str
-) -> tuple[str, bool]:
-    """Turn text through its last special token, and whether the turn needs an eos token."""
-    ids = tokenizer.encode(turn_text, add_special_tokens=False)
-    specials = special_token_ids(tokenizer)
-    last = max(
-        (pos for pos, token in enumerate(ids) if token in specials), default=None
-    )
-    if last is None:
-        return turn_text, True
-    encoding = tokenizer(
-        turn_text, add_special_tokens=False, return_offsets_mapping=True
-    )
-    if list(encoding["input_ids"]) != ids:
-        msg = (
-            "Cutting a turn out of the template render needs a fast tokenizer "
-            "whose offsets match its encoding of the turn."
+def _after_content(prompt: str, content: str) -> str:
+    """Text ``prompt`` holds after ``content``: the frame up to the turn."""
+    at = prompt.rfind(content)
+    return "" if at < 0 else prompt[at + len(content) :]
+
+
+def _turn_start(
+    tokenizer: PreTrainedTokenizerBase,
+    render: TemplateRender,
+    prefixes: PrefixRenders,
+    roles: list[str],
+    index: int,
+    cursor: int,
+    frame: TurnFrame,
+) -> tuple[int, str]:
+    """Where assistant message ``index``'s sampled text starts in ``render``, and the prompt's unmatched tail.
+
+    After a non-assistant message, the turn starts where the render leaves the
+    render of the messages before it with the generation prompt, when that is
+    past the message's content. Otherwise (a turn right after another
+    assistant turn, or a template that renders earlier messages differently
+    once later ones follow) it starts after the next assistant opener from
+    character ``cursor`` and the generation prompt it shares, or, with no
+    opener, after the message's content and the frame the template writes
+    after it.
+
+    :raises ValueError: If the render does not open the turn with the
+        generation prompt's header.
+    """
+    if roles[index - 1] != "assistant":
+        prompt = prefixes.before(index, True)
+        anchor = _content_end(render.text, prefixes.message(index - 1), cursor)
+        opened = _common_length(prefixes.before(index, False), render.text)
+        start = _not_inside_added_token(
+            tokenizer, render, _common_length(prompt, render.text)
         )
-        raise ValueError(msg)
-    return turn_text[: encoding["offset_mapping"][last][1]], False
+        if start >= max(cursor, anchor) and start - opened >= len(frame.header):
+            return start, prompt[start:]
+        cursor = max(cursor, anchor)
+        if not frame.opener and anchor > 0:
+            # A positive anchor means the message has string content.
+            tail = _after_content(
+                prompt, prefixes.message(index - 1)["content"].strip()
+            )
+            start = _not_inside_added_token(
+                tokenizer, render, anchor + _common_length(tail, render.text[anchor:])
+            )
+            return start, tail[start - anchor :]
+    at = render.text.find(frame.opener, cursor) if frame.opener else -1
+    if at >= 0:
+        shared = _common_length(frame.prompt, render.text[at:])
+        start = _not_inside_added_token(tokenizer, render, at + shared)
+        if start - at >= len(frame.header):
+            return start, frame.prompt[start - at :]
+    raise UnplacedTurnError(UNPLACED_TURN)
+
+
+def _turn_limit(
+    tokenizer: PreTrainedTokenizerBase,
+    render: TemplateRender,
+    prefixes: PrefixRenders,
+    render_messages: list[dict[str, Any]],
+    index: int,
+    next_index: int | None,
+    start: int,
+    frame: TurnFrame,
+    chat_format: ChatFormat | None,
+) -> tuple[int, bool]:
+    """Index of the first id after ``start`` that cannot belong to assistant message ``index``, and whether the turn ends right before it.
+
+    Before a tool result the chat format writes into the turn, that is the
+    result's first id. Before other messages, it is the id after the leading
+    terminator of the frame the template writes between an assistant turn and
+    those messages (Qwen's ``<|im_end|>`` before the user block), else the
+    next block that is not an assistant block. Before an assistant turn right
+    after it, it is that turn's opener.
+    """
+    if next_index is None:
+        return len(render.ids), False
+    first = render.token_at(start)
+    between = render_messages[index + 1 : next_index]
+    if not between:
+        after = _answer_end(render.text, render_messages[index], start)
+        at = render.text.find(frame.opener, after) if frame.opener else -1
+        if at < 0:
+            raise UnplacedTurnError(UNPLACED_TURN)
+        return render.token_at(at), False
+    following = render.token_at(
+        _common_length(prefixes.before(next_index, False), render.text)
+    )
+    if following <= first:
+        # The template renders this turn differently once later messages follow.
+        following = len(render.ids)
+    in_turn = None if chat_format is None else chat_format.format_tool_results(between)
+    if in_turn is not None:
+        written = tokenizer.encode(in_turn, add_special_tokens=False)
+        at = following - len(written)
+        if at >= first and render.ids[at:following] == written:
+            return at, False
+    roles = tuple(message["role"] for message in between)
+    parts = feedback_frame_parts(tokenizer, roles, prefixes.render_kwargs)
+    if parts is not None:
+        at = render.text.find(
+            parts[0], _answer_end(render.text, render_messages[index], start)
+        )
+        if at >= 0 and render.token_at(at) < following:
+            terminator = _terminator_length(tokenizer, parts[0])
+            if terminator == 0:
+                return render.token_at(at), False
+            # The id holding the terminator's last character: Phi-3.5's
+            # ``<|end|>`` also holds the newline after it.
+            return render.token_at(at + terminator - 1) + 1, True
+    blocks = (
+        pos
+        for pos in range(first, following)
+        if render.ids[pos] == frame.block
+        and render.ids[pos + 1 : pos + 2] != [frame.role]
+    )
+    return next(blocks, following), False
+
+
+def _terminator_length(tokenizer: PreTrainedTokenizerBase, frame: str) -> int:
+    """Characters of ``frame`` through its first added or special token, or ``0`` when it has none.
+
+    Phi-3.5 adds ``<|end|>`` without flagging it special.
+    """
+    ids = tokenizer.encode(frame, add_special_tokens=False)
+    marks = special_token_ids(tokenizer) | set(tokenizer.added_tokens_decoder)
+    first = next((pos for pos, token in enumerate(ids) if token in marks), None)
+    if first is None:
+        return 0
+    return len(str(tokenizer.decode(ids[: first + 1])))
+
+
+def _answer_end(text: str, message: dict[str, Any], start: int) -> int:
+    """Where ``message``'s visible answer ends in ``text`` from ``start``, else ``start``."""
+    answer = _visible_answer(message)
+    at = text.find(answer, start) if answer else -1
+    return start if at < 0 else at + len(answer)
+
+
+def _visible_answer(message: dict[str, Any]) -> str:
+    """The text an assistant message shows after any reasoning block, stripped."""
+    content = message.get("content")
+    if not isinstance(content, str):
+        return ""
+    return content.rsplit(REASONING_END_MARKER, 1)[-1].strip()
 
 
 def _assemble_from_template(
@@ -725,77 +963,84 @@ def _assemble_from_template(
 ) -> tuple[list[int], list[bool]]:
     """Ids of ``canonical``, the template render, with an assistant mask.
 
-    A generation prompt that is not a prefix of the completed turn is not
-    spliced onto the transcript. Trailing whitespace of that prompt stays in
-    the gap before the next assistant turn.
+    Each assistant turn is found by comparing ``canonical`` with renders of the
+    messages before it, nothing being written into the messages, so a template
+    may rewrite a message's content (split out a ``<think>`` block, trim it,
+    drop earlier reasoning) and the turn is still cut out. A turn runs through
+    its last special token before the next message; one with none gains eos.
+    The context before a turn and the turn keep the render's ids; where an id
+    crosses a boundary, each side is encoded alone, as a rollout encodes its
+    prompt and samples the turn. A generation prompt the completed turn does
+    not continue is not spliced on, but its unmatched trailing whitespace
+    stays in the context before a later turn. Text after the last turn is
+    dropped.
 
     :param render_messages: Messages as passed to the template.
     :param messages: The same turns, still carrying ``tool_calls`` for the parse check.
     :param trained_indices: Indices of the assistant messages that train.
     :return: Token ids and the assistant mask.
+    :raises ValueError: If the render does not open a turn with the generation
+        prompt's header, or a turn does not show its message's answer.
     """
-    addition = _generation_addition(tokenizer, render_kwargs)
-    block = _block_token(tokenizer, addition)
-    assistant_indices = [
-        idx
-        for idx, message in enumerate(render_messages)
-        if message["role"] == "assistant"
-    ]
-    payloads = [
-        _payload_at(tokenizer, render_messages, render_kwargs, canonical, idx)
-        for idx in range(len(render_messages))
-    ]
+    render = _rendered(tokenizer, canonical)
+    prefixes = PrefixRenders(tokenizer, render_messages, render_kwargs)
+    specials = special_token_ids(tokenizer)
+    frame = _turn_frame(tokenizer, render_kwargs, specials)
+    roles = [message["role"] for message in render_messages]
+    assistant_indices = [idx for idx, role in enumerate(roles) if role == "assistant"]
     ids: list[int] = []
     mask: list[bool] = []
     cursor = 0
-
-    def _assistant_span(index: int, payload: int) -> tuple[int, str, int]:
-        """Start, unmatched generation-prompt tail, and end of this assistant turn."""
-        located = _addition_end(tokenizer, canonical, cursor, payload, addition)
-        if located is None:
-            turn_start = payload
-            prompt_tail = ""
-        else:
-            turn_start, prompt_tail = located
-        next_payload = None
-        for later in range(index + 1, len(payloads)):
-            if payloads[later] is not None:
-                next_payload = payloads[later]
-                break
-        limit = len(canonical) if next_payload is None else next_payload
-        if block and next_payload is not None:
-            at = canonical.rfind(block, turn_start, next_payload)
-            if at >= 0:
-                limit = at
-        return turn_start, prompt_tail, limit
-
-    for position, idx in enumerate(assistant_indices):
-        payload = payloads[idx]
-        if payload is None:
-            msg = (
-                "The chat template renders an assistant turn that does not extend "
-                "its generation prompt, so the turn's sampled tokens cannot be cut out."
+    for position, (idx, next_idx) in enumerate(
+        zip(assistant_indices, [*assistant_indices[1:], None], strict=True)
+    ):
+        start, prompt_tail = _turn_start(
+            tokenizer, render, prefixes, roles, idx, cursor, frame
+        )
+        limit, closed = _turn_limit(
+            tokenizer,
+            render,
+            prefixes,
+            render_messages,
+            idx,
+            next_idx,
+            start,
+            frame,
+            chat_format,
+        )
+        first = render.token_at(start)
+        closing = (
+            limit - 1
+            if closed
+            else next(
+                (
+                    pos
+                    for pos in range(limit - 1, first - 1, -1)
+                    if render.ids[pos] in specials
+                ),
+                None,
             )
-            raise ValueError(msg)
-        turn_start, prompt_tail, limit = _assistant_span(idx, payload)
-        kept, needs_eos = _cut_kept_turn(tokenizer, canonical[turn_start:limit])
-        gap = canonical[cursor:turn_start]
+        )
+        last = limit - 1 if closing is None else closing
+        end = render.ends[last] if last >= first else start
+        if _visible_answer(render_messages[idx]) not in canonical[start:end]:
+            raise UnplacedTurnError(UNPLACED_TURN)
+        gap_ids = render.ids_between(tokenizer, cursor, start)
         # The completed turn does not continue this whitespace. The rollout
         # prompt still ends with it, so it stays outside the assistant span.
         if position > 0 and prompt_tail.isspace():
-            gap += prompt_tail
-        gap_ids = tokenizer.encode(gap, add_special_tokens=False)
-        ids += gap_ids
-        mask += [False] * len(gap_ids)
-        turn_ids = tokenizer.encode(kept, add_special_tokens=False)
-        if needs_eos:
-            turn_ids.append(tokenizer.eos_token_id)
+            gap_ids = tokenizer.encode(
+                canonical[cursor:start] + prompt_tail, add_special_tokens=False
+            )
+        turn_ids = render.ids_between(tokenizer, start, end)
+        if closing is None:
+            turn_ids = [*turn_ids, tokenizer.eos_token_id]
         trained = idx in trained_indices
         if trained:
             _check_tool_calls_parse(messages[idx], turn_ids, tools, chat_format)
-        ids += turn_ids
-        mask += [trained] * len(turn_ids)
-        cursor = turn_start + len(kept)
+        ids += gap_ids + turn_ids
+        mask += [False] * len(gap_ids) + [trained] * len(turn_ids)
+        cursor = end
     return ids, mask
 
 
@@ -849,11 +1094,7 @@ def _assistant_turn_ids(
     rendered = _render(tokenizer, [TURN_OPENER, message], False, render_kwargs)
     shared = len(os.path.commonprefix([prompt, rendered]))
     if shared < header:
-        msg = (
-            "The chat template renders an assistant turn that does not extend "
-            "its generation prompt, so the turn's sampled tokens cannot be cut out."
-        )
-        raise ValueError(msg)
+        raise ValueError(UNPLACED_TURN)
     turn = tokenizer.encode(rendered[shared:], add_special_tokens=False)
     last_special = max(
         (pos for pos, token in enumerate(turn) if token in special_ids), default=None
@@ -979,13 +1220,19 @@ def _named_tool_results(
     return named
 
 
-def _feedback_ids(
+def _feedback_frame(
     tokenizer: PreTrainedTokenizerBase,
     messages: list[dict[str, Any]],
     render_kwargs: dict[str, Any],
     chat_format: ChatFormat | None,
-) -> list[int]:
-    """Ids of the non-assistant messages between two assistant turns."""
+) -> str | tuple[str, ...]:
+    """How a rollout frames ``messages``, the non-assistant messages between two assistant turns.
+
+    :return: The text the chat format writes for them inside the turn, else
+        the template's frame parts around them (:func:`feedback_frame_parts`).
+    :raises ValueError: If a message has no string content, or neither the
+        chat format nor the template frames these roles after an assistant turn.
+    """
     for message in messages:
         if not isinstance(message.get("content"), str):
             msg = (
@@ -995,14 +1242,27 @@ def _feedback_ids(
             raise ValueError(msg)
     in_turn = None if chat_format is None else chat_format.format_tool_results(messages)
     if in_turn is not None:
-        return tokenizer.encode(in_turn, add_special_tokens=False)
+        return in_turn
     roles = tuple(message["role"] for message in messages)
     parts = feedback_frame_parts(tokenizer, roles, render_kwargs)
     if parts is None:
         msg = f"The chat template cannot render a {roles} turn after an assistant turn."
         raise ValueError(msg)
-    text = parts[0] + "".join(
+    return parts
+
+
+def _feedback_ids(
+    tokenizer: PreTrainedTokenizerBase,
+    messages: list[dict[str, Any]],
+    render_kwargs: dict[str, Any],
+    chat_format: ChatFormat | None,
+) -> list[int]:
+    """Ids of the non-assistant messages between two assistant turns."""
+    frame = _feedback_frame(tokenizer, messages, render_kwargs, chat_format)
+    if isinstance(frame, str):
+        return tokenizer.encode(frame, add_special_tokens=False)
+    text = frame[0] + "".join(
         message["content"] + part
-        for message, part in zip(messages, parts[1:], strict=True)
+        for message, part in zip(messages, frame[1:], strict=True)
     )
     return tokenizer.encode(text, add_special_tokens=False)
