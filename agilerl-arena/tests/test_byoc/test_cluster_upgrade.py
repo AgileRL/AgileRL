@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -502,6 +504,7 @@ def test_upgrade_command_passes_install_flags(
     assert upgrade.call_args.kwargs["kubeconfig"] == kubeconfig
     assert upgrade.call_args.kwargs["agent_namespace"] == "arena-agent"
     assert upgrade.call_args.kwargs["helm_wait"] is False
+    assert upgrade.call_args.kwargs["yes"] is False
 
 
 def test_upgrade_command_targets_platform_clusters_with_the_flag(
@@ -608,3 +611,180 @@ def test_fetch_cluster_install_artifacts_rejects_non_dict(
 
     with pytest.raises(ArenaAPIError, match="Unexpected cluster install artifacts"):
         byoc_api.fetch_cluster_install_artifacts("corp-k8s")
+
+
+RBAC_DIFF = [
+    {
+        "cluster_role": "operator",
+        "added": [
+            {"api_group": "", "resource": "nodes", "verbs": ["get", "list"]},
+            {
+                "api_group": "storage.k8s.io",
+                "resource": "storageclasses",
+                "verbs": ["get"],
+            },
+        ],
+        "removed": [
+            {
+                "api_group": "rbac.authorization.k8s.io",
+                "resource": "clusterroles",
+                "resource_name": "namespace-secrets",
+                "verbs": ["bind"],
+            }
+        ],
+    }
+]
+APPROVAL_ARTIFACTS = {
+    "agentHelmValuesYaml": AGENT_YAML,
+    "agentUpgradeRequiresApproval": True,
+    "rbacDiff": RBAC_DIFF,
+}
+
+
+class TtyInput(io.StringIO):
+    """Stdin that reports a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _upgrade_with(
+    tmp_path: Path, artifacts: dict[str, object], yes: bool = False
+) -> MagicMock:
+    """Run the upgrade against *artifacts* and return the Helm mock."""
+    package_root, _values_file = _install_package(tmp_path)
+    listed = _helm_list([{"name": "corp-k8s", "namespace": "arena"}])
+    with (
+        patch.object(
+            ByocApi, "fetch_cluster_install_artifacts", return_value=artifacts
+        ),
+        patch.object(ByocApi, "download_cluster_install_package", return_value=b"pkg"),
+        patch(
+            "agilerl.arena.byoc.cluster_upgrade.extract_cluster_install_package",
+            return_value=package_root,
+        ),
+        patch(
+            "agilerl.arena.byoc.cluster_upgrade.resolve_cluster_kubeconfig",
+            return_value=tmp_path / "kubeconfig",
+        ),
+        patch("agilerl.arena.byoc.cluster_helm.helm_available", return_value=True),
+        patch("agilerl.arena.byoc.cluster_helm.subprocess.run", return_value=listed),
+        patch(
+            "agilerl.arena.byoc.cluster_upgrade.sync_storage_secret_endpoint",
+            return_value=False,
+        ),
+        patch("agilerl.arena.byoc.cluster_upgrade.helm_upgrade_install") as helm,
+    ):
+        run_cluster_upgrade(MagicMock(), name="corp-k8s", yes=yes)
+    return helm
+
+
+def test_upgrade_prints_the_cluster_role_diff_and_asks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "stdin", TtyInput("y\n"))
+
+    helm = _upgrade_with(tmp_path, APPROVAL_ARTIFACTS)
+
+    out = capsys.readouterr().out
+    assert "changes the agent's ClusterRoles on cluster 'corp-k8s'" in out
+    assert (
+        "  operator\n"
+        "    + nodes: get, list\n"
+        "    + storageclasses.storage.k8s.io: get\n"
+        "    - clusterroles.rbac.authorization.k8s.io/namespace-secrets: bind\n"
+    ) in out
+    assert "Apply these ClusterRole changes? [y/N]" in out
+    helm.assert_called_once()
+
+
+def test_upgrade_stops_when_the_cluster_role_changes_are_declined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "stdin", TtyInput("n\n"))
+
+    with (
+        patch.object(
+            ByocApi, "fetch_cluster_install_artifacts", return_value=APPROVAL_ARTIFACTS
+        ),
+        patch.object(ByocApi, "download_cluster_install_package") as download,
+        patch("agilerl.arena.byoc.cluster_upgrade.helm_upgrade_install") as helm,
+        pytest.raises(click.Abort),
+    ):
+        run_cluster_upgrade(MagicMock(), name="corp-k8s")
+
+    download.assert_not_called()
+    helm.assert_not_called()
+
+
+def test_upgrade_with_yes_applies_cluster_role_changes_without_asking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    helm = _upgrade_with(tmp_path, APPROVAL_ARTIFACTS, yes=True)
+
+    out = capsys.readouterr().out
+    assert "+ nodes: get, list" in out
+    assert "[y/N]" not in out
+    helm.assert_called_once()
+
+
+def test_upgrade_without_a_terminal_stops_before_cluster_role_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    with (
+        patch.object(
+            ByocApi, "fetch_cluster_install_artifacts", return_value=APPROVAL_ARTIFACTS
+        ),
+        patch.object(ByocApi, "download_cluster_install_package") as download,
+        patch("agilerl.arena.byoc.cluster_upgrade.helm_upgrade_install") as helm,
+        pytest.raises(click.ClickException, match="pass --yes"),
+    ):
+        run_cluster_upgrade(MagicMock(), name="corp-k8s")
+
+    download.assert_not_called()
+    helm.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "artifacts",
+    [
+        {"agentHelmValuesYaml": AGENT_YAML},
+        {
+            "agentHelmValuesYaml": AGENT_YAML,
+            "agentUpgradeRequiresApproval": False,
+            "rbacDiff": [],
+        },
+    ],
+)
+def test_upgrade_without_cluster_role_changes_does_not_ask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    artifacts: dict[str, object],
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    helm = _upgrade_with(tmp_path, artifacts)
+
+    assert "ClusterRoles" not in capsys.readouterr().out
+    helm.assert_called_once()
+
+
+def test_upgrade_command_passes_yes(command_config: CommandConfig) -> None:
+    with patch("agilerl.arena.byoc.commands.run_cluster_upgrade") as upgrade:
+        result = CliRunner().invoke(
+            build_cluster_upgrade_command(),
+            ["--name", "corp-k8s", "--yes"],
+            obj=command_config,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert upgrade.call_args.kwargs["yes"] is True

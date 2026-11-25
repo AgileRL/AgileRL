@@ -1195,6 +1195,12 @@ def build_cluster_upgrade_command() -> click.Command:
         default=False,
         help="Do not wait for the agent Deployment.",
     )
+    @click.option(
+        "--yes",
+        is_flag=True,
+        default=False,
+        help="Apply agent ClusterRole changes without prompting.",
+    )
     @_platform_option
     @click.pass_obj
     def upgrade_cmd(
@@ -1203,6 +1209,7 @@ def build_cluster_upgrade_command() -> click.Command:
         kubeconfig: Path | None,
         agent_namespace: str | None,
         no_helm_wait: bool,
+        yes: bool,
         platform: bool,
     ) -> None:
         """Upgrade the BYOC agent chart without changing cluster credentials."""
@@ -1218,6 +1225,7 @@ def build_cluster_upgrade_command() -> click.Command:
                 agent_namespace=agent_namespace,
                 helm_wait=not no_helm_wait,
                 platform=platform,
+                yes=yes,
             )
 
     return upgrade_cmd
