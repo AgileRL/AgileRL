@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -31,9 +32,18 @@ def datasets_list(config: CommandConfig, search: str | None) -> None:
         if search is not None:
             for res in result:
                 res.pop("description", None)
-            result = sort_dataset_search_by_downloads(result)
+            emit_result(sort_dataset_search_by_downloads(result))
+            return
+        emit_result(result, display=_rows_column)
 
-        emit_result(result)
+
+def _rows_column(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Show ``training_row_count`` under a short ``rows`` header."""
+    return [
+        {key: value for key, value in dataset.items() if key != "training_row_count"}
+        | {"rows": dataset["training_row_count"]}
+        for dataset in datasets
+    ]
 
 
 @datasets_group.command("exists")

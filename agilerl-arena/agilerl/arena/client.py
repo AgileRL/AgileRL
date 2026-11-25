@@ -884,16 +884,37 @@ class ArenaClient:
 
         :param search: HuggingFace dataset search query.
         :type search: str | None
-        :returns: List of datasets or search results from Arena.
+        :returns: Search results, or the organization's datasets. Each registered
+            dataset includes ``training_row_count`` (``None`` until the rows are
+            counted). An organisation key leaves the count unset, and so does a
+            403 from ``GET /api/datasets``.
         :rtype: list[dict[str, Any]]
         """
         params = {"search": search} if search is not None else None
         result = self._request("GET", "/api/cli/v1/datasets", params=params)
         if not isinstance(result, list):
             return result
-        return [
+        rows = [
             order_dataset_fields(item) if isinstance(item, dict) else item
             for item in result
+        ]
+        if search is not None:
+            return rows
+        # /api/datasets rejects an org key, and the handler ignores the partner org.
+        if self._org_key is not None:
+            return [{**row, "training_row_count": None} for row in rows]
+        try:
+            web_rows = self._request("GET", "/api/datasets")
+        except ArenaAPIError as exc:
+            if exc.status_code != 403:
+                raise
+            return [{**row, "training_row_count": None} for row in rows]
+        # Newest first, so the first row for a shared name is the one to show.
+        row_counts: dict[str, int | None] = {}
+        for dataset in web_rows:
+            row_counts.setdefault(dataset["name"], dataset["training_row_count"])
+        return [
+            {**row, "training_row_count": row_counts.get(row["name"])} for row in rows
         ]
 
     def dataset_exists(self, name: str) -> dict[str, bool | str]:

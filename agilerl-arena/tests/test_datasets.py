@@ -15,7 +15,11 @@ from agilerl.arena.client import (
     PARQUET_CONTENT_TYPE,
     ArenaClient,
 )
-from agilerl.arena.exceptions import ArenaFileNotFoundError, ArenaValidationError
+from agilerl.arena.exceptions import (
+    ArenaAPIError,
+    ArenaFileNotFoundError,
+    ArenaValidationError,
+)
 
 
 @pytest.fixture
@@ -55,14 +59,40 @@ class TestListDatasets:
         assert result[0]["name"] is None
         assert result[0]["hf_dataset_id"] == "hf/foo"
 
-    def test_list_no_params(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[])
-        api_key_client.list_datasets()
-        api_key_client._request.assert_called_once_with(
-            "GET",
-            "/api/cli/v1/datasets",
-            params=None,
-        )
+    def test_list_adds_row_counts_from_the_web_app_list(self, api_key_client):
+        # Arrange
+        cli_rows = [
+            {"name": "counted", "category": "reasoning"},
+            {"name": "importing", "category": "sft"},
+        ]
+        web_rows = [
+            {"id": 1, "name": "importing", "training_row_count": None},
+            {"id": 2, "name": "counted", "training_row_count": 24},
+        ]
+        api_key_client._request = MagicMock(side_effect=[cli_rows, web_rows])
+
+        # Act
+        result = api_key_client.list_datasets()
+
+        # Assert
+        assert [call.args for call in api_key_client._request.call_args_list] == [
+            ("GET", "/api/cli/v1/datasets"),
+            ("GET", "/api/datasets"),
+        ]
+        assert result == [
+            {
+                "name": "counted",
+                "hf_dataset_id": None,
+                "category": "reasoning",
+                "training_row_count": 24,
+            },
+            {
+                "name": "importing",
+                "hf_dataset_id": None,
+                "category": "sft",
+                "training_row_count": None,
+            },
+        ]
 
     def test_list_non_list_response_passthrough(self, api_key_client):
         payload = {"results": [{"name": "hf-ds", "downloads": 100}]}
@@ -72,17 +102,113 @@ class TestListDatasets:
 
     def test_list_orders_fields(self, api_key_client):
         api_key_client._request = MagicMock(
-            return_value=[
-                {
-                    "category": "sft",
-                    "name": "my-data",
-                    "hf_dataset_id": "org/ds",
-                },
+            side_effect=[
+                [{"category": "sft", "name": "my-data", "hf_dataset_id": "org/ds"}],
+                [{"name": "my-data", "training_row_count": 7}],
             ],
         )
         result = api_key_client.list_datasets()
-        assert list(result[0].keys()) == ["name", "hf_dataset_id", "category"]
+        assert list(result[0].keys()) == [
+            "name",
+            "hf_dataset_id",
+            "category",
+            "training_row_count",
+        ]
         assert result[0]["hf_dataset_id"] == "org/ds"
+
+    def test_list_keeps_the_newest_count_when_names_repeat(self, api_key_client):
+        # Arrange
+        api_key_client._request = MagicMock(
+            side_effect=[
+                [
+                    {"name": "counted", "category": "reasoning"},
+                    {"name": "importing", "category": "sft"},
+                ],
+                [
+                    {"name": "counted", "training_row_count": 24},
+                    {"name": "counted", "training_row_count": 3},
+                    {"name": "importing", "training_row_count": None},
+                    {"name": "importing", "training_row_count": 9},
+                ],
+            ],
+        )
+
+        # Act
+        result = api_key_client.list_datasets()
+
+        # Assert
+        assert [row["training_row_count"] for row in result] == [24, None]
+
+    def test_list_leaves_counts_unset_for_an_org_key(self):
+        # Arrange
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_secret",
+                external_user_id="partner-user-1",
+            )
+        client._request = MagicMock(
+            side_effect=[
+                [{"name": "shared", "category": "sft"}],
+                [{"name": "shared", "training_row_count": 99}],
+            ],
+        )
+
+        # Act
+        result = client.list_datasets()
+
+        # Assert
+        client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/datasets",
+            params=None,
+        )
+        assert result == [
+            {
+                "name": "shared",
+                "hf_dataset_id": None,
+                "category": "sft",
+                "training_row_count": None,
+            }
+        ]
+
+    def test_web_list_forbidden_still_returns_cli_rows(self, api_key_client):
+        # Arrange
+        api_key_client._request = MagicMock(
+            side_effect=[
+                [{"name": "counted", "category": "reasoning"}],
+                ArenaAPIError("Forbidden", status_code=403),
+            ],
+        )
+
+        # Act
+        result = api_key_client.list_datasets()
+
+        # Assert
+        assert [call.args for call in api_key_client._request.call_args_list] == [
+            ("GET", "/api/cli/v1/datasets"),
+            ("GET", "/api/datasets"),
+        ]
+        assert result == [
+            {
+                "name": "counted",
+                "hf_dataset_id": None,
+                "category": "reasoning",
+                "training_row_count": None,
+            }
+        ]
+
+    def test_web_list_server_error_propagates(self, api_key_client):
+        # Arrange
+        api_key_client._request = MagicMock(
+            side_effect=[
+                [{"name": "counted", "category": "reasoning"}],
+                ArenaAPIError("Server error", status_code=500),
+            ],
+        )
+
+        # Act / Assert
+        with pytest.raises(ArenaAPIError, match="Server error"):
+            api_key_client.list_datasets()
 
 
 class TestDatasetExists:
