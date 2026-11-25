@@ -31,6 +31,7 @@ from agilerl.arena.byoc.cluster_register import (
     ensure_resource_class,
     run_cluster_register,
 )
+from agilerl.arena.byoc.cluster_smoke import run_cluster_smoke
 from agilerl.arena.byoc.cluster_token import run_cluster_rotate_token
 from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
 from agilerl.arena.byoc.kube_target import (
@@ -1420,6 +1421,54 @@ def build_cluster_upgrade_command() -> click.Command:
             )
 
     return upgrade_cmd
+
+
+def build_cluster_smoke_command() -> click.Command:
+    """Build ``arena cluster smoke``."""
+
+    @click.command("smoke")
+    @click.option("--name", required=True, help="Registered cluster name.")
+    @kube_target_options
+    @click.option(
+        "--timeout",
+        type=click.FloatRange(min=0),
+        default=3600.0,
+        show_default=True,
+        help="Seconds to wait for the result.",
+    )
+    @_platform_option
+    @click.pass_obj
+    def smoke_cmd(
+        config: CommandConfig,
+        name: str,
+        kubeconfig: Path | None,
+        kube_context: str | None,
+        timeout: float,
+        platform: bool,
+    ) -> None:
+        """Check that a BYOC cluster can run jobs.
+
+        The cluster's agent installs a small train release as its own
+        ServiceAccount, the way it installs a job, waits until its Ray head is
+        Ready, and removes it. The release mounts no storage and asks for no
+        GPU. The command fails with the agent's reason when the release does
+        not come up.
+        """
+        cluster_name = name.strip()
+        if not cluster_name:
+            msg = "--name is required."
+            raise click.ClickException(msg)
+        with arena_client(config) as client:
+            run_cluster_smoke(
+                client,
+                name=cluster_name,
+                kubeconfig=kubeconfig,
+                context=kube_context,
+                platform=platform,
+                timeout=timeout,
+            )
+
+    return smoke_cmd
 
 
 def _cluster_provision_options(command: click.Command) -> click.Command:

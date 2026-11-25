@@ -500,6 +500,46 @@ class TestByocApi:
         with pytest.raises(ArenaAPIError, match="Unexpected cluster token rotation"):
             byoc_api.rotate_cluster_token("prod-cluster")
 
+    def test_request_cluster_smoke_sends_the_name_and_cluster_uid(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"id": 3}
+
+        result = byoc_api.request_cluster_smoke("prod-cluster", "uid-1")
+
+        invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert result == {"id": 3}
+        assert (invoke["method"], invoke["path"]) == (
+            "POST",
+            "/api/cli/v1/byoc/clusters/smoke",
+        )
+        assert body == {"name": "prod-cluster", "clusterUid": "uid-1"}
+
+    def test_cluster_smoke_reads_the_smoke_by_id(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"status": "Passed"}
+
+        result = byoc_api.cluster_smoke("prod-cluster", 3)
+
+        invoke, args = mock_client._invoke_manifest_command.call_args.args
+        assert result == {"status": "Passed"}
+        assert (invoke["method"], invoke["path"]) == (
+            "GET",
+            "/api/cli/v1/byoc/clusters/smoke",
+        )
+        assert args == {"name": "prod-cluster", "id": 3}
+
+    def test_smoke_calls_reject_a_non_object_response(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = ["unexpected"]
+
+        with pytest.raises(ArenaAPIError, match="Unexpected cluster smoke response"):
+            byoc_api.request_cluster_smoke("prod-cluster", "uid-1")
+        with pytest.raises(ArenaAPIError, match="Unexpected cluster smoke response"):
+            byoc_api.cluster_smoke("prod-cluster", 3)
+
 
 class TestByocApiStoredNebiusConfig:
     def test_returns_config_for_the_named_cluster(

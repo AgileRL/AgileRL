@@ -237,6 +237,28 @@ ROTATE_CLUSTER_TOKEN: ManifestInvoke = {
     ],
 }
 
+REQUEST_CLUSTER_SMOKE: ManifestInvoke = {
+    "method": "POST",
+    "path": "/api/cli/v1/byoc/clusters/smoke",
+    "responseKind": "json",
+    "params": [
+        {"name": "name", "in": "body", "type": "string", "required": True},
+        {"name": "byocScope", "in": "body", "type": "string", "required": False},
+        {"name": "clusterUid", "in": "body", "type": "string", "required": False},
+    ],
+}
+
+GET_CLUSTER_SMOKE: ManifestInvoke = {
+    "method": "GET",
+    "path": "/api/cli/v1/byoc/clusters/smoke",
+    "responseKind": "json",
+    "params": [
+        {"name": "name", "in": "query", "type": "string", "required": True},
+        {"name": "id", "in": "query", "type": "int", "required": True},
+        {"name": "byocScope", "in": "query", "type": "string", "required": False},
+    ],
+}
+
 INSTALL_CLUSTER_PACKAGE: ManifestInvoke = {
     "method": "POST",
     "path": "/api/cli/v1/byoc/clusters/install-package",
