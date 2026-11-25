@@ -256,7 +256,7 @@ class TestTrainingManifestDatasetRolloutRubric:
             algorithm={"name": "GRPO", "batch_size": 2}, environment=environment
         )
 
-        with pytest.raises(ValidationError, match="only OPD may leave it unset"):
+        with pytest.raises(ValidationError, match="only OPD may leave both unset"):
             TrainingManifest.model_validate(doc)
 
 

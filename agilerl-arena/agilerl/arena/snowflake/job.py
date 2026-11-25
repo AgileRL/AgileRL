@@ -18,12 +18,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import yaml
 
 from agilerl.arena.memory import cli as memory_cli
-from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
@@ -39,6 +38,7 @@ from agilerl.arena.snowflake.profile import (
     SCHEMA,
     GpuPool,
 )
+from agilerl.arena.snowflake.rewards import check_reward_file
 from agilerl.arena.snowflake.source import (
     QuerySource,
     SnowflakeRow,
@@ -222,15 +222,18 @@ def job_id_from_run_id(run_id: str) -> int:
     return int(match.group(2), 16)
 
 
-def load_manifest(path: Path) -> TrainingManifest:
+def load_manifest(
+    path: Path, context: dict[str, Any] | None = None
+) -> TrainingManifest:
     """Parse a training manifest.
 
     :param path: YAML file.
+    :param context: Validation context passed to the manifest validators.
     :return: The validated manifest.
     """
     with path.open(encoding="utf-8") as handle:
         document = yaml.safe_load(handle)
-    return TrainingManifest.model_validate(document)
+    return TrainingManifest.model_validate(document, context=context)
 
 
 def write_job_manifest(
@@ -282,37 +285,6 @@ def write_job_manifest(
     path = directory / "manifest.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return path
-
-
-def check_reward_file(
-    manifest: TrainingManifest, environment: LLMEnvSpec, has_reward_file: bool
-) -> None:
-    """Reject a ``--reward-file`` the manifest does not use, or a missing one it needs.
-
-    :param manifest: Parsed training manifest.
-    :param environment: The manifest's LLM environment.
-    :param has_reward_file: Whether ``--reward-file`` was passed.
-    :raises ValueError: A dataset-backed rollout has no reward file and is not
-        OPD with no rubric, or a non-rollout manifest has one.
-    """
-    rollout = environment.env_type == "rollout"
-    opd_without_rubric = (
-        isinstance(manifest.algorithm, OPDSpec) and environment.rubric_file_path is None
-    )
-    if (
-        rollout
-        and environment.dataset_backed_rollout
-        and not has_reward_file
-        and not opd_without_rubric
-    ):
-        msg = (
-            "A dataset-backed rollout needs --reward-file, unless it runs OPD "
-            "and names no rubric."
-        )
-        raise ValueError(msg)
-    if not rollout and has_reward_file:
-        msg = "--reward-file is only used by RL manifests."
-        raise ValueError(msg)
 
 
 def validate_manifest(

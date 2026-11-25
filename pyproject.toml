@@ -57,6 +57,8 @@ cpu = [
 cpu-llm = [
     "bitsandbytes==0.50.2; sys_platform == 'linux'",
     "datasets==5.1.0",
+    # Built-in json_schema reward.
+    "jsonschema>=4.0",
     "liger-kernel==0.8.5; sys_platform == 'linux'",
     "openenv>=0.4.1,<0.5",
     "peft==0.21.2",

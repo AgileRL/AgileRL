@@ -25,6 +25,7 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
+from agilerl.arena.models.rewards import SnowflakeFunctionReward
 from agilerl.data.jsonl import (
     is_local_jsonl_dataset,
     load_jsonl_dataset,
@@ -556,7 +557,23 @@ def _rubric_factory(spec: LLMEnvSpec) -> Callable[[], Rubric] | None:
     on concurrent threads, and a rubric carries scoring state. Every rubric
     shares the process's one client for ``spec.judge``. A group rubric alone gets
     ``EnvReward``, which keeps the env's reward and the transcript it reads.
+    A built-in ``spec.reward`` gets its own rubric.
+
+    :raises ValueError: ``spec.reward`` is ``snowflake_function``, which only
+        the Snowflake app runs.
     """
+    if isinstance(spec.reward, SnowflakeFunctionReward):
+        msg = (
+            "reward type snowflake_function runs only in the AgileRL Snowflake "
+            "app, which calls the function bound to its reward_function reference."
+        )
+        raise ValueError(msg)
+    if spec.reward is not None:
+        from agilerl.llm_envs.builtin_rewards import (  # optional extra: llm
+            BuiltinRewardRubric,
+        )
+
+        return partial(BuiltinRewardRubric, spec.reward)
     if spec.rubric_file_path is None:
         return None
     if spec.rubric_name is None:
@@ -613,8 +630,8 @@ def _make_dataset_rollout_factory(
         make_rubric = _rubric_factory(spec)
         if make_rubric is None or spec.prompt_template is None:
             msg = (
-                "rubric_file_path and prompt_template are required for "
-                "dataset-backed rollout environments"
+                "reward or rubric_file_path, and prompt_template, are required "
+                "for dataset-backed rollout environments"
             )
             raise ValueError(msg)
 

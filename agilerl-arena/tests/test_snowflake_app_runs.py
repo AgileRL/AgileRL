@@ -73,16 +73,18 @@ SFT = yaml.safe_dump(
 )
 MIMO = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
 REWARD = "def reward(completion, **row):\n    return 1.0\n"
+REWARD_REFS = "SELECT SYSTEM$GET_ALL_REFERENCES('REWARD_FUNCTION') AS REFS"
 
 
-def grpo_manifest(hub_id: str) -> str:
-    """A GRPO rollout over source rows that trains ``hub_id``."""
+def grpo_manifest(hub_id: str, reward: dict | None = None) -> str:
+    """A GRPO rollout over source rows that trains ``hub_id``, scored by ``reward``."""
     return yaml.safe_dump(
         {
             "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
             "environment": {
                 "env_type": "rollout",
                 "prompt_template": {"user_0": "{question}"},
+                "reward": reward or {"type": "exact_match"},
             },
             "network": {
                 "pretrained_model_name_or_path": hub_id,
@@ -472,19 +474,98 @@ class TestSubmit:
         )
         assert f"@app_state.runs/{run_id}/job.json" in session.file.puts
 
-    def test_stages_the_reward_file_beside_the_manifest(self) -> None:
-        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B")
+    def test_stages_a_built_in_reward_in_the_manifest(self) -> None:
+        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "numeric"})
         session = submit_session()
 
         text = submit(
-            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", REWARD, None, None
+            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
-        assert session.file.puts[f"@app_state.runs/{run_id}/reward.py"] == REWARD
+        assert f"@app_state.runs/{run_id}/reward.py" not in session.file.puts
         job = json.loads(session.file.puts[f"@app_state.runs/{run_id}/job.json"])
-        assert job["reward_file"] is True
-        assert job["source"]["sql"] == "SELECT * FROM reference('SOURCE_VIEW', 'gsm8k')"
+        assert job["reward_file"] is False
+        staged = yaml.safe_load(
+            session.file.puts[f"@app_state.runs/{run_id}/manifest.yaml"]
+        )
+        assert staged["environment"]["reward"] == {"type": "numeric"}
+        assert "rubric_file_path" not in staged["environment"]
+
+    def test_refuses_a_reward_file_and_names_both_reward_options(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(ValueError, match="reward_file is not available") as exc:
+            submit(
+                session,
+                grpo_manifest("Qwen/Qwen3.5-0.8B"),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                REWARD,
+                None,
+                None,
+            )
+
+        message = str(exc.value)
+        assert message.startswith("reward_file is not available in the Snowflake app.")
+        assert "built-in reward" in message
+        assert "reward_function reference" in message
+        assert message.endswith("Nothing was started.")
+        assert session.statements == []
+        assert session.file.puts == {}
+
+    def test_refuses_a_rubric_file_in_the_manifest(self) -> None:
+        document = yaml.safe_load(grpo_manifest("Qwen/Qwen3.5-0.8B"))
+        del document["environment"]["reward"]
+        document["environment"]["rubric_file_path"] = "/opt/rewards/reward.py"
+        session = submit_session()
+
+        with pytest.raises(
+            ValueError, match="rubric_file_path is not available in the Snowflake app"
+        ):
+            submit(
+                session,
+                yaml.safe_dump(document),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                None,
+                None,
+                None,
+            )
+
+        assert executes(session) == []
+        assert session.file.puts == {}
+
+    def test_refuses_a_function_reward_with_nothing_bound(self) -> None:
+        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "snowflake_function"})
+        session = submit_session()
+        session.routes.append(exact(REWARD_REFS, [Row(REFS="[]")]))
+
+        with pytest.raises(ValueError, match="no function is bound"):
+            submit(session, manifest, 1, "SOURCE_VIEW", "gsm8k", None, None, None, None)
+
+        assert session.statements == [REWARD_REFS]
+        assert session.file.puts == {}
+
+    def test_starts_a_function_reward_once_a_function_is_bound(self) -> None:
+        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "snowflake_function"})
+        session = submit_session()
+        session.routes.append(exact(REWARD_REFS, [Row(REFS='["ref-1"]')]))
+
+        text = submit(
+            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
+        )
+
+        run_id = text.splitlines()[0].removeprefix("run_id: ")
+        staged = yaml.safe_load(
+            session.file.puts[f"@app_state.runs/{run_id}/manifest.yaml"]
+        )
+        assert staged["environment"]["reward"] == {"type": "snowflake_function"}
+        assert len(executes(session)) == 3
 
     def test_returns_the_manifest_warnings(self) -> None:
         manifest = yaml.safe_dump(
@@ -752,7 +833,7 @@ class TestSubmit:
                 "SOURCE_VIEW",
                 "gsm8k",
                 None,
-                REWARD,
+                None,
                 None,
                 None,
             )
@@ -776,7 +857,7 @@ class TestSubmit:
                 "SOURCE_VIEW",
                 "gsm8k",
                 None,
-                REWARD,
+                None,
                 None,
                 None,
             )
@@ -795,9 +876,7 @@ class TestSubmit:
             ValueError,
             match=r"vllm_engine_args\.trust_remote_code is not available",
         ):
-            submit(
-                session, manifest, 1, "SOURCE_VIEW", "gsm8k", None, REWARD, None, None
-            )
+            submit(session, manifest, 1, "SOURCE_VIEW", "gsm8k", None, None, None, None)
 
         # Assert
         assert session.statements == []
@@ -814,7 +893,7 @@ class TestSubmit:
                 "SOURCE_VIEW",
                 "gsm8k",
                 None,
-                REWARD,
+                None,
                 None,
                 None,
             )

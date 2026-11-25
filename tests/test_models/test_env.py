@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import agilerl.llm_envs  # noqa: F401
+from agilerl.llm_envs.builtin_rewards import BuiltinRewardRubric
 from agilerl.llm_envs.rubrics import EnvReward, TurnAction, TurnObservation
 from agilerl.models.env import (
     BanditEnvSpec,
@@ -2114,7 +2115,7 @@ class TestDatasetBackedRolloutRewardFields:
         factory, _max_turns = make_rollout_env_factory(spec, mock_tokenizer)
         with pytest.raises(
             ValueError,
-            match="rubric_file_path and prompt_template are required",
+            match="reward or rubric_file_path, and prompt_template, are required",
         ):
             factory()
 
@@ -2408,3 +2409,33 @@ class TestRubricFactoryForAGroupRubric:
         # Assert
         assert make_rubric is not None
         assert isinstance(make_rubric(), EnvReward)
+
+
+class TestRubricFactoryForAReward:
+    def test_a_built_in_reward_gets_its_rubric(self) -> None:
+        # Arrange
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env",
+            max_turns=1,
+            reward={"type": "exact_match"},
+        )
+
+        # Act
+        make_rubric = _rubric_factory(spec)
+
+        # Assert
+        assert make_rubric is not None
+        assert isinstance(make_rubric(), BuiltinRewardRubric)
+        assert make_rubric() is not make_rubric()
+
+    def test_a_snowflake_function_reward_is_refused_outside_the_app(self) -> None:
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env",
+            max_turns=1,
+            reward={"type": "snowflake_function"},
+        )
+
+        with pytest.raises(ValueError, match="runs only in the AgileRL Snowflake app"):
+            _rubric_factory(spec)
