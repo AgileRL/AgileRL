@@ -511,6 +511,21 @@ class ByocApi:
             raise ArenaAPIError(msg)
         return result
 
+    def suggested_classes(self, cluster: str) -> dict[str, Any]:
+        """Return the classes Arena suggests from *cluster*'s node report.
+
+        :param cluster: Registered cluster name.
+        :type cluster: str
+        :returns: ``suggestions`` (class create bodies), ``classes_without_nodes``,
+            ``needs_agent_upgrade`` and ``reported_at``.
+        :rtype: dict[str, Any]
+        """
+        result = self._invoke(endpoints.SUGGESTED_CLASSES, {"name": cluster})
+        if not isinstance(result, dict):
+            msg = "Unexpected class suggestions response from Arena."
+            raise ArenaAPIError(msg)
+        return {str(key): value for key, value in result.items()}
+
     def update_class(
         self,
         name: str,

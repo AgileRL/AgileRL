@@ -124,6 +124,25 @@ class TestKubeTarget:
         assert kubectl.calls[0][1]["KUBECONFIG"] == str(provisioned.resolve())
         assert "--context" not in kubectl.calls[0][0]
 
+    def test_unnamed_cluster_uses_kubectls_default_and_logs_to_stderr(
+        self,
+        kubectl: FakeKubectl,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("KUBECONFIG", str(tmp_path / "default-kubeconfig"))
+        _set_tty(monkeypatch, False)
+
+        with kube_target(None, None, "ctx-b") as target:
+            assert target.context == "ctx-b"
+
+        assert kubectl.calls[0][1]["KUBECONFIG"] == str(tmp_path / "default-kubeconfig")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Using Kubernetes context 'ctx-b'" in captured.err
+
     def test_current_context_needs_a_flag_when_nobody_can_answer(
         self, kubectl: FakeKubectl, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

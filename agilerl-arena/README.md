@@ -150,6 +150,52 @@ Use the deployment URL from `arena agent list`.
 
 ## BYOC cluster registration
 
+### Connect a cluster in one step
+
+`arena cluster connect` checks the cluster, registers it, installs the agent
+and waits until the agent connects and sends its first health report:
+
+```bash
+arena cluster connect --name my-cluster --context my-context \
+  --storage-endpoint https://s3.corp.example.com \
+  --storage-bucket arena-prod \
+  --storage-secret-name corp-s3
+```
+
+It stops before changing anything in Arena or the cluster if a preflight check
+fails. Re-running it on a connected cluster keeps the agent token and upgrades
+the agent in place; `--rotate-token` issues a new token. It waits up to
+`--wait-timeout` seconds (default 900) for a heartbeat and a health report
+from after the new agent ReplicaSet is ready, prints that report, and exits
+non-zero if a health check is red. When Arena suggests resource classes for
+the cluster's GPU nodes, it prints them; create them from the cluster's page
+in Arena. If the agent has not reported nodes, or it needs an upgrade, it
+says so.
+Connect needs `kubectl` and `helm` on `PATH` and a kubeconfig that can
+create cluster-scoped RBAC, which in practice is cluster-admin. For options
+connect does not have (inference domain, ingress, bundled MinIO, a cluster
+spec), use `arena cluster register --install`.
+
+`arena cluster preflight --context my-context` runs the same checks on their
+own and changes nothing. `--json` prints the report as one JSON document, for
+the Arena web wizard. The exit code is non-zero when a check fails.
+
+| Check | Fails when | Warns when |
+|---|---|---|
+| `kubernetes_version` | the API server is older than 1.30 | |
+| `can_create_*` | you may not create namespaces, ClusterRoles, ClusterRoleBindings, ValidatingAdmissionPolicies or their bindings | kubectl could not answer |
+| `can_escalate_clusterroles`, `can_bind_clusterroles` | | you lack them (Helm then needs every right the agent's ClusterRoles grant) |
+| `node_inventory` | | no node has allocatable `nvidia.com/gpu`, or a GPU node has no `nvidia.com/gpu.product` label |
+| `storage_class` | `--ray-data-storage-class-name` names a missing StorageClass | there is no single default StorageClass |
+| `privileged_pods` | admission refuses a privileged pod (a server-side dry run) in the agent namespace, or in `default` before that namespace exists | the namespace cannot be read, you may not create pods there, or the dry run fails for another reason (the probe name is taken, a webhook cannot dry-run, a timeout) |
+| `one_agent` | another Arena agent is installed in the cluster | its Deployments cannot be listed |
+
+Arena runs one agent per Kubernetes cluster. With `--name` of a cluster Arena
+already has in this Kubernetes cluster, its own agent does not count as
+another one.
+
+### Register
+
 Register a Kubernetes cluster against Arena (enterprise BYOC) and
 write Helm values files locally. Re-running with the same cluster name updates
 the existing registration (upsert) instead of creating a duplicate, and keeps
@@ -173,8 +219,8 @@ arena cluster register --name my-cluster \
 `--agent-namespace` (default `arena`) is the namespace for the agent Helm
 release. With `--install`, the release is named after the cluster (`--name`),
 unless `arena-byoc-agent` is already installed in that namespace. The chart
-names its ClusterRoles after the release, so per-cluster release names let two
-Arena agents share one Kubernetes cluster without colliding.
+names its ClusterRoles after the release, so two releases would not collide,
+but Arena runs one agent per Kubernetes cluster and `connect` refuses a second.
 
 Without `--no-write`, the CLI writes into `--output-dir` (default
 `./arena-cluster-<name>`):
@@ -221,8 +267,9 @@ until its Ray head is Ready, removes it, and the command prints whether that
 passed or the reason it failed. The release asks for no GPU and mounts no
 storage. `--timeout` sets how long to wait (default 3600 seconds).
 
-Every command that talks to Kubernetes (`register --install`,
-`register --install-storage`, `unregister`, `rotate-token`, `upgrade`, `smoke`) takes
+Every command that talks to Kubernetes (`preflight`, `connect`,
+`register --install`, `register --install-storage`, `unregister`,
+`rotate-token`, `upgrade`, `smoke`) takes
 `--kubeconfig` and `--context`. Without `--context` it uses the current context
 of `--kubeconfig`, of `./arena-cluster-<name>/kubeconfig`, or of kubectl's own
 default (`KUBECONFIG`, `~/.kube/config`). That last one is used only after you
@@ -234,9 +281,9 @@ falling back to `arena-byoc-agent`.
 Arena records each cluster's identity, the UID of its `kube-system` namespace.
 Registering with `--install` sends it, and the agent reports it on every
 heartbeat. A cluster registered before Arena kept identities takes the first one
-reported. After that, `rotate-token`, `upgrade` and `unregister` stop before
-they change anything when the context points at a different Kubernetes cluster,
-and `smoke` starts nothing.
+reported. After that, `connect`, `rotate-token`, `upgrade` and `unregister`
+stop before they change anything when the context points at a different
+Kubernetes cluster, and `smoke` starts nothing.
 
 `unregister`, `rotate-token`, `upgrade` and `smoke` look the cluster up in your active
 org. `--platform` targets AgileRL's own platform clusters instead, which needs
