@@ -264,15 +264,27 @@ estimate and picks the cheapest GPUs that fit. Asynchronous GRPO needs at least 
 trains the adapter and one runs the vLLM rollout engine. A 0.8B model fits on two single-GPU
 nodes, or on one 8-GPU node.
 
-LLM training runs on the GPU types ``arena resources list --algorithm GRPO`` shows, with the GPU
-counts a GRPO run trains on. Arena cloud L4 and A100 GPUs are
-not available for LLM training. To choose the GPUs yourself, pass both flags, for example
-``--gpu-type h100-80 --num-gpus 8``, and check the fit first:
+To choose the GPUs yourself, list the GPU types a GRPO run trains on. The ``--num-gpus`` column
+shows the GPU counts each type takes:
 
 .. code-block:: bash
 
    arena resources list --algorithm GRPO
-   arena memory estimate gsm8k_grpo.yaml --gpu h100-80 --num-gpus 8
+
+Then check the fit and pass both flags. A small model such as ``Qwen/Qwen3.5-0.8B`` trains on two
+L4 GPUs:
+
+.. code-block:: bash
+
+   arena memory estimate gsm8k_grpo.yaml --gpu l4 --num-gpus 2
+   arena experiments submit gsm8k_grpo.yaml \
+       --reward-file reward.py \
+       --project 'GSM8K Tutorial' \
+       --experiment-name gsm8k-grpo-v1 \
+       --gpu-type l4 --num-gpus 2
+
+Larger models need more memory per GPU. Run ``arena memory estimate`` with another GPU type from the
+list, such as ``a100-80`` or ``h100-80``, before you submit.
 
 Monitor Training
 ~~~~~~~~~~~~~~~~
