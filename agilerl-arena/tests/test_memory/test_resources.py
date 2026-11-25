@@ -21,6 +21,7 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
 from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
+from agilerl.arena.memory.resolve.lengths import ExpectedLengths
 from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.resolve.run import (
     SearchCache,
@@ -173,9 +174,11 @@ def priced(monkeypatch):
     calls = []
     real = resources_module._price
 
-    def spy(tier, manifest, model, build_config, layout, num_nodes, cache):
+    def spy(tier, manifest, model, build_config, layout, num_nodes, cache, lengths):
         calls.append((tier["name"], num_nodes))
-        return real(tier, manifest, model, build_config, layout, num_nodes, cache)
+        return real(
+            tier, manifest, model, build_config, layout, num_nodes, cache, lengths
+        )
 
     monkeypatch.setattr(resources_module, "_price", spy)
     return calls
@@ -1386,7 +1389,7 @@ class TestCheckTiers:
             )
         )
         doc["algorithm"]["fsdp"] = {"ep": 5}
-        doc["algorithm"]["batch_size"] = 40
+        doc["algorithm"]["batch_size"] = 120
         manifest = TrainingManifest.model_validate(doc)
         tiers = [
             {**tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 1.0), "node_counts": [2]}
@@ -1398,8 +1401,8 @@ class TestCheckTiers:
         # Assert
         assert check.fits
         assert check.layout == ParallelLayout(ep=5)
-        assert check.trainers == 5
-        assert check.engines == 7
+        assert check.trainers == 10
+        assert check.engines == 6
 
     def test_an_open_count_prices_searched_groups_on_one_node(
         self, monkeypatch, built_split
@@ -1491,6 +1494,175 @@ class TestCheckTiers:
         assert check.trainers == 1
         assert check.engines == 1
         assert check.engine_tensor_parallel == 1
+
+    @pytest.mark.parametrize("batch_size", [2, 64])
+    def test_searched_split_steps_within_its_generation_range(self, batch_size):
+        # Arrange
+        doc = unset_split(MANIFEST)
+        doc["algorithm"]["batch_size"] = batch_size
+        manifest = TrainingManifest.model_validate(doc)
+        lengths = ExpectedLengths(
+            prompt_tokens=100,
+            generated_tokens_per_turn=250,
+            turns=1,
+            generated_tokens_per_turn_low=100,
+            generated_tokens_per_turn_high=400,
+        )
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)],
+            manifest,
+            tiny_model(),
+            builder(),
+            expected_lengths=lengths,
+        )
+
+        # Assert
+        assert check.fits
+        assert check.step_seconds is not None
+        assert check.step_seconds_low is not None
+        assert check.step_seconds_high is not None
+        assert check.step_seconds_low <= check.step_seconds <= check.step_seconds_high
+
+    def test_default_lengths_give_one_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)], manifest, tiny_model(), builder()
+        )
+
+        # Assert
+        assert check.step_seconds is not None
+        assert check.step_seconds_low == check.step_seconds == check.step_seconds_high
+
+    def test_multi_turn_split_steps_within_its_generation_range(self):
+        # Arrange: a Sudoku-style env on Qwen2.5-0.5B.
+        doc = unset_split(MANIFEST)
+        doc["algorithm"]["batch_size"] = 16
+        doc["algorithm"]["max_output_tokens"] = 256
+        doc["environment"] = {
+            "env_type": "rollout",
+            "factory": "gem:make",
+            "entrypoint": "game:Sudoku-v0-hard",
+            "max_turns": 20,
+            "max_reward": 1.0,
+        }
+        doc["network"] = {**doc["network"], "max_context_length": 4096}
+        manifest = TrainingManifest.model_validate(doc)
+        lengths = ExpectedLengths(
+            prompt_tokens=600,
+            generated_tokens_per_turn=150,
+            turns=4,
+            generated_tokens_per_turn_low=60,
+            generated_tokens_per_turn_high=220,
+        )
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)],
+            manifest,
+            tiny_model(),
+            builder(),
+            expected_lengths=lengths,
+        )
+
+        # Assert
+        assert check.fits
+        assert check.step_seconds is not None
+        assert check.step_seconds_low is not None
+        assert check.step_seconds_high is not None
+        assert check.step_seconds_low <= check.step_seconds <= check.step_seconds_high
+        assert check.step_seconds_low < check.step_seconds_high
+
+    def test_expected_lengths_price_one_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
+        lengths = ExpectedLengths(
+            prompt_tokens=200, generated_tokens_per_turn=250, turns=1
+        )
+
+        # Act
+        (measured,) = check_tiers(
+            tiers, manifest, tiny_model(), builder(), expected_lengths=lengths
+        )
+        (default,) = check_tiers(tiers, manifest, tiny_model(), builder())
+
+        # Assert
+        assert measured.step_seconds is not None
+        assert measured.step_seconds_low == measured.step_seconds
+        assert measured.step_seconds_high == measured.step_seconds
+        assert measured.step_seconds != default.step_seconds
+
+    def test_range_at_the_mean_reprices_the_searched_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        device = lookup_gpu("NVIDIA L4").device_spec()
+        sync_link = tier_sync_link(4, device.gpus_per_node)
+        lengths = ExpectedLengths(
+            prompt_tokens=200, generated_tokens_per_turn=250, turns=1
+        )
+        laid_out, plan = split_manifest(
+            manifest, 4, device, sync_link=sync_link, expected_lengths=lengths
+        )
+        at_mean = lengths.model_copy(
+            update={
+                "generated_tokens_per_turn_low": 250,
+                "generated_tokens_per_turn_high": 250,
+            }
+        )
+
+        # Act
+        low, high = resources_module._step_range(
+            laid_out,
+            plan,
+            catalog_model(laid_out.algorithm),
+            device,
+            sync_link,
+            at_mean,
+        )
+
+        # Assert
+        assert plan.split is not None
+        assert low == pytest.approx(plan.split.step_seconds)
+        assert high == pytest.approx(plan.split.step_seconds)
+
+    def test_a_plan_without_a_split_has_no_step_range(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        device = lookup_gpu("NVIDIA L4").device_spec()
+        sync_link = tier_sync_link(4, device.gpus_per_node)
+        laid_out, plan = split_manifest(manifest, 4, device, sync_link=sync_link)
+
+        # Act
+        step_range = resources_module._step_range(
+            laid_out,
+            dataclasses.replace(plan, split=None),
+            catalog_model(laid_out.algorithm),
+            device,
+            sync_link,
+            None,
+        )
+
+        # Assert
+        assert step_range is None
+
+    def test_kept_counts_have_no_step_range(self):
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)],
+            TrainingManifest.model_validate(MANIFEST),
+            tiny_model(),
+            builder(),
+        )
+
+        # Assert
+        assert check.step_seconds is None
+        assert check.step_seconds_low is None
+        assert check.step_seconds_high is None
 
     def test_a_shared_search_cache_gives_the_same_verdicts(self):
         # Arrange
@@ -1998,7 +2170,9 @@ def node_tier(name: str, node_gpus: int, price: float) -> dict:
 def record_price(tried, fits):
     """``_price`` that records ``(tier, layout)`` and fits where ``fits`` says so."""
 
-    def price(tier, _manifest, _model, _build_config, layout, num_nodes, _cache):
+    def price(
+        tier, _manifest, _model, _build_config, layout, num_nodes, _cache, _lengths
+    ):
         tried.append((tier["name"], layout))
         ok = fits(tier["name"], layout)
         return resources_module.TierCheck(

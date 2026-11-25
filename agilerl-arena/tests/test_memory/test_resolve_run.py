@@ -1184,9 +1184,12 @@ class TestKeptSplitMemory:
         assert merged is True
 
     def test_learn_bound_counts_sync_the_adapter(self) -> None:
-        # Arrange: countdown at 4T4E on H100 is learn-bound; a 3 s merged sync
-        # over RDMA blocks the trainer and pauses the engines.
-        manifest = _kept_4t4e(_countdown_manifest(64))
+        # Arrange: countdown with 512-token answers at 4T4E on H100 is
+        # learn-bound; a 3 s merged sync over RDMA blocks the trainer and
+        # pauses the engines.
+        raw = _countdown_manifest(64)
+        raw["algorithm"]["max_output_tokens"] = 512
+        manifest = _kept_4t4e(raw)
 
         # Act
         merged = _kept_sync_over(manifest, "H100-80", "rdma")
@@ -1360,8 +1363,11 @@ class TestKeptSplitMemory:
 
 class TestKeptWeightSyncMode:
     def test_takes_the_mode_the_kept_plan_syncs(self) -> None:
-        # Arrange: countdown at 4T4E on H100 is learn-bound over RDMA.
-        manifest = _kept_4t4e(_countdown_manifest(64))
+        # Arrange: countdown with 512-token answers at 4T4E on H100 is
+        # learn-bound over RDMA.
+        raw = _countdown_manifest(64)
+        raw["algorithm"]["max_output_tokens"] = 512
+        manifest = _kept_4t4e(raw)
 
         # Act
         mode = kept_weight_sync_mode(
@@ -1440,6 +1446,7 @@ class TestResolveRunMemoryWeightSync:
         # Assert
         assert plan.merged_lora_sync is True
 
+    @pytest.mark.usefixtures("cap_filling_turns")
     def test_rdma_countdown_keeps_merged_weights(self) -> None:
         # Act: merged generation on H100 countdown saves more than the
         # 100 Gb/s RDMA sync of the checkpoint costs.
@@ -1492,8 +1499,9 @@ class TestResolveRunMemoryWeightSync:
     def test_kept_counts_price_the_sync_mode(
         self, sync_link: SyncLink, merged: bool
     ) -> None:
-        # Arrange: countdown at 4T4E on H100 is learn-bound.
+        # Arrange: countdown with 512-token answers at 4T4E on H100 is learn-bound.
         raw = _countdown_manifest(64)
+        raw["algorithm"]["max_output_tokens"] = 512
         raw["training"]["training_gpus_per_agent"] = 4
         raw["training"]["rollout_engines_per_agent"] = 4
         raw["algorithm"]["vllm_config"] = {"tensor_parallel_size": 1}
@@ -1736,11 +1744,11 @@ class TestQwen35NineBWeightSync:
         assert plan.training.fsdp is not None
         assert plan.training.fsdp.tp == 2
         assert {split.sync_transport for split in plan.quotes} == {"nixl"}
-        assert nixl.learn_seconds == pytest.approx(0.471, abs=0.01)
-        assert nixl.generation_seconds == pytest.approx(0.232, abs=0.01)
+        assert nixl.learn_seconds == pytest.approx(0.160, abs=0.01)
+        assert nixl.generation_seconds == pytest.approx(0.180, abs=0.01)
         assert nixl.sync_seconds == pytest.approx(0.726, abs=0.01)
-        assert adapter.learn_seconds == pytest.approx(0.471, abs=0.01)
-        assert adapter.generation_seconds == pytest.approx(0.470, abs=0.01)
+        assert adapter.learn_seconds == pytest.approx(0.160, abs=0.01)
+        assert adapter.generation_seconds == pytest.approx(0.347, abs=0.01)
         assert adapter.sync_seconds == pytest.approx(0.359, abs=0.005)
         assert adapter.synced_step_seconds < nixl.synced_step_seconds
         assert plan.merged_lora_sync is False
