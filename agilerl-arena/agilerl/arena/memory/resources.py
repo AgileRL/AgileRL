@@ -55,6 +55,7 @@ from agilerl.arena.memory.resolve.split import (
     price_gpu_split,
     split_workload_from_manifest,
 )
+from agilerl.arena.memory.resolve.supervised import supervised_step_seconds
 from agilerl.arena.memory.resolve.weight_sync import SyncLink
 from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
@@ -508,8 +509,8 @@ class SyncPlan:
 
     laid_out: TrainingManifest
     mode: WeightSyncMode
-    # The searched split's predicted step and its :func:`_step_range`;
-    # ``None`` when the counts were kept.
+    # The searched split's predicted step and its :func:`_step_range`; with
+    # kept counts, SFT and DPO's :func:`supervised_step_seconds` and no range.
     step_seconds: float | None = None
     step_range: tuple[float, float] | None = None
     # Why no split fits, and that miss's kind; ``None`` when one did or none
@@ -572,7 +573,11 @@ def _weight_sync_plan(
         expected_lengths,
     )
     return SyncPlan(
-        placed, mode, split_reason=split_reason, split_failure=split_failure
+        placed,
+        mode,
+        step_seconds=supervised_step_seconds(placed, model, device),
+        split_reason=split_reason,
+        split_failure=split_failure,
     )
 
 

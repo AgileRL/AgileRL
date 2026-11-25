@@ -353,9 +353,32 @@ def _learn_gpu_seconds(
     model: ModelSpec, device: DeviceSpec, peak_flops: float, workload: SplitWorkload
 ) -> float:
     """GPU-seconds one learn step costs, summed over trainer ranks."""
+    return learn_gpu_seconds(
+        model,
+        device,
+        peak_flops,
+        workload.batch_size * workload.group_size,
+        workload.row_tokens,
+        workload.learn_passes,
+    )
+
+
+def learn_gpu_seconds(
+    model: ModelSpec,
+    device: DeviceSpec,
+    peak_flops: float,
+    rows: int,
+    tokens: int,
+    learn_passes: int,
+) -> float:
+    """GPU-seconds ``learn_passes`` forward-equivalents over ``rows`` rows of ``tokens`` cost.
+
+    :param rows: Rows one learn step trains.
+    :param tokens: Tokens in one row.
+    :param learn_passes: Forward-equivalents per trained token.
+    :return: GPU-seconds, summed over trainer ranks.
+    """
     arch = model.arch
-    rows = workload.batch_size * workload.group_size
-    tokens = workload.row_tokens
     matmul_efficiency = (
         MOE_LEARN_MATMUL_EFFICIENCY if arch.is_moe else LEARN_MATMUL_EFFICIENCY
     )
@@ -369,7 +392,7 @@ def _learn_gpu_seconds(
         / LEARN_ATTENTION_EFFICIENCY
     )
     speed = peak_flops * learn_costs(device).peak_speed
-    return rows * workload.learn_passes * (matmul + attention) / speed
+    return rows * learn_passes * (matmul + attention) / speed
 
 
 def _engine_weight_bytes(

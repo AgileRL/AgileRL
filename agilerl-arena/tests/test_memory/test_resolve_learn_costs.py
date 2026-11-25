@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Learn-time constants are looked up by the training GPU's compute capability."""
+"""Learn-time constants are looked up by the training GPU's name, then its compute capability."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import pytest
 
 from agilerl.arena.memory.manifest import lookup_gpu
 from agilerl.arena.memory.resolve.learn_costs import (
+    L4_LEARN_COSTS,
     SM80_LEARN_COSTS,
     SM90_LEARN_COSTS,
     learn_costs,
@@ -44,8 +45,14 @@ class TestLearnCosts:
         assert device.compute_capability >= (9, 0)
         assert learn_costs(device) == SM90_LEARN_COSTS
 
-    def test_unmeasured_capability_uses_a100_entry(self) -> None:
+    def test_the_l4_gets_its_measured_learn_speed(self) -> None:
         device = lookup_gpu("NVIDIA L4").device_spec()
+
+        assert learn_costs(device) == L4_LEARN_COSTS
+        assert learn_costs(device).peak_speed > SM80_LEARN_COSTS.peak_speed
+
+    def test_unmeasured_capability_uses_a100_entry(self) -> None:
+        device = lookup_gpu("NVIDIA L40S").device_spec()
 
         assert device.compute_capability == (8, 9)
         assert learn_costs(device) == SM80_LEARN_COSTS
