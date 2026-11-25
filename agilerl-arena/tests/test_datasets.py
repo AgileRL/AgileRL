@@ -77,12 +77,20 @@ class TestListDatasets:
                     "category": "sft",
                     "name": "my-data",
                     "hf_dataset_id": "org/ds",
+                    "training_row_count": 1200,
                 },
             ],
         )
         result = api_key_client.list_datasets()
-        assert list(result[0].keys()) == ["name", "hf_dataset_id", "category"]
+        api_key_client._request.assert_called_once()
+        assert list(result[0].keys()) == [
+            "name",
+            "hf_dataset_id",
+            "category",
+            "training_row_count",
+        ]
         assert result[0]["hf_dataset_id"] == "org/ds"
+        assert result[0]["training_row_count"] == 1200
 
 
 class TestDatasetExists:

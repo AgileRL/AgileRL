@@ -1675,13 +1675,57 @@ class TestExperimentSubmitPricePreview:
         mock_client.submit_experiment.assert_not_called()
 
 
+DATASETS = [
+    {
+        "name": "my-ds",
+        "hf_dataset_id": None,
+        "category": "sft",
+        "training_row_count": 24,
+    }
+]
+
+
 class TestDatasetsListCommand:
-    def test_list_registered(self, runner, mock_client):
-        mock_client.list_datasets.return_value = [{"name": "my-ds", "category": "sft"}]
+    def test_list_registered_shows_rows(self, runner, mock_client):
+        mock_client.list_datasets.return_value = DATASETS
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["datasets", "list"])
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         mock_client.list_datasets.assert_called_once_with(search=None)
+        _assert_table_columns(
+            result.output, ["name", "hf_dataset_id", "category", "rows"]
+        )
+        assert "training_row_count" not in result.output
+        assert "24" in result.output
+
+    @pytest.mark.parametrize(
+        ("dataset", "cell"),
+        [
+            ({"training_row_count": 0}, "0"),
+            ({"training_row_count": None}, ""),
+            ({}, ""),
+        ],
+        ids=["zero", "not-counted", "older-server"],
+    )
+    def test_list_rows_cell(self, runner, mock_client, dataset, cell):
+        mock_client.list_datasets.return_value = [
+            {"name": "my-ds", "hf_dataset_id": None, "category": "sft"} | dataset
+        ]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["datasets", "list"])
+        assert result.exit_code == 0, result.output
+        _assert_table_columns(
+            result.output, ["name", "hf_dataset_id", "category", "rows"]
+        )
+        data_row = next(line for line in result.output.splitlines() if "my-ds" in line)
+        assert data_row.split("│")[4].strip() == cell
+
+    def test_list_json_keeps_training_row_count(self, runner, mock_client):
+        mock_client.list_datasets.return_value = DATASETS
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["--json", "datasets", "list"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == DATASETS
 
     def test_search_strips_descriptions_and_sorts(self, runner, mock_client):
         mock_client.list_datasets.return_value = [
