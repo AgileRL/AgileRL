@@ -32,6 +32,7 @@ from agilerl.arena.memory.resolve.split import (
     NGRAM_GENERATION_SPEEDUP,
     SINGLE_TURN_DECODE_SHARE,
     SINGLE_TURN_PROMPT_FILL,
+    SINGLE_TURN_QUOTED_TURN_TOKENS,
     SINGLE_TURN_REASONING_DECODE_SHARE,
     TIED_DROP_GENERATION_FACTOR,
     GpuSplit,
@@ -93,6 +94,15 @@ def _countdown_manifest(batch_size: int = 60) -> dict:
         # The throughput fits trained every generated group.
         "replay_buffer": {"kind": "llm", "drop_uninformative_groups": False},
     }
+
+
+def _long_row_manifest(max_output_tokens: int | None = None) -> dict:
+    """Countdown on a 262144-token row, with ``max_output_tokens`` unset unless given."""
+    raw = _countdown_manifest(16)
+    raw["algorithm"]["max_output_tokens"] = max_output_tokens
+    raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-0.8B"
+    raw["network"]["max_context_length"] = 262144
+    return raw
 
 
 def _sudoku_manifest() -> dict:
@@ -824,6 +834,62 @@ class TestChooseGpuSplit:
 
 
 class TestPriceGpuSplit:
+    def test_quoted_lengths_change_only_the_quoted_step(self) -> None:
+        # Arrange
+        manifest = _manifest(_long_row_manifest())
+        model = catalog_model(manifest.algorithm)
+        workload = split_workload_from_manifest(manifest)
+        sized = workload.model_copy(update={"quoted_decode_tokens": None})
+
+        def price(timed: SplitWorkload) -> GpuSplit | None:
+            return price_gpu_split(
+                model,
+                _device("H100-80"),
+                timed,
+                2,
+                2,
+                1,
+                lambda _: TrainerCost(1.0, False),
+            )
+
+        # Act
+        split, sized_split, quoted_split = (
+            price(timed) for timed in (workload, sized, workload.quoted())
+        )
+
+        # Assert
+        assert split is not None
+        assert sized_split is not None
+        assert quoted_split is not None
+        assert split.model_copy(update={"quoted_step": None}) == sized_split
+        assert sized_split.quoted_step_seconds == sized_split.step_seconds
+        assert split.quoted_step_seconds == pytest.approx(quoted_split.step_seconds)
+        assert split.quoted_step_seconds < split.step_seconds / 10
+
+    def test_quoted_lengths_keep_the_chosen_split(self) -> None:
+        # Arrange
+        manifest = _manifest(_long_row_manifest())
+        model = catalog_model(manifest.algorithm)
+        workload = split_workload_from_manifest(manifest)
+        sized = workload.model_copy(update={"quoted_decode_tokens": None})
+
+        def chosen(timed: SplitWorkload) -> GpuSplit | None:
+            return choose_gpu_split(
+                model,
+                _device("H100-80"),
+                timed,
+                8,
+                1,
+                lambda trainers: TrainerCost(1 + trainers / 10, False),
+            )
+
+        # Act
+        split, sized_split = chosen(workload), chosen(sized)
+
+        # Assert
+        assert split is not None
+        assert split.model_copy(update={"quoted_step": None}) == sized_split
+
     def test_nccl_reshard_on_a_pcie_gpu_raises(self) -> None:
         # Arrange
         model = catalog_model(_manifest(_countdown_manifest()).algorithm)
@@ -1414,6 +1480,45 @@ class TestSplitWorkloadFromManifest:
 
         # Assert
         assert workload.decode_tokens == math.ceil(SINGLE_TURN_DECODE_SHARE * 1024)
+
+    def test_single_turn_without_an_output_cap_is_quoted_shorter(self) -> None:
+        # Act
+        workload = split_workload_from_manifest(
+            TrainingManifest.model_validate(_long_row_manifest())
+        )
+
+        # Assert: sized at the whole row, quoted at the quoted turn.
+        assert workload.decode_tokens == math.ceil(
+            SINGLE_TURN_REASONING_DECODE_SHARE * 262144
+        )
+        assert workload.quoted_decode_tokens == math.ceil(
+            SINGLE_TURN_REASONING_DECODE_SHARE * SINGLE_TURN_QUOTED_TURN_TOKENS
+        )
+        quoted = workload.quoted()
+        assert quoted.decode_tokens == workload.quoted_decode_tokens
+        assert (
+            quoted.row_tokens - quoted.decode_tokens
+            == workload.row_tokens - workload.decode_tokens
+        )
+
+    @pytest.mark.parametrize(
+        ("max_output_tokens", "max_context_length"),
+        [(32768, 262144), (None, 8192)],
+        ids=["output-cap-set", "row-within-quoted-turn"],
+    )
+    def test_single_turn_is_quoted_as_sized(
+        self, max_output_tokens: int | None, max_context_length: int
+    ) -> None:
+        # Arrange
+        raw = _long_row_manifest(max_output_tokens)
+        raw["network"]["max_context_length"] = max_context_length
+
+        # Act
+        workload = split_workload_from_manifest(TrainingManifest.model_validate(raw))
+
+        # Assert
+        assert workload.quoted_decode_tokens is None
+        assert workload.quoted() is workload
 
     def test_multi_turn_spreads_the_row_over_several_turns(self) -> None:
         # Act

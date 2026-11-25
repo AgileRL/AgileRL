@@ -101,7 +101,8 @@ class TierCheck:
     engine_tensor_parallel: int | None = None
     # GPUs per separate OPD teacher engine; ``None`` without one.
     teacher_engine_tensor_parallel: int | None = None
-    # Predicted step, the slower of learn and generation. ``None`` when the
+    # Predicted step a price quote counts: the slower of learn and generation
+    # at the lengths completions are expected to reach. ``None`` when the
     # split was not searched.
     step_seconds: float | None = None
     failure: FailureKind | None = None
@@ -461,7 +462,9 @@ def _weight_sync_plan(
             split_reason = str(err)
             split_failure = FailureKind.OTHER
         else:
-            step_seconds = None if plan.split is None else plan.split.step_seconds
+            step_seconds = (
+                None if plan.split is None else plan.split.quoted_step_seconds
+            )
             mode = WeightSyncMode(plan.merged_lora_sync, plan.weight_sync_transport)
             return laid_out, mode, step_seconds, None, None
     mode = kept_weight_sync_mode(

@@ -122,6 +122,13 @@ MULTI_TURN_STRAGGLER_FACTOR = 1.22
 # countdown with Qwen3-4B thinking, 0.28-0.44 with Granite MoEs, which do not.
 SINGLE_TURN_REASONING_DECODE_SHARE = 0.85
 SINGLE_TURN_DECODE_SHARE = 0.35
+# Turn cap a price quote times a single-turn completion at when
+# max_output_tokens is unset and the row is longer. Qwen3.5-2B GRPO on
+# 4096-token rows decodes a mean of 3.1-3.3k tokens with thinking and 0.4-1.6k
+# without, far short of a long context; this leaves room for longer reasoning
+# and for the slowest completion a cycle waits on. Memory is still sized at
+# the row.
+SINGLE_TURN_QUOTED_TURN_TOKENS = 16384
 # Share of the row budget past max_output_tokens a single-turn prompt fills:
 # 0.20-0.22 on countdown.
 SINGLE_TURN_PROMPT_FILL = 0.2
@@ -174,6 +181,9 @@ class SplitWorkload(BaseModel):
     row_tokens: int
     decode_tokens: int
     turns: int
+    # Decoded tokens per row a price quote's step is timed at; ``None`` times
+    # it at ``decode_tokens``.
+    quoted_decode_tokens: int | None = None
     # Forward-equivalents per trained token, from :func:`learn_forward_passes`.
     learn_passes: int
     # Passes over each rank's rows in one learn step.
@@ -222,6 +232,19 @@ class SplitWorkload(BaseModel):
     max_num_batched_tokens: int | None = None
     # GPUs each engine's separate teacher engine adds; 0 without one.
     teacher_engine_gpus: int = 0
+
+    def quoted(self) -> SplitWorkload:
+        """This workload at the decode length a price quote's step is timed at."""
+        if self.quoted_decode_tokens is None:
+            return self
+        prompt_tokens = self.row_tokens - self.decode_tokens
+        return self.model_copy(
+            update={
+                "row_tokens": prompt_tokens + self.quoted_decode_tokens,
+                "decode_tokens": self.quoted_decode_tokens,
+                "quoted_decode_tokens": None,
+            }
+        )
 
 
 class TrainerCost(NamedTuple):
@@ -276,6 +299,9 @@ class GpuSplit(BaseModel):
     merged_lora_sync: bool = False
     # Transport this split's sync time was priced with.
     sync_transport: WeightSyncTransport = "nixl"
+    # :attr:`step_seconds` at :meth:`SplitWorkload.quoted` lengths; ``None``
+    # when they are the sized lengths.
+    quoted_step: float | None = None
 
     @property
     def gpus(self) -> int:
@@ -299,6 +325,11 @@ class GpuSplit(BaseModel):
         if self.merged_lora_sync:
             return self.step_seconds + self.sync_seconds
         return max(self.learn_seconds + self.sync_seconds, self.generation_seconds)
+
+    @property
+    def quoted_step_seconds(self) -> float:
+        """The step a price quote counts, at the lengths completions are expected to reach."""
+        return self.step_seconds if self.quoted_step is None else self.quoted_step
 
 
 def active_matmul_params(arch: ModelArch) -> int:
@@ -941,6 +972,8 @@ def _split_pricer(
     Engine residents and learn GPU-seconds do not depend on the counts, so
     they are computed once here. Each trainer count's cost, each count's
     sync and each cycle's generation seconds are computed once per pricer.
+    A workload with quoted lengths also times each split at them, at the
+    same counts and engine step.
 
     :raises ValueError: When the device has no peak bf16 or bandwidth figure.
     """
@@ -960,10 +993,40 @@ def _split_pricer(
     }
     fallback = next(iter(residents))
     learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, workload)
+    quoted = workload.quoted()
+    quoted_residents = (
+        residents
+        if quoted is workload
+        else {
+            step: resident_sequences(model, device, quoted, engine_width, step)
+            for step in residents
+        }
+    )
+    quoted_learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, quoted)
     trainer_costs: dict[int, TrainerCost | None] = {}
     syncs: dict[tuple[int, int], float] = {}
-    # (engines, rollout_batch_size) -> (step, seconds of one cycle)
-    cycles: dict[tuple[int, int], tuple[int, float]] = {}
+    # (engines, rollout_batch_size) -> (step, seconds of one cycle, quoted seconds)
+    cycles: dict[tuple[int, int], tuple[int, float, float]] = {}
+
+    def generation_seconds(
+        timed: SplitWorkload,
+        engines: int,
+        rollout_batch_size: int,
+        resident: int,
+        step: int,
+    ) -> float:
+        return _generation_seconds(
+            model,
+            device,
+            peak_flops,
+            bandwidth,
+            timed,
+            engines,
+            engine_width,
+            rollout_batch_size,
+            resident,
+            step,
+        )
 
     def price(trainers: int, engines: int) -> GpuSplit | None:
         rollout_batch_size = _cycle_rollout_batch_size(
@@ -981,22 +1044,19 @@ def _split_pricer(
             step = _cycle_step(
                 model, workload, engines, engine_width, rollout_batch_size, residents
             )
+            sized = generation_seconds(
+                workload, engines, rollout_batch_size, residents[step], step
+            )
             cycles[cycle] = (
                 step,
-                _generation_seconds(
-                    model,
-                    device,
-                    peak_flops,
-                    bandwidth,
-                    workload,
-                    engines,
-                    engine_width,
-                    rollout_batch_size,
-                    residents[step],
-                    step,
+                sized,
+                sized
+                if quoted is workload
+                else generation_seconds(
+                    quoted, engines, rollout_batch_size, quoted_residents[step], step
                 ),
             )
-        step, cycle_seconds = cycles[cycle]
+        step, cycle_seconds, quoted_cycle_seconds = cycles[cycle]
         sync_key = (trainers, engines)
         if sync_key not in syncs:
             syncs[sync_key] = _sync_seconds(
@@ -1006,32 +1066,42 @@ def _split_pricer(
             workload.batch_size * workload.generated_per_trained / rollout_batch_size
         )
         optimizer_steps = _optimizer_steps(workload, trainers)
-        # FSDP prefetch overlaps weight gathers with compute; the routed-token
-        # exchange, gradient sync and optimizer offload do not overlap.
-        learn_seconds = (
-            max(
-                learn_gpu_seconds * cost.learn_cost_ratio / trainers,
-                cost.cross_node.gathers * optimizer_steps,
+
+        def learn_seconds(gpu_seconds: float) -> float:
+            # FSDP prefetch overlaps weight gathers with compute; the routed-token
+            # exchange, gradient sync and optimizer offload do not overlap.
+            return (
+                max(
+                    gpu_seconds * cost.learn_cost_ratio / trainers,
+                    cost.cross_node.gathers * optimizer_steps,
+                )
+                + (
+                    cost.cross_node.exchange
+                    + cost.cross_node.grad_sync
+                    + cost.optimizer_offload_seconds
+                )
+                * optimizer_steps
             )
-            + (
-                cost.cross_node.exchange
-                + cost.cross_node.grad_sync
-                + cost.optimizer_offload_seconds
+
+        quoted_step = None
+        if quoted is not workload:
+            quoted_step = max(
+                learn_seconds(quoted_learn_gpu_seconds),
+                cycles_per_step * quoted_cycle_seconds,
             )
-            * optimizer_steps
-        )
         return GpuSplit(
             trainers=trainers,
             engines=engines,
             engine_width=engine_width,
             teacher_engine_gpus=workload.teacher_engine_gpus,
             rollout_batch_size=rollout_batch_size,
-            learn_seconds=learn_seconds,
+            learn_seconds=learn_seconds(learn_gpu_seconds),
             generation_seconds=cycles_per_step * cycle_seconds,
             max_num_batched_tokens=None if step == fallback else step,
             sync_seconds=syncs[sync_key],
             merged_lora_sync=workload.merged_lora_sync,
             sync_transport=workload.sync_transport,
+            quoted_step=quoted_step,
         )
 
     return price
@@ -1168,6 +1238,9 @@ def split_workload_from_manifest(
         row_tokens=row_tokens,
         decode_tokens=decode_tokens,
         turns=turns,
+        quoted_decode_tokens=_quoted_decode_tokens(
+            manifest, spec, decode_tokens, turns
+        ),
         learn_passes=learn_forward_passes(spec),
         update_epochs=spec.update_epochs,
         rollout_batch_size=manifest.training.rollout_batch_size,
@@ -1206,22 +1279,18 @@ def _expected_lengths(
     """Mean trained-row tokens, decoded tokens per row and turns from the budgets.
 
     A single turn decodes a share of ``max_output_tokens`` that depends on
-    whether the model reasons, after a prompt filling a share of the rest of
-    the row. A multi-turn row fills :data:`MULTI_TURN_ROW_FILL` of its budget
-    over :data:`MULTI_TURN_TURN_SHARE` of ``max_turns``, or as many full turns
-    as the row holds when turns are unbounded.
+    whether the model reasons (:func:`_decode_share`), after a prompt filling
+    a share of the rest of the row. A multi-turn row fills
+    :data:`MULTI_TURN_ROW_FILL` of its budget over
+    :data:`MULTI_TURN_TURN_SHARE` of ``max_turns``, or as many full turns as
+    the row holds when turns are unbounded.
     """
     row_budget = spec.max_row_tokens or spec.max_model_len
     turn_tokens = min(spec.max_output_tokens or row_budget, row_budget)
     env = manifest.environment
     max_turns = env.max_turns if isinstance(env, LLMEnvSpec) else 1
     if max_turns == 1:
-        share = (
-            SINGLE_TURN_REASONING_DECODE_SHARE
-            if _reasons(manifest, spec)
-            else SINGLE_TURN_DECODE_SHARE
-        )
-        decode_tokens = math.ceil(share * turn_tokens)
+        decode_tokens = math.ceil(_decode_share(manifest, spec) * turn_tokens)
         prompt_tokens = math.ceil(SINGLE_TURN_PROMPT_FILL * (row_budget - turn_tokens))
         return decode_tokens + prompt_tokens, decode_tokens, 1
     row_tokens = math.ceil(MULTI_TURN_ROW_FILL * row_budget)
@@ -1236,6 +1305,34 @@ def _expected_lengths(
         turns * MULTI_TURN_TURN_DECODE_TOKENS,
     )
     return row_tokens, decode_tokens, turns
+
+
+def _quoted_decode_tokens(
+    manifest: TrainingManifest, spec: RolloutLLMSpec, decode_tokens: int, turns: int
+) -> int | None:
+    """Decoded tokens per row a price quote's step is timed at, when fewer than the sized ones.
+
+    A single turn without ``max_output_tokens`` may decode to the end of its
+    row, so it is timed at the :func:`_decode_share` of
+    :data:`SINGLE_TURN_QUOTED_TURN_TOKENS` when the row is longer. A set
+    ``max_output_tokens`` is the length the run asks for and is timed as sized.
+
+    :param decode_tokens: :func:`_expected_lengths` decoded tokens per row.
+    :param turns: :func:`_expected_lengths` turns.
+    :return: The quoted tokens, or ``None`` for a multi-turn row, a set
+        ``max_output_tokens`` or a row no longer than the quoted cap.
+    """
+    if turns > 1 or spec.max_output_tokens is not None:
+        return None
+    quoted = math.ceil(_decode_share(manifest, spec) * SINGLE_TURN_QUOTED_TURN_TOKENS)
+    return quoted if quoted < decode_tokens else None
+
+
+def _decode_share(manifest: TrainingManifest, spec: RolloutLLMSpec) -> float:
+    """Share of its token cap a single-turn completion decodes."""
+    if _reasons(manifest, spec):
+        return SINGLE_TURN_REASONING_DECODE_SHARE
+    return SINGLE_TURN_DECODE_SHARE
 
 
 def _reasons(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
