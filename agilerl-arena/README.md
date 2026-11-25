@@ -215,8 +215,14 @@ Helm found for that cluster. The Secret name comes from
 `existingClusterTokenSecret` in the agent Helm values, and is `cluster-token`
 otherwise. Pass `--agent-namespace` when Helm lists more than one agent install.
 
+`arena cluster smoke --name my-cluster` checks that the cluster can run jobs.
+The agent installs a small training release with its own ServiceAccount, waits
+until its Ray head is Ready, removes it, and the command prints whether that
+passed or the reason it failed. The release asks for no GPU and mounts no
+storage. `--timeout` sets how long to wait (default 3600 seconds).
+
 Every command that talks to Kubernetes (`register --install`,
-`register --install-storage`, `unregister`, `rotate-token`, `upgrade`) takes
+`register --install-storage`, `unregister`, `rotate-token`, `upgrade`, `smoke`) takes
 `--kubeconfig` and `--context`. Without `--context` it uses the current context
 of `--kubeconfig`, of `./arena-cluster-<name>/kubeconfig`, or of kubectl's own
 default (`KUBECONFIG`, `~/.kube/config`). That last one is used only after you
@@ -229,9 +235,10 @@ Arena records each cluster's identity, the UID of its `kube-system` namespace.
 Registering with `--install` sends it, and the agent reports it on every
 heartbeat. A cluster registered before Arena kept identities takes the first one
 reported. After that, `rotate-token`, `upgrade` and `unregister` stop before
-they change anything when the context points at a different Kubernetes cluster.
+they change anything when the context points at a different Kubernetes cluster,
+and `smoke` starts nothing.
 
-`unregister`, `rotate-token` and `upgrade` look the cluster up in your active
+`unregister`, `rotate-token`, `upgrade` and `smoke` look the cluster up in your active
 org. `--platform` targets AgileRL's own platform clusters instead, which needs
 AgileRL staff access. Register, `register-classes` and `destroy` take the
 scope from `--byoc-scope` or the spec's `byoc_scope`.

@@ -434,6 +434,47 @@ class ByocApi:
             raise ArenaAPIError(msg)
         return result
 
+    def request_cluster_smoke(self, name: str, cluster_uid: str) -> dict[str, Any]:
+        """Ask the agent of cluster *name* to deploy and remove a small train release.
+
+        :param name: The registered cluster name.
+        :type name: str
+        :param cluster_uid: kube-system namespace UID the CLI is pointed at.
+            Arena refuses the smoke when it stores a different one.
+        :type cluster_uid: str
+        :returns: The smoke, or the one already running on the cluster.
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: If Arena answers with something other than an
+            object.
+        """
+        result = self._invoke(
+            endpoints.REQUEST_CLUSTER_SMOKE, {"name": name, "clusterUid": cluster_uid}
+        )
+        if not isinstance(result, dict):
+            msg = "Unexpected cluster smoke response from Arena."
+            raise ArenaAPIError(msg)
+        return result
+
+    def cluster_smoke(self, name: str, smoke_id: int) -> dict[str, Any]:
+        """Return smoke *smoke_id* of cluster *name*.
+
+        :param name: The registered cluster name.
+        :type name: str
+        :param smoke_id: Id Arena gave the smoke.
+        :type smoke_id: int
+        :returns: The smoke with its status and, once failed, the reason.
+        :rtype: dict[str, Any]
+        :raises ArenaAPIError: If Arena answers with something other than an
+            object.
+        """
+        result = self._invoke(
+            endpoints.GET_CLUSTER_SMOKE, {"name": name, "id": smoke_id}
+        )
+        if not isinstance(result, dict):
+            msg = "Unexpected cluster smoke response from Arena."
+            raise ArenaAPIError(msg)
+        return result
+
     def create_class(
         self,
         name: str,

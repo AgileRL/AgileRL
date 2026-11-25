@@ -624,6 +624,7 @@ def test_cluster_group_includes_hardcoded_commands() -> None:
     assert "unregister" in cluster.commands
     assert "rotate-token" in cluster.commands
     assert "upgrade" in cluster.commands
+    assert "smoke" in cluster.commands
     assert "register" in cluster.commands
     assert "register-classes" in cluster.commands
 
@@ -1813,7 +1814,9 @@ class TestPlatformClusters:
         assert result.exit_code == 0, result.output
         assert rotate.call_args.kwargs["platform"] is True
 
-    @pytest.mark.parametrize("command", ["unregister", "rotate-token", "upgrade"])
+    @pytest.mark.parametrize(
+        "command", ["unregister", "rotate-token", "upgrade", "smoke"]
+    )
     def test_help_says_staff_only(self, command: str) -> None:
         result = CliRunner().invoke(ClusterDynamicGroup().commands[command], ["--help"])
 
