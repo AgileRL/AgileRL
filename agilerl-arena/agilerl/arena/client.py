@@ -1641,7 +1641,8 @@ class ArenaClient:
 
         :param experiment_name: The name of the experiment to resume.
         :type experiment_name: str
-        :param max_steps: Training steps for the resumed run. Omit to keep the stored length.
+        :param max_steps: Total training steps, counted from the start of the original
+            run; must be greater than the checkpoint's step. Omit to keep the stored total.
         :type max_steps: int | None
         :param checkpoint: Checkpoint to resume from. Omit to use the best checkpoint.
         :type checkpoint: str | None
@@ -1673,8 +1674,8 @@ class ArenaClient:
         A resume runs on the experiment's own hardware. Arguments match
         :meth:`resume_experiment`.
 
-        :returns: The fields :meth:`quote_experiment` returns, for ``max_steps``
-            steps on that hardware.
+        :returns: The fields :meth:`quote_experiment` returns, for the steps
+            left between the checkpoint and ``max_steps`` on that hardware.
         :rtype: dict[str, Any]
         :raises ArenaAPIError: With status 404 from an Arena server that
             cannot price a resume before it starts.
