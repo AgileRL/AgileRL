@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Callable
 from difflib import get_close_matches
 from pathlib import Path
@@ -65,6 +67,7 @@ from agilerl.arena.models.networks import (
     dump_network_section,
     network_arch_is_resolvable,
     normalize_manifest_network,
+    target_modules_warnings,
 )
 from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
 from agilerl.arena.models.training import (
@@ -72,6 +75,22 @@ from agilerl.arena.models.training import (
     LLMRolloutBufferSpec,
     TrainingSpec,
 )
+
+logger = logging.getLogger(__name__)
+
+
+@functools.cache
+def warn_once(message: str) -> None:
+    """Log *message* as a warning the first time this process sees it.
+
+    A CLI submit validates the manifest for the quote and again for the
+    submit; the person reads each warning once.
+
+    :param message: The warning.
+    :type message: str
+    """
+    logger.warning(message)
+
 
 API_VERSION = "agilerl.com/v1"
 
@@ -960,6 +979,8 @@ class TrainingManifest(BaseModel):
         raw = cls.load(manifest)
         reject_resolved_memory_fields(raw)
         validated = cls.model_validate(raw)
+        for warning in target_modules_warnings(raw):
+            warn_once(warning)
         return validated if mode == "python" else validated.to_payload()
 
     def to_payload(self) -> dict[str, Any]:

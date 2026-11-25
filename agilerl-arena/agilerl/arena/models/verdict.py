@@ -24,7 +24,7 @@ from agilerl.arena.models.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.models.networks import TARGET_MODULES_IGNORED
+from agilerl.arena.models.networks import target_modules_warnings
 from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
 
 EXIT_OK = 0
@@ -294,23 +294,6 @@ def run_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
     except ValidationError as err:
         return errors(err)
     return []
-
-
-def target_modules_warnings(document: dict[str, Any]) -> list[str]:
-    """Warn when the document names LoRA modules, which Arena ignores.
-
-    :param document: The raw manifest document.
-    :type document: dict[str, Any]
-    :returns: Zero or one warning.
-    :rtype: list[str]
-    """
-    names_modules = any(
-        isinstance(section, dict)
-        and isinstance(section.get("lora_config"), dict)
-        and "target_modules" in section["lora_config"]
-        for section in (document.get("network"), document.get("algorithm"))
-    )
-    return [TARGET_MODULES_IGNORED] if names_modules else []
 
 
 def submit_errors(manifest: TrainingManifest) -> list[dict[str, str]]:

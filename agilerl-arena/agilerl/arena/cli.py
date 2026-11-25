@@ -739,7 +739,10 @@ def _experiment_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
     "--max-steps",
     type=int,
     required=True,
-    help="Maximum training steps for the resumed run.",
+    help=(
+        "Total training steps, counted from the start of the original run; "
+        "must be greater than the checkpoint's step."
+    ),
 )
 @click.option(
     "--checkpoint",
@@ -788,7 +791,13 @@ def experiment_resume(
     }
     with arena_client(config) as client:
         confirm_resume_price(client, yes, **resume_args)
-        emit_result(client.resume_experiment(**resume_args))
+        result = client.resume_experiment(**resume_args)
+    if json_output_enabled():
+        emit_json_result(result)
+        return
+    # The server answers with no field worth a table, so name the run instead.
+    started_as = f" as {new_name!r}" if new_name else ""
+    click.echo(f"Resume of {experiment_name!r} started{started_as}.")
 
 
 @experiment.command("stop")

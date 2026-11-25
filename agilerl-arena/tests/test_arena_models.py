@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import pkgutil
 from importlib.metadata import PackageNotFoundError
 from io import StringIO
@@ -43,7 +44,7 @@ from agilerl.arena.models.fsdp import (
     FSDPConfig,
     parallel_layout_pins,
 )
-from agilerl.arena.models.manifest import _resolve_algorithm
+from agilerl.arena.models.manifest import _resolve_algorithm, warn_once
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import TARGET_MODULES_IGNORED, VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
@@ -936,6 +937,33 @@ class TestVerdictIgnoresLoraTargetModules:
         # Assert
         assert result["ok"] is True
         assert "target_modules" not in result["payload"]["network"]["lora_config"]
+
+    def test_verdict_reports_them_without_logging(self, caplog) -> None:
+        # Act
+        with caplog.at_level(logging.WARNING):
+            result = verdict(
+                _grpo_manifest(network={"target_modules": ["q_proj"]}), submit=True
+            )
+
+        # Assert
+        assert result["warnings"].count(TARGET_MODULES_IGNORED) == 1
+        assert TARGET_MODULES_IGNORED not in caplog.messages
+
+    def test_get_validated_logs_them_once_per_process(self, caplog) -> None:
+        # Arrange
+        warn_once.cache_clear()
+        document = _grpo_manifest(
+            network={"target_modules": ["q_proj"]},
+            algorithm={"target_modules": ["v_proj"]},
+        )
+
+        # Act: a CLI submit validates for the quote and again for the submit.
+        with caplog.at_level(logging.WARNING):
+            TrainingManifest.get_validated(document, mode="python")
+            TrainingManifest.get_validated(document, mode="python")
+
+        # Assert
+        assert caplog.messages.count(TARGET_MODULES_IGNORED) == 1
 
     def test_manifest_without_them_has_no_warning(self) -> None:
         # Act
