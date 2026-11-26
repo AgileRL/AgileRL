@@ -36,6 +36,8 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.batch import (
     KV_POOL_FILL,
     engine_group_size,
+    per_rank_trajectories,
+    resolve_mini_batch_size,
     rollout_group_size,
 )
 from agilerl.arena.memory.resolve.decode_costs import (
@@ -55,6 +57,7 @@ from agilerl.arena.memory.resolve.fsdp import (
     CrossNodeSeconds,
     StepTiming,
     TrainingMemoryPlan,
+    recomputed_share,
 )
 from agilerl.arena.memory.resolve.learn_costs import learn_costs
 from agilerl.arena.memory.resolve.lengths import (
@@ -88,10 +91,12 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     WeightVariant,
 )
+from agilerl.arena.models.algorithms.dpo import DPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.algorithms.sft import SFTSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 from agilerl.arena.models.training import LLMRolloutBufferSpec
@@ -349,33 +354,21 @@ def no_grad_sweeps(spec: RolloutLLMSpec) -> float:
     return no_grad_passes(spec) / (spec.gradient_row_copies * spec.update_epochs)
 
 
-def _learn_gpu_seconds(
-    model: ModelSpec, device: DeviceSpec, peak_flops: float, workload: SplitWorkload
-) -> float:
-    """GPU-seconds one learn step costs, summed over trainer ranks."""
-    return learn_gpu_seconds(
-        model,
-        device,
-        peak_flops,
-        workload.batch_size * workload.group_size,
-        workload.row_tokens,
-        workload.learn_passes,
-    )
-
-
 def learn_gpu_seconds(
     model: ModelSpec,
     device: DeviceSpec,
     peak_flops: float,
     rows: int,
-    tokens: int,
-    learn_passes: int,
+    tokens: float,
+    square_tokens: float,
+    passes: int,
 ) -> float:
-    """GPU-seconds ``learn_passes`` forward-equivalents over ``rows`` rows of ``tokens`` cost.
+    """GPU-seconds ``passes`` forward-equivalents over ``rows`` rows of ``tokens`` cost.
 
     :param rows: Rows one learn step trains.
-    :param tokens: Tokens in one row.
-    :param learn_passes: Forward-equivalents per trained token.
+    :param tokens: Mean tokens in one row.
+    :param square_tokens: Mean of each row's squared token count, for attention.
+    :param passes: Forward-equivalents per trained token.
     :return: GPU-seconds, summed over trainer ranks.
     """
     arch = model.arch
@@ -388,11 +381,93 @@ def learn_gpu_seconds(
         * arch.attention_layers
         * arch.n_heads
         * arch.head_dim
-        * tokens**2
+        * square_tokens
         / LEARN_ATTENTION_EFFICIENCY
     )
     speed = peak_flops * learn_costs(device).peak_speed
-    return rows * learn_passes * (matmul + attention) / speed
+    return rows * passes * (matmul + attention) / speed
+
+
+class RowTokens(NamedTuple):
+    """Real tokens per trained row of a dataset.
+
+    DPO counts prompt + chosen and prompt + rejected as two rows. The planner
+    caps the aggregates at ``max_model_len``, so stats of untruncated rows that
+    run past it over-price the step; stats of truncated rows price it exactly.
+
+    :ivar mean: Mean tokens per row.
+    :ivar mean_square: Mean of each row's squared token count.
+    """
+
+    mean: float
+    mean_square: float
+
+
+def dataset_learn_seconds(
+    spec: SFTSpec | DPOSpec,
+    trainers: int,
+    model: ModelSpec,
+    device: DeviceSpec,
+    plan: TrainingMemoryPlan,
+    row_tokens: RowTokens | None,
+) -> float | None:
+    """Seconds one SFT or DPO learn step takes, every allocated GPU a trainer.
+
+    The step is its token work, the plan's per-micro-batch gathers and
+    routed-expert chunks, and the host time of every model call. A packed
+    trainer runs real tokens only, so its token work is priced at
+    ``row_tokens`` capped at ``max_model_len``; padded trainers, or an
+    unknown ``row_tokens``, price ``max_model_len`` rows. Gathers and chunks
+    stay at their ``max_model_len`` price. Each update epoch is a forward and
+    a frozen-base backward over every row. DPO trains a chosen and a rejected
+    row per pair and scores both with the reference first.
+
+    Each micro-batch runs a forward per row copy, a backward through each
+    and a checkpoint recompute of each, and DPO adds one reference forward
+    per copy; each pays ``learn_costs(device).pass_overhead_seconds``.
+
+    :param spec: The SFT or DPO algorithm.
+    :param trainers: Trainer ranks, ``training.training_gpus_per_agent``.
+    :param model: Model the trainers run.
+    :param device: Training GPU.
+    :param plan: The trainers' training-memory plan.
+    :param row_tokens: The dataset's row lengths, or ``None`` when unknown.
+    :return: The seconds, or ``None`` when the GPU has no peak bf16 figure.
+    """
+    peak_flops = device.peak_bf16_flops
+    if peak_flops is None:
+        return None
+    dpo = isinstance(spec, DPOSpec)
+    copies = 2 if dpo else 1
+    rows = spec.batch_size * copies
+    passes = 2 * spec.update_epochs + int(dpo)
+    max_len = plan.settings.max_model_len
+    tokens, square_tokens = max_len, max_len**2
+    if row_tokens is not None and plan.settings.sequence_packing:
+        tokens = min(row_tokens.mean, max_len)
+        square_tokens = min(row_tokens.mean_square, max_len**2)
+    costs = learn_costs(device)
+    recomputed = recomputed_share(
+        model.arch.n_layers, plan.gradient_checkpointing, plan.checkpoint_every_n_blocks
+    )
+    token_seconds = learn_gpu_seconds(
+        model, device, peak_flops, rows, tokens, square_tokens, passes
+    ) * (1 + costs.recompute_cost * recomputed)
+    fixed_seconds = (
+        learn_gpu_seconds(model, device, peak_flops, rows, max_len, max_len**2, passes)
+        * plan.fixed_cost
+        / plan.tokens
+    )
+    _, per_rank = per_rank_trajectories(spec, trainers)
+    micro_batches = -(-per_rank // plan.micro_batch_size_per_gpu)
+    calls = micro_batches * copies * (spec.update_epochs * (2 + recomputed) + int(dpo))
+    mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
+    offload = plan.optimizer_offload_seconds * spec.update_epochs * (per_rank // mini)
+    return (
+        (token_seconds + fixed_seconds) / trainers
+        + calls * costs.pass_overhead_seconds
+        + offload
+    )
 
 
 def _engine_weight_bytes(
@@ -849,7 +924,16 @@ def step_timing(
         return None
     steps = max(_optimizer_steps(workload, trainers), 1)
     return StepTiming(
-        _learn_gpu_seconds(model, device, peak_flops, workload) / (trainers * steps),
+        learn_gpu_seconds(
+            model,
+            device,
+            peak_flops,
+            workload.batch_size * workload.group_size,
+            workload.row_tokens,
+            workload.row_tokens**2,
+            workload.learn_passes,
+        )
+        / (trainers * steps),
         no_grad_sweeps(spec),
     )
 
@@ -965,7 +1049,15 @@ def _split_pricer(
         for step in engine_steps(model, workload)
     }
     fallback = next(iter(residents))
-    learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, workload)
+    step_gpu_seconds = learn_gpu_seconds(
+        model,
+        device,
+        peak_flops,
+        workload.batch_size * workload.group_size,
+        workload.row_tokens,
+        workload.row_tokens**2,
+        workload.learn_passes,
+    )
     trainer_costs: dict[int, TrainerCost | None] = {}
     syncs: dict[tuple[int, int], float] = {}
     # (engines, rollout_batch_size) -> (step, seconds of one cycle)
@@ -1016,7 +1108,7 @@ def _split_pricer(
         # exchange, gradient sync and optimizer offload do not overlap.
         learn_seconds = (
             max(
-                learn_gpu_seconds * cost.learn_cost_ratio / trainers,
+                step_gpu_seconds * cost.learn_cost_ratio / trainers,
                 cost.cross_node.gathers * optimizer_steps,
             )
             + (

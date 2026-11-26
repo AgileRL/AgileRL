@@ -21,6 +21,7 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
 from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
+from agilerl.arena.memory.resolve.learn_costs import L4_LEARN_COSTS
 from agilerl.arena.memory.resolve.lengths import ExpectedLengths
 from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.resolve.run import (
@@ -28,6 +29,7 @@ from agilerl.arena.memory.resolve.run import (
     SplitSearchError,
     resolve_run_memory,
 )
+from agilerl.arena.memory.resolve.split import RowTokens
 from agilerl.arena.memory.resources import (
     FailureKind,
     NodeShardGroups,
@@ -174,10 +176,28 @@ def priced(monkeypatch):
     calls = []
     real = resources_module._price
 
-    def spy(tier, manifest, model, build_config, layout, num_nodes, cache, lengths):
+    def spy(
+        tier,
+        manifest,
+        model,
+        build_config,
+        layout,
+        num_nodes,
+        cache,
+        lengths,
+        row_tokens,
+    ):
         calls.append((tier["name"], num_nodes))
         return real(
-            tier, manifest, model, build_config, layout, num_nodes, cache, lengths
+            tier,
+            manifest,
+            model,
+            build_config,
+            layout,
+            num_nodes,
+            cache,
+            lengths,
+            row_tokens,
         )
 
     monkeypatch.setattr(resources_module, "_price", spy)
@@ -1723,6 +1743,193 @@ class TestCheckTiers:
         assert checks[1].layout == checks[0].layout
 
 
+def dataset_step(name, batch_size=8, context=512, num_gpus=1, row_tokens=None):
+    doc = copy.deepcopy(SFT_MANIFEST)
+    doc["algorithm"] = {"name": name, "batch_size": batch_size}
+    doc["network"]["max_context_length"] = context
+    manifest = TrainingManifest.model_validate(doc)
+    (check,) = check_tiers(
+        [tier("l4", "NVIDIA L4", num_gpus, 1.0)],
+        manifest,
+        tiny_model(),
+        builder(),
+        row_tokens=row_tokens,
+    )
+    assert check.fits
+    return check.step_seconds
+
+
+def dataset_token_work(name, **step):
+    """``dataset_step`` less its host time, for a step that trains in one micro-batch.
+
+    SFT's forward and backward are two model calls; DPO's chosen and rejected
+    forwards and backwards and their reference forwards are six.
+    """
+    calls = {"SFT": 2, "DPO": 6}[name]
+    return dataset_step(name, **step) - calls * L4_LEARN_COSTS.pass_overhead_seconds
+
+
+class TestCheckTiersStepSeconds:
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    def test_sft_and_dpo_price_a_learn_step(self, name):
+        # Act
+        seconds = dataset_step(name)
+
+        # Assert
+        assert seconds is not None
+        assert seconds > 0
+
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    def test_each_model_call_pays_the_host_overhead(self, name):
+        # Act
+        seconds = dataset_step(name)
+        token_work = dataset_token_work(name)
+
+        # Assert: the tiny model's step is mostly host time.
+        assert 0 < token_work < seconds - token_work
+
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    def test_a_larger_batch_in_one_micro_batch_adds_only_token_work(self, name):
+        # Act
+        small = dataset_token_work(name, batch_size=8)
+        large = dataset_token_work(name, batch_size=16)
+
+        # Assert
+        assert large == pytest.approx(2 * small, rel=1e-9)
+
+    def test_a_longer_context_takes_at_least_proportionally_longer(self):
+        # Act
+        short = dataset_token_work("SFT", context=512)
+        long = dataset_token_work("SFT", context=1024)
+
+        # Assert: attention grows with the square of the row.
+        assert long > 1.9 * short
+
+    def test_more_gpus_shorten_the_step(self):
+        # Act
+        one = dataset_token_work("SFT", batch_size=16, num_gpus=1)
+        four = dataset_token_work("SFT", batch_size=16, num_gpus=4)
+
+        # Assert
+        assert four == pytest.approx(one / 4, rel=1e-9)
+
+    def test_dpo_costs_about_three_sft_steps(self):
+        # Act
+        sft = dataset_step("SFT")
+        dpo = dataset_step("DPO")
+
+        # Assert: two rows per pair, and a reference forward over both.
+        assert dpo == pytest.approx(3 * sft, rel=0.1)
+
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    def test_short_dataset_rows_shorten_the_step(self, name):
+        # Act
+        full = dataset_step(name, context=512)
+        short = dataset_step(name, context=512, row_tokens=RowTokens(128.0, 128.0**2))
+
+        # Assert: token work shrinks; each micro-batch's fixed cost stays.
+        assert full / 16 < short < full
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [("SFT", 0.47422456727567436), ("DPO", 1.4226737018270232)],
+    )
+    def test_unknown_row_lengths_keep_the_max_model_len_step(self, name, expected):
+        # Act
+        seconds = dataset_step(name, row_tokens=None)
+
+        # Assert: the step priced at max_model_len rows.
+        assert seconds == pytest.approx(expected, rel=1e-12)
+
+    def test_a_searched_rollout_split_keeps_its_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
+        )
+
+        # Assert: the split's predicted step, unchanged by dataset pricing.
+        assert check.step_seconds == pytest.approx(0.7876836424373541, rel=1e-12)
+
+    def test_kept_rollout_counts_have_no_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(MANIFEST)
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
+        )
+
+        # Assert
+        assert check.fits
+        assert check.step_seconds is None
+
+
+def short_row_dataset_manifest(name: str, context: int = 4096) -> TrainingManifest:
+    """Qwen3.5-4B LoRA SFT or DPO, eight rows a step."""
+    columns = (
+        {"prompt": "prompt", "chosen": "chosen", "rejected": "rejected"}
+        if name == "DPO"
+        else {"prompt": "prompt", "target": "chosen"}
+    )
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {"name": name, "batch_size": 8},
+            "environment": {
+                "dataset": "humans",
+                "env_type": "dataset",
+                "objective": "preference" if name == "DPO" else "sft",
+                "columns": columns,
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-4B",
+                "max_context_length": context,
+                "lora_config": {"lora_r": 16, "lora_alpha": 32},
+            },
+            "training": {"max_steps": 60, "pop_size": 1},
+        }
+    )
+
+
+class TestCheckTiersShortRowDatasetSteps:
+    @pytest.mark.parametrize(
+        ("name", "gpu_type", "gpus", "context", "mean", "rms", "measured"),
+        [
+            ("SFT", "NVIDIA A100-SXM4-80GB", 1, 4096, 285, 320, 1.81),
+            ("DPO", "NVIDIA A100-SXM4-80GB", 1, 4096, 271, 315, 10.84),
+            ("SFT", "NVIDIA L4", 1, 4096, 285, 320, 2.04),
+            ("DPO", "NVIDIA L4", 1, 4096, 271, 315, 5.30),
+            # Eight trainers, one row each.
+            ("SFT", "NVIDIA H100 80GB HBM3", 8, 16384, 279, 323, 0.35),
+            ("DPO", "NVIDIA H100 80GB HBM3", 8, 4096, 266, 326, 0.79),
+            ("DPO", "NVIDIA H100 80GB HBM3", 8, 16384, 266, 326, 1.10),
+            ("SFT", "NVIDIA H100 80GB HBM3", 8, 4096, 285, 320, 0.296),
+        ],
+    )
+    def test_a_packed_short_row_step_lands_near_its_measured_time(
+        self, name, gpu_type, gpus, context, mean, rms, measured
+    ):
+        # Arrange: about 300-token rows, where host time per model call
+        # outweighs the token work.
+        manifest = short_row_dataset_manifest(name, context)
+        hub_id = "Qwen/Qwen3.5-4B"
+
+        # Act
+        (check,) = check_tiers(
+            [{**tier("one", gpu_type, gpus, 1.0), "ram_gb": 160 * gpus}],
+            manifest,
+            catalog_model(manifest.algorithm),
+            catalogue_builder(hub_id),
+            row_tokens=RowTokens(mean, rms**2),
+        )
+
+        # Assert
+        assert check.fits
+        assert check.step_seconds == pytest.approx(measured, rel=0.15)
+
+
 class TestTierCheckFailure:
     def test_a_plain_fit_has_no_failure_and_is_not_host_limited(self):
         manifest = TrainingManifest.model_validate(MANIFEST)
@@ -2171,7 +2378,15 @@ def record_price(tried, fits):
     """``_price`` that records ``(tier, layout)`` and fits where ``fits`` says so."""
 
     def price(
-        tier, _manifest, _model, _build_config, layout, num_nodes, _cache, _lengths
+        tier,
+        _manifest,
+        _model,
+        _build_config,
+        layout,
+        num_nodes,
+        _cache,
+        _lengths,
+        _row_tokens,
     ):
         tried.append((tier["name"], layout))
         ok = fits(tier["name"], layout)
