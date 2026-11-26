@@ -52,6 +52,7 @@ from agilerl.arena.models import (
     __version__,
 )
 from agilerl.arena.models.env import LLMEnvSpec
+from agilerl.arena.models.manifest import warn_once
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.verdict import (
@@ -59,7 +60,9 @@ from agilerl.arena.models.verdict import (
     arena_failures,
     describe,
     is_classic_rl,
+    manifest_warnings,
     submit_errors,
+    unsupported_model_symptom_failures,
 )
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.reward_check import check_reward_file
@@ -1450,7 +1453,15 @@ class ArenaClient:
         self._check_num_gpus(num_gpus)
         manifest = with_reward_file_path(manifest, reward_file)
         document = TrainingManifest.load(manifest)
-        training_manifest = TrainingManifest.get_validated(document, mode="python")
+        try:
+            training_manifest = TrainingManifest.get_validated(document, mode="python")
+        except ValueError as err:
+            unsupported = unsupported_model_symptom_failures(document, err)
+            if not unsupported:
+                raise
+            raise ArenaValidationError(describe(unsupported[0])) from err
+        for warning in manifest_warnings(training_manifest, document):
+            warn_once(warning)
         self._check_runs_on_arena(training_manifest)
         self._check_model_status(training_manifest)
         self._check_submit_rules(training_manifest, document)

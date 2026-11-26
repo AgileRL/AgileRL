@@ -55,6 +55,7 @@ from agilerl.arena.models.verdict import (
     loc_to_path,
     model_warnings,
     read_manifest,
+    unsupported_model_failures,
     verdict,
 )
 
@@ -928,6 +929,146 @@ def _grpo_manifest(**lora_sections) -> dict:
     )
 
 
+class TestUnsupportedModelFailures:
+    def test_unknown_hub_id_is_one_error(self) -> None:
+        document = {"network": {"pretrained_model_name_or_path": "acme/not-a-model"}}
+
+        assert unsupported_model_failures(document) == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": "Arena does not support the model 'acme/not-a-model'.",
+                "kind": "value_error",
+            }
+        ]
+
+    def test_unknown_hub_id_names_the_closest_catalog_model(self) -> None:
+        document = {"network": {"pretrained_model_name_or_path": "Qwen/Qwen3.5-0.9B"}}
+
+        assert unsupported_model_failures(document) == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": (
+                    "Arena does not support the model 'Qwen/Qwen3.5-0.9B'."
+                    " Did you mean Qwen/Qwen3.5-0.8B?"
+                ),
+                "kind": "value_error",
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "network",
+        [
+            {"pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B"},
+            {"pretrained_model_name_or_path": "./checkpoints/mine"},
+            {},
+            "not-a-mapping",
+        ],
+    )
+    def test_catalog_local_or_missing_model_is_no_error(self, network) -> None:
+        assert unsupported_model_failures({"network": network}) == []
+
+
+class TestSubmitErrorsUnsupportedModel:
+    def test_hub_id_outside_the_catalog_fails_submit(self) -> None:
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "acme/not-a-model"
+
+        record = verdict(document, submit=True)
+
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": "Arena does not support the model 'acme/not-a-model'.",
+                "kind": "value_error",
+            }
+        ]
+
+    def test_registered_model_name_passes_submit(self) -> None:
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "my-registered-model"
+
+        record = verdict(document, submit=True)
+
+        assert record["ok"] is True
+
+
+class TestVerdictUnsupportedModel:
+    def test_unknown_model_without_context_reports_only_the_model(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["network"] = {"pretrained_model_name_or_path": "acme/not-a-model"}
+
+        # Act
+        result = verdict(document)
+
+        # Assert
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": "Arena does not support the model 'acme/not-a-model'.",
+                "kind": "value_error",
+            }
+        ]
+
+    def test_unknown_model_keeps_an_unrelated_schema_error(self) -> None:
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "acme/not-a-model"
+        document["algorithm"]["clip_coef"] = "wide"
+
+        result = verdict(document)
+
+        assert result["ok"] is False
+        assert [e["path"] for e in result["errors"]] == ["algorithm.clip_coef"]
+
+    def test_unknown_model_with_context_still_passes_with_a_warning(self) -> None:
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "acme/not-a-model"
+
+        result = verdict(document)
+
+        assert result["ok"] is True
+        assert any(
+            "acme/not-a-model is not in the Arena" in w for w in result["warnings"]
+        )
+
+    @pytest.mark.parametrize(
+        ("context_length", "kind", "message"),
+        [
+            (None, "missing", "Field required"),
+            (
+                "lots",
+                "int_parsing",
+                "Input should be a valid integer, unable to parse string as an integer",
+            ),
+        ],
+    )
+    def test_registered_name_keeps_a_context_error(
+        self, context_length: int | str | None, kind: str, message: str
+    ) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "my-registered-model"
+        if context_length is None:
+            del document["network"]["max_context_length"]
+        else:
+            document["network"]["max_context_length"] = context_length
+
+        # Act
+        result = verdict(document)
+
+        # Assert
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": "network.max_context_length",
+                "message": message,
+                "kind": kind,
+            }
+        ]
+
+
 class TestVerdictIgnoresLoraTargetModules:
     @pytest.mark.parametrize(
         "lora_sections",
@@ -1121,7 +1262,7 @@ class TestPackageVersionFallback:
     def test_models_init_without_distribution(self) -> None:
         import importlib
 
-        import agilerl.arena.models as models
+        from agilerl.arena import models
 
         with patch(
             "importlib.metadata.version",
@@ -2181,8 +2322,7 @@ def _base_models(package) -> list[type]:
 
 class TestPydanticModelsForbidExtra:
     def test_arena_models_forbid_extra(self) -> None:
-        import agilerl.arena.inference as inference
-        import agilerl.arena.models as models
+        from agilerl.arena import inference, models
 
         # These parse a subset of inference JSON (RL-only flags, results, title/created_by, success).
         wire_subset = {

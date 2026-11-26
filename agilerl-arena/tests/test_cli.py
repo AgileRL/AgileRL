@@ -466,33 +466,31 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "Did you mean GRPO?" in result.output
 
-    @pytest.mark.parametrize(
-        ("model", "warning"),
-        [
-            (
-                "Qwen/Qwen3.5-0.9B",
-                (
-                    "warning: Model Qwen/Qwen3.5-0.9B is not in the Arena supported "
-                    "model catalog; see 'arena models supported'. "
-                    "Did you mean Qwen/Qwen3.5-0.8B?"
-                ),
-            ),
-            (
-                "Qwen/Qwen3-4B",
-                "warning: Model Qwen/Qwen3-4B is deprecated and can no longer be submitted.",
-            ),
-        ],
-    )
-    def test_validate_warns_about_the_model_without_failing(
-        self, runner, model, warning
-    ):
+    def test_validate_warns_about_a_deprecated_model_without_failing(self, runner):
         result = runner.invoke(
-            main, ["manifest", "validate", "-"], input=_llm_manifest(model)
+            main, ["manifest", "validate", "-"], input=_llm_manifest("Qwen/Qwen3-4B")
         )
 
         assert result.exit_code == 0
-        assert warning in " ".join(result.output.split())
+        assert (
+            "warning: Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
+            in " ".join(result.output.split())
+        )
         assert "valid (GRPO)" in result.output
+
+    def test_validate_refuses_a_hub_id_outside_the_catalog(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-"],
+            input=_llm_manifest("Qwen/Qwen3.5-0.9B"),
+        )
+
+        assert result.exit_code == 1
+        assert (
+            "network.pretrained_model_name_or_path: Arena does not support the "
+            "model 'Qwen/Qwen3.5-0.9B'. Did you mean Qwen/Qwen3.5-0.8B?"
+            in " ".join(result.output.split())
+        )
 
     def test_validate_warns_about_a_preview_model(self, runner, monkeypatch):
         hub_id = "Qwen/Qwen3.5-0.8B"
