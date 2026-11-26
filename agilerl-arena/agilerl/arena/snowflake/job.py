@@ -1062,11 +1062,14 @@ def run_state(states: Mapping[str, str]) -> str:
     """One state for a run from its role states.
 
     The head runs the trainer, so its exit decides success. The head drops
-    the broker when it ends.
+    the broker as its last step, so a missing broker alone is the head
+    finishing. A missing head or worker before the head is done means the run
+    cannot progress.
 
     :param states: Role to :func:`job_state`, for every role in :data:`ROLES`.
     :return: ``failed``, ``cancelling``, ``cancelled``, ``succeeded``,
-        ``gone`` when every service is dropped, else ``running``.
+        ``gone`` when every service is dropped, ``failed`` when the head or
+        worker service is dropped, else ``running``.
     """
     values = set(states.values())
     for state in ("failed", "cancelling", "cancelled"):
@@ -1076,6 +1079,8 @@ def run_state(states: Mapping[str, str]) -> str:
         return "succeeded"
     if values == {"gone"}:
         return "gone"
+    if "gone" in (states["head"], states["worker"]):
+        return "failed"
     return "running"
 
 
