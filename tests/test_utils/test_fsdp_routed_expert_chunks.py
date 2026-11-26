@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from collections.abc import Generator
@@ -14,17 +15,29 @@ import torch
 import torch.distributed as dist
 from peft import LoraConfig, get_peft_model
 from torch import nn
-from torch.utils.checkpoint import CheckpointPolicy
+from torch.utils.checkpoint import CheckpointPolicy, checkpoint
 from transformers import NemotronHConfig, NemotronHForCausalLM
 
 from agilerl.distributed import FSDPConfig, init_distributed
+from agilerl.distributed.expert_parallel.forward import (
+    RoutedCounts,
+    RoutedCountsScope,
+    TokenExchange,
+    _routed_counts,
+)
 from agilerl.distributed.fsdp import materialize_fsdp2_from_cpu_state
-from agilerl.distributed.fsdp_blocks import _save_routing_policy
+from agilerl.distributed.fsdp_blocks import (
+    EXPERT_SCOPE,
+    _block_checkpoint_contexts,
+    _checkpoint_block,
+    _save_routing_policy,
+)
 from agilerl.lora.fused import patch_lora_for_fused_forward
 from agilerl.lora.moe import (
     RoutedExpertsLoraWrapper,
     upgrade_moe_param_wrappers,
 )
+from agilerl.lora.moe.grouped_gemm import expert_row_counts
 
 VOCAB = 64
 
@@ -98,13 +111,82 @@ def world_size_one(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     dist.destroy_process_group()
 
 
+class PackedExperts(nn.Module):
+    """Routed packed-experts layout; the forward is never run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.randn(2, 4, 2))
+        self.down_proj = nn.Parameter(torch.randn(2, 2, 2))
+        self.act_fn = nn.SiLU()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return hidden_states
+
+
+def host_copy(values: list[int]) -> list[int]:
+    """``.tolist()`` through ``_to_copy``, as a CUDA tensor's host read runs."""
+    return torch.ops.aten._to_copy.default(
+        torch.tensor(values), device=torch.device("cpu")
+    ).tolist()
+
+
+class CachedBoundsMixer(nn.Module):
+    """Reads its bounds to host on the first call only, like a cached CP context."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bounds: list[int] | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.bounds is None:
+            self.bounds = host_copy([7, 7])
+        return x * 2
+
+
+class HostSplitMoe(nn.Module):
+    """Splits its rows by host-read sizes, like routed expert counts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = PackedExperts()
+        self.weight = nn.Parameter(torch.randn(4, 4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        chunks = (x @ self.weight).split(host_copy([2, 3]))
+        return torch.cat([chunk.pow(i + 2) for i, chunk in enumerate(chunks)])
+
+
+class MixerMoeDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear_attn = CachedBoundsMixer()
+        self.mlp = HostSplitMoe()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(self.linear_attn(x))
+
+
 class TestSaveRoutingPolicy:
-    def test_saves_router_topk(self) -> None:
+    def test_saves_router_topk_inside_experts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(EXPERT_SCOPE, "depth", 1)
+
         policy = _save_routing_policy(None, torch.ops.aten.topk.default)
 
         assert policy is CheckpointPolicy.MUST_SAVE
 
-    def test_saves_cpu_device_copy(self) -> None:
+    def test_saves_cpu_device_copy_inside_experts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(EXPERT_SCOPE, "depth", 1)
+
         policy = _save_routing_policy(
             None,
             torch.ops.aten._to_copy.default,
@@ -113,10 +195,166 @@ class TestSaveRoutingPolicy:
 
         assert policy is CheckpointPolicy.MUST_SAVE
 
-    def test_recomputes_other_ops(self) -> None:
+    def test_recomputes_other_ops(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(EXPERT_SCOPE, "depth", 1)
+
         policy = _save_routing_policy(None, torch.ops.aten.add.Tensor)
 
         assert policy is CheckpointPolicy.PREFER_RECOMPUTE
+
+    def test_recomputes_cpu_device_copy_outside_experts(self) -> None:
+        policy = _save_routing_policy(
+            None,
+            torch.ops.aten._to_copy.default,
+            device=torch.device("cpu"),
+        )
+
+        assert policy is CheckpointPolicy.PREFER_RECOMPUTE
+
+
+class TestCheckpointBlock:
+    def test_mixer_host_copies_do_not_shift_expert_replay(self) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        decoder = MixerMoeDecoder()
+        reference = copy.deepcopy(decoder)
+        hidden = torch.randn(5, 4)
+        upstream = torch.randn(5, 4)
+        (reference(hidden) * upstream).sum().backward()
+        wrapped = _checkpoint_block(decoder, FSDPConfig())
+
+        # Act
+        (wrapped(hidden) * upstream).sum().backward()
+
+        # Assert
+        assert EXPERT_SCOPE.depth == 0
+        assert torch.equal(decoder.mlp.weight.grad, reference.mlp.weight.grad)
+
+
+class TestBlockCheckpointContexts:
+    @pytest.mark.usefixtures("world_size_one")
+    def test_recompute_matches_forward_after_routed_counts_copy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        tolist = torch.Tensor.tolist
+        # CUDA ``.tolist()`` copies to host through ``_to_copy``; CPU tensors skip it.
+        monkeypatch.setattr(
+            torch.Tensor,
+            "tolist",
+            lambda t: tolist(
+                torch.ops.aten._to_copy.default(t, device=torch.device("cpu"))
+            ),
+        )
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3, requires_grad=True)
+        hidden = torch.randn(5, 4)
+        splits = torch.tensor([2, 3])
+
+        def block(x: torch.Tensor) -> torch.Tensor:
+            scores, experts = (x @ weight).topk(2, -1)
+            send = expert_row_counts(experts.reshape(-1), 3).unsqueeze(0)
+            _routed_counts(send, exchange)
+            chunks = scores.split(splits.tolist())
+            # The cast is a later ``_to_copy`` the recompute must not misread.
+            return torch.cat(
+                [chunk.to(torch.float64).pow(i + 2) for i, chunk in enumerate(chunks)]
+            )
+
+        upstream = torch.randn(5, 2, dtype=torch.float64)
+        (block(hidden) * upstream).sum().backward()
+        expected = weight.grad.clone()
+        weight.grad = None
+
+        # Act
+        out = checkpoint(
+            block,
+            hidden,
+            use_reentrant=False,
+            context_fn=_block_checkpoint_contexts(True),
+        )
+        (out * upstream).sum().backward()
+
+        # Assert
+        assert torch.equal(weight.grad, expected)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    def test_routed_counts_replay_keeps_later_host_copies_aligned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            "agilerl.distributed.expert_parallel.forward.exchange_expert_counts",
+            lambda send, *_: send.flip(-1),
+        )
+        exchange = TokenExchange(None, 2, 1, None, 1)
+        seen: list[list[float]] = []
+
+        def block(x: torch.Tensor) -> torch.Tensor:
+            send = torch.tensor([[1, 2, 3, 4]], device=x.device)
+            _routed_counts(send, exchange)
+            seen.append((x * 2).tolist())
+            return x * 2
+
+        x = torch.arange(3.0, device="cuda").requires_grad_(True)
+
+        # Act
+        out = checkpoint(
+            block,
+            x,
+            use_reentrant=False,
+            context_fn=_block_checkpoint_contexts(save_router=True),
+        )
+        out.sum().backward()
+
+        # Assert
+        assert seen == [[0.0, 2.0, 4.0], [0.0, 2.0, 4.0]]
+
+
+class TestRoutedCounts:
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    @pytest.mark.usefixtures("world_size_one")
+    def test_replay_returns_the_recorded_counts_without_a_host_sync(self) -> None:
+        # Arrange
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        send = torch.tensor([[2, 3]], device="cuda")
+        recorded = RoutedCounts(send, send, [[2, 3]], [[2, 3]])
+        scope = RoutedCountsScope([recorded], replay=True)
+        torch.cuda.synchronize()
+
+        # Act
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            with scope:
+                replayed = _routed_counts(send.clone(), exchange)
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+
+        # Assert
+        assert replayed is recorded
+
+    @pytest.mark.usefixtures("world_size_one")
+    def test_replay_with_no_recorded_calls_raises(self) -> None:
+        # Arrange
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        scope = RoutedCountsScope([], replay=True)
+
+        # Act / Assert
+        with scope, pytest.raises(RuntimeError, match="Recompute routed tokens"):
+            _routed_counts(torch.tensor([[2, 3]]), exchange)
+
+    @pytest.mark.usefixtures("world_size_one")
+    def test_replay_with_different_routing_raises(self) -> None:
+        # Arrange
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        send = torch.tensor([[2, 3]])
+        recorded = RoutedCounts(send, send, [[2, 3]], [[2, 3]])
+        scope = RoutedCountsScope([recorded], replay=True)
+
+        # Act / Assert
+        with scope, pytest.raises(RuntimeError, match="Recompute routed tokens"):
+            _routed_counts(torch.tensor([[9, 9]]), exchange)
 
 
 class TestMaterializeFsdp2FromCpuStateRoutedExpertChunks:

@@ -1,0 +1,29 @@
+---
+# Snowflake CLI project for the Arena application package. Build it with
+# `just snowflake-app-build CONNECTION TAG` from the repository root, which
+# copies this directory, sets the image tag, and adds agilerl_arena.zip
+# before deploying.
+definition_version: 2
+entities:
+    arena_pkg:
+        type: application package
+        identifier: arena_app_pkg
+        stage: app_src.stage
+        manifest: manifest.yml
+        artifacts:
+            - manifest.yml
+            - setup_script.sql
+            - src: app_code/arena_app.py
+              dest: app_code/
+            - src: app_code/app_billing.py
+              dest: app_code/
+            - src: app_code/app_keys.py
+              dest: app_code/
+            - src: app_code/app_trial.py
+              dest: app_code/
+            - agilerl_arena.zip
+    arena_app:
+        type: application
+        identifier: arena_app
+        from:
+            target: arena_pkg

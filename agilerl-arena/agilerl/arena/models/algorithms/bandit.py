@@ -20,15 +20,20 @@ class BanditSpec(SingleAgentAlgorithmSpec):
 
     gamma: float = Field(
         default=1.0,
-        ge=0.0,
+        gt=0.0,
+        le=100.0,
         description="Exploration scale on the predicted uncertainty of each arm.",
     )
     lamb: float = Field(
         default=1.0,
+        gt=0.0,
+        le=100.0,
         description="Ridge parameter of the covariance estimate over arm features.",
     )
     reg: float = Field(
         default=0.000625,
+        gt=0.0,
+        le=1.0,
         description="L2 regularization on the network weights.",
     )
     learn_step: int = Field(

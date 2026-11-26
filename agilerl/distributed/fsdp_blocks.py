@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import Any, cast
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
@@ -31,17 +32,24 @@ from torch.utils.checkpoint import (
     SelectiveCheckpointContext,
     create_selective_checkpoint_contexts,
 )
+from torch.utils.hooks import RemovableHandle
 
-from agilerl.architectures.nemotron_h.mamba import block_type_mask_mapping
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.architectures.moe_router import patch_moe_routers
+from agilerl.arena.models.fsdp import (
+    PARAM_PERSISTENCE_THRESHOLD,
+    PREFETCH_UNITS,
+    FSDPConfig,
+)
+from agilerl.distributed.context_parallel.ulysses import ulysses_checkpoint_context_fn
 from agilerl.distributed.expert_parallel import (
+    SAVED_COLLECTIVE_SCOPE,
     iter_packed_expert_modules,
     routed_counts_contexts,
 )
+from agilerl.distributed.mesh import MeshAxisName
 from agilerl.distributed.process import is_distributed
-from agilerl.distributed.tensor_parallel import set_tp_compute_dtype
 from agilerl.lora.moe.layouts import is_packed_experts_module
-from agilerl.utils.patching import class_is_patched
+from agilerl.utils.patching import library_shim
 
 
 def _transformer_blocks(model: nn.Module) -> list[nn.Module]:
@@ -66,87 +74,6 @@ def _transformer_blocks(model: nn.Module) -> list[nn.Module]:
                 continue
             nested.add(id(child))
     return [module for module in hits if id(module) not in nested]
-
-
-def _unwrap_checkpoint(module: nn.Module) -> nn.Module:
-    """Inner module when ``module`` is an activation-checkpoint wrapper."""
-    inner = getattr(module, "_checkpoint_wrapped_module", None)
-    return inner if isinstance(inner, nn.Module) else module
-
-
-class FSDPBlockGroup(nn.Module):
-    """Consecutive transformer blocks treated as one FSDP2 unit."""
-
-    def __init__(self, blocks: Sequence[nn.Module]) -> None:
-        super().__init__()
-        self.blocks = nn.ModuleList(list(blocks))
-        first = _unwrap_checkpoint(self.blocks[0])
-        # HF indexes ``layer.block_type`` / ``layer_idx`` on ModuleList entries.
-        self.block_type = getattr(first, "block_type", None)
-        self.layer_idx = getattr(first, "layer_idx", None)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *args: object,
-        **kwargs: object,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        mask = kwargs.get("attention_mask")
-        result: torch.Tensor | tuple[torch.Tensor, ...] = hidden_states
-        for block in self.blocks:
-            hidden = result[0] if isinstance(result, tuple) else result
-            if isinstance(mask, dict):
-                raw = _unwrap_checkpoint(block)
-                block_kwargs = dict(kwargs)
-                block_kwargs["attention_mask"] = mask.get(
-                    getattr(raw, "block_type", None)
-                )
-                result = block(hidden, *args, **block_kwargs)
-            else:
-                result = block(hidden, *args, **kwargs)
-        return result
-
-
-def _replace_consecutive_blocks(
-    root: nn.Module, blocks: Sequence[nn.Module]
-) -> FSDPBlockGroup:
-    """Lift a consecutive ``ModuleList`` span into an :class:`FSDPBlockGroup`."""
-    target = list(blocks)
-    if not target:
-        msg = "blocks must be non-empty"
-        raise ValueError(msg)
-    for parent in root.modules():
-        if not isinstance(parent, nn.ModuleList):
-            continue
-        children = list(parent)
-        span = len(target)
-        for start in range(len(children) - span + 1):
-            if children[start : start + span] != target:
-                continue
-            for offset in range(span - 1, -1, -1):
-                del parent[start + offset]
-            group = FSDPBlockGroup(target)
-            parent.insert(start, group)
-            return group
-    msg = "Could not find consecutive ModuleList span for FSDP block group"
-    raise RuntimeError(msg)
-
-
-def _group_transformer_units(
-    model: nn.Module, units: Sequence[nn.Module], every_n: int
-) -> list[nn.Module]:
-    """Bundle consecutive wrap targets into groups of ``every_n``."""
-    unit_list = list(units)
-    if every_n == 1 or len(unit_list) <= 1:
-        return unit_list
-    grouped: list[nn.Module] = []
-    for start in range(0, len(unit_list), every_n):
-        chunk = unit_list[start : start + every_n]
-        if len(chunk) == 1:
-            grouped.append(chunk[0])
-            continue
-        grouped.append(_replace_consecutive_blocks(model, chunk))
-    return grouped
 
 
 def _replace_child(root: nn.Module, old: nn.Module, new: nn.Module) -> None:
@@ -223,18 +150,70 @@ def _owned_parameters(module: nn.Module) -> set[nn.Parameter]:
     return owned
 
 
-def _persistent_params(module: nn.Module, threshold: int) -> set[nn.Parameter]:
-    """Unsharded parameters: ``numel`` below ``threshold``."""
-    if threshold <= 0:
-        return set()
-    return {param for param in _owned_parameters(module) if param.numel() < threshold}
+class UnforwardedFSDPUnits:
+    """FSDP2 units that have not run a forward since this tracker was built."""
+
+    def __init__(self, modules: Iterable[nn.Module]) -> None:
+        """Track the FSDP2 units in ``modules`` until each one's first forward.
+
+        :param modules: Modules to scan; those that are not FSDP2 units are skipped.
+        :type modules: Iterable[nn.Module]
+        """
+        self.units: dict[int, FSDPModule] = {}
+        self.handles: dict[int, RemovableHandle] = {}
+        for module in modules:
+            if not isinstance(module, FSDPModule):
+                continue
+            self.units[id(module)] = module
+            self.handles[id(module)] = module.register_forward_pre_hook(
+                self._mark_forwarded
+            )
+
+    def _mark_forwarded(self, module: nn.Module, _args: tuple[Any, ...]) -> None:
+        """Stop tracking ``module`` once it runs a forward."""
+        self.units.pop(id(module))
+        self.handles.pop(id(module)).remove()
+
+    def __iter__(self) -> Iterator[FSDPModule]:
+        return iter(self.units.values())
 
 
-def _cast_params(params: Iterable[nn.Parameter], dtype: torch.dtype) -> None:
-    """Put unsharded parameters in the mixed-precision compute dtype."""
+def _persistent_params(module: nn.Module) -> set[nn.Parameter]:
+    """Unsharded parameters: frozen, ``numel`` below ``PARAM_PERSISTENCE_THRESHOLD``.
+
+    Trainable parameters always shard, so the mixed-precision policy runs
+    their fp32 master weights in ``param_dtype``.
+    """
+    return {
+        param
+        for param in _owned_parameters(module)
+        if not param.requires_grad and param.numel() < PARAM_PERSISTENCE_THRESHOLD
+    }
+
+
+def _cast_frozen_params(params: Iterable[nn.Parameter], dtype: torch.dtype) -> None:
+    """Put frozen unsharded parameters in the mixed-precision compute dtype.
+
+    Trainable ones outside FSDP (EP shards) keep their stored dtype; their
+    kernels cast them to the activation dtype.
+    """
     for param in params:
-        if param.dtype != dtype:
+        if param.requires_grad or param.dtype == dtype:
+            continue
+        if isinstance(param, DTensor):
+            # ``.data`` assignment relabels a DTensor but leaves its local shard.
+            cast_param = nn.Parameter(param.detach().to(dtype), param.requires_grad)
+            torch.utils.swap_tensors(param, cast_param)
+        else:
             param.data = param.data.to(dtype=dtype)
+
+
+def _ple_embed(language: nn.Module | None) -> nn.Module | None:
+    """Packed per-layer embedding table on the language body, if present."""
+    if language is None:
+        return None
+    module = getattr(language, "embed_tokens_per_layer", None)
+    return module if isinstance(module, nn.Module) else None
 
 
 def _embed_params(model: nn.Module) -> set[nn.Parameter]:
@@ -242,7 +221,8 @@ def _embed_params(model: nn.Module) -> set[nn.Parameter]:
 
     ``to_empty`` splits tied ``lm_head.weight`` from ``embed_tokens``. Both
     must be ignored or FSDP shards the head, then ``tie_weights()`` replaces
-    that DTensor with the dense embed Parameter.
+    that DTensor with the dense embed Parameter. Per-layer embeddings are a
+    separate FSDP unit, not ignored here.
     """
     causal = resolve_causal_lm(model)
     language = _language_model(causal)
@@ -272,22 +252,18 @@ def _embed_params(model: nn.Module) -> set[nn.Parameter]:
 def _shard_unit(
     module: nn.Module,
     shard_kwargs: dict,
-    persistence_threshold: int,
     extra_ignored: set[nn.Parameter] | None = None,
-    keep_dtype: set[nn.Parameter] | None = None,
 ) -> None:
-    """``fully_shard`` ``module``, leaving tiny owned parameters replicated.
-
-    :param keep_dtype: Ignored parameters whose stored dtype is kept.
-    """
-    ignored = _persistent_params(module, persistence_threshold)
+    """``fully_shard`` ``module``, leaving tiny frozen owned parameters replicated."""
+    ignored = _persistent_params(module)
+    owned = _owned_parameters(module)
     if extra_ignored:
-        ignored = ignored | (extra_ignored & _owned_parameters(module))
+        ignored = ignored | (extra_ignored & owned)
     if ignored:
         mp_policy = shard_kwargs.get("mp_policy")
         param_dtype = getattr(mp_policy, "param_dtype", None)
         if param_dtype is not None:
-            _cast_params(ignored - (keep_dtype or set()), param_dtype)
+            _cast_frozen_params(ignored, param_dtype)
         shard_kwargs = dict(shard_kwargs)
         shard_kwargs["ignored_params"] = ignored
     fully_shard(module, **shard_kwargs)
@@ -296,17 +272,15 @@ def _shard_unit(
 def _shard_embed_and_lm_head(
     model: nn.Module,
     shard_kwargs: dict,
-    persistence_threshold: int,
     extra_ignored: set[nn.Parameter] | None = None,
-    keep_dtype: set[nn.Parameter] | None = None,
 ) -> None:
     """Replicate token embeddings; shard an untied ``lm_head`` as its own unit.
 
     Embeddings stay dense on every rank. An untied head is sharded alone
     with ``reshard_after_forward=False`` so the last all-gather stays live
     into the unembedding. Tied embeddings skip the head unit so tying
-    stays intact. A head whose parameters are already on the expert-parallel
-    mesh stays there.
+    stays intact. A head whose parameters all stay outside FSDP (on the
+    expert-parallel mesh, or resident frozen TP shards) gets no unit.
     """
     causal = resolve_causal_lm(model)
     config = getattr(causal, "config", None)
@@ -322,13 +296,24 @@ def _shard_embed_and_lm_head(
         return
     head_kwargs = dict(shard_kwargs)
     head_kwargs["reshard_after_forward"] = False
-    _shard_unit(
-        lm_head,
-        head_kwargs,
-        persistence_threshold,
-        extra_ignored=ignored,
-        keep_dtype=keep_dtype,
-    )
+    _shard_unit(lm_head, head_kwargs, extra_ignored=ignored)
+
+
+def _shard_ple_embeddings(
+    model: nn.Module,
+    shard_kwargs: dict,
+    extra_ignored: set[nn.Parameter] | None = None,
+) -> None:
+    """Shard packed per-layer embeddings as their own FSDP unit.
+
+    Gemma 4 PLE is vocab * layers * ple_dim (billions of elements on E4B).
+    A dedicated unit all-gathers that table without mixing it into the root
+    leftover gather.
+    """
+    ple = _ple_embed(_language_model(resolve_causal_lm(model)))
+    if ple is None:
+        return
+    _shard_unit(ple, shard_kwargs, extra_ignored=extra_ignored)
 
 
 def _prefetch_chains(
@@ -339,9 +324,9 @@ def _prefetch_chains(
     Blocks of one parent (a decoder ``layers`` list, a vision ``blocks``
     stack) run back to back, so only siblings prefetch each other. A unit
     with no explicit backward prefetch falls back to FSDP's recorded
-    post-forward order, which covers the jump between towers. Embed and
-    ``lm_head`` join the language model's chain, or the last chain when no
-    language model is found.
+    post-forward order, which covers the jump between towers. Embed,
+    per-layer embeddings, and ``lm_head`` join the language model's chain,
+    or the last chain when no language model is found.
     """
     unit_ids = {id(unit) for unit in block_units if isinstance(unit, FSDPModule)}
     causal = resolve_causal_lm(model)
@@ -367,25 +352,25 @@ def _prefetch_chains(
         embed = getattr(language, "embed_tokens", None) or getattr(
             language, "embeddings", None
         )
+        insert_at = 0
         if isinstance(embed, FSDPModule):
             language_chain.insert(0, embed)
+            insert_at = 1
+        ple = _ple_embed(language)
+        if isinstance(ple, FSDPModule):
+            language_chain.insert(insert_at, ple)
     lm_head = getattr(causal, "lm_head", None) or getattr(causal, "embed_out", None)
     if isinstance(lm_head, FSDPModule):
         language_chain.append(lm_head)
     return chains
 
 
-def _set_prefetch(
-    model: nn.Module,
-    block_units: Sequence[nn.Module],
-    forward_units: int = 1,
-    backward_units: int = 1,
-) -> None:
+def _set_prefetch(model: nn.Module, block_units: Sequence[nn.Module]) -> None:
     """Overlap neighbour FSDP all-gathers with the current unit's compute.
 
-    Forward prefetches the next ``forward_units`` units of the same chain
+    Forward prefetches the next ``PREFETCH_UNITS`` units of the same chain
     (see :func:`_prefetch_chains`). Backward prefetches the previous
-    ``backward_units`` so unit i-1 gathers while unit i runs backward.
+    ``PREFETCH_UNITS`` so unit i-1 gathers while unit i runs backward.
     ``block_units`` are the modules just ``fully_shard``ed with the
     non-expert mesh (checkpoint wrappers when checkpointing is on), so
     every prefetch stays on that mesh: under HSDP each all-gather runs
@@ -393,12 +378,55 @@ def _set_prefetch(
     """
     for units in _prefetch_chains(model, block_units):
         for index, current in enumerate(units):
-            nxt = units[index + 1 : index + 1 + forward_units]
+            nxt = units[index + 1 : index + 1 + PREFETCH_UNITS]
             if nxt:
                 current.set_modules_to_forward_prefetch(list(nxt))
-            prev = units[max(0, index - backward_units) : index]
+            prev = units[max(0, index - PREFETCH_UNITS) : index]
             if prev:
                 current.set_modules_to_backward_prefetch(list(reversed(prev)))
+
+
+# Resolved once: the routing policy runs on every op of a routed block.
+TOPK_OP = torch.ops.aten.topk
+TO_COPY_OP = torch.ops.aten._to_copy
+# Expert-parallel token all-to-alls and tensor-parallel reduces and gathers.
+COLLECTIVE_OPS = frozenset(
+    {
+        torch.ops._c10d_functional.all_to_all_single,
+        torch.ops._c10d_functional.all_reduce,
+        torch.ops._c10d_functional.all_gather_into_tensor,
+        torch.ops._c10d_functional.wait_tensor,
+    }
+)
+
+
+class ExpertScope(threading.local):
+    """Depth of packed-expert child forwards running on this thread."""
+
+    depth = 0
+
+
+EXPERT_SCOPE = ExpertScope()
+
+
+def _enter_expert_scope(_module: nn.Module, _args: tuple[Any, ...]) -> None:
+    EXPERT_SCOPE.depth += 1
+
+
+def _exit_expert_scope(
+    _module: nn.Module, _args: tuple[Any, ...], _output: object
+) -> None:
+    EXPERT_SCOPE.depth -= 1
+
+
+def _enter_saved_collective_scope(_module: nn.Module, _args: tuple[Any, ...]) -> None:
+    SAVED_COLLECTIVE_SCOPE.depth += 1
+
+
+def _exit_saved_collective_scope(
+    _module: nn.Module, _args: tuple[Any, ...], _output: object
+) -> None:
+    SAVED_COLLECTIVE_SCOPE.depth -= 1
 
 
 def _save_routing_policy(
@@ -407,21 +435,44 @@ def _save_routing_policy(
     *_args: Any,
     **kwargs: Any,
 ) -> CheckpointPolicy:
-    """Keep router ``topk`` and device-to-host copies from forward; recompute the rest.
+    """Inside a packed-expert child, keep ``topk`` and device-to-host copies; recompute the rest.
 
     A recomputed router can pick other experts, which changes dispatch shapes
-    and the all-to-all splits every expert-parallel peer expects.
+    and the all-to-all splits every expert-parallel peer expects. Saved host
+    copies spare the recompute a host sync each.
+
+    Saved outputs replay in forward order per op, so a saved op must run the
+    same number of times in the recompute. Mixers outside the experts (Gated
+    DeltaNet under context parallel) can skip host copies on recompute, so
+    their ops are never saved.
     """
-    if op.overloadpacket is torch.ops.aten.topk:
+    if not EXPERT_SCOPE.depth:
+        return CheckpointPolicy.PREFER_RECOMPUTE
+    packet = op.overloadpacket
+    if packet is TOPK_OP:
         return CheckpointPolicy.MUST_SAVE
+    if packet is not TO_COPY_OP:
+        return CheckpointPolicy.PREFER_RECOMPUTE
     device = kwargs.get("device")
-    if (
-        op.overloadpacket is torch.ops.aten._to_copy
-        and isinstance(device, torch.device)
-        and device.type == "cpu"
-    ):
+    if isinstance(device, torch.device) and device.type == "cpu":
         return CheckpointPolicy.MUST_SAVE
     return CheckpointPolicy.PREFER_RECOMPUTE
+
+
+def _save_routing_and_collectives_policy(
+    context: SelectiveCheckpointContext,
+    op: torch._ops.OpOverload,
+    *args: Any,
+    **kwargs: Any,
+) -> CheckpointPolicy:
+    """:func:`_save_routing_policy`, plus every functional collective inside a packed-expert child.
+
+    The recompute then skips the token all-to-alls and tensor-parallel
+    reduces and gathers of the experts.
+    """
+    if EXPERT_SCOPE.depth and op.overloadpacket in COLLECTIVE_OPS:
+        return CheckpointPolicy.MUST_SAVE
+    return _save_routing_policy(context, op, *args, **kwargs)
 
 
 @contextmanager
@@ -432,209 +483,95 @@ def _together(*cms: Any) -> Iterator[None]:
         yield
 
 
-def _block_checkpoint_contexts(save_router: bool) -> Callable[[], tuple[Any, Any]]:
-    """EP count replay, plus router topk save on packed-expert blocks."""
+@library_shim("torch", "==2.13.*")
+def _block_checkpoint_contexts(
+    save_router: bool, ulysses: bool = False, save_collectives: bool = False
+) -> Callable[[], tuple[Any, Any]]:
+    """EP count replay, router topk save, and Ulysses params on recompute.
+
+    :param save_collectives: With ``save_router``, also save the experts'
+        functional collectives.
+    """
+    policy = (
+        _save_routing_and_collectives_policy
+        if save_collectives
+        else _save_routing_policy
+    )
 
     def context_fn() -> tuple[Any, Any]:
+        forwards: list[Any] = []
+        recomputes: list[Any] = []
+        if ulysses:
+            ulysses_fwd, ulysses_recompute = ulysses_checkpoint_context_fn()
+            forwards.append(ulysses_fwd)
+            recomputes.append(ulysses_recompute)
         routing_fwd, routing_recompute = routed_counts_contexts()
-        if not save_router:
-            return routing_fwd, routing_recompute
-        save_fwd, save_recompute = create_selective_checkpoint_contexts(
-            _save_routing_policy
-        )
-        return (
-            _together(save_fwd, routing_fwd),
-            _together(save_recompute, routing_recompute),
-        )
+        if save_router:
+            save_fwd, save_recompute = create_selective_checkpoint_contexts(policy)
+            forwards.extend((save_fwd, routing_fwd))
+            recomputes.extend((save_recompute, routing_recompute))
+        else:
+            forwards.append(routing_fwd)
+            recomputes.append(routing_recompute)
+        return _together(*forwards), _together(*recomputes)
 
     return context_fn
 
 
-def _block_kind(block: nn.Module) -> str:
-    """Kind of a transformer block for activation-checkpoint selection.
-
-    :param block: Unwrapped transformer block.
-    :type block: nn.Module
-    :return: The block's ``block_type`` string (hybrid models name the
-        mixer, e.g. ``linear_attention`` / ``full_attention`` / ``moe``), else
-        its class name.
-    :rtype: str
-    """
-    kind = getattr(block, "block_type", None)
-    return kind if isinstance(kind, str) else type(block).__name__
-
-
 def _blocks_to_checkpoint(blocks: Sequence[nn.Module], config: FSDPConfig) -> set[int]:
-    """``id`` of each block that ``config``'s checkpoint policy wraps."""
-    kinds = [_block_kind(block) for block in blocks]
-    skipped = set(config.checkpoint_skip_layer_types)
-    unknown = skipped - set(kinds)
-    if unknown:
+    """``id`` of every ``config.checkpoint_every_n_blocks``-th block, the ones activation checkpointing wraps."""
+    stride = config.checkpoint_every_n_blocks
+    if stride is None:
         msg = (
-            f"FSDPConfig.checkpoint_skip_layer_types {sorted(unknown)} match no "
-            f"transformer block; block kinds are {sorted(set(kinds))}"
+            "FSDPConfig.checkpoint_every_n_blocks is unset; the training-memory "
+            "search sets it before activation checkpointing wraps blocks"
         )
         raise ValueError(msg)
-    eligible = [
-        (block, kind)
-        for block, kind in zip(blocks, kinds, strict=True)
-        if kind not in skipped
-    ]
-    chosen = eligible[:: config.checkpoint_every_n_blocks]
-    totals = Counter(kinds)
-    wrapped = Counter(kind for _block, kind in chosen)
+    chosen = blocks[::stride]
     logging.getLogger(__name__).info(
-        "Activation checkpointing wraps %s",
-        ", ".join(f"{kind} {wrapped[kind]}/{totals[kind]}" for kind in sorted(totals)),
+        "Activation checkpointing wraps %d/%d blocks", len(chosen), len(blocks)
     )
-    return {id(block) for block, _kind in chosen}
+    return {id(block) for block in chosen}
 
 
-def _inner_block_types(group: FSDPBlockGroup) -> set[object]:
-    """``block_type`` of each inner decoder block in ``group``."""
-    types: set[object] = set()
-    for block in group.blocks:
-        raw = _unwrap_checkpoint(block)
-        types.add(getattr(raw, "block_type", None))
-    return types
+def _has_packed_experts(module: nn.Module) -> bool:
+    """Whether ``module`` holds a packed-experts layer."""
+    return any(is_packed_experts_module(child) for child in module.modules())
 
 
-def _mixed_fsdp_groups(module: nn.Module) -> list[FSDPBlockGroup]:
-    """Grouped wrap units whose inner blocks do not share one ``block_type``."""
-    return [
-        child
-        for child in module.modules()
-        if isinstance(child, FSDPBlockGroup) and len(_inner_block_types(child)) > 1
-    ]
-
-
-def _mixed_group_attention_mask(
-    language: nn.Module,
-    input_ids: torch.Tensor | None,
-    inputs_embeds: torch.Tensor | None,
-    position_ids: torch.Tensor | None,
-    past_key_values: object | None,
-    attention_mask: torch.Tensor | dict[str, object] | None,
-) -> tuple[
-    torch.Tensor | dict[str, object] | None,
-    torch.Tensor | None,
-    torch.Tensor | None,
-    torch.Tensor | None,
-    list[tuple[FSDPBlockGroup, object]],
-]:
-    """Rewrite mixed-type group ``block_type`` so HF forwards the full mask dict."""
-    mixed = _mixed_fsdp_groups(language)
-    mapping = attention_mask if isinstance(attention_mask, dict) else None
-    restored: list[tuple[FSDPBlockGroup, object]] = []
-    if mapping is None and mixed:
-        needs_linear = any(
-            "linear_attention" in _inner_block_types(group) for group in mixed
-        )
-        embeds = inputs_embeds
-        if embeds is None and input_ids is not None:
-            embed_fn = getattr(language, "embeddings", None) or getattr(
-                language, "embed_tokens", None
-            )
-            if callable(embed_fn):
-                embeds = embed_fn(input_ids)
-        if needs_linear and embeds is not None:
-            mapping, position_ids = block_type_mask_mapping(
-                language,
-                embeds=embeds,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                position_ids=position_ids,
-            )
-            if inputs_embeds is None:
-                inputs_embeds = embeds
-                input_ids = None
-    if mapping and mixed:
-        mapping = dict(mapping)
-        payload = dict(mapping)
-        mapping["_agilerl_fsdp_group"] = payload
-        attention_mask = mapping
-        for group in mixed:
-            restored.append((group, group.block_type))
-            group.block_type = "_agilerl_fsdp_group"
-    return attention_mask, input_ids, inputs_embeds, position_ids, restored
-
-
-def _run_grouped_language_forward(
-    language: nn.Module,
-    original: Callable[..., object],
-    input_ids: torch.Tensor | None,
-    inputs_embeds: torch.Tensor | None,
-    position_ids: torch.Tensor | None,
-    past_key_values: object | None,
-    use_cache: bool | None,
-    attention_mask: torch.Tensor | dict[str, object] | None,
-    kwargs: dict[str, object],
-) -> object:
-    """HF language forward with mixed-type FSDP group masks restored after."""
-    (
-        attention_mask,
-        input_ids,
-        inputs_embeds,
-        position_ids,
-        restored,
-    ) = _mixed_group_attention_mask(
-        language,
-        input_ids=input_ids,
-        inputs_embeds=inputs_embeds,
-        position_ids=position_ids,
-        past_key_values=past_key_values,
-        attention_mask=attention_mask,
+def _checkpoint_wrap(
+    module: nn.Module, save_router: bool, ulysses: bool, save_collectives: bool
+) -> nn.Module:
+    """Non-reentrant activation checkpoint around ``module``."""
+    return checkpoint_wrapper(
+        module,
+        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+        preserve_rng_state=False,
+        context_fn=_block_checkpoint_contexts(save_router, ulysses, save_collectives),
     )
-    try:
-        return original(
-            language,
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            attention_mask=attention_mask,
-            **kwargs,
-        )
-    finally:
-        for group, previous in restored:
-            group.block_type = previous
 
 
-def _install_grouped_mask_forward(language: nn.Module) -> None:
-    """Pass the full mask dict into mixed-type ``FSDPBlockGroup`` units.
+def _checkpoint_block(block: nn.Module, config: FSDPConfig) -> nn.Module:
+    """Wrap ``block``; an expert block saves routing ops from its expert children.
 
-    HuggingFace does ``mapping.get(layer.block_type)`` before calling the layer.
+    With ``config.save_moe_collectives`` those children also run and save
+    their collectives as functional collectives.
     """
-    cls = type(language)
-    if class_is_patched(cls, "_agilerl_grouped_fsdp_forward_patched"):
-        return
-    original = cls.forward
-
-    def wrapped(
-        self: nn.Module,
-        input_ids: torch.Tensor | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        position_ids: torch.Tensor | None = None,
-        past_key_values: object | None = None,
-        use_cache: bool | None = None,
-        attention_mask: torch.Tensor | dict[str, object] | None = None,
-        **kwargs: object,
-    ) -> object:
-        return _run_grouped_language_forward(
-            self,
-            original,
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            attention_mask=attention_mask,
-            kwargs=kwargs,
-        )
-
-    cls.forward = wrapped
-    type.__setattr__(cls, "_agilerl_grouped_fsdp_forward_patched", True)
+    ulysses = config.cp > 1
+    if not _has_packed_experts(block):
+        return _checkpoint_wrap(block, False, ulysses, False)
+    save_collectives = bool(config.save_moe_collectives)
+    patch_moe_routers(block)
+    for child in block.children():
+        if _has_packed_experts(child):
+            child.register_forward_pre_hook(_enter_expert_scope)
+            child.register_forward_hook(_exit_expert_scope, always_call=True)
+            if save_collectives:
+                child.register_forward_pre_hook(_enter_saved_collective_scope)
+                child.register_forward_hook(
+                    _exit_saved_collective_scope, always_call=True
+                )
+    return _checkpoint_wrap(block, True, ulysses, save_collectives)
 
 
 def apply_fsdp2(
@@ -644,7 +581,7 @@ def apply_fsdp2(
     expert_mesh: DeviceMesh | None = None,
     gradient_checkpointing: bool = False,
 ) -> nn.Module:
-    """Shard ``model`` with FSDP2: blocks, embed/(untied) lm_head, root, prefetch.
+    """Shard ``model`` with FSDP2: experts, blocks, embed / untied lm_head, PLE, root, prefetch.
 
     Parameters become DTensors in place, so any optimizer must be (re)built
     after this call. Callers must not pass a dense full-model replica on
@@ -655,12 +592,13 @@ def apply_fsdp2(
     when ``None``, FSDP uses the default process group (flat path). Packed
     expert modules are sharded on ``expert_mesh`` when that is provided.
 
-    When ``gradient_checkpointing`` is on, the transformer blocks chosen by
-    ``config.checkpoint_skip_layer_types`` and
-    ``config.checkpoint_every_n_blocks`` are wrapped with
+    Each transformer block is one FSDP unit. When ``gradient_checkpointing``
+    is on, every ``config.checkpoint_every_n_blocks``-th block is wrapped with
     ``checkpoint_wrapper`` before ``fully_shard`` so the checkpoint boundary
     sits inside the FSDP unit. Blocks holding packed experts reuse their
-    forward routing in the recompute.
+    forward routing in the recompute; their listed routers
+    (:data:`~agilerl.architectures.moe_router.ROUTER_FORWARDS`) get
+    out-of-place top-k renormalization.
 
     :param model: Model to shard (CPU or meta parameters).
     :type model: nn.Module
@@ -674,10 +612,12 @@ def apply_fsdp2(
         (the leftover data-parallel axis). Ignored when ``None``.
     :type expert_mesh: DeviceMesh | None
     :param gradient_checkpointing: Wrap the transformer blocks selected by
-        ``config`` with non-reentrant activation checkpointing before sharding.
+        ``config.checkpoint_every_n_blocks`` with non-reentrant activation
+        checkpointing before sharding.
     :type gradient_checkpointing: bool
     :return: The sharded model (same object).
     :rtype: nn.Module
+    :raises ValueError: If ``config.cp > 1`` and ``mesh`` is ``None``.
     """
     if not is_distributed():
         msg = (
@@ -699,47 +639,47 @@ def apply_fsdp2(
     if mesh is not None:
         kwargs["mesh"] = mesh
 
+    # PreMulSum, which applies a custom divide factor, is NCCL-only.
+    force_sum = dist.get_backend() == "gloo"
     packed_experts = [expert for _name, expert in iter_packed_expert_modules(model)]
     # fully_shard on the EP group densifies packed experts to full-E.
     skip_expert_fsdp = False
     if config.ep > 1 and expert_mesh is None:
         skip_expert_fsdp = True
     elif expert_mesh is not None:
-        size_fn = getattr(expert_mesh, "size", None)
-        skip_expert_fsdp = callable(size_fn) and int(expert_mesh.size()) <= 1
+        skip_expert_fsdp = int(expert_mesh.size()) <= 1
         if not skip_expert_fsdp:
             expert_kwargs = dict(kwargs)
             expert_kwargs["mesh"] = expert_mesh
             # Packed experts take leftover-dp FSDP. LoRA parameters stay EP-only.
             # An EP owner's grad already sums its EP group, so the FSDP
-            # reduce divides by the full world. PreMulSum is NCCL-only;
-            # force SUM so the custom factor also works on gloo.
+            # reduce (over dp_replicate too under HSDP) divides by world / cp;
+            # CP ranks hold slices of one sequence and sum.
             for expert in packed_experts:
-                _shard_unit(expert, expert_kwargs, config.param_persistence_threshold)
+                _shard_unit(expert, expert_kwargs)
                 unit = cast("FSDPModule", expert)
-                unit.set_gradient_divide_factor(expert_mesh.size() * config.ep)
-                unit.set_force_sum_reduction_for_comms(True)
-    expert_params: set[nn.Parameter] = set()
+                unit.set_gradient_divide_factor(
+                    expert_mesh.size() * config.ep // config.cp
+                )
+                unit.set_force_sum_reduction_for_comms(force_sum)
+    fsdp_ignored: set[nn.Parameter] = set()
     if skip_expert_fsdp:
         for expert in packed_experts:
-            expert_params.update(expert.parameters())
-    # EP / TP shards (including LoRA on PEFT wrapper links outside the packed
-    # modules) are DTensors on their own mesh. No non-expert unit may manage
-    # them: fully_shard would treat that mesh as TP and fail concatenating it
-    # with its own. TP-replicated copies hold rows each TP rank reads in full.
-    expert_params.update(
-        param for param in model.parameters() if isinstance(param, DTensor)
+            fsdp_ignored.update(expert.parameters())
+    # EP shards (including LoRA on PEFT wrapper links outside the packed
+    # modules) are DTensors on the sparse mesh, which fully_shard cannot
+    # concatenate with the dense FSDP mesh. TP shards share its root and
+    # shard over dp_shard x cp like any dense weight, except frozen ones
+    # ``config.frozen_tp_resident`` keeps resident at 1/tp with no gathers.
+    fsdp_ignored.update(
+        param
+        for param in model.parameters()
+        if isinstance(param, DTensor)
+        and (
+            param.device_mesh.mesh_dim_names != (MeshAxisName.TP,)
+            or (config.frozen_tp_resident and not param.requires_grad)
+        )
     )
-    expert_params.update(
-        module.get_parameter(name)
-        for module in model.modules()
-        for name in getattr(module, "tp_replicated_params", ())
-    )
-    # TP params skip FSDP, so TP regions apply the mixed-precision policy.
-    tp_trainable: set[nn.Parameter] = set()
-    if config.tp > 1:
-        tp_trainable = set_tp_compute_dtype(model, getattr(torch, config.param_dtype))
-
     blocks = [
         block
         for block in _transformer_blocks(model)
@@ -752,49 +692,30 @@ def apply_fsdp2(
     for block in blocks:
         unit = block
         if id(block) in checkpointed:
-            unit = checkpoint_wrapper(
-                block,
-                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-                preserve_rng_state=False,
-                context_fn=_block_checkpoint_contexts(
-                    bool(iter_packed_expert_modules(block))
-                ),
-            )
+            unit = _checkpoint_block(block, config)
             _replace_child(model, block, unit)
         wrap_units.append(unit)
-    sharded_blocks = _group_transformer_units(
-        model, wrap_units, config.wrap_every_n_blocks
-    )
-    if _mixed_fsdp_groups(model):
-        language = _language_model(resolve_causal_lm(model))
-        if language is not None:
-            _install_grouped_mask_forward(language)
-    threshold = config.param_persistence_threshold
-    for unit in sharded_blocks:
-        _shard_unit(
-            unit,
-            kwargs,
-            threshold,
-            extra_ignored=expert_params,
-            keep_dtype=tp_trainable,
-        )
-    _shard_embed_and_lm_head(
-        model,
-        kwargs,
-        threshold,
-        extra_ignored=expert_params,
-        keep_dtype=tp_trainable,
-    )
+    for unit in wrap_units:
+        _shard_unit(unit, kwargs, extra_ignored=fsdp_ignored)
+    _shard_embed_and_lm_head(model, kwargs, extra_ignored=fsdp_ignored)
+    _shard_ple_embeddings(model, kwargs, extra_ignored=fsdp_ignored)
     _shard_unit(
         model,
         kwargs,
-        threshold,
-        extra_ignored=_embed_params(model) | expert_params,
-        keep_dtype=tp_trainable,
+        extra_ignored=_embed_params(model) | fsdp_ignored,
     )
-    _set_prefetch(
-        model, sharded_blocks, config.prefetch_units, config.backward_prefetch_units
-    )
+    if config.cp > 1:
+        if mesh is None:
+            msg = f"FSDPConfig.cp={config.cp} needs an FSDP device mesh"
+            raise ValueError(msg)
+        # Dense units reduce over dp_shard x cp. CP ranks hold slices of one
+        # data shard's grad and sum, so divide by data parallel only.
+        expert_ids = {id(expert) for expert in packed_experts}
+        for module in model.modules():
+            if isinstance(module, FSDPModule) and id(module) not in expert_ids:
+                module.set_gradient_divide_factor(mesh.size() // config.cp)
+                module.set_force_sum_reduction_for_comms(force_sum)
+    _set_prefetch(model, wrap_units)
     # PEFT ``generate`` delegates to ``base_model.generate`` and never enters
     # the FSDP-rooted ``forward``, so remaining root shards stay DTensors
     # against plain ``input_ids``. Register ``generate`` so FSDP2 all-gathers

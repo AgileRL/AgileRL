@@ -25,10 +25,11 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from peft import LoraConfig
 
 from agilerl.algorithms.reinforce_llm import REINFORCE
+from tests.rank_launch import run_ranks
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps
 from tests.test_algorithms.test_llms.segment_helpers import (
+    balanced_learn_worker,
     pad_to_eight_rows,
-    spawn_balanced_learn,
-    use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_COUNTS,
@@ -37,6 +38,7 @@ from tests.test_algorithms.test_llms.vision_helpers import (
     SEGMENTS,
     TowerVisionModel,
     VisionHiddenStatesModel,
+    VisionRowsLifetime,
     adapter_weights,
     expected_vision_rows,
     learn_on_vision_episodes,
@@ -65,10 +67,8 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
         "mini_batch_size": 4,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -83,16 +83,11 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
 
 class TestREINFORCELearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
-        self, monkeypatch: pytest.MonkeyPatch, segmented: bool, liger: bool
+        self, segmented: bool
     ) -> None:
         # Arrange
         agent = make_vision_reinforce()
-        if liger:
-            use_fake_liger_policy_loss(
-                agent, monkeypatch, "agilerl.algorithms.reinforce_llm"
-            )
         model = vision_model(agent)
         expected = expected_vision_rows(segmented)
 
@@ -174,6 +169,7 @@ class TestREINFORCELearnVision:
             agent.learn(
                 (token_ids, action_masks, rewards),
                 turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
                 episode_segments=SEGMENTS,
                 pixel_values=pixel_values,
                 pixel_image_counts=IMAGE_COUNTS,
@@ -229,9 +225,29 @@ class TestREINFORCELearnVisionCache:
                 ), name
 
 
+class TestREINFORCELearnVisionRowsLifetime:
+    @pytest.mark.parametrize("cached", [True, False], ids=["warm", "cold"])
+    def test_learn_frees_each_micro_batch_vision_rows_before_backward(
+        self, monkeypatch: pytest.MonkeyPatch, cached: bool
+    ) -> None:
+        # Arrange
+        agent = make_tower_vision_reinforce(micro_batch_size_per_gpu=1)
+        if not cached:
+            monkeypatch.setattr(agent._vision_cache, "step", nullcontext)
+        lifetime = VisionRowsLifetime(agent, monkeypatch)
+
+        # Act
+        learn_on_vision_episodes(agent, segmented=True)
+
+        # Assert
+        assert len(lifetime.freed) >= 2
+        assert all(lifetime.freed)
+
+
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestREINFORCELearnVisionCacheAcrossRanks:
     def test_balanced_rows_run_the_tower_once_per_vision_row(self) -> None:
         # Arrange: rank 0's 4 rows (5 vision rows) and rank 1's 2 rows (3 vision
@@ -239,13 +255,21 @@ class TestREINFORCELearnVisionCacheAcrossRanks:
         # and 3. Rank 0 receives a row with 2 vision rows, rank 1 two rows with 3.
 
         # Act
-        cached = spawn_balanced_learn(
+        cached = run_ranks(
+            balanced_learn_worker,
+            2,
             make_tower_vision_reinforce,
             partial(learn_rank_vision_episodes, cached=True),
+            backend=None,
+            cpu=True,
         )
-        uncached = spawn_balanced_learn(
+        uncached = run_ranks(
+            balanced_learn_worker,
+            2,
             make_tower_vision_reinforce,
             partial(learn_rank_vision_episodes, cached=False),
+            backend=None,
+            cpu=True,
         )
 
         # Assert

@@ -11,8 +11,7 @@ and verify quantization actually happened. Validates that:
     ``quantization_config``) into transformers' ``from_pretrained`` while
     still applying the flash/sdpa + dtype defaults.
   * `build_bnb_quantization_config` resolves YAML-friendly presets / dicts.
-  * `_prepare_llm_algo_kwargs` wires ``INIT_HP['QUANTIZATION']`` and
-    ``INIT_HP['ACTIVATION_OFFLOAD']`` through.
+  * `_prepare_llm_algo_kwargs` wires ``INIT_HP['QUANTIZATION']`` through.
   * `LLMAlgorithm._activation_offload_ctx` gates ``save_on_cpu`` correctly.
   * `LLMAlgorithm` adds ``lm_head`` to ``llm_int8_skip_modules`` when a fused
     log-prob path is active.
@@ -52,20 +51,14 @@ from agilerl.utils.llm_utils import (
     _json_safe_value,
     adapt_lora_config_for_model,
     build_bnb_quantization_config,
-    build_clippable_linear_lora_target_regex,
-    build_clippable_linear_lora_target_suffixes,
-    build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
-    filter_peft_state_dict_for_vllm_lora,
     list_peft_matched_module_keys,
     offload_colocated_trainer_from_gpu,
     peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
-    resolve_attn_implementation,
-    resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
 )
 from agilerl.utils.utils import _prepare_llm_algo_kwargs
@@ -74,10 +67,10 @@ from tests import TINY_LLM_FIXTURE_PATH
 
 class TestCreateModelFromNameOrPath:
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: types.SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3"),
         )
 
     def test_forwards_quantization_config(self):
@@ -91,18 +84,16 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
-                "dummy/path", model_config={"quantization_config": cfg}
+                "dummy/path", "sdpa", model_config={"quantization_config": cfg}
             )
 
         assert captured.get("quantization_config") is cfg
 
     def test_quant_config_keeps_attn_and_dtype(self):
-        # A model_config carrying a quantization_config must still get the
-        # default attn backend and dtype.
         cfg = BitsAndBytesConfig(load_in_4bit=True)
         captured = {}
 
@@ -111,36 +102,16 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
-                "dummy/path", model_config={"quantization_config": cfg}
+                "dummy/path", "sdpa", model_config={"quantization_config": cfg}
             )
 
-        assert captured.get("attn_implementation") == resolve_attn_implementation(
-            None, model_name_or_path="dummy/path"
-        )
+        assert captured.get("attn_implementation") == "sdpa"
         assert "torch_dtype" in captured
         assert captured.get("quantization_config") is cfg
-
-    def test_explicit_model_config_values_win(self):
-        # setdefault semantics: a caller-supplied attn_implementation is kept.
-        captured = {}
-
-        def _fake_from_pretrained(**kwargs):
-            captured.update(kwargs)
-            return mock.MagicMock()
-
-        with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
-            side_effect=_fake_from_pretrained,
-        ):
-            create_model_from_name_or_path(
-                "dummy/path", model_config={"attn_implementation": "eager"}
-            )
-
-        assert captured.get("attn_implementation") == "eager"
 
     def test_none_quantization_does_not_inject_key(self):
         captured = {}
@@ -150,10 +121,10 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
-            create_model_from_name_or_path("dummy/path")
+            create_model_from_name_or_path("dummy/path", "sdpa")
 
         assert "quantization_config" not in captured
 
@@ -171,6 +142,7 @@ class TestCreateModelFromNameOrPath:
         ):
             create_model_from_name_or_path(
                 "dummy/path",
+                "sdpa",
                 add_value_head=True,
                 model_config={"quantization_config": cfg},
             )
@@ -259,20 +231,6 @@ class TestInitHpQuantizationWiring:
         )
         assert merged["quantization_config"] is explicit
 
-    def test_activation_offload_resolved_from_init_hp(self):
-        merged = self._prepare({}, {"ACTIVATION_OFFLOAD": True})
-        assert merged["activation_offload"] is True
-
-    def test_activation_offload_absent_leaves_kwargs_clean(self):
-        merged = self._prepare({}, {})
-        assert "activation_offload" not in merged
-
-    def test_explicit_activation_offload_kwarg_wins(self):
-        merged = self._prepare(
-            {"activation_offload": False}, {"ACTIVATION_OFFLOAD": True}
-        )
-        assert merged["activation_offload"] is False
-
 
 class TestActivationOffloadContext:
     """`LLMAlgorithm._activation_offload_ctx` gates ``save_on_cpu``.
@@ -311,19 +269,13 @@ class TestVLLMConfigDefaults:
         cfg = VLLMConfig()
         assert cfg.quantization is None
         assert cfg.vllm_model_name_or_path is None
-        assert cfg.max_lora_rank == 16
-        assert cfg.max_loras == 1
         assert cfg.kv_cache_dtype is None
 
-    def test_lora_fields_can_be_set(self):
+    def test_quantized_engine_fields_can_be_set(self):
         cfg = VLLMConfig(
-            max_lora_rank=32,
-            max_loras=2,
             vllm_model_name_or_path="TheBloke/Llama-2-7B-AWQ",
             quantization="awq",
         )
-        assert cfg.max_lora_rank == 32
-        assert cfg.max_loras == 2
         assert cfg.vllm_model_name_or_path == "TheBloke/Llama-2-7B-AWQ"
         assert cfg.quantization == "awq"
 
@@ -403,54 +355,21 @@ class TestJsonSafeValue:
         assert payload["target_modules"] == ["k_proj", "q_proj"]
 
 
-class TestFilterPeftStateDictForVllmLora:
-    def test_keeps_only_tensors_matching_target_modules(self):
-        target = build_scoped_lora_target_regex(
-            [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ],
-            "language_model",
-        )
-        state = {
-            "base_model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight": torch.zeros(
-                1
-            ),
-            "base_model.model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.weight": torch.zeros(
-                1
-            ),
-        }
-        filtered = filter_peft_state_dict_for_vllm_lora(state, target)
-        assert len(filtered) == 1
-        assert "language_model" in next(iter(filtered))
+class TestRemapPeftLoraKeyForVllm:
+    def test_keeps_clippable_linear_suffix(self):
+        key = "base_model.model.model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.weight"
 
-    def test_remaps_clippable_linear_suffix(self):
-        key = "base_model.model.language_model.layers.0.self_attn.q_proj.linear.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(key)
-            == "base_model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight"
-        )
-
-
-class TestResolveVllmMaxLoraRank:
-    def test_takes_max_of_config_and_trainer(self):
-        assert resolve_vllm_max_lora_rank(16, 32) == 32
-        assert resolve_vllm_max_lora_rank(64, 16) == 64
+        assert remap_peft_lora_key_for_vllm(key) == key
 
 
 class TestConfigureVllmKwargs:
     """Verify build_vllm_llm_init_kwargs wires VLLMConfig into LLM()."""
 
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: types.SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3"),
         )
 
     def test_default_config_enables_lora(self):
@@ -460,7 +379,7 @@ class TestConfigureVllmKwargs:
         )
         assert kwargs["model"] == "trainer/model"
         assert kwargs["enable_lora"] is True
-        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_lora_rank"] == 8
         assert kwargs["max_loras"] == 1
         assert "quantization" not in kwargs
         # Default kv_cache_dtype is None -> the builder omits the key entirely.
@@ -477,8 +396,6 @@ class TestConfigureVllmKwargs:
         cfg = VLLMConfig(
             quantization="awq",
             vllm_model_name_or_path="TheBloke/Llama-2-7B-AWQ",
-            max_lora_rank=32,
-            max_loras=4,
         )
         kwargs = build_vllm_llm_init_kwargs(
             cfg,
@@ -489,8 +406,8 @@ class TestConfigureVllmKwargs:
         assert kwargs["model"] == "TheBloke/Llama-2-7B-AWQ"
         assert kwargs["quantization"] == "awq"
         assert kwargs["enable_lora"] is True
-        assert kwargs["max_lora_rank"] == 32
-        assert kwargs["max_loras"] == 4
+        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_loras"] == 1
 
     def test_vllm_model_fallback_to_trainer_model(self):
         cfg = VLLMConfig(quantization=None)
@@ -502,13 +419,12 @@ class TestConfigureVllmKwargs:
         assert kwargs["model"] == "Qwen/Qwen2.5-0.5B-Instruct"
         assert kwargs["enable_lora"] is True
 
-    def test_trainer_rank_bumps_max_lora_rank(self):
-        cfg = VLLMConfig(max_lora_rank=8)
+    def test_max_lora_rank_rounds_the_trainer_rank_up(self):
         kwargs = build_vllm_llm_init_kwargs(
-            cfg,
+            VLLMConfig(),
             trainer_model_name_or_path="m",
             max_model_len=512,
-            lora_rank=32,
+            lora_rank=20,
         )
         assert kwargs["max_lora_rank"] == 32
 
@@ -755,181 +671,63 @@ class TestPrepareVllmForGenerationOffload:
             agent._prepare_vllm_for_generation()
 
 
-class TestAdaptLoraConfigForClippableLinear:
+class TestAdaptLoraConfigForGemmaLayout:
     @staticmethod
-    def _gemma4_style_block():
-        class Gemma4ClippableLinear(torch.nn.Module):
-            def __init__(self, in_features: int, out_features: int) -> None:
-                super().__init__()
-                self.linear = torch.nn.Linear(in_features, out_features, bias=False)
-
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.q_proj = Gemma4ClippableLinear(8, 8)
-                self.k_proj = Gemma4ClippableLinear(8, 8)
-                self.o_proj = Gemma4ClippableLinear(8, 8)
-
-        return Block()
-
-    def test_no_op_on_plain_linear_model(self):
-        from peft import LoraConfig
-
-        model = torch.nn.Module()
-        model.layer = torch.nn.Linear(4, 4)
-        cfg = LoraConfig(r=4, target_modules=["layer"])
-        assert adapt_lora_config_for_model(model, cfg) is cfg
-
-    def test_all_linear_becomes_suffix_targets(self):
-        from peft import LoraConfig
-
-        model = self._gemma4_style_block()
-        cfg = LoraConfig(r=4, target_modules="all-linear")
-        adapted = adapt_lora_config_for_model(model, cfg)
-        # peft normalizes target_modules to a set, so compare order-insensitively
-        # against the canonical (sorted) suffix list.
-        assert sorted(adapted.target_modules) == (
-            build_clippable_linear_lora_target_suffixes(["k_proj", "o_proj", "q_proj"])
-        )
-        assert sorted(list_peft_matched_module_keys(model, adapted.target_modules)) == [
-            "k_proj.linear",
-            "o_proj.linear",
-            "q_proj.linear",
-        ]
-
-    def test_explicit_proj_names_become_suffix_targets(self):
-        from peft import LoraConfig
-
-        model = self._gemma4_style_block()
-        cfg = LoraConfig(r=4, target_modules=["q_proj", "o_proj"])
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert sorted(adapted.target_modules) == ["o_proj.linear", "q_proj.linear"]
-        # A targeted projection's inner .linear matches; the wrapper alone does not.
-        assert peft_target_key_matches(
-            "model.layers.0.self_attn.q_proj.linear", adapted.target_modules
-        )
-        assert not peft_target_key_matches(
-            "model.layers.0.self_attn.q_proj", adapted.target_modules
-        )
-
-    def test_nested_wrapper_matches_via_suffix_list(self):
-        from peft import LoraConfig
-
-        class Gemma4ClippableLinear(torch.nn.Module):
-            def __init__(self, in_features: int, out_features: int) -> None:
-                super().__init__()
-                self.linear = torch.nn.Linear(in_features, out_features, bias=False)
-
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.attn = torch.nn.Module()
-                self.attn.q_proj = Gemma4ClippableLinear(8, 8)
-
-        model = Block()
-        cfg = LoraConfig(r=4, target_modules="all-linear")
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert sorted(adapted.target_modules) == ["q_proj.linear"]
-        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
-            "attn.q_proj.linear"
-        ]
-
-    def test_unscoped_regex_fullmatches_nested_keys(self):
-        import re
-
-        pattern = build_clippable_linear_lora_target_regex(["q_proj"])
-        assert re.fullmatch(pattern, "model.layers.0.self_attn.q_proj.linear")
-        assert re.fullmatch(pattern, "q_proj.linear")
-        assert re.fullmatch(pattern, "model.layers.0.self_attn.q_proj") is None
-
-    def test_user_regex_is_left_unchanged(self):
-        from peft import LoraConfig
-
-        model = self._gemma4_style_block()
-        custom = r".*\.language_model.*\.(q_proj|k_proj)\.linear"
-        cfg = LoraConfig(r=4, target_modules=custom)
-        assert adapt_lora_config_for_model(model, cfg) is cfg
-
-    def test_language_model_scope_only_when_all_inners_under_scope(self):
-        import re
-
-        from peft import LoraConfig
-
-        # Realistic Gemma-4 layout: the language model is nested under ``model``
-        # and uses plain nn.Linear projections (ClippableLinear is only on the
-        # vision/audio towers). The scoped regex requires the scope to be nested.
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.model = torch.nn.Module()
-                self.model.language_model = torch.nn.Module()
-                self.model.language_model.layers = torch.nn.ModuleList(
-                    [torch.nn.Module()]
-                )
-                self.model.language_model.layers[0].q_proj = torch.nn.Linear(
-                    4, 4, bias=False
-                )
-
-        model = Block()
-        cfg = LoraConfig(r=4, target_modules=["q_proj"])
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
-        scoped = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert isinstance(adapted.target_modules, str)
-        assert adapted.target_modules == scoped
-        assert re.fullmatch(scoped, "model.language_model.layers.0.q_proj")
-        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
-            "model.language_model.layers.0.q_proj"
-        ]
-
-    def test_scoped_regex_targets_plain_lm_and_not_vision_clippable(self):
-        import re
-
-        from peft import LoraConfig
+    def _gemma4_style_model() -> torch.nn.Module:
+        """Plain-linear language model beside a ClippableLinear vision tower."""
 
         class Gemma4ClippableLinear(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
                 self.linear = torch.nn.Linear(4, 4, bias=False)
 
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.model = torch.nn.Module()
-                self.model.language_model = torch.nn.Module()
-                layer = torch.nn.Module()
-                layer.self_attn = torch.nn.Module()
-                layer.self_attn.q_proj = torch.nn.Linear(4, 4, bias=False)
-                layer.mlp = torch.nn.Module()
-                layer.mlp.gate_proj = torch.nn.Linear(4, 8, bias=False)
-                self.model.language_model.layers = torch.nn.ModuleList([layer])
-                vt_layer = torch.nn.Module()
-                vt_layer.self_attn = torch.nn.Module()
-                vt_layer.self_attn.q_proj = Gemma4ClippableLinear()
-                self.model.vision_tower = torch.nn.Module()
-                self.model.vision_tower.encoder = torch.nn.Module()
-                self.model.vision_tower.encoder.layers = torch.nn.ModuleList([vt_layer])
+        model = torch.nn.Module()
+        model.model = torch.nn.Module()
+        model.model.language_model = torch.nn.Module()
+        layer = torch.nn.Module()
+        layer.self_attn = torch.nn.Module()
+        layer.self_attn.q_proj = torch.nn.Linear(4, 4, bias=False)
+        layer.mlp = torch.nn.Module()
+        layer.mlp.gate_proj = torch.nn.Linear(4, 8, bias=False)
+        model.model.language_model.layers = torch.nn.ModuleList([layer])
+        vt_layer = torch.nn.Module()
+        vt_layer.self_attn = torch.nn.Module()
+        vt_layer.self_attn.q_proj = Gemma4ClippableLinear()
+        model.model.vision_tower = torch.nn.Module()
+        model.model.vision_tower.encoder = torch.nn.Module()
+        model.model.vision_tower.encoder.layers = torch.nn.ModuleList([vt_layer])
+        return model
 
-        model = Block()
-        cfg = LoraConfig(r=4, target_modules=["q_proj", "gate_proj"])
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
-        matched = list_peft_matched_module_keys(model, adapted.target_modules)
-        assert matched == [
+    def test_no_op_on_plain_linear_model(self):
+        model = torch.nn.Module()
+        model.layer = torch.nn.Linear(4, 4)
+        cfg = LoraConfig(r=4, target_modules=["layer"])
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+    @pytest.mark.parametrize("targets", [["q_proj", "gate_proj"], "all-linear"])
+    def test_targets_land_on_language_model_not_clippable_tower(
+        self, targets: list[str] | str
+    ):
+        model = self._gemma4_style_model()
+        cfg = LoraConfig(r=4, target_modules=targets)
+
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
             "model.language_model.layers.0.self_attn.q_proj",
             "model.language_model.layers.0.mlp.gate_proj",
         ]
-        assert not any("vision_tower" in key for key in matched)
-        scoped = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert re.fullmatch(scoped, "model.language_model.layers.0.self_attn.q_proj")
-        assert (
-            re.fullmatch(
-                scoped, "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear"
-            )
-            is None
+        assert not peft_target_key_matches(
+            "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear",
+            adapted.target_modules,
         )
+
+    def test_user_regex_is_left_unchanged(self):
+        custom = r".*\.language_model.*\.(q_proj|k_proj)"
+        cfg = LoraConfig(r=4, target_modules=custom)
+
+        assert adapt_lora_config_for_model(self._gemma4_style_model(), cfg) is cfg
 
 
 def _require_bf16_cuda() -> None:
@@ -983,6 +781,7 @@ class TestQuantizedModelLoadOnGpu:
     def _load(preset):
         return create_model_from_name_or_path(
             TINY_LLM_FIXTURE_PATH,
+            "sdpa",
             model_config={"quantization_config": build_bnb_quantization_config(preset)},
         )
 
@@ -1050,7 +849,6 @@ class TestReinforceQuantizedInit:
             micro_batch_size_per_gpu=1,
             max_output_tokens=8,
             max_model_len=32,
-            use_liger_loss=False,
         )
 
         # __init__ forces lm_head into the bnb skip list (fused logprob paths

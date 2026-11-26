@@ -3,6 +3,13 @@ name: macOS
 
 on:
     workflow_call:
+        inputs:
+            pythons:
+                type: string
+                required: true
+            max_parallel:
+                type: number
+                default: 5
 
 permissions:
     contents: read
@@ -12,9 +19,10 @@ jobs:
         runs-on: macos-26
         strategy:
             fail-fast: false
-            max-parallel: 3
+            max-parallel: ${{ inputs.max_parallel }}
             matrix:
-                shard: [1, 2, 3]
+                python-version: ${{ fromJSON(inputs.pythons) }}
+                shard: [1, 2, 3, 4, 5]
         env:
             PYTHONPATH: ${{ github.workspace }}/agilerl-arena
 
@@ -23,7 +31,7 @@ jobs:
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
-                  python-version: '3.13'
+                  python-version: ${{ matrix.python-version }}
             - name: Restore macOS test durations
               uses: actions/cache/restore@v4
               with:
@@ -33,26 +41,26 @@ jobs:
             - name: Install dependencies
               run: |
                   uv sync --locked --all-groups --extra all
+            # Linux runs the multi_rank (gloo process group) tests; macOS ranks
+            # cannot fork from the preloaded forkserver and spawn is several times slower.
             - name: Run macOS shard
               run: |
-                  rm -f .coverage .coverage.*
-                  uv run python scripts/pytest_shard.py run \
+                  uv run --no-sync python scripts/pytest_shard.py run \
                     --root tests \
                     --root agilerl-arena/tests \
-                    --total-shards 3 \
+                    --total-shards 5 \
                     --shard-index ${{ matrix.shard }} \
                     --durations-file .ci-durations/macos.json \
                     -- \
                     --import-mode=importlib \
                     --junitxml=junit-macos.xml \
-                    -m "not gpu and not vllm" \
-                    -n auto --dist loadgroup \
-                    --durations=15 \
-                    --cov --cov-report=term-missing
+                    -m "not gpu and not vllm and not multi_rank" \
+                    -n logical --dist loadgroup \
+                    --durations=15
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-macos-3.13-${{ matrix.shard }}
+                  name: junit-macos-${{ matrix.python-version }}-${{ matrix.shard }}
                   path: junit-macos.xml
                   if-no-files-found: ignore

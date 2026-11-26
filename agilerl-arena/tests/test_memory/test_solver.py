@@ -7,12 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import formulas
+from agilerl.arena.memory import estimator as estimator_module
+from agilerl.arena.memory import formulas, kv_cache, lora_formulas
+from agilerl.arena.memory import solver as solver_module
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
     generation_can_serve,
 )
+from agilerl.arena.memory.generation import KV_MARGIN_BYTES, sequences_held
+from agilerl.arena.memory.manifest import lookup_gpu
 from agilerl.arena.memory.solver import (
     DEFAULT_CONTEXT_LIMIT,
     CannotSolve,
@@ -20,8 +24,8 @@ from agilerl.arena.memory.solver import (
     _apply,
     architectural_context_limit,
     inference_run_config,
+    size_serving_engine,
     solve,
-    solve_inference,
 )
 from agilerl.arena.memory.specs import (
     DeviceSpec,
@@ -32,7 +36,9 @@ from agilerl.arena.memory.specs import (
     RunConfig,
     TrainingSettings,
 )
-from tests.test_memory.test_formulas import QWEN_05B
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from tests.test_memory.test_estimator import component
+from tests.test_memory.test_formulas import MOE_TINY, QWEN_05B
 
 ASSETS = Path(__file__).parent / "assets"
 TINY_CONFIG = json.loads((ASSETS / "tiny_llm" / "config.json").read_text())
@@ -59,6 +65,33 @@ def device():
     return DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4")
 
 
+@pytest.fixture
+def nine_b():
+    hub_id = "Qwen/Qwen3.5-9B"
+    return ModelSpec(
+        model_id=hub_id,
+        arch=ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config),
+    )
+
+
+@pytest.fixture
+def nine_b_engine():
+    return GenerationSettings(
+        gpu_memory_utilization=0.9,
+        max_num_seqs=16,
+        max_lora_rank=64,
+        lora_sync_scope="all-linear",
+        lora_dual_stream=True,
+    )
+
+
+def engine_run(model, card_gib, generation):
+    card = DeviceSpec(total_bytes=int(card_gib * GiB), name="card")
+    return RunConfig(
+        model=model, train_device=card, gen_device=card, generation=generation
+    )
+
+
 class TestArchitecturalContextLimit:
     def test_reads_max_position(self):
         assert architectural_context_limit(TINY_CONFIG) == 32768
@@ -73,71 +106,98 @@ class TestArchitecturalContextLimit:
         assert architectural_context_limit({}) == DEFAULT_CONTEXT_LIMIT
 
 
-class TestSolveInference:
+class TestSolveGenerationOnly:
     def test_max_model_len_is_the_last_value_that_serves(self, model, device):
-        pool = 256 * 1024 * 1024
-        settings = GenerationSettings(
-            gpu_memory_utilization=0.9,
-            max_num_seqs=8,
-            kv_cache_memory_bytes=pool,
+        settings = GenerationSettings(gpu_memory_utilization=0.07, max_num_seqs=8)
+        result = solve(
+            inference_run_config(model, device, settings),
+            "max_model_len",
+            hi=32768,
+            phases=("generation",),
         )
-        result = solve_inference(
-            inference_run_config(model, device, settings), "max_model_len", hi=32768
-        )
-        per_token = formulas.kv_cache_bytes_per_token(model.arch, "bf16")
-        expected = (int(pool // (8 * per_token)) // 16) * 16
-        assert result.value == expected
+        assert result.value % 16 == 0
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
 
         over = estimate_generation(
             model,
             device,
-            settings.model_copy(update={"max_model_len": expected + 16}),
+            result.config.generation.model_copy(
+                update={"max_model_len": result.value + 16}
+            ),
         )
         assert not generation_can_serve(over)
 
     def test_max_num_seqs_grows_until_the_pool_is_full(self, model, device):
-        settings = GenerationSettings(
-            gpu_memory_utilization=0.9,
-            max_model_len=2048,
-            kv_cache_memory_bytes=256 * 1024 * 1024,
-        )
-        result = solve_inference(
-            inference_run_config(model, device, settings), "max_num_seqs", hi=64
+        settings = GenerationSettings(gpu_memory_utilization=0.07, max_model_len=2048)
+        result = solve(
+            inference_run_config(model, device, settings),
+            "max_num_seqs",
+            hi=64,
+            phases=("generation",),
         )
         over = estimate_generation(
             model,
             device,
-            settings.model_copy(update={"max_num_seqs": result.value + 1}),
+            result.config.generation.model_copy(
+                update={"max_num_seqs": result.value + 1}
+            ),
         )
-        assert result.value == 10
+        assert result.value == 7
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
         assert not generation_can_serve(over)
 
+    def test_generation_search_does_not_price_training(
+        self, model, device, monkeypatch
+    ):
+        # Arrange
+        settings = GenerationSettings(gpu_memory_utilization=0.07, max_model_len=2048)
+        priced = []
+        real = estimator_module.estimate_training
+
+        def spy(*args, **kwargs):
+            priced.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(solver_module, "estimate_training", spy)
+        monkeypatch.setattr(estimator_module, "estimate_training", spy)
+
+        # Act
+        result = solve(
+            inference_run_config(model, device, settings),
+            "max_num_seqs",
+            hi=64,
+            phases=("generation",),
+        )
+
+        # Assert: one training bar, for the returned estimate.
+        assert result.value == 7
+        assert result.estimate.training.phase == "training"
+        assert len(priced) == 1
+
     def test_higher_concurrency_shortens_max_model_len(self, model, device):
         def solved(seqs: int) -> int:
             settings = GenerationSettings(
-                gpu_memory_utilization=0.9,
-                max_num_seqs=seqs,
-                kv_cache_memory_bytes=256 * 1024 * 1024,
+                gpu_memory_utilization=0.07, max_num_seqs=seqs
             )
-            return solve_inference(
+            return solve(
                 inference_run_config(model, device, settings),
                 "max_model_len",
                 hi=32768,
+                phases=("generation",),
             ).value
 
-        assert solved(4) == 5456
-        assert solved(8) == 2720
+        assert solved(4) == 3856
+        assert solved(8) == 1872
 
     def test_tiny_model_on_l4_hits_the_rope_cap(self, device):
         tiny = ModelSpec(model_id="tiny", arch=ModelArch.from_hf_config(TINY_CONFIG))
-        result = solve_inference(
+        result = solve(
             inference_run_config(tiny, device),
             "max_model_len",
             hi=architectural_context_limit(TINY_CONFIG),
+            phases=("generation",),
         )
         assert result.value == 32768
         assert result.limited_by == "bound"
@@ -148,19 +208,20 @@ class TestSolveInference:
             arch=QWEN_05B.model_copy(update={"n_layers": 400, "hidden_size": 8192}),
         )
         with pytest.raises(CannotSolve, match="no max_model_len value up to"):
-            solve_inference(
+            solve(
                 inference_run_config(
                     huge, DeviceSpec(total_bytes=1 * GiB), GenerationSettings()
                 ),
                 "max_model_len",
                 hi=1024,
+                phases=("generation",),
             )
 
     def test_upper_bound_below_the_minimum_is_rejected(self, model, device):
         config = inference_run_config(model, device)
 
         with pytest.raises(ValueError, match="below the minimum"):
-            solve_inference(config, "max_model_len", hi=1)
+            solve(config, "max_model_len", hi=1, phases=("generation",))
 
     def test_two_fields_on_one_group_both_update(self, model, device):
         config = inference_run_config(model, device)
@@ -187,7 +248,229 @@ class TestSolveInference:
 
         # Act + Assert
         with pytest.raises(ValueError, match="Unknown field"):
-            solve_inference(config, "learning_rate")
+            solve(config, "learning_rate", phases=("generation",))
+
+
+class TestInferenceRunConfig:
+    def test_inference_engine_holds_no_lora_slot_or_dual_stream(self, model, device):
+        # Arrange
+        settings = GenerationSettings(lora_dual_stream=True)
+        training = RunConfig(
+            model=model, train_device=device, gen_device=device, generation=settings
+        )
+
+        # Act
+        served = estimate_run(inference_run_config(model, device, settings))
+        trained = estimate_run(training)
+
+        # Assert
+        slot = 2 * lora_formulas.engine_lora_param_count(QWEN_05B, 16)
+        assert component(served.generation, "lora_slots").n_bytes == 0
+        assert component(trained.generation, "lora_slots").n_bytes == slot
+        assert (
+            component(served.generation, "cuda_graphs").n_bytes
+            == formulas.CUDA_GRAPH_POOL_BYTES
+        )
+        assert (
+            component(trained.generation, "cuda_graphs").n_bytes
+            == formulas.CUDA_GRAPH_POOL_BYTES + formulas.LORA_DUAL_STREAM_BYTES
+        )
+        assert (
+            component(served.generation, "kv_cache").detail["pool"]
+            == component(trained.generation, "kv_cache").detail["pool"]
+            + slot
+            + formulas.LORA_DUAL_STREAM_BYTES
+        )
+
+    def test_moe_inference_drops_the_expert_lora_stacks(self, device):
+        # Arrange
+        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        settings = GenerationSettings()
+        training = RunConfig(
+            model=moe, train_device=device, gen_device=device, generation=settings
+        )
+
+        # Act
+        served = estimate_run(inference_run_config(moe, device, settings))
+        trained = estimate_run(training)
+
+        # Assert
+        stacks = lora_formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, False)
+        assert component(served.generation, "lora_slots").n_bytes == 0
+        assert component(trained.generation, "lora_slots").n_bytes == 2 * (
+            lora_formulas.engine_lora_param_count(MOE_TINY, 16) + stacks
+        )
+
+
+def catalogued(hub_id):
+    return ModelSpec(
+        model_id=hub_id,
+        arch=ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config),
+    )
+
+
+def serving_settings(max_model_len):
+    return GenerationSettings(
+        gpu_memory_utilization=0.9, max_num_seqs=8, max_model_len=max_model_len
+    )
+
+
+class TestSizeServingEngine:
+    def test_dense_model_takes_every_gpu_of_an_h100_node(self):
+        # Arrange: Qwen3-4B has 32 attention and 8 KV heads.
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        serving = size_serving_engine(
+            catalogued("Qwen/Qwen3-4B"), h100, 8, serving_settings(4096)
+        )
+
+        # Assert
+        assert serving.tensor_parallel_size == 8
+        assert serving.fits
+        assert serving.serves_all
+        assert serving.full_context_sequences == 8
+        assert serving.reason is None
+
+    def test_dump_keeps_the_fields_the_platform_reads(self):
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        serving = size_serving_engine(
+            catalogued("Qwen/Qwen3-4B"), h100, 8, serving_settings(4096)
+        )
+
+        assert {
+            "tensor_parallel_size",
+            "fits",
+            "serves_all",
+            "full_context_sequences",
+            "reason",
+        } <= set(serving.model_dump(mode="json"))
+
+    def test_width_matches_the_inference_run_config_estimate(self):
+        # Arrange
+        model = catalogued("Qwen/Qwen3-4B")
+        h100 = lookup_gpu("H100-80").device_spec()
+        settings = serving_settings(4096)
+
+        # Act
+        serving = size_serving_engine(model, h100, 8, settings)
+
+        # Assert
+        config = inference_run_config(
+            model, h100, settings.model_copy(update={"tensor_parallel_size": 8})
+        )
+        bar = estimate_generation(config.model, config.gen_device, config.generation)
+        assert serving.full_context_sequences == sequences_held(bar, 8)
+        assert serving.serves_all == generation_can_serve(bar, KV_MARGIN_BYTES)
+
+    @pytest.mark.parametrize(
+        ("hub_id", "num_gpus", "width"),
+        [
+            # 32 heads split over 4 but not 5 or 6.
+            ("Qwen/Qwen3-4B", 6, 4),
+            # 14 heads split over 2 but not 4 or 8.
+            ("Qwen/Qwen2.5-0.5B-Instruct", 8, 2),
+        ],
+    )
+    def test_falls_back_to_the_widest_width_the_heads_split_over(
+        self, hub_id, num_gpus, width
+    ):
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        serving = size_serving_engine(
+            catalogued(hub_id), h100, num_gpus, serving_settings(4096)
+        )
+
+        assert serving.tensor_parallel_size == width
+        assert serving.fits
+
+    def test_skips_a_width_the_mamba_heads_do_not_split_over(self):
+        # Arrange: attention splits over 8; 36 recurrent heads only over 4.
+        model = catalogued("Qwen/Qwen3.5-9B")
+        model = model.model_copy(
+            update={"arch": model.arch.model_copy(update={"mamba_n_heads": 36})}
+        )
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        serving = size_serving_engine(model, h100, 8, serving_settings(4096))
+
+        # Assert
+        assert model.arch.n_heads % 8 == 0
+        assert not model.arch.splits_heads(8)
+        assert serving.tensor_parallel_size == 4
+
+    def test_sharded_vision_heads_cap_the_width(self):
+        # Arrange: text heads split over 8; vLLM shards the 12 vision heads.
+        model = catalogued("Qwen/Qwen3.5-0.8B")
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        serving = size_serving_engine(model, h100, 8, serving_settings(4096))
+
+        # Assert
+        assert model.arch.vision_heads == 12
+        assert model.arch.model_copy(update={"vision_heads": None}).splits_heads(8)
+        assert not model.arch.splits_heads(8)
+        assert model.arch.splits_heads(4)
+        assert serving.tensor_parallel_size == 4
+
+    def test_replicated_vision_tower_does_not_cap_the_width(self):
+        # Arrange: Gemma 4 has 12 vision heads, but vLLM replicates its tower.
+        model = catalogued("google/gemma-4-E4B-it")
+        h100 = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        serving = size_serving_engine(model, h100, 8, serving_settings(4096))
+
+        # Assert
+        assert model.arch.vision_heads is None
+        assert model.arch.splits_heads(8)
+        assert serving.tensor_parallel_size == 8
+
+    def test_long_context_holds_some_sequences_at_full_length(self):
+        l4 = lookup_gpu("NVIDIA L4").device_spec()
+
+        serving = size_serving_engine(
+            catalogued("Qwen/Qwen3-4B"), l4, 1, serving_settings(32768)
+        )
+
+        assert serving.tensor_parallel_size == 1
+        assert serving.fits
+        assert not serving.serves_all
+        assert serving.full_context_sequences == 2
+        assert serving.reason is None
+
+    def test_model_larger_than_the_card_does_not_fit(self):
+        l4 = lookup_gpu("NVIDIA L4").device_spec()
+
+        serving = size_serving_engine(
+            catalogued("Qwen/Qwen3.8-27B"), l4, 1, serving_settings(4096)
+        )
+
+        assert serving.tensor_parallel_size == 1
+        assert not serving.fits
+        assert not serving.serves_all
+        assert serving.full_context_sequences == 0
+        assert serving.reason.startswith("the engine needs ")
+        assert serving.reason.endswith(
+            "tensor_parallel_size=1; the GPU has 22.0 GiB usable"
+        )
+
+    def test_kv_pool_without_room_for_one_sequence_does_not_fit(self):
+        l4 = lookup_gpu("NVIDIA L4").device_spec()
+
+        serving = size_serving_engine(
+            catalogued("Qwen/Qwen3-4B"), l4, 1, serving_settings(131072)
+        )
+
+        assert not serving.fits
+        assert serving.full_context_sequences == 0
+        assert serving.reason == (
+            "the KV cache cannot hold one 131072-token sequence at "
+            "tensor_parallel_size=1"
+        )
 
 
 class TestSolve:
@@ -210,45 +493,72 @@ class TestSolve:
         assert result.config.training.max_model_len == 2048
         assert result.config.generation.max_model_len == 2048
 
+    def test_max_num_seqs_on_an_engine_run_checks_only_generation(self, model, device):
+        # Arrange: the trainer does not fit its 1 GiB card; the engine has an L4.
+        config = RunConfig(
+            model=model,
+            train_device=DeviceSpec(total_bytes=GiB),
+            gen_device=device,
+            generation=GenerationSettings(
+                gpu_memory_utilization=0.07, max_model_len=2048
+            ),
+        )
 
-class TestSolveSingleValley:
-    """Generation fits() dips mid-range; the minimum failing must not end it."""
+        # Act
+        result = solve(config, "max_num_seqs", hi=64)
+        over = estimate_generation(
+            model,
+            device,
+            result.config.generation.model_copy(update={"max_num_seqs": 7}),
+        )
 
-    def test_returns_the_run_top_when_the_minimum_does_not_fit(self, model):
-        # Arrange
+        # Assert
+        assert result.value == 6
+        assert result.limited_by == "memory"
+        assert generation_can_serve(result.estimate.generation)
+        assert not generation_can_serve(over)
+        assert result.unchecked_over_budget == ("training",)
+
+
+class TestSolveEngineReserve:
+    """vLLM reserves its gpu_memory_utilization budget at any context length."""
+
+    def test_no_context_fits_when_the_reserve_outgrows_the_card(self, model):
+        # Arrange: 0.9 of 8 GiB plus the CUDA context is more than the card.
         device = DeviceSpec(total_bytes=8 * GiB)
         settings = GenerationSettings(
             gpu_memory_utilization=0.9,
             max_num_seqs=8,
             concurrent_requests=2,
+            max_num_batched_tokens=32768,
         )
         config = inference_run_config(model, device, settings)
 
-        # Act
-        result = solve_inference(config, "max_model_len", hi=32768)
+        # Act + Assert
+        with pytest.raises(CannotSolve, match="no max_model_len value up to 32768"):
+            solve(config, "max_model_len", hi=32768, phases=("generation",))
 
-        # Assert
-        assert result.value == 21120
-        assert result.limited_by == "memory"
-
-    def test_the_minimum_fails_while_mid_range_fits(self, model):
+    def test_the_engine_bar_does_not_move_with_context(self, model):
         # Arrange
         device = DeviceSpec(total_bytes=8 * GiB)
 
-        def serves(context: int) -> bool:
+        def engine_bar(context: int) -> int:
             settings = GenerationSettings(
                 gpu_memory_utilization=0.9,
                 max_num_seqs=8,
                 concurrent_requests=2,
                 max_model_len=context,
+                max_num_batched_tokens=32768,
             )
-            bar = estimate_run(inference_run_config(model, device, settings))
-            return generation_can_serve(bar.generation)
+            run = estimate_run(inference_run_config(model, device, settings))
+            return run.generation.total_bytes
 
-        # Act + Assert
-        assert not serves(16)
-        assert serves(4096)
-        assert not serves(32768)
+        # Act
+        bars = [engine_bar(context) for context in (16, 4096, 32768)]
+
+        # Assert: the start-up profile's peak stays reserved after it frees.
+        assert bars[0] == bars[1] == bars[2]
+        assert bars[0] > device.generation_usable_bytes
 
 
 class TestSolveWithoutAnEngine:
@@ -303,16 +613,230 @@ class TestSolveWithoutAnEngine:
         result = solve(config, "max_model_len", hi=32768)
         over = estimate_run(
             lockstep_max_model_len(
-                result.config, result.value + formulas.KV_BLOCK_SIZE_DEFAULT
+                result.config, result.value + kv_cache.KV_BLOCK_SIZE_DEFAULT
             )
         )
 
         # Assert
-        assert result.value == 432
+        assert result.value == 10944
         assert result.limited_by == "memory"
         assert result.estimate.training.fits_with_buffer
         assert over.training.fits
         assert not over.training.fits_with_buffer
+
+
+class TestSolveRebuild:
+    def test_micro_batch_resolved_per_candidate_reaches_the_single_row_top(self, model):
+        # Arrange: the rebuild picks the largest micro-batch that fits, as a
+        # manifest with an omitted micro-batch does.
+        device = DeviceSpec(total_bytes=int(4.5 * GiB))
+        base = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(
+                algorithm="sft", micro_batch_size=8, trajectories_per_update=8
+            ),
+            generation=GenerationSettings(),
+        )
+
+        def at(length: int, micro: int) -> RunConfig:
+            training = base.training.model_copy(update={"micro_batch_size": micro})
+            return lockstep_max_model_len(
+                base.model_copy(update={"training": training}), length
+            )
+
+        def rebuild(length: int) -> RunConfig:
+            fitting = (
+                micro
+                for micro in (8, 4, 2)
+                if estimate_run(at(length, micro)).training.fits_with_buffer
+            )
+            return at(length, next(fitting, 1))
+
+        # Act
+        held = solve(base, "max_model_len", hi=32768)
+        rebuilt = solve(base, "max_model_len", hi=32768, rebuild=rebuild)
+        over = estimate_run(at(rebuilt.value + kv_cache.KV_BLOCK_SIZE_DEFAULT, 1))
+
+        # Assert
+        assert held.value == 1360
+        assert rebuilt.value == 10944
+        assert rebuilt.limited_by == "memory"
+        assert rebuilt.config.training.micro_batch_size == 1
+        assert rebuilt.config.training.max_model_len == 10944
+        assert not over.training.fits_with_buffer
+
+    def test_a_training_miss_ends_the_scan(self, model):
+        # Arrange: no context fits the trainer on a 1 GiB card.
+        device = DeviceSpec(total_bytes=GiB)
+        base = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(algorithm="sft"),
+            generation=GenerationSettings(),
+        )
+        rebuilt = []
+
+        def rebuild(length: int) -> RunConfig:
+            rebuilt.append(length)
+            return lockstep_max_model_len(base, length)
+
+        # Act
+        with pytest.raises(CannotSolve, match="no max_model_len value up to 4096"):
+            solve(base, "max_model_len", hi=4096, rebuild=rebuild)
+
+        # Assert
+        assert rebuilt == [kv_cache.KV_BLOCK_SIZE_DEFAULT]
+
+    def test_a_generation_miss_keeps_scanning(self, model, device):
+        # Arrange: below 64 tokens the rebuild puts the engine on a card too
+        # small to serve; the trainer fits throughout.
+        small = DeviceSpec(total_bytes=GiB, name="small")
+        base = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            generation=GenerationSettings(gpu_memory_utilization=0.3, max_num_seqs=4),
+        )
+
+        def rebuild(length: int) -> RunConfig:
+            gen_device = small if length < 64 else device
+            return base.model_copy(update={"gen_device": gen_device})
+
+        # Act
+        result = solve(base, "max_model_len", hi=128, rebuild=rebuild)
+
+        # Assert
+        assert result.value == 128
+        assert result.limited_by == "bound"
+        assert result.config.gen_device == device
+
+
+class TestSolveWidestEngineWidth:
+    def test_a_generation_miss_at_the_widest_engine_ends_the_scan(
+        self, nine_b, nine_b_engine
+    ):
+        # Arrange: one 9B engine GPU of 20 GiB serves no context.
+        base = engine_run(nine_b, 20, nine_b_engine)
+        rebuilt = []
+
+        def rebuild(length: int) -> RunConfig:
+            rebuilt.append(length)
+            return base
+
+        # Act
+        with pytest.raises(CannotSolve, match="no max_model_len value up to 128"):
+            solve(
+                base,
+                "max_model_len",
+                hi=128,
+                phases=("generation",),
+                rebuild=rebuild,
+                widest_engine_width=1,
+            )
+
+        # Assert
+        assert rebuilt == [kv_cache.KV_BLOCK_SIZE_DEFAULT]
+
+    def test_a_miss_below_the_widest_engine_keeps_scanning(self, nine_b, nine_b_engine):
+        # Arrange: from 64 tokens the rebuild serves on two 20 GiB GPUs.
+        base = engine_run(nine_b, 20, nine_b_engine)
+
+        def rebuild(length: int) -> RunConfig:
+            width = 1 if length < 64 else 2
+            return engine_run(
+                nine_b,
+                20,
+                nine_b_engine.model_copy(update={"tensor_parallel_size": width}),
+            )
+
+        # Act
+        result = solve(
+            base,
+            "max_model_len",
+            hi=128,
+            phases=("generation",),
+            rebuild=rebuild,
+            widest_engine_width=2,
+        )
+
+        # Assert
+        assert result.value == 128
+        assert result.limited_by == "bound"
+        assert result.config.generation.tensor_parallel_size == 2
+
+    def test_a_miss_the_other_sync_mode_clears_keeps_scanning(
+        self, nine_b, nine_b_engine
+    ):
+        # Arrange: on 24 GiB only merged sync serves; the rebuild picks it from 64 tokens.
+        base = engine_run(nine_b, 24, nine_b_engine)
+        merged = engine_run(
+            nine_b, 24, nine_b_engine.model_copy(update={"merged_lora_sync": True})
+        )
+
+        # Act
+        result = solve(
+            base,
+            "max_model_len",
+            hi=128,
+            phases=("generation",),
+            rebuild=lambda length: base if length < 64 else merged,
+            widest_engine_width=1,
+        )
+
+        # Assert
+        assert result.value == 128
+        assert result.limited_by == "bound"
+        assert result.config.generation.merged_lora_sync
+
+    def test_a_miss_the_lean_engine_clears_keeps_scanning(self):
+        # Arrange: on 23.5 GiB a multi-turn Gemma engine with n-gram drafting
+        # and dual-stream LoRA misses in both sync modes; from 64 tokens the
+        # rebuild drops those fast paths.
+        hub_id = "google/gemma-4-E4B-it"
+        gemma = ModelSpec(
+            model_id=hub_id,
+            arch=ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config),
+        )
+        engine = GenerationSettings(
+            gpu_memory_utilization=0.9,
+            max_num_seqs=16,
+            multi_turn=True,
+            max_lora_rank=64,
+            lora_sync_scope="all-linear",
+            lora_dual_stream=True,
+        )
+        base = engine_run(gemma, 23.5, engine)
+        lean = engine_run(
+            gemma,
+            23.5,
+            engine.model_copy(
+                update={
+                    "lora_dual_stream": False,
+                    "speculative_drafting": False,
+                    "max_num_batched_tokens": kv_cache.VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS,
+                    "merged_lora_sync": True,
+                }
+            ),
+        )
+
+        # Act
+        result = solve(
+            base,
+            "max_model_len",
+            hi=128,
+            phases=("generation",),
+            rebuild=lambda length: base if length < 64 else lean,
+            widest_engine_width=1,
+        )
+
+        # Assert
+        assert result.value == 128
+        assert result.limited_by == "bound"
+        assert result.config.generation.speculative_drafting is False
+        assert result.config.generation.lora_dual_stream is False
 
 
 class TestBareSolveOnAnInferenceConfig:
@@ -324,17 +848,18 @@ class TestBareSolveOnAnInferenceConfig:
 
         # Act
         bare = solve(config, "max_model_len", hi=32768)
-        dedicated = solve_inference(config, "max_model_len", hi=32768)
+        dedicated = solve(config, "max_model_len", hi=32768, phases=("generation",))
 
         # Assert
-        assert bare.value == 9008
+        assert bare.value == 14880
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
-        assert dedicated.value == 22256
+        assert dedicated.value == 32768
+        assert dedicated.limited_by == "bound"
         assert dedicated.value > bare.value
         over = estimate_run(
             lockstep_max_model_len(
-                bare.config, bare.value + formulas.KV_BLOCK_SIZE_DEFAULT
+                bare.config, bare.value + kv_cache.KV_BLOCK_SIZE_DEFAULT
             )
         )
         assert over.training.fits

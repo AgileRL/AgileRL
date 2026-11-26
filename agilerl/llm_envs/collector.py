@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 from collections.abc import Callable, Sequence
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.arena.models.env import DEFAULT_ADAPTIVE_TASK_SAMPLING
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed.process import get_rank, get_world_size
 from agilerl.llm_envs.harness import RolloutHarness
@@ -25,11 +27,13 @@ from agilerl.llm_envs.task_assigner import (
     TaskRowStats,
 )
 from agilerl.utils.llm_utils import is_rollout_prompt
+from agilerl.utils.sampling_supports import concat_sampling_supports
 
 __all__ = ["RolloutCollector"]
 
 if TYPE_CHECKING:
     from agilerl.llm_envs.observation import ImageProcessorCall
+    from agilerl.llm_envs.rubrics import GroupEpisode, GroupRubric
     from agilerl.typing import RolloutPrompt
 
 
@@ -61,9 +65,10 @@ class RolloutCollector:
         slot_acquire_timeout_s: float | None = 300.0,
         rank: int | None = None,
         world_size: int | None = None,
-        adaptive_task_sampling: bool = False,
+        adaptive_task_sampling: bool = DEFAULT_ADAPTIVE_TASK_SAMPLING,
         task_families: Sequence[str | None] | None = None,
         task_family_prior_strength: float = DEFAULT_FAMILY_PRIOR_STRENGTH,
+        group_rubric: GroupRubric | None = None,
     ) -> None:
         """Create ``(batch_size / world_size) * group_size`` env wrappers on this rank.
 
@@ -85,11 +90,15 @@ class RolloutCollector:
             :func:`~agilerl.distributed.get_world_size`.
         :param adaptive_task_sampling: Draw each group's dataset row by its recent
             informative-group rate (see :meth:`record_group_outcome`) instead of
-            the epoch cycle.
+            the epoch cycle. Only a caller that records group outcomes gains
+            from it; without them every row keeps the same weight.
         :param task_families: Family key of every dataset row (``None`` for a row
             in no family); a row with few groups is weighted by its family's rate.
         :param task_family_prior_strength: Groups' worth of weight a family's rate
             carries in a row's estimate.
+        :param group_rubric: Scores each finished group together, adding to each
+            episode's final-turn reward. Every harness needs a rubric of its own,
+            which keeps the transcript; ``EnvReward`` keeps the env's reward.
         """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
@@ -129,6 +138,7 @@ class RolloutCollector:
         self.adaptive_task_sampling = adaptive_task_sampling
         self._task_families = task_families
         self._task_family_prior_strength = task_family_prior_strength
+        self._group_rubric = group_rubric
         # --- per-episode state (untouched by the lock-step path) ---
         self._base_seed = int(base_seed) if base_seed is not None else None
         self._slot_acquire_timeout_s = slot_acquire_timeout_s
@@ -228,29 +238,33 @@ class RolloutCollector:
     def get_rubric_score_means(self) -> dict[str, float]:
         """Mean per-episode component sums over the frozen component key set.
 
-        A component missing from every episode reports ``nan`` rather than ``0``,
-        so a never-scored criterion is not logged as a zero reward.
+        An episode a container's short-circuit kept from a component counts as 0
+        for it. A component missing from every episode reports ``nan`` rather than
+        ``0``, so a never-scored criterion is not logged as a zero reward.
         """
         means: dict[str, float] = {}
         for name in self.rubric_component_names:
-            values = [
-                env.rubric_score_sums[name]
-                for env in self._window_envs()
-                if name in env.rubric_score_sums
-            ]
-            means[name] = sum(values) / len(values) if values else float("nan")
+            scored = [env for env in self._window_envs() if env.rubric_score_sums]
+            if any(name in env.rubric_score_sums for env in scored):
+                total = sum(env.rubric_score_sums.get(name, 0.0) for env in scored)
+                means[name] = total / len(scored)
+            else:
+                means[name] = float("nan")
         return means
 
     def step(
         self,
         token_ids: list[torch.Tensor],
         sampling_logps: list[torch.Tensor | None] | None = None,
+        sampling_supports: list[torch.Tensor | None] | None = None,
     ) -> list[RolloutPrompt] | None:
         """Step each active env with its turn's token sequence.
 
         :param token_ids: One ``prompt + generation`` tensor per active env.
         :param sampling_logps: vLLM logprobs parallel to ``token_ids``; entries or
             the whole list may be ``None``.
+        :param sampling_supports: ``(n, K)`` vLLM sampling supports parallel to
+            ``token_ids``, or ``None``.
         :return: Next active prompts after stepping.
         """
         active = self._active_envs()
@@ -266,11 +280,22 @@ class RolloutCollector:
                 f"envs: {len(sampling_logps)} != {len(active)}"
             )
             raise RuntimeError(msg)
+        if sampling_supports is not None and len(sampling_supports) != len(active):
+            msg = (
+                "Number of sampling supports does not match number of active "
+                f"envs: {len(sampling_supports)} != {len(active)}"
+            )
+            raise RuntimeError(msg)
         slps = sampling_logps if sampling_logps is not None else [None] * len(active)
+        supports = (
+            sampling_supports if sampling_supports is not None else [None] * len(active)
+        )
         # Phase 1 (sequential — tokenizer): decode + record each generation.
         gen_texts = [
-            env._step_prepare(full, sampling_logps=slp)
-            for env, full, slp in zip(active, token_ids, slps, strict=False)
+            env._step_prepare(full, sampling_logps=slp, sampling_supports=support)
+            for env, full, slp, support in zip(
+                active, token_ids, slps, supports, strict=False
+            )
         ]
         # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
         results = self._map_env_io(
@@ -281,8 +306,22 @@ class RolloutCollector:
             envs=active,
         )
         # Phase 3 (sequential — tokenizer): apply each result to its own env.
-        for env, result in zip(active, results, strict=False):
+        steps = [
             env._step_apply(result)
+            for env, result in zip(active, results, strict=False)
+        ]
+        # Phase 4 (concurrent, not bound by io_timeout_s): rubrics score the turns.
+        unscored = [
+            (env, step, turn)
+            for env, step in zip(active, steps, strict=False)
+            if (turn := env._take_unscored_turn()) is not None
+        ]
+        if unscored:
+            scores = self.io_executor.map(
+                lambda item: item[0]._score_turn(item[2]), unscored
+            )
+            for (env, step, _turn), final in zip(unscored, scores, strict=True):
+                env._apply_turn_score(step, final)
         return self._get_prompts()
 
     def _replace_timed_out_slots(self, hung: list[RolloutHarness]) -> None:
@@ -332,6 +371,71 @@ class RolloutCollector:
             raise TimeoutError(msg)
         return [future.result() for future in futures]
 
+    @property
+    def scores_groups(self) -> bool:
+        """Whether a group rubric scores this collector's finished groups."""
+        return self._group_rubric is not None
+
+    @property
+    def group_component_name(self) -> str:
+        """Metric name of the group rubric's score."""
+        if self._group_rubric is None:
+            msg = "this collector has no group rubric"
+            raise RuntimeError(msg)
+        return self._group_rubric.component_name
+
+    def score_group(self, episodes: Sequence[GroupEpisode]) -> list[float]:
+        """Score one finished group with the group rubric; blocks on any judge call.
+
+        Not bound by ``io_timeout_s``.
+
+        :param episodes: The group's episodes, in member order.
+        :return: One finite score per episode.
+        :raises RuntimeError: If this collector has no group rubric.
+        :raises ValueError: If the rubric's scores are not one finite float per episode.
+        """
+        if self._group_rubric is None:
+            msg = "this collector has no group rubric"
+            raise RuntimeError(msg)
+        scores = [float(score) for score in self._group_rubric.score_group(episodes)]
+        if len(scores) != len(episodes) or not all(map(math.isfinite, scores)):
+            msg = (
+                f"A group rubric must return one finite score per episode; got "
+                f"{scores} for {len(episodes)} episodes."
+            )
+            raise ValueError(msg)
+        return scores
+
+    def _add_group_scores(self, all_rewards: list[torch.Tensor]) -> None:
+        """Score the window's groups and add each score to its episode's final turn.
+
+        :param all_rewards: Each env's turn rewards in window order, updated in place.
+        """
+        from agilerl.llm_envs.rubrics import add_group_score  # optional extra: llm
+
+        window = self._window_envs()
+        groups = [
+            [env.group_episode() for env in window[start : start + self.group_size]]
+            for start in range(0, len(window), self.group_size)
+        ]
+        scores = [
+            score
+            for group_scores in self.io_executor.map(self.score_group, groups)
+            for score in group_scores
+        ]
+        episodes = [episode for group in groups for episode in group]
+        name = self.group_component_name
+        for env, rewards, score, episode in zip(
+            window, all_rewards, scores, episodes, strict=True
+        ):
+            add_group_score(rewards, len(env.turn_rewards), score)
+            env.rubric_score_sums[name] = score
+            env.rubric_notes.update(episode.notes)
+
+    def rubric_notes(self) -> list[dict[str, str]]:
+        """Each episode's judge notes, in the window order :meth:`get_trajectories` returns."""
+        return [dict(env.rubric_notes) for env in self._window_envs()]
+
     def close(self) -> None:
         """Close every env wrapper and clear the slot state; a later reset rebuilds."""
         with self._slot_lock:
@@ -354,14 +458,19 @@ class RolloutCollector:
         int,
         list[torch.Tensor | None] | None,
         list[torch.Tensor | None] | None,
+        list[torch.Tensor | None] | None,
     ]:
         """Collect complete episode tensors from all envs, in list order.
 
+        A group rubric's scores are already in the returned rewards.
+
         :return: ``(token_ids_list, action_masks_list, all_turn_ids, all_rewards,
-            batch_steps, all_sampling_logps, all_pixel_values)`` where ``batch_steps``
-            is the summed turn count. ``all_sampling_logps`` is ``None`` when no vLLM
-            logprobs were captured, else one 1-D tensor per env (``None`` for envs that
-            captured none). ``all_pixel_values`` follows the same per-env collapse rule.
+            batch_steps, all_sampling_logps, all_pixel_values,
+            all_sampling_supports)`` where ``batch_steps`` is the summed turn
+            count. ``all_sampling_logps`` is ``None`` when no vLLM logprobs were
+            captured, else one 1-D tensor per env (``None`` for envs that
+            captured none). ``all_pixel_values`` and the ``(n, K)``
+            ``all_sampling_supports`` follow the same per-env collapse rule.
         :raises ValueError: If an episode's context restarted into segments.
         """
         token_ids_list: list[torch.Tensor] = []
@@ -370,6 +479,7 @@ class RolloutCollector:
         all_rewards: list[torch.Tensor] = []
         all_sampling_logps: list[torch.Tensor | None] = []
         all_pixel_values: list[torch.Tensor | None] = []
+        all_sampling_supports: list[torch.Tensor | None] = []
         batch_steps = 0
         for env in self._window_envs():
             (
@@ -395,6 +505,13 @@ class RolloutCollector:
             batch_steps += len(env.turn_boundaries)
             all_sampling_logps.append(sampling_logps)
             all_pixel_values.append(pixel_values)
+            all_sampling_supports.append(
+                concat_sampling_supports(env.sampling_supports)
+                if env.sampling_supports
+                else None
+            )
+        if self._group_rubric is not None:
+            self._add_group_scores(all_rewards)
 
         return (
             token_ids_list,
@@ -411,6 +528,11 @@ class RolloutCollector:
             (
                 all_pixel_values
                 if any(pv is not None for pv in all_pixel_values)
+                else None
+            ),
+            (
+                all_sampling_supports
+                if any(support is not None for support in all_sampling_supports)
                 else None
             ),
         )
@@ -499,7 +621,29 @@ class RolloutCollector:
                 families=self._task_families,
                 family_prior_strength=self._task_family_prior_strength,
             )
-            self.rubric_component_names = tuple(self.envs[0].rubric_components)
+            self.rubric_component_names = self._component_names()
+
+    def _component_names(self) -> tuple[str, ...]:
+        """The turn rubric's component names, then the group rubric's.
+
+        :raises ValueError: If a group rubric has no harness rubric to keep the
+            transcript, or shares a component name with a turn rubric leaf.
+        """
+        names = tuple(self.envs[0].rubric_components)
+        if self._group_rubric is None:
+            return names
+        if not self.envs[0].has_rubric:
+            msg = (
+                "A group rubric reads each episode's transcript, which a harness "
+                "only keeps with a rubric; build each harness with one "
+                "(EnvReward keeps the env's reward)."
+            )
+            raise ValueError(msg)
+        name = self._group_rubric.component_name
+        if name in names:
+            msg = f"The group rubric and a turn rubric both report {name!r}."
+            raise ValueError(msg)
+        return (*names, name)
 
     def _ensure_slots(self) -> None:
         """Build the envs, the task assigner and the free-slot queue once (thread-safe)."""
@@ -754,8 +898,8 @@ class RolloutCollector:
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Advance one episode a turn: decode, round-trip its env, apply the result.
 
-        Thread-safe; only the env round-trip runs outside the tokenizer lock, so
-        interleaved episodes overlap on I/O and stay serial on tokenizer work.
+        Thread-safe; only the env round-trip and rubric scoring run outside the
+        tokenizer lock, so interleaved episodes overlap on I/O and stay serial on tokenizer work.
 
         :param episode_id: The episode to step (from a prior :meth:`reset_episode`).
         :param token_ids: This turn's ``prompt + generation`` tensor.
@@ -779,7 +923,14 @@ class RolloutCollector:
         env_result = env._step_env(gen_text)
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)
-            return env._step_apply(env_result)
+            step = env._step_apply(env_result)
+            turn = env._take_unscored_turn()
+        if turn is None:
+            return step
+        final = env._score_turn(turn)
+        with self._tokenizer_lock:
+            self._require_current(episode_id, slot, activation)
+            return env._apply_turn_score(step, final)
 
     def episode_image_calls(self, episode_id: str) -> list[ImageProcessorCall]:
         """Processor calls behind one active episode's ``pixel_values``.
@@ -790,6 +941,16 @@ class RolloutCollector:
         with self._slot_lock:
             slot = self._episode_to_slot[episode_id]
         return self.envs[slot].episode_image_calls()
+
+    def episode_for_group(self, episode_id: str) -> GroupEpisode:
+        """One active episode as a group rubric sees it.
+
+        :param episode_id: An active episode; ``KeyError`` when not active.
+        :return: See :meth:`RolloutHarness.group_episode`.
+        """
+        with self._slot_lock:
+            slot = self._episode_to_slot[episode_id]
+        return self.envs[slot].group_episode()
 
     def get_episode_data(
         self,

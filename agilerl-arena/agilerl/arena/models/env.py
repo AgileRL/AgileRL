@@ -6,10 +6,17 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
+
+from agilerl.arena.models.judge import ENV_VAR_NAME_PATTERN, JudgeSpec
+from agilerl.arena.models.prompt_template import check_row_placeholders
+from agilerl.arena.models.rewards import RewardSpec, check_reward_fields
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
+from agilerl.arena.models.visibility import ADVANCED, ADVANCED_PLATFORM_WRITTEN
 
 
 def reject_legacy_llm_env_spelling(
@@ -39,11 +46,13 @@ def reject_legacy_llm_env_spelling(
 
 
 DNS_LABEL_PATTERN = r"^[a-z]([-a-z0-9]*[a-z0-9])?$"
-ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 # Env Pods are I/O-bound; this fits beside Ray workers that request a node's CPUs.
 ENV_POD_DEFAULT_CPUS = 0.01
 # A multi-GB env image cold-pulls in minutes.
 ENV_POD_READY_TIMEOUT_S = 600.0
+DEFAULT_ADAPTIVE_TASK_SAMPLING = True
+# Arena fills a named built-in's source when the run starts.
+BUNDLED_ENVIRONMENTS = frozenset({"AgentWorldModel", "VisualWebArena"})
 
 
 class EnvContainerSpec(BaseModel):
@@ -112,8 +121,8 @@ class EnvContainerSpec(BaseModel):
             "Size of a memory-backed volume the image is unpacked into, for an "
             "image larger than a node's disk. The container then runs command "
             "under chroot in a privileged container: the image's ENTRYPOINT, "
-            "ENV and WORKDIR do not apply, so set command and env. The image "
-            "must pull without credentials."
+            "ENV and WORKDIR do not apply, so set command and env. The unpack "
+            "uses the Pod's image pull secrets."
         ),
     )
 
@@ -132,6 +141,60 @@ class EnvContainerSpec(BaseModel):
             msg = (
                 f"Container {self.name!r}: memory_rootfs runs the unpacked image "
                 "without its ENTRYPOINT; set command."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class EnvHostVolume(BaseModel):
+    """A node directory mounted read-only into every container of a service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=40,
+        description="Volume name, unique within its service.",
+    )
+    host_path: str = Field(
+        description=(
+            "Directory on the node under /var/cache/agilerl-, where the platform "
+            "mounts the data it provides. The Pod does not start on a node "
+            "without it."
+        ),
+    )
+    mount_path: str = Field(description="Where the containers see the directory.")
+
+    @model_validator(mode="after")
+    def _check_paths(self) -> Self:
+        paths = {"host_path": self.host_path, "mount_path": self.mount_path}
+        for field, path in paths.items():
+            normal = PurePosixPath(path)
+            if (
+                not normal.is_absolute()
+                or path == "/"
+                or str(normal) != path
+                or ".." in normal.parts
+            ):
+                msg = (
+                    f"Host volume {self.name!r}: {field} must be an absolute path "
+                    f"without '..', a trailing slash or '/' itself; got {path!r}."
+                )
+                raise ValueError(msg)
+        node_data_root = "/var/cache/agilerl-"
+        if not self.host_path.startswith(node_data_root):
+            msg = (
+                f"Host volume {self.name!r}: host_path must be under "
+                f"{node_data_root}*; got {self.host_path!r}."
+            )
+            raise ValueError(msg)
+        # Every env container already mounts a memory volume at /dev/shm.
+        shm = PurePosixPath("/dev/shm")
+        mount = PurePosixPath(self.mount_path)
+        if mount == shm or shm in mount.parents:
+            msg = (
+                f"Host volume {self.name!r}: mount_path {self.mount_path!r} is in "
+                "/dev/shm, the containers' shared-memory mount; pick another path."
             )
             raise ValueError(msg)
         return self
@@ -168,12 +231,37 @@ class EnvServiceSpec(BaseModel):
         gt=0.0,
         description="How long the service may take to become ready.",
     )
+    host_volumes: list[EnvHostVolume] = Field(
+        default_factory=list,
+        description=(
+            "Node directories mounted read-only into every container, for data "
+            "the node provides (a disk the cluster attaches) rather than the image."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_service(self) -> Self:
         names = [container.name for container in self.containers]
         if len(set(names)) != len(names):
             msg = f"Service {self.name!r} repeats a container name: {names}."
+            raise ValueError(msg)
+        volume_names = [volume.name for volume in self.host_volumes]
+        if len(set(volume_names)) != len(volume_names):
+            msg = f"Service {self.name!r} repeats a host volume name: {volume_names}."
+            raise ValueError(msg)
+        mount_paths = [volume.mount_path for volume in self.host_volumes]
+        for path in mount_paths:
+            if mount_paths.count(path) > 1:
+                msg = (
+                    f"Service {self.name!r} mounts more than one host volume at {path}."
+                )
+                raise ValueError(msg)
+        rootfs = [c.name for c in self.containers if c.memory_rootfs is not None]
+        if self.host_volumes and rootfs:
+            msg = (
+                f"Service {self.name!r}: host_volumes are not visible under "
+                f"memory_rootfs, which containers {rootfs} set."
+            )
             raise ValueError(msg)
         serving = [c.name for c in self.containers if c.port is not None]
         if len(serving) != 1:
@@ -468,6 +556,8 @@ class LLMEnvSpec(EnvSpecBase):
     * ``env_url`` — an OpenEnv service someone else hosts;
     * ``env_image`` — a prebuilt env image the Ray runtime runs as its own Pod.
 
+    A built-in (:data:`BUNDLED_ENVIRONMENTS`) may name no source.
+
     A ``dataset`` env is teacher-forced over the rows; ``objective`` picks the
     loss.
     """
@@ -494,7 +584,18 @@ class LLMEnvSpec(EnvSpecBase):
 
     dataset: str | None = Field(
         default=None,
-        description="HuggingFace dataset id, or a Parquet path, for the dataset sources.",
+        description="HuggingFace dataset id, or a Parquet or JSONL path, for the dataset sources.",
+    )
+    dataset_format: Literal["traces"] | None = Field(
+        default=None,
+        description=(
+            "traces: rows are recorded session segments, OpenAI chat messages "
+            "in a messages column with optional tools. A rollout renders each "
+            "target assistant turn's history as a single-turn prompt and "
+            "needs no prompt_template; with no rubric_file_path it scores 0, "
+            "which OPD trains on as pure distillation. objective sft trains "
+            "every target assistant turn. Takes no columns mapping."
+        ),
     )
     dataset_path: str | None = Field(
         default=None, description="Object-store path to a user-supplied dataset."
@@ -507,7 +608,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description=(
             "Maps your dataset's column names onto the ones the run expects "
-            "(question, answer). Unset assumes they already match."
+            "(question, answer; prompt, target, or multi-turn messages and "
+            "tools for SFT). Unset assumes they already match."
         ),
     )
     response_column: str | None = Field(
@@ -518,8 +620,9 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description=(
             "Conversation template, keyed 'role_index' (system_0, user_1, ...) "
-            "so ordering is explicit. Values may interpolate dataset columns. "
-            "Required for a rollout over dataset rows."
+            "so ordering is explicit. Values may use {question} and {answer}, "
+            "filled from the mapped columns; other braces are literal. "
+            "Required for a rollout over dataset rows, except traces."
         ),
     )
     rubric_file_path: str | None = Field(
@@ -527,7 +630,10 @@ class LLMEnvSpec(EnvSpecBase):
         validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
         description=(
             "Path to the Python module holding the rubric (or reward function) "
-            "that scores a rollout over dataset rows."
+            "that scores every turn. Required for a rollout over dataset rows, "
+            "except under OPD, where unset scores every turn 0; on an env, its "
+            "score replaces the env's reward, which it can "
+            "read as an input."
         ),
     )
     rubric_name: str | None = Field(
@@ -536,9 +642,47 @@ class LLMEnvSpec(EnvSpecBase):
         validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
         description="Name of the rubric (or reward callable) to import from that module.",
     )
+    group_rubric_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Name of a GroupRubric in the rubric_file_path module. It scores each "
+            "finished group of completions together, and each score is added to "
+            "that completion's final-turn reward. Leave rubric_name unset to keep "
+            "the env's own turn reward. Group replay is off with a group rubric."
+        ),
+    )
+    judge: JudgeSpec | None = Field(
+        default=None,
+        description=(
+            "LLM judge handed to the rubric: a Rubric class whose __init__ takes "
+            "judge is built with it. Needs rubric_file_path."
+        ),
+    )
+    reward: RewardSpec | None = Field(
+        default=None,
+        description="Built-in reward scoring each turn, in place of rubric_file_path.",
+    )
     max_reward: float | None = Field(
         default=None,
         description="Reward at which a rollout counts as solved, used for the success metric.",
+    )
+    min_reward: float | None = Field(
+        default=None,
+        description=(
+            "Lowest reward the env gives. Scores a turn whose tool calls are "
+            "malformed or missing, which never reaches the env. Unset scores 0."
+        ),
+    )
+    include_reasoning: bool | None = Field(
+        default=None,
+        description=(
+            "Send the env each turn's reasoning with its markers, not only "
+            "the text after the reasoning ends; a Rubric class reads that text "
+            "as TurnAction.message. Unset sends it over dataset rows and not "
+            "to an env that runs the action. A reward function gets the whole "
+            "turn as completion either way."
+        ),
     )
     train_test_split: float | None = Field(
         default=None,
@@ -586,8 +730,10 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         ge=1,
         description=(
-            "Turn budget per episode. Unset probes it from an entrypoint env; "
-            "required with env_url, where it cannot be probed."
+            "Turn budget per episode. Unset puts no cap on turns: the episode "
+            "ends when the env terminates or truncates, or when the next prompt "
+            "no longer fits the model's context. Required with env_url, "
+            "segment_prompt_tokens or segment_max_images."
         ),
     )
     segment_prompt_tokens: int | None = Field(
@@ -643,6 +789,14 @@ class LLMEnvSpec(EnvSpecBase):
             "lists the actions alone."
         ),
     )
+    repeat_system_prompt: bool = Field(
+        default=False,
+        description=(
+            "Also put env_config.system_prompt after the first observation and "
+            "after each image observation, ahead of a trailing 'Question:' "
+            "block. False sends each observation unchanged."
+        ),
+    )
     strict_chat_template_boundary: bool | None = Field(
         default=None,
         description=(
@@ -667,6 +821,35 @@ class LLMEnvSpec(EnvSpecBase):
             "exclusive with observation_field."
         ),
     )
+    action_processor: str | None = Field(
+        default=None,
+        description=(
+            "module:fn entrypoint that turns the post-</think> action text "
+            "into what the env receives. Unset sends that text unchanged."
+        ),
+    )
+    screenshot_field: str | None = Field(
+        default=None,
+        description=(
+            "Observation field holding the page image. Empty or unset reads no "
+            "page image. A field named image is always read when present."
+        ),
+    )
+    goal_images_field: str | None = Field(
+        default=None,
+        description=(
+            "Observation field holding the task images that follow the first "
+            "prompt. Empty or unset reads none."
+        ),
+    )
+    modality: Literal["text", "vision"] | None = Field(
+        default=None,
+        description=(
+            "What the env's observations carry: text only, or text and images "
+            "(vision). text lets a vision-language model's rollout engine skip "
+            "its multimodal towers. Unset is unknown and keeps them."
+        ),
+    )
 
     env_url: str | list[str] | None = Field(
         default=None,
@@ -675,9 +858,13 @@ class LLMEnvSpec(EnvSpecBase):
             "interchangeable replicas dealt across rollout slots."
         ),
     )
-    mcp_tool: str | None = Field(
+    answer_tool: str | None = Field(
         default=None,
-        description="For an MCP-backed env, the tool the model's text is sent to.",
+        description=(
+            "For an MCP-backed env, one of its real tools receiving a turn's "
+            "prose when the turn has no tool call. Unset answers such a turn "
+            "with retry feedback."
+        ),
     )
     action_field: str | None = Field(
         default=None,
@@ -705,12 +892,12 @@ class LLMEnvSpec(EnvSpecBase):
         ),
     )
     adaptive_task_sampling: bool = Field(
-        default=False,
+        default=DEFAULT_ADAPTIVE_TASK_SAMPLING,
         description=(
             "Draw each group's task row in proportion to how often that row's "
             "recent groups had differing rewards, so tasks that keep giving tied "
-            "groups are drawn less (Ray async rollouts only). Unset keeps the "
-            "per-epoch shuffle."
+            "groups are drawn less (Ray async rollouts over task rows only). "
+            "false keeps the per-epoch shuffle."
         ),
     )
     task_family_field: str | None = Field(
@@ -734,11 +921,13 @@ class LLMEnvSpec(EnvSpecBase):
 
     env_hosts: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
         ge=1,
         description=(
             "Number of env hosts to serve the env on (Ray runtime only). Unset "
             "with no image or packages runs an entrypoint in-process in each "
-            "rollout slot."
+            "rollout slot, unless cpus_per_env_host, env_host_memory_bytes or "
+            "env_host_resource is set, which asks for one host."
         ),
     )
     env_image: str | None = Field(
@@ -750,12 +939,14 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_port: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
         ge=1,
         le=65535,
         description="TCP port the env_image server listens on.",
     )
     env_sessions_per_host: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         ge=1,
         description=(
             "Sessions per env_image Pod: one container each, serving on "
@@ -765,6 +956,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_session_ports: dict[str, int] = Field(
         default_factory=dict,
+        json_schema_extra=ADVANCED,
         description=(
             "Container environment set to base + session index in each session "
             "container, so sessions sharing a Pod bind distinct ports."
@@ -772,6 +964,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     cpus_per_env_host: float | None = Field(
         default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
         gt=0.0,
         description=(
             "CPUs reserved per env host; an env_image Pod requests them with no "
@@ -779,15 +972,20 @@ class LLMEnvSpec(EnvSpecBase):
         ),
     )
     env_host_memory_bytes: int | None = Field(
-        default=None, gt=0, description="Memory reserved per env host."
+        default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
+        gt=0,
+        description="Memory reserved per env host.",
     )
     env_host_memory_limit_bytes: int | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         gt=0,
         description="Memory limit per env_image Pod. Unset sets no limit.",
     )
     env_host_ready_timeout_s: float | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         gt=0.0,
         description=(
             "Seconds each env_image session Pod may take to become ready, "
@@ -796,6 +994,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_services: list[EnvServiceSpec] = Field(
         default_factory=list,
+        json_schema_extra=ADVANCED,
         description=(
             "Backing services the env_image sessions share, started with the "
             "job and deleted with it (Ray runtime on Kubernetes only)."
@@ -803,6 +1002,7 @@ class LLMEnvSpec(EnvSpecBase):
     )
     env_host_resource: str | None = Field(
         default=None,
+        json_schema_extra=ADVANCED,
         description=(
             "Where env hosts land: a custom Ray resource, or (for env_image) "
             "the Pod nodeSelector — key=value, or a bare pool name."
@@ -848,6 +1048,30 @@ class LLMEnvSpec(EnvSpecBase):
         """Whether this rollout env serves labelled rows scored by a rubric."""
         return self.env_type == "rollout" and self._named_dataset() is not None
 
+    @property
+    def name_only_built_in(self) -> bool:
+        """Whether this rollout names a built-in and no source."""
+        if self.env_type != "rollout" or self.name not in BUNDLED_ENVIRONMENTS:
+            return False
+        return (
+            self._named_dataset() is None
+            and self.entrypoint is None
+            and self.env_url is None
+            and self.env_image is None
+        )
+
+    @property
+    def sends_reasoning(self) -> bool:
+        """Whether each turn's reasoning reaches the env or reward function."""
+        if self.include_reasoning is not None:
+            return self.include_reasoning
+        return self.dataset_backed_rollout
+
+    @property
+    def text_only(self) -> bool:
+        """Whether every observation is text: declared text, or dataset rows."""
+        return self.modality == "text" or self.dataset_backed_rollout
+
     def _named_dataset(self) -> str | None:
         for value in (self.dataset, self.dataset_path, self.hf_dataset_id):
             if value is not None:
@@ -889,7 +1113,7 @@ class LLMEnvSpec(EnvSpecBase):
             "env_image": self.env_image,
         }
         named = [name for name, value in sources.items() if value is not None]
-        if len(named) != 1:
+        if len(named) != 1 and not self.name_only_built_in:
             got = ", ".join(named) or "none"
             msg = (
                 "A rollout environment needs exactly one source: dataset rows "
@@ -924,10 +1148,10 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if (
-            self.mcp_tool is not None or self.request_timeout_s is not None
+            self.answer_tool is not None or self.request_timeout_s is not None
         ) and dataset is not None:
             msg = (
-                "mcp_tool / request_timeout_s configure an env reached over "
+                "answer_tool / request_timeout_s configure an env reached over "
                 "HTTP; a rollout over dataset rows has no such env."
             )
             raise ValueError(msg)
@@ -968,26 +1192,63 @@ class LLMEnvSpec(EnvSpecBase):
                 "observations; a dataset-backed rollout builds its own prompts."
             )
             raise ValueError(msg)
+        if self.action_processor is not None and dataset is not None:
+            msg = (
+                "action_processor rewrites the text an env receives; a "
+                "dataset-backed rollout has no such env."
+            )
+            raise ValueError(msg)
+        if dataset is not None and (
+            (self.screenshot_field is not None and self.screenshot_field != "")
+            or (self.goal_images_field is not None and self.goal_images_field != "")
+        ):
+            msg = (
+                "screenshot_field and goal_images_field name env observation "
+                "keys; a dataset-backed rollout has no such observation."
+            )
+            raise ValueError(msg)
         if self.env_url is not None and self.max_turns is None:
             msg = (
-                "max_turns is required with env_url: a remote env's turn budget "
-                "cannot be probed, so set it explicitly (1 for single-turn)."
+                "max_turns is required with env_url: set the remote env's turn "
+                "budget explicitly (1 for single-turn)."
             )
             raise ValueError(msg)
         if dataset is not None:
-            if self.rubric_file_path is None:
-                msg = "rubric_file_path is required for dataset-backed rollout environments"
-                raise ValueError(msg)
-            if self.prompt_template is None:
-                msg = "Prompt template is required for dataset-backed rollout environments"
-                raise ValueError(msg)
+            if self.dataset_format != TRACES_DATASET_FORMAT:
+                if self.prompt_template is None:
+                    msg = "Prompt template is required for dataset-backed rollout environments"
+                    raise ValueError(msg)
+                check_row_placeholders(self.prompt_template, self.columns)
             if self.max_turns not in (None, 1):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
             self.max_turns = 1
-        elif self.rubric_file_path is not None:
+        if self.max_turns is None and (
+            self.segment_prompt_tokens is not None
+            or self.segment_max_images is not None
+        ):
             msg = (
-                "rubric_file_path is not supported for env-backed rollout environments."
+                "max_turns is required with segment_prompt_tokens or "
+                "segment_max_images: a restarted context never fills, so only "
+                "the turn cap ends an episode the env does not end."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_modality(self) -> Self:
+        if self.modality == "text" and (
+            self.screenshot_field or self.goal_images_field
+        ):
+            msg = (
+                "modality text means the env sends no images; drop "
+                "screenshot_field and goal_images_field, or set modality vision."
+            )
+            raise ValueError(msg)
+        if self.modality == "vision" and self.dataset_backed_rollout:
+            msg = (
+                "modality vision needs image observations; a dataset-backed "
+                "rollout sends text only."
             )
             raise ValueError(msg)
         return self
@@ -1056,6 +1317,40 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
+    def _check_traces_format(self) -> Self:
+        if self.dataset_format != TRACES_DATASET_FORMAT:
+            return self
+        if self._named_dataset() is None:
+            msg = "dataset_format traces describes dataset rows; name the dataset too."
+            raise ValueError(msg)
+        expected = "sft" if self.env_type == "dataset" else None
+        if self.objective != expected:
+            msg = (
+                "A traces dataset trains SFT (env_type dataset, objective sft) or a "
+                f"rollout (env_type rollout, no objective); objective {self.objective!r} "
+                f"on env_type {self.env_type!r} is not supported."
+            )
+            raise ValueError(msg)
+        mapped = [
+            field
+            for field, value in (
+                ("columns", self.columns),
+                ("prompt_template", self.prompt_template),
+            )
+            if value is not None
+        ]
+        if mapped:
+            msg = (
+                f"A traces dataset's column names are the spec; drop {', '.join(mapped)}. "
+                "Each row's prompt messages are the rollout prompt."
+            )
+            raise ValueError(msg)
+        if self.response_column not in (None, "completion"):
+            msg = "A traces dataset trains its completion column; drop response_column."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _resolve_env_image_host_defaults(self) -> Self:
         if self.env_image is not None:
             if self.env_port is None:
@@ -1066,22 +1361,46 @@ class LLMEnvSpec(EnvSpecBase):
                 self.env_sessions_per_host = 1
             if self.env_host_ready_timeout_s is None:
                 self.env_host_ready_timeout_s = ENV_POD_READY_TIMEOUT_S
+        elif (
+            self.env_hosts is None
+            and self.entrypoint is not None
+            and (
+                self.cpus_per_env_host is not None
+                or self.env_host_memory_bytes is not None
+                or self.env_host_resource is not None
+            )
+        ):
+            self.env_hosts = 1
+        return self
+
+    @model_validator(mode="after")
+    def _check_reward_fields(self) -> Self:
+        check_reward_fields(self)
         return self
 
     @model_validator(mode="after")
     def _apply_conditional_defaults(self) -> Self:
-        if self._dataset_identity_backed():
-            if self.train_test_split is None:
-                self.train_test_split = 0.9
-            if self.env_type == "rollout" and self.rubric_name is None:
-                self.rubric_name = "reward_fn"
+        if self._dataset_identity_backed() and self.train_test_split is None:
+            self.train_test_split = 0.9
+        if (
+            self.rubric_file_path is not None
+            and self.rubric_name is None
+            and self.group_rubric_name is None
+        ):
+            self.rubric_name = "reward_fn"
         if self.env_type == "dataset" and self.response_column is None:
-            self.response_column = "response"
+            self.response_column = (
+                "completion"
+                if self.dataset_format == TRACES_DATASET_FORMAT
+                else "response"
+            )
         if self.env_type == "rollout":
-            if self.num_envs is None:
-                self.num_envs = 1
-            if self.strict_chat_template_boundary is None:
-                self.strict_chat_template_boundary = True
+            # Unset here: a submitted default replaces the bundled profile's value.
+            if not self.name_only_built_in:
+                if self.num_envs is None:
+                    self.num_envs = 1
+                if self.strict_chat_template_boundary is None:
+                    self.strict_chat_template_boundary = True
             env_backed = (
                 self.entrypoint is not None
                 or self.env_url is not None

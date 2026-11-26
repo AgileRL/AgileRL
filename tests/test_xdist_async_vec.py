@@ -49,13 +49,13 @@ class TestNodeidSpawnsAsyncVectorEnv:
 
         assert nodeid_spawns_async_vector_env(nodeid)
 
-    def test_deferred_encoder_is_grouped(self):
+    def test_deferred_encoder_is_not_grouped(self):
         nodeid = (
             "tests/test_train/test_trainer.py::"
             "test_deferred_encoder_uses_spec_defaults_not_dataclass[cnn]"
         )
 
-        assert nodeid_spawns_async_vector_env(nodeid)
+        assert not nodeid_spawns_async_vector_env(nodeid)
 
     def test_unrelated_cpu_test_is_not_grouped(self):
         nodeid = "tests/test_algorithms/test_dqn.py::test_learn"

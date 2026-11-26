@@ -23,6 +23,7 @@ import agilerl
 _LLM_MODULES = {
     "bitsandbytes": "bitsandbytes",
     "datasets": "datasets",
+    "jsonschema": "jsonschema",
     "liger-kernel": "liger_kernel",
     "openenv": "openenv",
     "peft": "peft",

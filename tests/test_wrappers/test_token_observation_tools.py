@@ -146,7 +146,7 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
     w = bare_rollout_env()
     w.tools = _TOOLS
     w.tokenizer = _RecordingTokenizer()
-    w._chat_template_boundary_ids("tool result")
+    w._chat_template_boundary_ids([{"role": "user", "content": "tool result"}])
     assert w.tokenizer.last_tools == _TOOLS
 
 

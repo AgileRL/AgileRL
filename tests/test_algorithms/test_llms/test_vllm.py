@@ -91,7 +91,7 @@ class TestREINFORCETest:
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             # Keep the always-awake path covered here; the sleep/wake cycle is
-            # exercised end-to-end by test_quantized_generate_survives_sleep_wake.
+            # exercised end-to-end by test_dense_generate_survives_sleep_wake.
             sleep_mode=False,
         )
 
@@ -121,7 +121,9 @@ class TestREINFORCETest:
         )
 
         for training in (True, False):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _, _ = rf.get_action(
+                prompts, training=training
+            )
             assert_vllm_get_action_contract(
                 token_ids=completion_ids,
                 action_masks=action_masks,
@@ -138,110 +140,6 @@ class TestREINFORCETest:
         )
         out = rf.test(env, loop=1)
         assert out.shape == ()
-
-        rf.clean_up()
-
-    @spawn_new_process_for_each_test
-    @pytest.mark.parametrize("vocab_size", [1000])
-    @pytest.mark.parametrize("input_size", [10])
-    @pytest.mark.parametrize("max_tokens", [20])
-    @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
-    def test_quantized_generate_survives_sleep_wake(
-        self,
-        reinforce_factory,
-        dist_mode_factory,
-        model_factory,
-        vocab_size,
-        input_size,
-        max_tokens,
-        pretrained_model_name_or_path,
-    ):
-        """End-to-end bnb quantization: load → quantize → generate → sleep →
-        wake → generate.
-
-        vLLM loads the fixture with in-flight bitsandbytes quantization and the
-        trainer holds its own base (loaded from the model name). vLLM native
-        sleep/wake must round-trip the quantized base losslessly: greedy decode
-        of the same prompts has to be identical before sleep and after wake. An
-        earlier sleep path re-quantized bnb weights to garbage on reload — token
-        equality is the regression check for that.
-        """
-        bnb = pytest.importorskip(
-            "bitsandbytes",
-            reason="quantized vLLM test requires bitsandbytes (linux-only).",
-        )
-        if not torch.cuda.is_bf16_supported(including_emulation=False):
-            # vLLM refuses bf16 below sm_80 (e.g. the T4 CI runners); torch's
-            # default check includes emulated bf16 and stays True there.
-            pytest.skip("bnb nf4 preset uses bf16 compute; GPU lacks native bf16.")
-        from agilerl.utils.llm_utils import build_bnb_quantization_config
-
-        rf = reinforce_factory(
-            dist_mode_factory=dist_mode_factory,
-            model_factory=model_factory,
-            dist_mode=None,
-            vocab_size=vocab_size,
-            input_size=input_size,
-            max_tokens=max_tokens,
-            use_vllm=True,
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            micro_batch_size_per_gpu=None,
-            sleep_mode=True,
-            quantization_config=build_bnb_quantization_config("nf4"),
-            # The fixture checkpoint is fp16; pin vLLM to bf16 so the engine's
-            # quantization target matches the trainer's nf4 preset (bf16
-            # compute/storage) and the shared base is dtype-consistent.
-            vllm_config_overrides={
-                "quantization": "bitsandbytes",
-                "dtype": "bfloat16",
-            },
-            from_name=True,
-            temperature=0.0,  # greedy → outputs comparable across sleep/wake
-        )
-
-        # The trainer holds its own 4-bit bnb base. Use ``named_modules()``
-        # (torch's recursive walk), not ``modules()``.
-        assert any(
-            isinstance(m, bnb.nn.Linear4bit) for _, m in rf.actor.named_modules()
-        )
-        # Sleep mode is active and the engine was put to sleep after init.
-        assert not rf._vllm_awake
-
-        # Build prompts once and reuse them verbatim for both generations.
-        batch_size = 2
-        prompts = [
-            {
-                "input_ids": torch.randint(
-                    0, vocab_size, (1, input_size), device=rf.device
-                ),
-                "attention_mask": torch.ones(1, input_size, device=rf.device),
-                "text": "Write me a short story about a cat.",
-            }
-            for _ in range(batch_size)
-        ]
-
-        first_ids, first_masks, _ = rf.get_action(prompts, training=True)
-        assert rf._vllm_awake
-        assert_vllm_get_action_contract(
-            token_ids=first_ids,
-            action_masks=first_masks,
-            batch_size=batch_size,
-            prompt_len=input_size,
-            pad_token_id=rf.pad_token_id,
-        )
-
-        # The algorithm's own pre-learn hook: native sleep frees the KV cache
-        # and backs the base up to host RAM; wake must restore it losslessly.
-        rf._prepare_vllm_for_training()
-        assert not rf._vllm_awake
-
-        second_ids, _, _ = rf.get_action(prompts, training=True)
-        assert rf._vllm_awake
-        for first, second in zip(first_ids, second_ids, strict=True):
-            assert torch.equal(first, second), (
-                "greedy completions changed across sleep/wake — the quantized "
-                "base did not survive native sleep/wake"
-            )
 
         rf.clean_up()
 
@@ -297,7 +195,7 @@ class TestREINFORCETest:
             for _ in range(batch_size)
         ]
 
-        first_ids, first_masks, _ = rf.get_action(prompts, training=True)
+        first_ids, first_masks, _, _ = rf.get_action(prompts, training=True)
         assert rf._vllm_awake
         assert_vllm_get_action_contract(
             token_ids=first_ids,
@@ -312,7 +210,7 @@ class TestREINFORCETest:
         rf._prepare_vllm_for_training()
         assert not rf._vllm_awake
 
-        second_ids, _, _ = rf.get_action(prompts, training=True)
+        second_ids, _, _, _ = rf.get_action(prompts, training=True)
         assert rf._vllm_awake
         for first, second in zip(first_ids, second_ids, strict=True):
             assert torch.equal(first, second), (

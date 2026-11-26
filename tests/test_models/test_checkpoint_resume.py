@@ -34,8 +34,12 @@ if HAS_LLM_DEPENDENCIES:
 
     from agilerl.algorithms.grpo import GRPO
     from agilerl.arena.models.algorithms import GRPOSpec
+    from agilerl.arena.models.model_info import catalog_lora_modules
     from agilerl.utils.algo_utils import CosineLRScheduleConfig
     from tests import TINY_LLM_FIXTURE_PATH
+
+# The catalog model the tiny Qwen2 checkpoint stands in for.
+CATALOG_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 def _lora_config():
@@ -43,7 +47,7 @@ def _lora_config():
     return LoraConfig(
         r=16,
         lora_alpha=64,
-        target_modules=["q_proj"],
+        target_modules=catalog_lora_modules(CATALOG_MODEL),
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
     )
@@ -54,7 +58,6 @@ def _lora_config_dict():
     return {
         "lora_r": 16,
         "lora_alpha": 64,
-        "target_modules": ["q_proj"],
         "task_type": "CAUSAL_LM",
         "lora_dropout": 0.05,
     }
@@ -233,7 +236,8 @@ class TestLLMSpecResumeVsLoad:
 
     def _spec(self, lr):
         return GRPOSpec(
-            pretrained_model_name_or_path=TINY_LLM_FIXTURE_PATH,
+            pretrained_model_name_or_path=CATALOG_MODEL,
+            weights_path=TINY_LLM_FIXTURE_PATH,
             lr=lr,
             group_size=2,
             lora_config=_lora_config_dict(),

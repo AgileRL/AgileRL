@@ -2,7 +2,6 @@
 INIT_HP:
     ALGO: GRPO
     BATCH_SIZE: 32
-    MICRO_BATCH_SIZE_PER_GPU: 16
     GROUP_SIZE: 8
     BETA: 0.0
     LR: 0.001
@@ -22,4 +21,4 @@ DEBUG:
     lora:
         r: 8
         lora_alpha: 16
-        target_modules: [c_attn, c_proj, c_fc]
+        target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]

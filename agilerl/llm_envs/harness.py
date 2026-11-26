@@ -5,15 +5,14 @@
 
 from __future__ import annotations
 
-import ast
-import re
-import uuid
+import inspect
 import warnings
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
 from PIL import Image, ImageOps
@@ -22,13 +21,21 @@ from agilerl.components.llm_rollout_data import (
     EpisodeSegments,
     validate_episode_segments,
 )
+from agilerl.llm_envs.chat_formats import (
+    ParsedToolCall,
+    ToolCallParseStatus,
+    action_text,
+    frame_repeats_terminator,
+    resolve_chat_format,
+)
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
 from agilerl.llm_envs.observation import (
-    DEFAULT_OBSERVATION_ROLE,
     ESCAPED_IMAGE_PLACEHOLDER,
     IMAGE_PLACEHOLDER,
     QUESTION_AFTER_CONTEXT,
     ImageProcessorCall,
+    ImageTokens,
+    apply_info_prefix_suffix,
     encode_image_training_inputs,
     goal_images_text,
     observation_goal_images,
@@ -36,79 +43,94 @@ from agilerl.llm_envs.observation import (
     observation_text_and_image,
     process_observation,
 )
+from agilerl.llm_envs.reasoning import reasoning_trace_text
 from agilerl.llm_envs.restart_prompt import KeptTurn, RestartPromptMixin
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.algo_utils import is_str_keyed_dict
+from agilerl.utils.chat_template import feedback_frame_parts
 from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 __all__ = [
+    "EPISODE_TOOLS_INFO_KEY",
     "PROMPT_LIMIT_INFO_KEY",
+    "TOOL_CALLS_INFO_KEY",
+    "TOOL_CALL_ERROR_INFO_KEY",
+    "EnvStepResult",
     "RolloutHarness",
     "TranscriptContinuityError",
-    "env_action_text",
 ]
 
 # Every restart prompt repeats each entry; an unclosed reasoning block is the whole generation.
 ACTION_HISTORY_MAX_CHARS = 300
 # Set ``True`` in a step's info when the episode ends because no prompt fits the prompt limit.
 PROMPT_LIMIT_INFO_KEY = "prompt_limit"
+# Reset info key for an env whose tools depend on the episode: OpenAI function
+# schemas the harness renders and parses against for that episode only.
+EPISODE_TOOLS_INFO_KEY = "episode_tools"
+# On a tool-call env, every step's info holds the valid calls the turn ran
+# (prose sent to ``answer_tool`` counts 0) and flags a turn rejected for a
+# malformed or missing call. Text envs set neither.
+TOOL_CALLS_INFO_KEY = "tool_calls"
+TOOL_CALL_ERROR_INFO_KEY = "tool_call_error"
+TOOL_CALL_ERRORS = {
+    ToolCallParseStatus.INVALID_JSON: "Tool call arguments are not valid JSON.",
+    ToolCallParseStatus.UNCLOSED_BLOCK: "Unclosed tool call block.",
+    ToolCallParseStatus.MISSING_NAME: "Tool call is missing its name.",
+    ToolCallParseStatus.MALFORMED_STRUCTURE: "Malformed tool call.",
+}
+
+
+class EnvStepResult(NamedTuple):
+    """One turn's env round-trip, rendered for :meth:`RolloutHarness._step_apply`.
+
+    :param messages: ``role`` / ``content`` observation messages, one per env step.
+    :param image: The last step's observation image, or ``None``.
+    :param reward: Summed reward of the turn's env steps.
+    :param terminated: Whether the episode terminated.
+    :param truncated: Whether the episode was truncated.
+    :param info: Merged step info; ``rubric_scores`` summed across steps.
+    :param action_error: The last step's ``action_error_field`` text, or ``None``.
+    :param older_obs_text: The last step's ``restart_older_obs_field`` text, or ``None``.
+    """
+
+    messages: list[dict[str, str]]
+    image: object | None
+    reward: float
+    terminated: bool
+    truncated: bool
+    info: dict[str, Any]
+    action_error: str | None
+    older_obs_text: str | None
 
 
 class TranscriptContinuityError(RuntimeError):
     """A turn was sampled from a context that does not extend the tokens sampled so far."""
 
 
-def env_action_text(gen_text: str) -> str:
-    """Text the env executes: what follows the first ``</think>``, else the whole text.
-
-    A template that prefills an open ``<think>`` yields ``reasoning</think>action``
-    with no opening tag. A reasoning block that never closes passes through whole.
-    """
-    return _quote_unparsed_call(_action_span(gen_text))
-
-
-def _action_span(gen_text: str) -> str:
-    """The unquoted action: what follows the first ``</think>``, else the whole text."""
-    _reasoning, closed, action = gen_text.partition("</think>")
-    return action.strip() if closed else gen_text
-
-
-def _quote_unparsed_call(text: str) -> str:
-    """Wrap the payload of a call the env cannot parse as a string argument."""
-    raw = text.strip()
-    matched = re.match(r"\A([A-Za-z_][A-Za-z0-9_]*)\b(.*)\Z", raw, re.DOTALL)
-    if matched is None:
-        return text
-    name, rest = matched.group(1), matched.group(2).strip()
-    # A tag after the call is not a payload to quote.
-    if not rest or rest[0] not in "({:" or "<" in raw:
-        return text
-    try:
-        tree = ast.parse(raw)
-    # Deeply nested text overflows the parser's stack or the AST builder's recursion.
-    except (SyntaxError, MemoryError, RecursionError):
-        tree = None
-    if (
-        tree is not None
-        and len(tree.body) == 1
-        and isinstance(tree.body[0], ast.Expr)
-        and isinstance(tree.body[0].value, ast.Call)
-    ):
-        return raw
-    payload = rest.lstrip(":{( ").rstrip(")} ")
-    if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in "'\"":
-        payload = payload[1:-1]
-    if not payload:
-        return text
-    escaped = payload.replace("\\", "\\\\").replace("'", "\\'")
-    return f"{name}('{escaped}')"
-
-
 if TYPE_CHECKING:
     from openenv.core.env_server.interfaces import Environment
     from openenv.core.rubrics.base import Rubric
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+    from agilerl.llm_envs.rubrics import GroupEpisode
+
+
+class UnscoredTurn(NamedTuple):
+    """One turn's env result, waiting for the rubric to score it."""
+
+    rubric: Rubric
+    result: EnvStepResult
+    message: str
+    calls: list[ParsedToolCall]
+    payload: object | None
+    env_ran: bool
+
+
+def _add_scores(totals: dict[str, float], scores: Mapping[str, float]) -> None:
+    """Add rubric component ``scores`` to running ``totals``."""
+    for name, value in scores.items():
+        totals[name] = totals.get(name, 0.0) + float(value)
 
 
 def _image_list(image: object | None) -> list[object]:
@@ -127,6 +149,59 @@ def _coerced_system_prompt(value: object) -> str | None:
     return None
 
 
+def _check_uncapped_turns(
+    max_turns: int | None,
+    max_model_len: int | None,
+    segment_prompt_tokens: int | None,
+    segment_max_images: int | None,
+) -> None:
+    """An uncapped episode needs a context length and no context restart."""
+    if max_turns is not None:
+        return
+    if max_model_len is None:
+        msg = "max_turns=None needs max_model_len: an uncapped episode stops when its prompt no longer fits."
+        raise ValueError(msg)
+    if segment_prompt_tokens is not None or segment_max_images is not None:
+        msg = "max_turns=None cannot restart the context: a restarted episode never fills it, so nothing would end it."
+        raise ValueError(msg)
+
+
+def _resolve_rollout_env_client(
+    env_client: str | Callable[[], str] | EnvClientProtocol,
+    *,
+    timeout_s: float | None,
+    answer_tool: str | None,
+    action_field: str,
+    tasks: Sequence[Mapping[str, Any]] | None,
+    eval_tasks: Sequence[Mapping[str, Any]] | None,
+) -> EnvClientProtocol:
+    if isinstance(env_client, EnvClientProtocol):
+        if (
+            timeout_s is not None
+            or answer_tool is not None
+            or action_field != "message"
+            or tasks is not None
+            or eval_tasks is not None
+        ):
+            msg = (
+                "timeout_s / answer_tool / action_field / tasks / "
+                "eval_tasks configure the transport and have no effect "
+                "on an already-built env client; set them on the client instead."
+            )
+            raise ValueError(msg)
+        return env_client
+    from agilerl.llm_envs.openenv import RemoteEnvClient  # optional extra: llm
+
+    return RemoteEnvClient(
+        env_client,
+        timeout_s=timeout_s,
+        answer_tool=answer_tool,
+        action_field=action_field,
+        tasks=tasks,
+        eval_tasks=eval_tasks,
+    )
+
+
 class RolloutHarness(RestartPromptMixin):
     """Token-level rollout env: tokenisation + turn loop over a text env client.
 
@@ -138,20 +213,24 @@ class RolloutHarness(RestartPromptMixin):
         self,
         env_client: str | Callable[[], str] | EnvClientProtocol,
         tokenizer: PreTrainedTokenizerBase,
-        max_turns: int = 1,
+        max_turns: int | None = 1,
         *,
         timeout_s: float | None = None,
-        mcp_tool: str | None = None,
+        answer_tool: str | None = None,
         action_field: str = "message",
         observation_field: str | None = None,
         observation_processor: Callable[[Any], str] | None = None,
+        action_processor: Callable[[str], str] | None = None,
         instruction: str = "",
         strict_chat_template_boundary: bool = True,
         apply_chat_template: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
         max_model_len: int | None = None,
+        max_output_tokens: int | None = None,
         system_prompt: str | None = None,
+        repeat_system_prompt: bool = False,
         vision_processor: Callable[..., Mapping[str, Any]] | None = None,
+        image_tokens: ImageTokens | None = None,
         tasks: Sequence[Mapping[str, Any]] | None = None,
         eval_tasks: Sequence[Mapping[str, Any]] | None = None,
         segment_prompt_tokens: int | None = None,
@@ -160,6 +239,12 @@ class RolloutHarness(RestartPromptMixin):
         restart_older_obs_field: str = "",
         restart_older_images: bool = True,
         action_error_field: str = "",
+        screenshot_field: str | None = None,
+        goal_images_field: str | None = None,
+        chat_format: str | None = None,
+        min_reward: float = 0.0,
+        include_reasoning: bool = False,
+        rubric: Rubric | None = None,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -167,9 +252,15 @@ class RolloutHarness(RestartPromptMixin):
             WebSocket session, the provider re-resolved per dial) or an
             ``EnvClientProtocol``.
         :param tokenizer: Encodes prompts/feedback and applies the chat template.
-        :param max_turns: Max generation turns per episode.
+        :param max_turns: Max generation turns per episode. ``None`` puts no cap
+            on turns: the episode ends when the env does or the next prompt no
+            longer fits ``max_model_len``, which must then be set, with no
+            context restart setting.
         :param timeout_s: Per-request OpenEnv timeout; ``None`` leaves requests unbounded.
-        :param mcp_tool: MCP tool the text is sent to as ``call_tool``; ``None`` sends plain text.
+        :param answer_tool: For an MCP env, one of its real tools (e.g. ``guess``,
+            ``submit_answer``) receiving a turn's prose as ``call_tool`` when
+            the turn has no tool call. ``None`` answers such a turn with retry
+            feedback.
         :param action_field: Action field the model's text goes into — the env's own
             name for it (``message`` by default, but ``code`` or ``action_str``
             for envs that name it otherwise), or the MCP tool's argument name.
@@ -180,6 +271,9 @@ class RolloutHarness(RestartPromptMixin):
             text, replacing the default (:func:`process_observation`) for envs
             whose observations need more than a field lookup. Runs on the
             collector's I/O threads, so it must be thread-safe.
+        :param action_processor: Turns the post-reasoning action text into
+            what the env receives. ``None`` sends that text unchanged. The
+            restart prompt's action list uses the same callable.
         :param instruction: Prompt used when reset's observation renders empty.
         :param strict_chat_template_boundary: Raise when the chat template cannot
             render a multi-turn boundary; ``False`` warns and falls back to
@@ -189,17 +283,27 @@ class RolloutHarness(RestartPromptMixin):
             render (e.g. ``{"enable_thinking": False}``); the env's tool schemas
             are set on top under ``tools``.
         :param max_model_len: Engine context length; enables stop-on-overflow when set.
+        :param max_output_tokens: Per-turn generation cap. With a context restart
+            setting, prompts stay within ``max_model_len - max_output_tokens`` so
+            every turn can generate in full.
         :param system_prompt: Rendered as a leading ``system`` message ahead of the
             env's first observation. Requires ``apply_chat_template``; a template
             without a system slot raises at reset rather than dropping it silently.
+        :param repeat_system_prompt: Also put the system prompt after the first
+            observation and after each image feedback turn, ahead of a trailing
+            ``Question:`` block. ``False`` sends each observation unchanged.
         :param vision_processor: Callable ``(text=..., images=..., return_tensors='pt')``
             that returns ``input_ids`` and ``pixel_values`` for image observations.
             Each image turn's new text is processed alone with that turn's image;
             ``pixel_values`` concatenate along dim 0 across turns.
+        :param image_tokens: The model's image placeholder
+            (:meth:`ImageTokens.from_processor`). ``None`` keeps
+            :data:`IMAGE_PLACEHOLDER`, for processors that expand it themselves.
         :param tasks: Per-row reset kwargs forwarded to a URL-backed client.
         :param eval_tasks: Held-out per-row reset kwargs for eval mode on a URL-backed client.
         :param segment_prompt_tokens: Restart the episode's context when the next
-            prompt would exceed this many tokens. The restarted prompt holds the
+            prompt would exceed this many tokens or the model's prompt budget,
+            whichever is lower. The restarted prompt holds the
             system prompt, the actions taken so far, the kept turns
             (``restart_keep_turns``) and the latest observation;
             :meth:`get_episode_data` returns every segment. Every prompt the
@@ -210,9 +314,10 @@ class RolloutHarness(RestartPromptMixin):
         :param segment_max_images: Restart the episode's context when the next
             prompt would carry more than this many images (match the engine's
             ``limit_mm_per_prompt``). A restarted prompt carries one image, plus
-            kept turns' images up to ``segment_max_images - 1`` in all.
+            kept turns' images up to ``segment_max_images - 1`` in all. Set,
+            it also restarts the context at the model's prompt budget.
             ``None`` puts no image limit on a segment. The reset observation's
-            ``goal_images`` follow the first prompt's text, repeat in every
+            task images (``goal_images_field``) follow the first prompt's text, repeat in every
             restarted prompt, and count toward the limit. They are letterboxed
             to that observation's image size (the first goal image's size when
             it has none).
@@ -233,6 +338,22 @@ class RolloutHarness(RestartPromptMixin):
         :param action_error_field: Observation field holding the error text of
             the action just taken; a non-blank value follows that action in the
             restarted prompt's action list. ``""`` lists actions alone.
+        :param screenshot_field: Observation field holding the page image.
+            ``""`` reads no page image. ``image`` is always read when present.
+        :param goal_images_field: Observation field holding the task images
+            that follow the first prompt. ``""`` reads none.
+        :param chat_format: Name of the model family's chat format
+            format (see :data:`~agilerl.llm_envs.chat_formats.CHAT_FORMATS`).
+            ``None`` picks the format whose tokens are in the tokenizer vocab.
+        :param min_reward: Lowest reward the env gives. Scores a turn whose tool
+            calls are malformed or missing, which never reaches the env.
+        :param rubric: OpenEnv ``Rubric`` scoring every turn, called with a
+            :class:`~agilerl.llm_envs.rubrics.TurnAction` and
+            :class:`~agilerl.llm_envs.rubrics.TurnObservation`; its score
+            replaces the env's reward. ``None`` keeps the env's reward.
+        :param include_reasoning: Send the env the whole turn, reasoning and its
+            markers included, with end-of-turn tokens dropped. The restart
+            history still lists only the post-reasoning action.
         :ivar full_ids: Running token sequence of the current segment (prompt +
             generations + feedback).
         :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated
@@ -241,7 +362,15 @@ class RolloutHarness(RestartPromptMixin):
         :ivar done: Whether the episode has terminated.
         :ivar current_prompt: Latest policy-ready prompt; ``{}`` once done.
         :ivar sampling_logps: Per-turn vLLM sampling logprobs (empty on the HF path).
+        :ivar sampling_supports: Per-turn ``(n, K)`` token ids vLLM could sample
+            at each generated token (empty unless the engine records them).
         """
+        _check_uncapped_turns(
+            max_turns,
+            max_model_len,
+            segment_prompt_tokens,
+            segment_max_images,
+        )
         self.max_turns = max_turns
         if segment_prompt_tokens is not None and segment_prompt_tokens < 1:
             msg = (
@@ -264,6 +393,8 @@ class RolloutHarness(RestartPromptMixin):
         self._restart_older_obs_field = restart_older_obs_field
         self._restart_older_images = restart_older_images
         self._action_error_field = action_error_field
+        self._screenshot_field = screenshot_field or ""
+        self._goal_images_field = goal_images_field or ""
         self._kept_turns: deque[KeptTurn] = deque(maxlen=restart_keep_turns)
         # This turn's sampled ids, held until its observation arrives.
         self._gen_ids = torch.empty(0, dtype=torch.long)
@@ -285,45 +416,55 @@ class RolloutHarness(RestartPromptMixin):
             observation_processor
             or partial(process_observation, observation_field=observation_field)
         )
+        self._action_processor = action_processor
         self._instruction = instruction
         self._strict_chat_template_boundary = strict_chat_template_boundary
-        if isinstance(env_client, EnvClientProtocol):
-            if (
-                timeout_s is not None
-                or mcp_tool is not None
-                or action_field != "message"
-                or tasks is not None
-                or eval_tasks is not None
-            ):
-                msg = (
-                    "timeout_s / mcp_tool / action_field / tasks / "
-                    "eval_tasks configure the transport and have no effect "
-                    "on an already-built env client; set them on the client instead."
-                )
-                raise ValueError(msg)
-            self._env_client: EnvClientProtocol = env_client
-        else:
-            from agilerl.llm_envs.openenv import RemoteEnvClient  # optional extra: llm
-
-            self._env_client = RemoteEnvClient(
-                env_client,
-                timeout_s=timeout_s,
-                mcp_tool=mcp_tool,
-                action_field=action_field,
-                tasks=tasks,
-                eval_tasks=eval_tasks,
-            )
+        self._env_client = _resolve_rollout_env_client(
+            env_client,
+            timeout_s=timeout_s,
+            answer_tool=answer_tool,
+            action_field=action_field,
+            tasks=tasks,
+            eval_tasks=eval_tasks,
+        )
         self.tokenizer = tokenizer
+        self._include_reasoning = include_reasoning
+        self._rubric = rubric
+        self._rubric_components: tuple[str, ...] = ()
+        if rubric is not None:
+            from agilerl.llm_envs.rubrics import (  # optional extra: llm
+                register_component_hooks,
+            )
+
+            self._rubric_components = register_component_hooks(rubric)
+        # This turn's whole decoded text, reasoning included; only kept for a rubric.
+        self._turn_completion = ""
+        # This turn's post-reasoning text; only kept for a rubric.
+        self._turn_text = ""
+        # Scored after :meth:`_step_apply`, once the episode's end is known.
+        self._unscored_turn: UnscoredTurn | None = None
+        # The episode's messages as the rubric sees them; only kept for a rubric.
+        self._rubric_transcript: list[dict[str, str]] = []
+        # The env's question and answer fields, once a turn's observation has them.
+        self._rubric_question: Any = None
+        self._rubric_answer: Any = None
+        self._init_tool_calling(tokenizer, chat_format, min_reward)
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
-        # Tool schemas fetched lazily on first use (see :attr:`tools`).
-        self._tools: list[Any] | None = None
+        # The env's tool schemas, fetched lazily on first use (see :attr:`tools`),
+        # and the current episode's from reset info, which win while set.
+        self._env_tools: list[Any] | None = None
         self._tools_known = False
+        self._episode_tools: list[Any] | None = None
+        self._tools_template_checked = False
         self._max_model_len = max_model_len
+        self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
         self.rubric_score_sums: dict[str, float] = {}
+        # Component name to the judge's latest note on this episode.
+        self.rubric_notes: dict[str, str] = {}
         self._turn_idx = 0
         self._prompt_text: str = ""
         # Image episodes: the last prompt plus its sampled tokens, as text and as
@@ -335,10 +476,13 @@ class RolloutHarness(RestartPromptMixin):
         # The reset observation's goal images, repeated in every segment.
         self._goal_images: list[Image.Image] = []
         self._last_full_prompt_token_len: int | None = None
-        # Cached chat-template frame around a feedback turn, per observation role
-        # (rendered once each): a tool result and a user message get different frames.
-        self._boundary_parts: dict[str, tuple[str, str] | None] = {}
+        # Cached chat-template frame around a feedback turn, per sequence of
+        # observation roles (rendered once each with the current tools): a tool
+        # result and a user message get different frames, and so do one and two
+        # tool results.
+        self._boundary_parts: dict[tuple[str, ...], tuple[str, ...] | None] = {}
         self._system_prompt = system_prompt or None
+        self._repeat_system_prompt = repeat_system_prompt
         if self._system_prompt is not None and not self.apply_chat_template:
             msg = (
                 "system_prompt is rendered through the chat template; with "
@@ -349,28 +493,45 @@ class RolloutHarness(RestartPromptMixin):
         self.done: bool = False
         self.current_prompt: dict[str, Any] = {}
         self.sampling_logps: list[torch.Tensor] = []
+        self.sampling_supports: list[torch.Tensor] = []
         self._special_ids_cache: frozenset[int] | None = None
         self._vision_processor = vision_processor
+        self.image_tokens = image_tokens or ImageTokens()
         # The VL forward scatters one image feature row into every id equal to
-        # the placeholder, generated ones included.
+        # the image token, generated ones included.
         self._image_placeholder_id: int | None = (
             None
             if vision_processor is None
-            else tokenizer.get_vocab().get(IMAGE_PLACEHOLDER)
+            else tokenizer.get_vocab().get(self.image_tokens.image_token)
         )
         self._multimodal_turn: dict[str, Any] | None = None
         self._episode_pixel_values: torch.Tensor | None = None
         # One entry per processor call whose pixel rows the episode kept, in row order.
         self._episode_image_calls: list[ImageProcessorCall] = []
 
+    def _init_tool_calling(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        chat_format: str | None,
+        min_reward: float,
+    ) -> None:
+        """Bind the family's chat format and the pending-call buffers."""
+        self._chat_format = resolve_chat_format(tokenizer, chat_format)
+        self._min_reward = float(min_reward)
+        # Read from the env client on the first reset; see :meth:`_reset_fetch`.
+        self._takes_tool_calls: bool | None = None
+        self._pending_tool_calls: list[ParsedToolCall] = []
+        self._pending_tool_error: str | None = None
+
     @classmethod
     def local(
         cls,
         env: TextEnvProtocol | Environment,
         tokenizer: PreTrainedTokenizerBase,
-        max_turns: int = 1,
+        max_turns: int | None = 1,
         *,
         action_field: str = "message",
+        answer_tool: str | None = None,
         instruction: str = "",
         **kwargs: Any,
     ) -> RolloutHarness:
@@ -378,16 +539,20 @@ class RolloutHarness(RestartPromptMixin):
 
         :param env: A plain-text env or an OpenEnv ``Environment``.
         :param tokenizer: Tokenizer for the token-level loop.
-        :param max_turns: Generation turns per episode.
+        :param max_turns: Generation turns per episode; ``None`` for no cap.
         :param action_field: Action field the model's text goes into, on the
-            env's declared action class.
+            env's declared action class, or the ``answer_tool`` argument name.
+        :param answer_tool: For an MCP env, one of its real tools receiving a
+            turn's prose when the turn has no tool call.
         :param instruction: Prompt returned when the env's reset obs renders empty.
         :param kwargs: Forwarded to :class:`RolloutHarness`.
         :rtype: RolloutHarness
         """
         from agilerl.llm_envs.openenv import InProcessEnvClient  # optional extra: llm
 
-        env_client = InProcessEnvClient(env, action_field=action_field)
+        env_client = InProcessEnvClient(
+            env, action_field=action_field, answer_tool=answer_tool
+        )
         if _coerced_system_prompt(kwargs.get("system_prompt")) is None:
             env_prompt = _coerced_system_prompt(getattr(env, "system_prompt", None))
             if env_prompt is not None:
@@ -406,7 +571,7 @@ class RolloutHarness(RestartPromptMixin):
         spec: str | Callable[..., TextEnvProtocol],
         env_config: dict[str, Any] | None,
         tokenizer: PreTrainedTokenizerBase,
-        max_turns: int = 1,
+        max_turns: int | None = 1,
         *,
         factory: str | None = None,
         **kwargs: Any,
@@ -421,10 +586,11 @@ class RolloutHarness(RestartPromptMixin):
         :param spec: A URL, an env constructor callable, or an entrypoint /
             registry id.
         :param env_config: Kwargs for the factory / constructor (ignored for a
-            URL, except ``system_prompt``). ``system_prompt`` is set on the built
-            env and passed to the harness so the chat template renders it.
+            URL, except ``system_prompt`` and ``action_field``). ``system_prompt``
+            is set on the built env and passed to the harness so the chat
+            template renders it; ``action_field`` goes to the harness.
         :param tokenizer: Tokenizer for the token-level loop.
-        :param max_turns: Generation turns per episode.
+        :param max_turns: Generation turns per episode; ``None`` for no cap.
         :param factory: Optional ``module:attr`` builder that receives ``spec``.
         :param kwargs: Forwarded to :class:`RolloutHarness`.
         :rtype: RolloutHarness
@@ -436,6 +602,9 @@ class RolloutHarness(RestartPromptMixin):
         # manifest naming a prompt for a registry env means. The harness reads
         # that attribute (or an explicit kwarg) so the chat template renders it.
         system_prompt = config.pop("system_prompt", None)
+        # An action_field here names the harness's action field, not a factory
+        # kwarg; an explicit action_field kwarg wins.
+        kwargs.setdefault("action_field", config.pop("action_field", "message"))
         if isinstance(spec, str) and is_url(spec):
             if "system_prompt" not in kwargs:
                 kwargs["system_prompt"] = system_prompt
@@ -468,14 +637,16 @@ class RolloutHarness(RestartPromptMixin):
         prompt_builder: Callable[[Mapping[str, Any]], str] | None = None,
         question_column: str = "question",
         answer_column: str = "answer",
+        metadata_columns: Sequence[str] = (),
         **kwargs: Any,
     ) -> RolloutHarness:
         """Build a single-turn ``RolloutHarness`` from (question, answer) rows and a rubric.
 
-        Rows + rubric are served in-process as a single-turn
+        Rows are served in-process as a single-turn
         :class:`~agilerl.llm_envs.qa_dataset.QADatasetEnv` (``max_turns`` fixed
-        to 1); ``test_dataset`` rows are served under :meth:`eval_mode`. Wrap a
-        ``(completion, answer, question) -> float`` callable with
+        to 1) and the harness scores each completion with ``rubric``;
+        ``test_dataset`` rows are served under :meth:`eval_mode`. Wrap a
+        callable of ``completion``, ``answer``, and ``question`` with
         :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric` first.
 
         :param dataset: Train rows, indexable to mappings with the question/answer keys.
@@ -486,24 +657,24 @@ class RolloutHarness(RestartPromptMixin):
             ``str(row[question_column])``.
         :param question_column: Row key for the question.
         :param answer_column: Row key for the answer.
+        :param metadata_columns: Row keys copied into each reset's info.
         :param kwargs: Forwarded to :class:`RolloutHarness`.
         :rtype: RolloutHarness
         """
         from agilerl.llm_envs.qa_dataset import QADatasetEnv  # optional extra: llm
-        from agilerl.llm_envs.rubrics import _require_rubric  # optional extra: llm
 
         if "max_turns" in kwargs:
             msg = "from_dataset builds a single-turn env; max_turns is fixed to 1"
             raise TypeError(msg)
         env = QADatasetEnv(
             dataset,
-            rubric=_require_rubric(rubric),
             test_dataset=test_dataset,
             prompt_builder=prompt_builder,
             question_column=question_column,
             answer_column=answer_column,
+            metadata_columns=metadata_columns,
         )
-        return cls.local(env, tokenizer, max_turns=1, **kwargs)
+        return cls.local(env, tokenizer, max_turns=1, rubric=rubric, **kwargs)
 
     def _adopt_system_prompt(self, info: Mapping[str, Any]) -> None:
         """Take a system prompt from reset metadata when the harness has none."""
@@ -538,7 +709,7 @@ class RolloutHarness(RestartPromptMixin):
 
     def _with_trailing_instruction(self, content: str) -> str:
         """Put the instruction after the observation text and leave the question last."""
-        if self._system_prompt is None:
+        if self._system_prompt is None or not self._repeat_system_prompt:
             return content
         if QUESTION_AFTER_CONTEXT in content:
             context, question = content.rsplit(QUESTION_AFTER_CONTEXT, 1)
@@ -546,9 +717,9 @@ class RolloutHarness(RestartPromptMixin):
         return f"{content}\n{self._system_prompt}"
 
     def _chat_prompt_string(self, obs_text: str) -> str:
-        """Render one user turn (plus optional system) through the chat template."""
+        """Render one image-prompt user turn (plus optional system), with the model's image placeholders."""
         if not self.apply_chat_template:
-            return obs_text
+            return self.image_tokens.render(obs_text)
         messages, chat_template_kwargs = self._user_turn_chat_template_inputs(obs_text)
         rendered = self.tokenizer.apply_chat_template(
             messages,
@@ -559,7 +730,7 @@ class RolloutHarness(RestartPromptMixin):
         if not isinstance(rendered, str):
             msg = "apply_chat_template(tokenize=False) must return str"
             raise TypeError(msg)
-        return rendered
+        return self.image_tokens.render(rendered)
 
     def _image_feedback_turn_text(
         self, feedback_text: str, role: str, last_token_id: int
@@ -575,8 +746,8 @@ class RolloutHarness(RestartPromptMixin):
         """
         content = self._with_trailing_instruction(feedback_text)
         if not self.apply_chat_template:
-            return content
-        parts = self._feedback_boundary_parts(role)
+            return self.image_tokens.render(content)
+        parts = self._feedback_boundary_parts((role,))
         if parts is None:
             msg = (
                 f"The tokenizer's chat template could not render a {role!r} "
@@ -588,7 +759,7 @@ class RolloutHarness(RestartPromptMixin):
         if last_token_id in self._special_ids():
             end_text = self._decode([last_token_id], skip_special_tokens=False)
             prefix = prefix.removeprefix(end_text)
-        return prefix + content + suffix
+        return prefix + self.image_tokens.render(content) + suffix
 
     def _require_transcript_continues(
         self, transcript_ids: torch.Tensor, prompt_ids: torch.Tensor
@@ -633,7 +804,11 @@ class RolloutHarness(RestartPromptMixin):
     def _require_vision_processor(self) -> Callable[..., Mapping[str, Any]]:
         """The vision processor; raises when the harness has none."""
         if self._vision_processor is None:
-            msg = "Image observations require vision_processor on RolloutHarness"
+            msg = (
+                "Image observations require vision_processor on RolloutHarness; "
+                "a VL model's engine skips its towers when environment.modality "
+                "is text"
+            )
             raise RuntimeError(msg)
         return self._vision_processor
 
@@ -677,42 +852,55 @@ class RolloutHarness(RestartPromptMixin):
         )
         return encoded["input_ids"]
 
-    def _tokenize_feedback(
-        self,
-        feedback_text: str,
-        role: str = DEFAULT_OBSERVATION_ROLE,
-    ) -> torch.Tensor:
+    def _tokenize_feedback(self, messages: list[dict[str, str]]) -> torch.Tensor:
         """Tokenize the feedback turn via the cached chat-template frame (ChatML fallback).
 
-        :param feedback_text: The env's rendered observation for this turn.
-        :param role: Chat role the observation speaks as — ``user`` for an env
-            message, ``tool`` for a tool result, ``system`` for an injected
-            directive. The frame is rendered per role, so a tool result is not
-            passed off to the model as something the user said.
+        :param messages: The env's rendered observations for this turn as
+            ``role`` / ``content`` chat messages, one per tool result when the
+            turn ran several calls. The role is ``user`` for an env message,
+            ``tool`` for a tool result, ``system`` for an injected directive.
+            The frame is rendered per role, so a tool result is not passed off
+            to the model as something the user said.
         """
         if not self.apply_chat_template:
+            text = "\n".join(message["content"] for message in messages)
             return torch.tensor(
-                [self.tokenizer.encode(feedback_text, add_special_tokens=False)],
+                [self.tokenizer.encode(text, add_special_tokens=False)],
                 dtype=torch.long,
             )
+        if self._chat_format is not None:
+            formatted = self._chat_format.format_tool_results(messages)
+            if formatted is not None:
+                encoded = self.tokenizer.encode(formatted, add_special_tokens=False)
+                if encoded:
+                    return torch.tensor([encoded], dtype=torch.long)
 
-        boundary_ids = self._chat_template_boundary_ids(feedback_text, role)
+        boundary_ids = self._chat_template_boundary_ids(messages)
         if boundary_ids is not None:
             return boundary_ids
 
+        roles = ", ".join(repr(message["role"]) for message in messages)
+        if self._strict_chat_template_boundary:
+            msg = (
+                f"The chat template of {self.tokenizer.name_or_path!r} could not "
+                f"render a {roles} feedback turn after the first turn, so the env's "
+                "observation cannot be framed. Label the observation with a role "
+                "this template accepts mid-conversation, such as 'user'."
+            )
+            raise RuntimeError(msg)
         msg = (
-            f"The tokenizer's chat template could not render a {role!r} feedback "
+            f"The tokenizer's chat template could not render a {roles} feedback "
             "turn boundary; falling back to ChatML markers "
             "(<|im_end|>/<|im_start|>). For a non-ChatML tokenizer the multi-turn "
             "transcript will be malformed."
         )
-        if self._strict_chat_template_boundary:
-            raise RuntimeError(msg)
         warnings.warn(msg, stacklevel=2)
         # Fallback: ChatML-style markers.
         turn_boundary = (
-            f"<|im_end|>\n<|im_start|>{role}\n"
-            + feedback_text
+            "".join(
+                f"<|im_end|>\n<|im_start|>{message['role']}\n{message['content']}"
+                for message in messages
+            )
             + "<|im_end|>\n<|im_start|>assistant\n"
         )
         return torch.tensor(
@@ -721,19 +909,20 @@ class RolloutHarness(RestartPromptMixin):
         )
 
     def _text_feedback_ids(
-        self, feedback_text: str, role: str, last_token_id: int
+        self, messages: list[dict[str, str]], last_token_id: int
     ) -> torch.Tensor:
         """Feedback ids that extend a text transcript ending in ``last_token_id``."""
-        feedback_ids = self._tokenize_feedback(feedback_text, role)
+        feedback_ids = self._tokenize_feedback(messages)
         # The transcript keeps the sampled end-of-turn token (it is trained),
         # so drop the boundary frame's duplicate terminator when both are
         # present; a turn truncated at max_tokens still gets the frame's one.
-        if (
-            feedback_ids.shape[1] > 1
-            and last_token_id == int(feedback_ids[0, 0])
-            and last_token_id in self._special_ids()
+        if feedback_ids.shape[1] > 1 and frame_repeats_terminator(
+            last_token_id,
+            int(feedback_ids[0, 0]),
+            self._special_ids(),
+            self._chat_format,
         ):
-            feedback_ids = feedback_ids[:, 1:]
+            return feedback_ids[:, 1:]
         return feedback_ids
 
     def _special_ids(self) -> frozenset[int]:
@@ -745,74 +934,54 @@ class RolloutHarness(RestartPromptMixin):
         return self._special_ids_cache
 
     def _feedback_boundary_parts(
-        self,
-        role: str = DEFAULT_OBSERVATION_ROLE,
-    ) -> tuple[str, str] | None:
-        """Cached ``(prefix, suffix)`` the chat template wraps a ``role`` feedback turn in.
+        self, roles: tuple[str, ...]
+    ) -> tuple[str, ...] | None:
+        """Cached :func:`feedback_frame_parts` for this harness's render kwargs.
 
-        Sliced at two uuid4 placeholders (render verbatim, can't collide); the dummy
-        user message satisfies strict-alternation templates. ``None`` -> ChatML fallback.
+        ``None`` -> ChatML fallback.
 
-        :param role: Chat role of the observation turn being framed.
+        :param roles: Chat role of each observation message being framed.
         """
-        if role in self._boundary_parts:
-            return self._boundary_parts[role]
-        self._boundary_parts[role] = None
-        assistant_ph = uuid.uuid4().hex
-        feedback_ph = uuid.uuid4().hex
-        messages = [
-            {"role": "user", "content": "."},
-            {"role": "assistant", "content": assistant_ph},
-            {"role": role, "content": feedback_ph},
-        ]
-        chat_template_kwargs = dict(self.chat_template_kwargs)
-        if self.tools is not None:
-            chat_template_kwargs["tools"] = self.tools
-        try:
-            rendered = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                **chat_template_kwargs,
+        if roles not in self._boundary_parts:
+            chat_template_kwargs = dict(self.chat_template_kwargs)
+            if self.tools is not None:
+                chat_template_kwargs["tools"] = self.tools
+            self._boundary_parts[roles] = feedback_frame_parts(
+                self.tokenizer, roles, chat_template_kwargs
             )
-        except Exception:
-            return None
-        if not isinstance(rendered, str):
-            return None
-
-        assistant_end = rendered.rfind(assistant_ph)
-        feedback_start = rendered.rfind(feedback_ph)
-        if assistant_end < 0 or feedback_start <= assistant_end:
-            return None
-        assistant_end += len(assistant_ph)
-        prefix = rendered[assistant_end:feedback_start]
-        suffix = rendered[feedback_start + len(feedback_ph) :]
-        if not prefix or not suffix:
-            return None
-        self._boundary_parts[role] = (prefix, suffix)
-        return self._boundary_parts[role]
+        return self._boundary_parts[roles]
 
     def _chat_template_boundary_ids(
-        self,
-        feedback_text: str,
-        role: str = DEFAULT_OBSERVATION_ROLE,
+        self, messages: list[dict[str, str]]
     ) -> torch.Tensor | None:
-        """Token ids for the templated turn boundary carrying ``feedback_text`` (``None`` if no frame)."""
-        parts = self._feedback_boundary_parts(role)
+        """Token ids for the templated turn boundary carrying ``messages`` (``None`` if no frame)."""
+        roles = tuple(message["role"] for message in messages)
+        parts = self._feedback_boundary_parts(roles)
         if parts is None:
             return None
-        prefix, suffix = parts
-        encoded = self.tokenizer.encode(
-            prefix + feedback_text + suffix, add_special_tokens=False
+        text = parts[0] + "".join(
+            message["content"] + part
+            for message, part in zip(messages, parts[1:], strict=True)
         )
+        encoded = self.tokenizer.encode(text, add_special_tokens=False)
         if not encoded:
             return None
         return torch.tensor([encoded], dtype=torch.long)
 
     def _prompt_budget(self) -> int | None:
-        """Max prompt tokens before context overflow, or ``None`` when no model length is set."""
+        """Max prompt tokens the model length allows, or ``None`` when it is not set.
+
+        With a context restart setting and ``max_output_tokens``, the budget
+        leaves room for a full turn; otherwise it leaves one token.
+        """
         if self._max_model_len is None:
             return None
+        restarts = (
+            self._segment_prompt_tokens is not None
+            or self._segment_max_images is not None
+        )
+        if restarts and self._max_output_tokens is not None:
+            return max(0, self._max_model_len - self._max_output_tokens)
         return max_prompt_tokens_for_model_len(self._max_model_len)
 
     def _prompt_limit(self) -> int | None:
@@ -841,26 +1010,48 @@ class RolloutHarness(RestartPromptMixin):
 
     @property
     def tools(self) -> list[Any] | None:
-        """Tool schemas the env advertises (``None`` when none); fetched once and cached."""
+        """Tool schemas for this episode (``None`` when none): its reset tools, else the env's, fetched once."""
         if not self._tools_known:
-            self._tools = self._env_client.tools or None
+            self._env_tools = self._env_client.tools or None
             self._tools_known = True
-            if self._tools and self.apply_chat_template:
-                template = getattr(self.tokenizer, "chat_template", None)
-                if template and "tools" not in template:
-                    warnings.warn(
-                        f"The env advertises {len(self._tools)} tool(s) but the "
-                        "tokenizer's chat template never references 'tools'; the "
-                        "schemas will not be rendered into any prompt.",
-                        stacklevel=2,
-                    )
-        return self._tools
+            self._warn_if_template_skips_tools(self._env_tools)
+        if self._episode_tools is None:
+            return self._env_tools
+        return self._episode_tools or None
 
     @tools.setter
     def tools(self, value: list[Any] | None) -> None:
-        """Override the advertised tool schemas (``None`` / ``[]`` -> no ``tools=``)."""
-        self._tools = value or None
+        """Override the env's tool schemas (``None`` / ``[]`` -> no ``tools=``) until a reset sends episode tools."""
+        self._env_tools = value or None
         self._tools_known = True
+        self._episode_tools = None
+        self._boundary_parts = {}
+
+    def _use_episode_tools(self, episode_tools: list[Any] | None) -> None:
+        """Render and parse this episode against ``episode_tools``; ``None`` uses the env's tools.
+
+        :param episode_tools: The reset info's tool schemas, or ``None`` when it sent none.
+        """
+        previous = self.tools
+        self._episode_tools = episode_tools
+        tools = self.tools
+        if tools != previous:
+            self._boundary_parts.clear()
+        self._warn_if_template_skips_tools(tools)
+
+    def _warn_if_template_skips_tools(self, tools: list[Any] | None) -> None:
+        """Warn once per harness, on the first non-empty ``tools``, if the chat template never renders tools."""
+        if not tools or self._tools_template_checked:
+            return
+        self._tools_template_checked = True
+        template = getattr(self.tokenizer, "chat_template", None)
+        if self.apply_chat_template and template and "tools" not in template:
+            warnings.warn(
+                f"The env advertises {len(tools)} tool(s) but the "
+                "tokenizer's chat template never references 'tools'; the "
+                "schemas will not be rendered into any prompt.",
+                stacklevel=3,
+            )
 
     @property
     def dataset_size(self) -> int:
@@ -869,7 +1060,9 @@ class RolloutHarness(RestartPromptMixin):
 
     @property
     def rubric_components(self) -> tuple[str, ...]:
-        """Leaf rubric names for component metrics (empty when none)."""
+        """Leaf rubric names for component metrics: the harness rubric's, else the env's."""
+        if self._rubric is not None:
+            return self._rubric_components
         return tuple(self._env_client.rubric_components)
 
     @contextmanager
@@ -911,15 +1104,32 @@ class RolloutHarness(RestartPromptMixin):
         """Pull and render the initial prompt from the env backend — the parallelizable I/O.
 
         No tokenizer work; touching :attr:`tools` warms its cache to overlap too.
+        The first reset also reads whether the env takes tool calls, and fails
+        when it does but no chat format matches the tokenizer.
         """
         _ = self.tools
+        if self._takes_tool_calls is None:
+            self._takes_tool_calls = self._env_client.takes_tool_calls
+            if self._takes_tool_calls and self._chat_format is None:
+                msg = (
+                    "The env takes tool calls, but no chat format in "
+                    "agilerl.llm_envs.chat_formats matches this tokenizer's "
+                    "tool-call format. Add one for this model family, or name "
+                    "it with chat_format."
+                )
+                raise ValueError(msg)
         payload, info = self._env_client.reset(seed=seed, row_index=row_index)
-        obs_text, image = observation_text_and_image(payload)
+        self._use_episode_tools(info.pop(EPISODE_TOOLS_INFO_KEY, None))
+        obs_text, image = observation_text_and_image(
+            payload, screenshot_field=self._screenshot_field
+        )
         if image is None:
             obs_text = self._render_observation(payload) or self._instruction
         elif not obs_text:
             obs_text = self._instruction
-        self._goal_images = observation_goal_images(payload)
+        self._goal_images = observation_goal_images(
+            payload, goal_images_field=self._goal_images_field
+        )
         if self._goal_images:
             # Every image of an episode stacks into one pixel_values tensor, so
             # goal images take the observation image's size, letterboxed.
@@ -931,7 +1141,7 @@ class RolloutHarness(RestartPromptMixin):
             )
             self._goal_images = [ImageOps.pad(goal, size) for goal in self._goal_images]
             obs_text, image = self._with_goal_images(obs_text, image)
-        return obs_text, image, info
+        return apply_info_prefix_suffix(obs_text, info), image, info
 
     def _with_goal_images(
         self, obs_text: str, image: object | None
@@ -998,11 +1208,20 @@ class RolloutHarness(RestartPromptMixin):
         self.turn_boundaries = []
         self.turn_rewards = []
         self.rubric_score_sums = {}
+        self.rubric_notes = {}
+        if self._rubric is not None:
+            for node in (self._rubric, *self._rubric.rubrics()):
+                node.reset()
+            self._rubric_transcript = [{"role": "user", "content": obs_text}]
+            self._rubric_question = None
+            self._rubric_answer = None
+            self._unscored_turn = None
         self._turn_idx = 0
         self._prompt_text = obs_text
         self._transcript = None
         self._sampled_ids = None
         self.sampling_logps = []
+        self.sampling_supports = []
         self._segments = []
         self._action_history = []
         self._kept_turns.clear()
@@ -1034,8 +1253,9 @@ class RolloutHarness(RestartPromptMixin):
         self,
         token_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
+        sampling_supports: torch.Tensor | None = None,
     ) -> str:
-        """Decode and record this turn's generation; return its text (tokenizer phase)."""
+        """Record this turn's generation; return the text the env receives (tokenizer phase)."""
         if self._last_full_prompt_token_len is None:
             msg = "step() requires a prior reset() or step() that built a prompt"
             raise RuntimeError(msg)
@@ -1048,9 +1268,11 @@ class RolloutHarness(RestartPromptMixin):
             self._sampled_ids = sequence.detach()
             gen_ids = sequence[0, prompt_len:].detach()
             self._reject_image_placeholder_ids(gen_ids)
-            gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
+            action = action_text(self._decode, gen_ids.tolist(), self._chat_format)
             if sampling_logps is not None:
                 self.sampling_logps.append(sampling_logps)
+            if sampling_supports is not None:
+                self.sampling_supports.append(sampling_supports)
             sampled_text = self._decode(gen_ids.tolist(), skip_special_tokens=False)
             engine_ids = turn["prompt_token_ids"]
             self._transcript = (
@@ -1072,8 +1294,10 @@ class RolloutHarness(RestartPromptMixin):
                 (int(processor_ids.shape[1]), gen_end, self._turn_idx)
             )
             self._gen_ids = gen_ids
-            self._record_action(gen_text)
-            return gen_text
+            self._record_action(action)
+            self._parse_tool_calls(gen_ids.tolist())
+            self._record_completion(gen_ids.tolist(), action)
+            return self._env_text(gen_ids.tolist(), action)
         full_ids = self.full_ids
         if full_ids is None:
             msg = "step() requires a prior reset() or step() that built a prompt"
@@ -1081,15 +1305,63 @@ class RolloutHarness(RestartPromptMixin):
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
         gen_ids = sequence[0, prompt_len:].detach().to(full_ids.device)
         self._reject_image_placeholder_ids(gen_ids)
-        gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
+        action = action_text(self._decode, gen_ids.tolist(), self._chat_format)
         if sampling_logps is not None:
             self.sampling_logps.append(sampling_logps)
+        if sampling_supports is not None:
+            self.sampling_supports.append(sampling_supports)
         self.full_ids = torch.cat([full_ids, gen_ids.unsqueeze(0)], dim=1)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_ids = gen_ids
-        self._record_action(gen_text)
-        return gen_text
+        self._record_action(action)
+        self._parse_tool_calls(gen_ids.tolist())
+        self._record_completion(gen_ids.tolist(), action)
+        return self._env_text(gen_ids.tolist(), action)
+
+    def _record_completion(self, gen_ids: list[int], action: str) -> None:
+        """Keep this turn's post-reasoning text and its whole text for the rubric."""
+        if self._rubric is not None:
+            self._turn_text = action
+            self._turn_completion = reasoning_trace_text(
+                gen_ids, self._special_ids(), self._decode
+            )
+
+    def _env_text(self, gen_ids: list[int], action: str) -> str:
+        """Text the env receives: the whole turn under ``include_reasoning``, else the action."""
+        if not self._include_reasoning:
+            return action
+        return reasoning_trace_text(gen_ids, self._special_ids(), self._decode)
+
+    def _parse_tool_calls(self, gen_ids: list[int]) -> None:
+        """Queue this turn's tool calls, or a retry error, for :meth:`_step_env`.
+
+        Runs in the sequential phase because it decodes with the tokenizer.
+        Text envs queue nothing and get the post-reasoning text. A turn with no
+        call is prose for the env's ``answer_tool`` answer tool, or an error when
+        no ``answer_tool`` is named. One malformed call fails the whole turn, so
+        no call runs. Each queued call carries the whole turn, so an env that
+        answers a turn's calls together sees all of them on the first step.
+        """
+        self._pending_tool_calls = []
+        self._pending_tool_error = None
+        if not self._takes_tool_calls or self._chat_format is None:
+            return
+        _, calls = self._chat_format.extract_tool_calls(gen_ids, self.tools)
+        if not calls and self._env_client.answer_tool is None:
+            self._pending_tool_error = "No tool call found. Emit a tool call."
+            return
+        bad = next((c for c in calls if c.status is not ToolCallParseStatus.OK), None)
+        if bad is not None:
+            self._pending_tool_error = (
+                f"{TOOL_CALL_ERRORS[bad.status]} No calls ran; emit valid tool calls."
+            )
+            return
+        turn = tuple(calls)
+        self._pending_tool_calls = [
+            replace(call, turn=turn, turn_index=index)
+            for index, call in enumerate(calls)
+        ]
 
     def _reject_image_placeholder_ids(self, gen_ids: torch.Tensor) -> None:
         """Fail a turn whose sampled ids hold the image placeholder id.
@@ -1104,18 +1376,23 @@ class RolloutHarness(RestartPromptMixin):
         if count:
             msg = (
                 f"Turn {self._turn_idx} generated the image placeholder "
-                f"{IMAGE_PLACEHOLDER!r} (id {self._image_placeholder_id}) {count} "
+                f"{self.image_tokens.image_token!r} (id {self._image_placeholder_id}) {count} "
                 "time(s); its training row would have more image positions than "
                 "pixel rows. Suppress the id at sampling time."
             )
             raise ValueError(msg)
 
-    def _record_action(self, gen_text: str) -> None:
+    def _processed_action(self, text: str) -> str:
+        """The action text the env executes."""
+        if self._action_processor is None:
+            return text
+        return self._action_processor(text)
+
+    def _record_action(self, raw: str) -> None:
         """Add this turn's env action to the restart history, capped in length."""
         if self._segment_prompt_tokens is None and self._segment_max_images is None:
             return
-        raw = _action_span(gen_text)
-        action = _quote_unparsed_call(raw[:ACTION_HISTORY_MAX_CHARS])
+        action = self._processed_action(raw[:ACTION_HISTORY_MAX_CHARS])
         if (
             len(raw) > ACTION_HISTORY_MAX_CHARS
             or len(action) > ACTION_HISTORY_MAX_CHARS
@@ -1147,68 +1424,242 @@ class RolloutHarness(RestartPromptMixin):
         text = f"{field}: {'' if value is None else value}"
         return text.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)
 
-    def _step_env(
-        self, gen_text: str
-    ) -> tuple[
-        str,
-        str,
-        object | None,
-        float,
-        bool,
-        bool,
-        dict[str, Any],
-        str | None,
-        str | None,
-    ]:
-        """Round-trip the env backend and render its observation — the parallelizable phase.
+    def _step_env(self, action: str) -> EnvStepResult:
+        """Round-trip the env backend and render its observations — the parallelizable phase.
 
-        Carries the observation's chat role alongside its text so :meth:`_step_apply`
-        frames a tool result as a tool turn rather than as something the user said,
-        the action's error text from ``action_error_field``, and the observation's
-        ``restart_older_obs_field`` text; each is ``None`` when absent or unset.
+        Queued tool calls run in order, one env step each; a queued parse error
+        scores ``min_reward`` with no env I/O; otherwise ``action`` is the one
+        action. The queue empties here, so no tool runs twice.
         """
-        payload, reward, terminated, truncated, info = self._env_client.step(
-            env_action_text(gen_text)
-        )
-        action_error = self._action_error_text(payload)
-        older_obs_text = self._older_obs_text(payload)
-        if is_str_keyed_dict(payload) and (
-            payload.get("image") is not None or payload.get("screenshot") is not None
-        ):
-            obs_text, image = observation_text_and_image(payload)
+        error, self._pending_tool_error = self._pending_tool_error, None
+        calls, self._pending_tool_calls = self._pending_tool_calls, []
+        if error is not None:
+            result = EnvStepResult(
+                messages=[
+                    {
+                        "role": "tool",
+                        "name": "unknown",
+                        "content": f"Error: {error}",
+                    }
+                ],
+                image=None,
+                reward=self._min_reward,
+                terminated=False,
+                truncated=False,
+                info={
+                    "role": "tool",
+                    TOOL_CALLS_INFO_KEY: 0,
+                    TOOL_CALL_ERROR_INFO_KEY: True,
+                },
+                action_error=None,
+                older_obs_text=None,
+            )
+            payload = None
+            message = action
         else:
-            image = None
-            obs_text = self._render_observation(payload)
-        return (
-            obs_text,
-            observation_role(payload, info),
-            image,
-            reward,
-            terminated,
-            truncated,
-            info,
-            action_error,
-            older_obs_text,
+            env_actions: list[object] = []
+            if calls:
+                message = action
+                env_actions.extend(calls)
+            else:
+                message = self._processed_action(action)
+                env_actions.append(message)
+            result, payload = self._step_env_actions(env_actions)
+            if self._takes_tool_calls:
+                result.info[TOOL_CALLS_INFO_KEY] = len(result.messages) if calls else 0
+        rubric = self._rubric
+        if rubric is None:
+            return result
+        self._unscored_turn = UnscoredTurn(
+            rubric, result, message, calls, payload, error is None
         )
+        return result._replace(
+            info={k: v for k, v in result.info.items() if k != "rubric_scores"}
+        )
+
+    def _take_unscored_turn(self) -> UnscoredTurn | None:
+        """The turn :meth:`_step_apply` just applied, when a rubric has yet to score it."""
+        turn, self._unscored_turn = self._unscored_turn, None
+        return turn
+
+    def _score_turn(
+        self, turn: UnscoredTurn
+    ) -> tuple[float, dict[str, float], dict[str, str]]:
+        """Score one applied turn with the rubric; runs outside the tokenizer lock.
+
+        An async rubric (an LLM judge) runs on the shared session loop, so slots
+        stepping on concurrent threads overlap their judge calls.
+
+        :return: The turn's score, its leaf scores and any judge notes.
+        """
+        from agilerl.llm_envs.rubrics import (  # optional extra: llm
+            TurnAction,
+            TurnObservation,
+        )
+
+        fields = turn.payload if is_str_keyed_dict(turn.payload) else {}
+        action = TurnAction(
+            message=turn.message,
+            completion=self._turn_completion,
+            tool_calls=turn.calls,
+        )
+        self._rubric_transcript.append(
+            {
+                "role": "assistant",
+                "content": self._turn_text,
+                "completion": action.completion,
+            }
+        )
+        self._rubric_transcript.extend(
+            {"role": reply["role"], "content": reply["content"]}
+            for reply in turn.result.messages
+            # A dataset env's terminal reply only repeats the prompt.
+            if reply["content"] != self._prompt_text
+        )
+        turn_index = self._turn_idx - 1
+        question = fields.get("question")
+        # A dataset row's prompt can be chat-templated; its question is the plain text.
+        if turn_index == 0 and question is not None:
+            self._rubric_transcript[0]["content"] = str(question)
+        if question is not None:
+            self._rubric_question = question
+        if fields.get("answer") is not None:
+            self._rubric_answer = fields["answer"]
+        observation = TurnObservation(
+            env_reward=turn.result.reward,
+            env_ran=turn.env_ran,
+            done=self.done,
+            turn_index=turn_index,
+            prompt=self._prompt_text,
+            question=question,
+            answer=fields.get("answer"),
+            payload=turn.payload,
+            env_info=turn.result.info,
+            transcript=list(self._rubric_transcript),
+        )
+        score = turn.rubric(action, observation)
+        if inspect.iscoroutine(score):
+            from agilerl.llm_envs.openenv import (  # optional extra: llm
+                SESSION_LOOP,
+            )
+
+            pending = score
+            score = SESSION_LOOP.run(lambda: pending)
+        return (
+            float(score),
+            observation.metadata.get("rubric_scores") or {},
+            observation.metadata.get("rubric_notes") or {},
+        )
+
+    @property
+    def has_rubric(self) -> bool:
+        """Whether a rubric scores this harness's turns and keeps its transcript."""
+        return self._rubric is not None
+
+    def group_episode(self) -> GroupEpisode:
+        """This episode as a group rubric sees it; needs a harness rubric.
+
+        :return: The episode's transcript, task fields and turn rewards.
+        """
+        from agilerl.llm_envs.rubrics import GroupEpisode  # optional extra: llm
+
+        return GroupEpisode(
+            transcript=list(self._rubric_transcript),
+            prompt=self._prompt_text,
+            question=self._rubric_question,
+            answer=self._rubric_answer,
+            turn_rewards=list(self.turn_rewards),
+        )
+
+    def _apply_turn_score(
+        self,
+        step: tuple[dict[str, Any], float, bool, bool, dict[str, Any]],
+        final: tuple[float, dict[str, float], dict[str, str]],
+    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Replace the env's reward for the turn with the rubric's score."""
+        prompt, _reward, terminated, truncated, info = step
+        score, scores, notes = final
+        self.turn_rewards[-1] = score
+        _add_scores(self.rubric_score_sums, scores)
+        self.rubric_notes.update(notes)
+        if scores:
+            info = {**info, "rubric_scores": scores}
+        if notes:
+            info = {**info, "rubric_notes": notes}
+        return prompt, score, terminated, truncated, info
+
+    def _step_env_actions(
+        self, actions: list[object]
+    ) -> tuple[EnvStepResult, object | None]:
+        """Run each action as one env step until the episode ends.
+
+        :return: The turn's result and the last step's observation payload.
+        """
+        messages: list[dict[str, str]] = []
+        image: object | None = None
+        turn_reward = 0.0
+        terminated = truncated = False
+        info: dict[str, Any] = {}
+        rubric_scores: dict[str, float] = {}
+        action_error = older_obs_text = None
+        payload: object | None = None
+        for action in actions:
+            payload, reward, terminated, truncated, step_info = self._env_client.step(
+                action
+            )
+            action_error = self._action_error_text(payload)
+            older_obs_text = self._older_obs_text(payload)
+            if is_str_keyed_dict(payload) and (
+                payload.get("image") is not None
+                or (
+                    self._screenshot_field
+                    and payload.get(self._screenshot_field) is not None
+                )
+            ):
+                obs_text, image = observation_text_and_image(
+                    payload, screenshot_field=self._screenshot_field
+                )
+            else:
+                image = None
+                obs_text = self._render_observation(payload)
+            message = {
+                "role": observation_role(payload, step_info),
+                "content": apply_info_prefix_suffix(obs_text, step_info),
+            }
+            if isinstance(action, ParsedToolCall):
+                message["name"] = action.name or "unknown"
+            elif self._takes_tool_calls and self._env_client.answer_tool is not None:
+                message["name"] = self._env_client.answer_tool
+            messages.append(message)
+            turn_reward += float(reward)
+            _add_scores(rubric_scores, step_info.get("rubric_scores") or {})
+            info.update(step_info)
+            if terminated or truncated:
+                break
+        if rubric_scores:
+            info["rubric_scores"] = rubric_scores
+        return EnvStepResult(
+            messages=messages,
+            image=image,
+            reward=turn_reward,
+            terminated=terminated,
+            truncated=truncated,
+            info=info,
+            action_error=action_error,
+            older_obs_text=older_obs_text,
+        ), payload
 
     def _step_apply(
-        self,
-        env_result: tuple[
-            str,
-            str,
-            object | None,
-            float,
-            bool,
-            bool,
-            dict[str, Any],
-            str | None,
-            str | None,
-        ],
+        self, env_result: EnvStepResult
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
-        """Apply the env round-trip result: rewards, truncation, feedback tokens."""
+        """Apply the env round-trip result: rewards, truncation, feedback tokens.
+
+        Several tool results frame as one message each in the transcript and in
+        a kept-turn replay. Image turns and the action-list restart fallback
+        take them as one observation.
+        """
         (
-            next_obs,
-            next_role,
+            messages,
             next_image,
             reward,
             terminated,
@@ -1217,18 +1668,20 @@ class RolloutHarness(RestartPromptMixin):
             action_error,
             older_obs_text,
         ) = env_result
+        next_role = messages[-1]["role"]
         if action_error is not None and self._action_history:
             error_max_chars = 200
             error = " ".join(action_error.split())[:error_max_chars]
             self._action_history[-1] += f" -> error: {error}"
         self.turn_rewards.append(float(reward))
-        for name, value in (info.get("rubric_scores") or {}).items():
-            self.rubric_score_sums[name] = self.rubric_score_sums.get(
-                name, 0.0
-            ) + float(value)
+        _add_scores(self.rubric_score_sums, info.get("rubric_scores") or {})
         self._turn_idx += 1
 
-        if not (terminated or truncated) and self._turn_idx >= self.max_turns:
+        if (
+            not (terminated or truncated)
+            and self.max_turns is not None
+            and self._turn_idx >= self.max_turns
+        ):
             truncated = True
 
         prompt: dict[str, Any] = {}
@@ -1237,14 +1690,13 @@ class RolloutHarness(RestartPromptMixin):
             if full_ids is None:
                 msg = "reset() must run before step()"
                 raise RuntimeError(msg)
-            feedback_text = next_obs
+            feedback_text = "\n\n".join(message["content"] for message in messages)
             if self._restart_keep_turns:
                 self._kept_turns.append(
                     KeptTurn(
                         gen_ids=self._gen_ids,
                         last_token_id=int(full_ids[0, -1]),
-                        obs_text=feedback_text,
-                        role=next_role,
+                        messages=messages,
                         image=next_image,
                         older_obs_text=older_obs_text,
                     )
@@ -1261,7 +1713,7 @@ class RolloutHarness(RestartPromptMixin):
                     transcript_text, transcript_engine_ids = self._transcript
                 # A sampled turn that spells the placeholder would be expanded as
                 # another image, and its trained ids cannot change: end here.
-                if transcript_text.count(IMAGE_PLACEHOLDER) != len(
+                if transcript_text.count(self.image_tokens.image_token) != len(
                     self._episode_images
                 ):
                     truncated = True
@@ -1334,7 +1786,7 @@ class RolloutHarness(RestartPromptMixin):
                 self._transcript = None
                 self._sampled_ids = None
                 feedback_ids = self._text_feedback_ids(
-                    feedback_text, next_role, int(full_ids[0, -1])
+                    messages, int(full_ids[0, -1])
                 ).to(full_ids.device)
                 self.full_ids = torch.cat([full_ids, feedback_ids], dim=1)
 
@@ -1360,11 +1812,11 @@ class RolloutHarness(RestartPromptMixin):
         return prompt, reward, terminated, truncated, info
 
     def _over_segment_tokens(self, prompt_len: int) -> bool:
-        """Whether a ``prompt_len``-token prompt restarts the context."""
-        return (
-            self._segment_prompt_tokens is not None
-            and prompt_len > self._segment_prompt_tokens
-        )
+        """Whether a ``prompt_len``-token prompt restarts the context: past the segment limit or the model budget."""
+        if self._segment_prompt_tokens is None and self._segment_max_images is None:
+            return False
+        max_pt = self._prompt_limit()
+        return max_pt is not None and prompt_len > max_pt
 
     def _restart_context(
         self, segment_ids: torch.Tensor, obs_text: str, image: object | None
@@ -1412,8 +1864,12 @@ class RolloutHarness(RestartPromptMixin):
         Single-env convenience over the ``_step_*`` phases; ``sampling_logps`` is this
         turn's vLLM logprobs (or ``None``).
         """
-        gen_text = self._step_prepare(token_ids, sampling_logps)
-        return self._step_apply(self._step_env(gen_text))
+        action = self._step_prepare(token_ids, sampling_logps)
+        step = self._step_apply(self._step_env(action))
+        turn = self._take_unscored_turn()
+        if turn is None:
+            return step
+        return self._apply_turn_score(step, self._score_turn(turn))
 
     def episode_image_calls(self) -> list[ImageProcessorCall]:
         """Processor calls behind the episode's ``pixel_values``, in row order.
@@ -1474,7 +1930,10 @@ class RolloutHarness(RestartPromptMixin):
             offset += int(ids.shape[1])
 
         turn_rewards = list(self.turn_rewards)
-        while len(turn_rewards) < self.max_turns:
+        if self.max_turns is not None:
+            turn_rewards += [0.0] * (self.max_turns - len(turn_rewards))
+        elif not turn_rewards:
+            # Group scoring writes a turn-0 ending at index 0.
             turn_rewards.append(0.0)
 
         pixel_values = self._episode_pixel_values

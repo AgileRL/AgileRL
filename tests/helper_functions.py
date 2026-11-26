@@ -1,9 +1,14 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+import importlib.util
 import random
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from numbers import Number
+from types import ModuleType
 from typing import Any
 
 import numpy as np
@@ -13,7 +18,12 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn
 
+import agilerl
 import agilerl.utils.algo_utils as algo_utils
+from agilerl.architectures.moe_router import (
+    ROUTER_FORWARDS,
+    ROUTER_RENORM_OUT_OF_PLACE,
+)
 from agilerl.builders import AlgorithmBuildRuntime, select_builder
 from agilerl.components.data import Transition
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
@@ -37,6 +47,43 @@ def build_from_spec(spec, *args, **kwargs):
         **{key: kwargs.pop(key) for key in BUILD_RUNTIME_KEYS if key in kwargs}
     )
     return select_builder(spec).build(spec, *args, runtime=runtime, **kwargs)
+
+
+@contextmanager
+def restore_moe_routers() -> Iterator[None]:
+    """Restore each listed MoE router's forward and drop its out-of-place flag on exit."""
+    saved_forwards = {}
+    for name in ROUTER_FORWARDS:
+        module_name, _, class_name = name.rpartition(".")
+        router = getattr(importlib.import_module(module_name), class_name)
+        saved_forwards[router] = vars(router)["forward"]
+    try:
+        yield
+    finally:
+        for router, forward in saved_forwards.items():
+            router.forward = forward
+            if ROUTER_RENORM_OUT_OF_PLACE in vars(router):
+                delattr(router, ROUTER_RENORM_OUT_OF_PLACE)
+
+
+def load_without_llm_dependencies(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> ModuleType:
+    """Run ``module``'s source into a new module object with ``HAS_LLM_DEPENDENCIES`` False.
+
+    The imported module keeps its functions, so identity checks elsewhere hold.
+
+    :param module: Imported module to re-execute.
+    :param monkeypatch: Patches ``agilerl.HAS_LLM_DEPENDENCIES`` for the test.
+    :return: The new module.
+    """
+    monkeypatch.setattr(agilerl, "HAS_LLM_DEPENDENCIES", False)
+    spec = importlib.util.spec_from_file_location(module.__name__, module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    return fresh
 
 
 skip_torch_compile_on_windows_cpu = pytest.mark.skipif(

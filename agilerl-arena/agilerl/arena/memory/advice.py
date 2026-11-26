@@ -12,7 +12,8 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.arena.memory.estimator import PhaseName, estimate_run
+from agilerl.arena.memory.breakdown import PhaseName
+from agilerl.arena.memory.estimator import estimate_run
 from agilerl.arena.memory.specs import GiB, RunConfig
 
 
@@ -77,16 +78,6 @@ def _training_candidates(
         )
     if t.max_model_len > 512:
         candidates.append(_shorter_context_candidate(t.max_model_len))
-    if not t.activation_offload:
-        candidates.append(
-            (
-                (
-                    "Offload backward-saved activations to host RAM "
-                    "(activation_offload=True)"
-                ),
-                _update("training", activation_offload=True),
-            )
-        )
     if t.lora_rank > 8:
         candidates.append(
             (
@@ -112,11 +103,21 @@ def _generation_candidates(
 ) -> list[tuple[str, Callable[[RunConfig], RunConfig]]]:
     g = config.generation
     candidates: list[tuple[str, Callable[[RunConfig], RunConfig]]] = []
-    if not g.enforce_eager:
+    stripped = next(
+        (v.name for v in config.model.variants if v.stripped_multimodal), None
+    )
+    if (
+        stripped is not None
+        and not config.model.variant(g.weight_variant).stripped_multimodal
+        and config.training.images_per_row == 0
+    ):
         candidates.append(
             (
-                "Skip CUDA-graph capture (enforce_eager=True; costs decode throughput)",
-                _update("generation", enforce_eager=True),
+                (
+                    "Skip the multimodal towers in the engine "
+                    "(environment.modality text; text-only envs)"
+                ),
+                _update("generation", weight_variant=stripped),
             )
         )
     if g.max_num_seqs > 1:

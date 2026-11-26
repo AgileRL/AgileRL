@@ -11,6 +11,7 @@ from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
+    maybe_to_device,
 )
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
@@ -69,6 +70,54 @@ class TestReplayBufferLen:
 
 
 class TestReplayBufferAdd:
+    @pytest.mark.parametrize("buffer_class", [ReplayBuffer, PrioritizedReplayBuffer])
+    @pytest.mark.parametrize("prefix_size", [0, 2])
+    @pytest.mark.parametrize("batch_size", [2, 3, 5, 8])
+    def test_batch_matches_sequential_writes(
+        self, buffer_class, prefix_size, batch_size
+    ):
+        """Oversized batches retain the latest transitions and the circular position."""
+        # Arrange
+        capacity = 3
+        batched = buffer_class(max_size=capacity)
+        sequential = buffer_class(max_size=capacity)
+        total = prefix_size + batch_size
+        data = TensorDict(
+            {
+                "state": TensorDict(
+                    {"value": torch.arange(total + 1).reshape(-1, 1)},
+                    batch_size=[total + 1],
+                ),
+                "reward": torch.arange(total + 1, dtype=torch.float32),
+            },
+            batch_size=[total + 1],
+        )
+
+        # Act
+        if prefix_size:
+            batched.add(data[:prefix_size].clone())
+        for i in range(total):
+            sequential.add(data[i : i + 1].clone())
+        batched.add(data[prefix_size:total].clone())
+
+        # Assert
+        assert batched.size == sequential.size == min(total, capacity)
+        assert batched.counter == sequential.counter == total
+        assert batched.is_full == sequential.is_full
+        assert batched.storage is not None
+        assert sequential.storage is not None
+        assert (batched.storage == sequential.storage).all()
+
+        for buffer in (batched, sequential):
+            buffer.add(data[total : total + 1].clone())
+        assert batched.storage is not None
+        assert sequential.storage is not None
+        assert (batched.storage == sequential.storage).all()
+        assert batched.counter == sequential.counter == total + 1
+        if isinstance(batched, PrioritizedReplayBuffer):
+            assert batched.tree_ptr == sequential.tree_ptr
+            assert batched.sum_tree.sum() == sequential.sum_tree.sum()
+
     def test_buffer_initialization(self):
         """Test that the buffer correctly initializes storage when adding first data."""
         buffer = ReplayBuffer(max_size=1000)
@@ -199,6 +248,40 @@ class TestReplayBufferAdd:
         assert sample["reward"].shape == (2, 1)
         assert sample["action"].shape == (2, 1)
 
+    def test_add_does_not_reshape_caller_action(self):
+        buffer = ReplayBuffer(max_size=10)
+        data = TensorDict(
+            {
+                "state": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+                "action": torch.tensor([0.0, 1.0]),
+                "reward": torch.tensor([1.0, 2.0]),
+            },
+        )
+        data.batch_size = [2]
+
+        buffer.add(data)
+
+        assert data["action"].shape == (2,)
+        assert data["reward"].shape == (2,)
+
+    def test_add_does_not_reshape_locked_caller_action(self):
+        buffer = ReplayBuffer(max_size=10)
+        data = TensorDict(
+            {
+                "state": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+                "action": torch.tensor([0.0, 1.0]),
+                "reward": torch.tensor([1.0, 2.0]),
+            },
+            batch_size=[2],
+            device="cpu",
+        )
+        data.lock_()
+
+        buffer.add(data)
+
+        assert data["action"].shape == (2,)
+        assert data["reward"].shape == (2,)
+
     def test_add_with_nested_tensordict_1d_values_reshaped(self):
         """Test add() reshapes 1D values inside nested TensorDict."""
         buffer = ReplayBuffer(max_size=10)
@@ -238,6 +321,68 @@ class TestReplayBufferAdd:
         # Check buffer state
         assert len(buffer) == 2
         assert buffer.counter == 2
+
+
+class TestMaybeToDevice:
+    def test_returns_same_object_when_tensordict_device_matches(self):
+        data = TensorDict(
+            {"obs": torch.zeros(4)},
+            batch_size=[4],
+            device="cpu",
+        )
+
+        assert maybe_to_device(data, "cpu") is data
+
+    def test_clones_unlocked_tensordict_on_target_device(self):
+        data = TensorDict({"obs": torch.zeros(4), "reward": torch.zeros(1)})
+
+        moved = maybe_to_device(data, "cpu")
+
+        assert moved is not data
+        assert moved.device == torch.device("cpu")
+        assert data.device is None
+        assert data["obs"].shape == (4,)
+
+    def test_moves_leaves_when_device_differs(self):
+        data = TensorDict({"obs": torch.zeros(4), "reward": torch.zeros(1)})
+
+        moved = maybe_to_device(data, "meta")
+
+        assert moved is not data
+        assert moved["obs"].device.type == "meta"
+        assert moved["reward"].device.type == "meta"
+        assert moved["obs"].shape == (4,)
+        assert moved["reward"].shape == (1,)
+        assert data.device is None
+        assert data["obs"].device == torch.device("cpu")
+        assert torch.equal(data["obs"], torch.zeros(4))
+        assert torch.equal(data["reward"], torch.zeros(1))
+
+    def test_clones_nested_unlocked_tensordict(self):
+        data = TensorDict(
+            {
+                "obs": TensorDict({"img": torch.zeros(2, 3)}),
+                "reward": torch.zeros(2),
+            }
+        )
+
+        moved = maybe_to_device(data, "cpu")
+
+        assert moved is not data
+        assert moved.device == torch.device("cpu")
+        assert moved["obs"]["img"].device == torch.device("cpu")
+        assert moved["obs"]["img"].shape == (2, 3)
+        assert moved["reward"].shape == (2,)
+        assert torch.equal(moved["obs"]["img"], torch.zeros(2, 3))
+        assert data.device is None
+        assert torch.equal(data["obs"]["img"], torch.zeros(2, 3))
+
+    def test_empty_tensordict_does_not_raise(self):
+        moved = maybe_to_device(TensorDict(), "cpu")
+
+        assert isinstance(moved, TensorDict)
+        assert moved.batch_size == torch.Size([])
+        assert len(list(moved.keys())) == 0
 
 
 class TestReplayBufferSample:

@@ -108,26 +108,21 @@ persists credentials locally so you only need to log in once per machine:
 Custom Environments
 -------------------
 
-Before launching a training run a custom environment or dataset, Arena requires these to be **validated**,
-ensuring that the environment is importable, has the correct interface (e.g. Gymnasium or
-PettingZoo), and can be stepped without errors. After validation,
-environments are automatically **profiled** to determine their compute and
-memory footprint. This information is then used to estimate a ceiling on the resources
-available for training, depending on the selected cluster tier.
+Before launching a training run on a custom environment or dataset, Arena requires these to be **validated**,
+ensuring that the environment is importable, follows the GEM API, and can be stepped without errors.
 
 Users can register two types of environments on Arena:
 
-- **Custom Gymnasium/PettingZoo**: upload a source directory, file, or
-  ``.tar.gz`` archive containing your environment code.
+- **Custom GEM environments**: upload a source directory, file, or
+  ``.tar.gz`` archive containing your multi-turn environment code.
 - **LLM Datasets**: upload a dataset file or reference a HuggingFace
   dataset ID to create a language-model fine-tuning environment.
 
 Uploading and Validating
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-In order to create and validate a custom Gymnasium/PettingZoo environment from scratch, users need to provide a source
-file or directory containing the environment code. Multi-agent environments must be signaled through the ``multi_agent`` flag.
-Additionally, an entrypoint can be provided to the environment class to use, which is useful when multiple entrypoints exist in the same path.
+In order to create and validate a custom GEM environment from scratch, users need to provide a source
+file or directory containing the environment code. Additionally, an entrypoint can be provided to the environment class to use, which is useful when multiple entrypoints exist in the same path.
 Please refer to the :meth:`ArenaClient.validate_environment <agilerl.arena.client.ArenaClient.validate_environment>` method documentation for more details.
 
 When you point ``source`` at a directory, Arena packages the whole folder and uploads it. A
@@ -138,11 +133,10 @@ and ``--env-config`` on the CLI).
 
 Once your environment / dataset has been validated successfully, you will be able to view it in the **Environments / Datasets** section in Arena.
 
-RL Environments
-^^^^^^^^^^^^^^^
+GEM Environments
+^^^^^^^^^^^^^^^^
 
-The following commands use the ``merge-env/`` directory, which contains a ``MergeEnv`` Gymnasium
-environment. See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
+The following commands use a ``my-gem-env/`` directory containing a GEM environment.
 
 .. tab-set::
    :sync-group: interface
@@ -154,12 +148,12 @@ environment. See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
 
          # Upload, create, and validate in one step
          result = client.validate_environment(
-             source="merge-env/",
-             name="merge-env",
+             source="my-gem-env/",
+             name="my-gem-env",
          )
 
          # Re-validate an already-registered environment
-         result = client.validate_environment(name="merge-env", version="v1")
+         result = client.validate_environment(name="my-gem-env", version="v1")
 
    .. tab-item:: CLI
       :sync: cli
@@ -167,11 +161,11 @@ environment. See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
       .. code-block:: bash
 
          # Upload and validate in one step
-         arena env validate merge-env \
-             --source merge-env/
+         arena env validate my-gem-env \
+             --source my-gem-env/
 
          # Re-validate an already-registered environment
-         arena env validate merge-env --version v1
+         arena env validate my-gem-env --version v1
 
 LLM Datasets
 ^^^^^^^^^^^^^
@@ -202,6 +196,14 @@ LLM Datasets
              --column-mapping '{"question": "prompt", "answer": "completion"}' \
              --file ./my_dataset/data.csv
 
+Recorded model calls (agent traces) go in a ``traces`` dataset: OpenAI chat
+messages in prompt-completion rows, checked locally before upload and trained
+by SFT or on-policy distillation with no column mapping. See :doc:`traces`.
+
+.. code-block:: bash
+
+   arena datasets create helpdesk-traces --category traces --file ./traces.jsonl
+
 Additional Tools
 ^^^^^^^^^^^^^^^^
 
@@ -211,7 +213,6 @@ You can find the analogous CLI commands by running ``arena env --help``.
 - :meth:`~agilerl.arena.client.ArenaClient.list_environments`: List all registered environments and their versions.
 - :meth:`~agilerl.arena.client.ArenaClient.list_environment_entrypoints`: List available entrypoints for a specific environment version.
 - :meth:`~agilerl.arena.client.ArenaClient.environment_exists`: Check whether an environment (and optionally a version) is registered.
-- :meth:`~agilerl.arena.client.ArenaClient.profile_environment`: Profile a validated environment to determine its resource requirements.
 - :meth:`~agilerl.arena.client.ArenaClient.delete_environment`: Delete one or all versions of a registered environment.
 
 .. _arena_models:
@@ -299,6 +300,46 @@ Some useful command to manage your projects:
 
       arena projects set-default <project-name>
 
+.. _arena_secrets:
+
+Organization Secrets
+--------------------
+
+Secrets hold API keys your training jobs need, such as an LLM judge's provider key.
+In a manifest, ``judge.api_key_env`` names one of these secrets, and Arena passes it
+to the job as an environment variable of that name. Any org member can list, set and
+delete secrets. Arena never shows any part of a value, only each secret's name, when
+it was created and last updated, and who last updated it.
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         import os
+
+         client.list_secrets()
+         client.set_secret(name="OPENAI_API_KEY", value=os.environ["OPENAI_API_KEY"])
+         client.delete_secret("OPENAI_API_KEY")
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena secrets list
+
+         # Hidden prompt; or pipe the value on stdin, or use --from-env VAR
+         arena secrets set OPENAI_API_KEY
+         arena secrets set OPENAI_API_KEY --from-env OPENAI_API_KEY
+
+         arena secrets delete OPENAI_API_KEY --yes
+
+The CLI never takes the value as an argument, so it stays out of your shell history.
+
 .. _arena_training:
 
 Submitting Experiments
@@ -311,11 +352,13 @@ directly from the Arena dashboard. Training runs in a distributed manner across 
 (this can be customized by the user) to achieve lightning-fast training for arbitrarily large
 populations of agents.
 
-Available Clusters on Arena
+Available GPU Types on Arena
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We currently provide a wide variety of compute resources on Arena, including GPU and CPU clusters.
-These might change over time, so it is recommended to use the :meth:`ArenaClient.list_resources <agilerl.arena.client.ArenaClient.list_resources>`
-method to get the latest list of available resources before setting off an experiment.
+Arena trains on several GPU types. These might change over time, so it is recommended to use the
+:meth:`ArenaClient.list_resources <agilerl.arena.client.ArenaClient.list_resources>` method to get
+the latest list before setting off an experiment. Pass a GPU type as ``gpu_type`` (``--gpu-type`` on
+the CLI) and a GPU count as ``num_gpus`` (``--num-gpus``) when you submit. Pass your manifest's
+``algorithm.name`` to list only the GPU counts that algorithm trains on.
 
 .. tab-set::
    :sync-group: interface
@@ -325,66 +368,41 @@ method to get the latest list of available resources before setting off an exper
 
       .. code-block:: python
 
-         resources = client.list_resources()
+         resources = client.list_resources(algorithm="GRPO")
 
    .. tab-item:: CLI
       :sync: cli
 
       .. code-block:: bash
 
-         arena resources list
+         arena resources list --algorithm GRPO
 
-Example output from CLI command:
+Example output from CLI command. ``--num-gpus`` lists the GPU counts a GRPO run takes on each type:
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 22 6 10 18
+   :widths: 20 25 20 10
 
-   * - Resource ID
-     - GPUs
-     - CPUs
-     - RAM (GB)
-     - Credits/node-hour
-   * - arena-medium
-     - 1x nvidia-l4
-     - 15
-     - 55.0
-     - 2.41
-   * - arena-large
-     - 1x nvidia-l4
-     - 30
-     - 110.0
-     - 3.65
-   * - arena-large-4gpu
-     - 4x nvidia-l4
-     - 47
-     - 165.0
-     - 8.41
-   * - arena-large-compute-96
-     - N/A
-     - 95
-     - 180.0
-     - 8.57
-   * - arena-a100-40gb-2gpu
-     - 2x nvidia-tesla-a100
-     - 23
-     - 156.0
-     - 15.74
-   * - arena-extra-large
-     - 8x nvidia-l4
-     - 94
-     - 370.0
-     - 16.82
-   * - arena-large-compute-192
-     - N/A
-     - 191
-     - 370.0
-     - 17.15
-   * - arena-a100-40gb-4gpu
-     - 4x nvidia-tesla-a100
-     - 47
-     - 312.0
-     - 31.47
+   * - GPU type
+     - ``--num-gpus``
+     - GPUs per node
+     - Dev only
+   * - a100-40
+     - 2, 4, 8, 16
+     - 1
+     -
+   * - a100-80
+     - 2, 4, 8, 16
+     - 1
+     -
+   * - h100-80
+     - 8, 16, 32, 64, 128
+     - 8
+     -
+   * - l4
+     - 2, 4, 8, 16, 32, 64
+     - 1, 4
+     -
 
 Job Submission
 ~~~~~~~~~~~~~~
@@ -394,61 +412,15 @@ and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrai
 
 For an LLM manifest, check the GPU before you submit. ``arena memory estimate``
 prints the training and generation bars against the card; ``arena memory solve``
-inverts one field (context length or concurrency) given the rest.
+finds the longest context the run fits, given the rest of the manifest.
 See :ref:`llm_memory_estimate`.
 
-Here is an example manifest for training DQN on LunarLander-v3:
+Here is an example manifest for fine-tuning ``Qwen/Qwen3.5-0.8B`` with GRPO on GSM8K:
 
-.. collapse:: dqn.yaml
+.. collapse:: gsm8k_grpo.yaml
 
-  .. code-block:: yaml
-
-    algorithm:
-      name: DQN
-
-    environment:
-      name: LunarLander-v3
-      num_envs: 16
-
-    training:
-      max_steps: 1_000_000
-      target_score: 200.0
-      pop_size: 4
-      evo_steps: 10_000
-
-    network:
-      latent_dim: 128
-      encoder_config:
-        hidden_size: [128]
-        activation: ReLU
-      head_config:
-        hidden_size: [128]
-        activation: ReLU
-
-    replay_buffer:
-      max_size: 100_000
-
-    mutation:
-      probabilities:
-        no_mut: 0.4
-        arch_mut: 0.2
-        new_layer: 0.2
-        params_mut: 0.2
-        act_mut: 0.2
-        rl_hp_mut: 0.2
-      rl_hp_selection:
-        lr:
-          min: 0.0000625
-          max: 0.01
-        batch_size:
-          min: 8
-          max: 512
-      mutation_sd: 0.1
-      rand_seed: 42
-
-    selection_strategy:
-      tournament_size: 2
-      elitism: true
+   .. literalinclude:: /_static/examples/gsm8k_grpo.yaml
+      :language: yaml
 
 .. tab-set::
    :sync-group: interface
@@ -459,11 +431,10 @@ Here is an example manifest for training DQN on LunarLander-v3:
       .. code-block:: python
 
          result = client.submit_experiment(
-             manifest="dqn.yaml",
-             resource_id="arena-medium",
-             num_nodes=2,
+             manifest="gsm8k_grpo.yaml",
+             reward_file="reward.py",
              project="my-project",
-             experiment_name="lunar-lander-dqn",
+             experiment_name="gsm8k-grpo",
          )
 
    .. tab-item:: CLI
@@ -472,11 +443,10 @@ Here is an example manifest for training DQN on LunarLander-v3:
       .. code-block:: bash
 
          # Submit an experiment
-         arena experiments submit dqn.yaml \
-             --resource-id arena-medium \
-             --num-nodes 2 \
+         arena experiments submit gsm8k_grpo.yaml \
+             --reward-file reward.py \
              --project my-project \
-             --experiment-name lunar-lander-dqn
+             --experiment-name gsm8k-grpo
 
 You can also submit experiments via the :class:`~agilerl.training.trainer.ArenaTrainer`
 class, which provides a higher-level interface:
@@ -487,13 +457,15 @@ class, which provides a higher-level interface:
 
    # Don't need to provide a client if we have already authenticated through `arena login`
    trainer = ArenaTrainer.from_manifest(
-       manifest="dqn.yaml",
+       manifest="my_manifest.yaml",
    )
    result = trainer.train()
 
 .. seealso::
 
    - :ref:`training_manifests` section for an overview of the training manifest and its options.
+
+   - :ref:`arena_reward_inputs` for how ``prompt_template`` is rendered and what your reward function receives.
 
    - :ref:`trainers` section for more information on the ``ArenaTrainer`` class and its usage.
 
@@ -520,12 +492,13 @@ Agent Deployment
 
 Once training is complete, you can deploy a checkpoint from an experiment to an Arena inference
 endpoint and interact with it in real time. Deployed agents expose an HTTP API
-that accepts observations and returns actions, making the integration of
-trained RL policies into applications seamless.
+that accepts prompts and returns completions, making the integration of
+fine-tuned models into applications seamless.
 
 To deploy an agent, you can use the :meth:`~agilerl.arena.client.ArenaClient.deploy_agent` method by specifying the experiment
-name and optionally the checkpoint you wish to deploy. If the latter is not provided, the checkpoint with the largest fitness value
-will be deployed by default.
+name and optionally the checkpoint you wish to deploy. Name a checkpoint by its ``steps`` from
+:meth:`~agilerl.arena.client.ArenaClient.list_checkpoints` (or ``arena experiments checkpoints``), for example ``500``.
+If no checkpoint is given, the one with the most steps is deployed.
 
 .. tab-set::
    :sync-group: interface
@@ -538,7 +511,7 @@ will be deployed by default.
          # Deploy an agent from an experiment
          client.deploy_agent(
             experiment_name="<experiment-name>",
-            checkpoint="<checkpoint-name>",  # optional, defaults to best fitness
+            checkpoint="500",  # optional: the checkpoint's steps; defaults to the most steps
          )
 
    .. tab-item:: CLI
@@ -546,11 +519,44 @@ will be deployed by default.
 
       .. code-block:: bash
 
-         # Deploy the best checkpoint from an experiment
-         arena agent deploy lunar-lander-dqn
+         # Deploy the checkpoint with the most steps
+         arena agent deploy gsm8k-grpo
 
          # Deploy a specific checkpoint
-         arena agent deploy lunar-lander-dqn --checkpoint step_500000
+         arena agent deploy gsm8k-grpo --checkpoint 500
+
+GPUs
+~~~~
+
+Pick the GPUs an agent is served on with ``num_gpus`` and
+``gpu_type`` (a short GPU name such as ``h100-80``, ``b200`` or ``l4``):
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         client.deploy_agent(
+            experiment_name="<experiment-name>",
+            num_gpus=2,
+            gpu_type="h100-80",
+         )
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena agent deploy my-chat-model --num-gpus 2 --gpu-type h100-80
+
+Without either option (``--num-gpus`` / ``--gpu-type`` on the CLI), a redeploy
+keeps the agent's resources. A new deployment runs on the cluster the agent was
+trained on if that is your own cluster, else on the cheapest node type that can
+serve the model. If Arena can't size the model, it uses its default node type
+and rejects ``num_gpus`` and ``gpu_type``.
 
 Memory Scope
 ~~~~~~~~~~~~
@@ -603,7 +609,6 @@ name with :meth:`~agilerl.arena.client.ArenaClient.open_inference_agent`, which 
 Call the matching agent method; the server returns HTTP 400 if the route does
 not match the deployment:
 
-- **RL** (single- or multi-agent, recurrent): :meth:`~agilerl.arena.inference.Agent.get_action`
 - **Supervised (SFT)**: :meth:`~agilerl.arena.inference.Agent.predict`
 - **LLM**: :meth:`~agilerl.arena.inference.Agent.generate` or
   :meth:`~agilerl.arena.inference.Agent.generate_stream`
@@ -711,45 +716,20 @@ memory per user knows which conversations are yours. Run ``arena login``, or set
 ``ARENA_API_KEY`` to a personal access token from Profile then CLI API key.
 Without either, the deployment returns a 403 asking you to log in.
 
-RL Inference
-^^^^^^^^^^^^
-
-:meth:`~agilerl.arena.inference.Agent.get_action` serializes NumPy observations
-(base64 ``.npy`` wire format), supports batched inference, ``Dict`` / ``Tuple``
-observation spaces, and recurrent hidden states.
-
-.. code-block:: python
-
-   import numpy as np
-   import gymnasium as gym
-
-   from agilerl.arena import ArenaClient
-
-   env = gym.make("LunarLander-v3")
-
-   with ArenaClient() as client:
-       with client.open_inference_agent("lunar-lander-dqn") as agent:
-         # Single request
-         obs, _ = env.reset()
-         action, hidden_state = agent.get_action(obs)
-
-         # Batched inference
-         batch_size = 8
-         obs_batch = np.stack([env.observation_space.sample() for _ in range(batch_size)])
-         actions, _ = agent.get_action(obs_batch, batched=True)
-
-Multi-agent RL passes per-agent observations and returns a dict of actions:
-
-.. code-block:: python
-
-   obs = {"agent_0": obs_a, "agent_1": obs_b}
-   actions, _ = agent.get_action(obs)
-   # actions["agent_0"], actions["agent_1"]
-
 .. tutorial::
-
-   :ref:`tutorial_arena_end_to_end`
-      Complete walkthrough of validating, training, and deploying a custom environment on Arena.
 
    :ref:`tutorial_arena_grpo_gsm8k`
       Complete walkthrough of fine-tuning an LLM with GRPO on the GSM8K dataset in Arena.
+
+In-account Snowflake
+--------------------
+
+Train on a Snowflake table and serve the model without the data leaving the
+account. See :doc:`snowflake`.
+
+.. toctree::
+   :maxdepth: 1
+
+   prompts_and_rewards
+   traces
+   snowflake

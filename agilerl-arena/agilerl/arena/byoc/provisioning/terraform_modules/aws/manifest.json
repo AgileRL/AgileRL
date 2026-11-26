@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "arena-cluster-aws",
+  "provider": "aws",
+  "version": "1.0.0",
+  "orchestration": "aws.v1",
+  "terraform_version": ">= 1.10.0",
+  "archive": "module.tar.gz",
+  "digest": "sha256:de07fbdd1a63857af1fadb255e31a89eb57c9e2ab1415f7d90acd082736b2d20",
+  "files": [
+    "aws_load_balancer_controller_iam.json",
+    "main.tf",
+    "outputs.tf",
+    "variables.tf"
+  ]
+}

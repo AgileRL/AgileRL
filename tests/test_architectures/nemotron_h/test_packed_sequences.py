@@ -9,7 +9,6 @@ log-prob equals the padded (one document per row) forward.
 """
 
 import itertools
-import logging
 
 import pytest
 import torch
@@ -25,8 +24,14 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
 )
 
 from agilerl.architectures import install_family_patches
-from agilerl.architectures.nemotron_h.mamba import (
+from agilerl.architectures.nemotron_h.layers import (
+    _fused_split_scan,
     patch_nemotron_mamba_packed_sequences,
+)
+from agilerl.lora.fused import (
+    patch_lora_for_fused_forward,
+    set_fused_adapter_routing,
+    unset_fused_adapter_routing,
 )
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
@@ -42,6 +47,8 @@ CHUNK_SIZE = 4
 # One document per chunk-boundary case: longer than two chunks, exactly one
 # chunk, a single token, and lengths that straddle chunk edges once packed.
 LENGTHS = (7, CHUNK_SIZE, 9, 1, 5)
+# Packed rows of equal length, as LLMPPO stacks one packed row per adapter.
+MULTI_ROW_LENGTHS = ((7, CHUNK_SIZE, 9), (1, 5, 6, 8))
 VARLEN_ATTENTION = "agilerl_test_varlen"
 
 
@@ -117,7 +124,7 @@ def _right_padded_documents() -> tuple[torch.Tensor, torch.Tensor]:
     return ids, ids != 0
 
 
-def _token_logprobs(model: NemotronHForCausalLM, ids: torch.Tensor, **kwargs):
+def _token_logprobs(model: torch.nn.Module, ids: torch.Tensor, **kwargs):
     logits = model(input_ids=ids, use_cache=False, **kwargs).logits[:, :-1].float()
     return torch.log_softmax(logits, -1).gather(-1, ids[:, 1:, None]).squeeze(-1)
 
@@ -133,13 +140,78 @@ def _padded_and_packed_logprobs(model: NemotronHForCausalLM):
     return padded, unpack_logprobs(packed_row, packed_batch), mask[:, 1:]
 
 
+def _multi_row_and_document_logprobs(
+    model: NemotronHForCausalLM,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Log-probs of every in-document target from the packed rows and from each document alone."""
+    torch.manual_seed(2)
+    rows = [
+        [torch.randint(1, VOCAB, (length,)) for length in lengths]
+        for lengths in MULTI_ROW_LENGTHS
+    ]
+    ids = torch.stack([torch.cat(documents) for documents in rows])
+    positions = torch.stack(
+        [torch.cat([torch.arange(len(doc)) for doc in documents]) for documents in rows]
+    )
+    packed = _token_logprobs(model, ids, position_ids=positions)
+    packed_targets, document_targets = [], []
+    for row, documents in enumerate(rows):
+        start = 0
+        for document in documents:
+            packed_targets.append(packed[row, start : start + len(document) - 1])
+            document_targets.append(_token_logprobs(model, document.unsqueeze(0))[0])
+            start += len(document)
+    return torch.cat(packed_targets), torch.cat(document_targets)
+
+
+def _routed_logprobs_and_each_adapter(
+    model: NemotronHForCausalLM,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One packed row stacked per adapter, as LLMPPO routes it, and each adapter alone."""
+    config = LoraConfig(r=4, target_modules=["in_proj", "q_proj"])
+    peft = get_peft_model(model, config, adapter_name="actor")
+    peft.add_adapter("critic", config)
+    torch.manual_seed(3)
+    for name, param in peft.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(param, std=0.1)
+    patch_lora_for_fused_forward(peft)
+    ids, mask = _right_padded_documents()
+    packed = pack_padded_batch(ids, mask)
+    set_fused_adapter_routing(peft, ["actor", "critic"])
+    routed = _token_logprobs(
+        peft,
+        packed.input_ids.repeat(2, 1),
+        position_ids=packed.position_ids.repeat(2, 1),
+    )
+    alone = []
+    for adapter in ("actor", "critic"):
+        set_fused_adapter_routing(peft, [adapter])
+        alone.append(
+            _token_logprobs(peft, packed.input_ids, position_ids=packed.position_ids)
+        )
+    unset_fused_adapter_routing(peft)
+    return routed, torch.cat(alone)
+
+
 class TestPatchNemotronMambaPackedSequences:
     """Mamba2 conv and scan state restart at every packed-document boundary."""
+
+    def test_family_install_skips_packed_sequences_by_default(
+        self, pristine_nemotron_classes
+    ):
+        model = _tiny_nemotron_h()
+
+        install_family_patches(model.config.model_type, model)
+
+        assert RESETS_AT_DOCUMENT_BOUNDARY not in vars(NemotronHMamba2Mixer)
 
     def test_packed_logprobs_match_padded_logprobs(self, pristine_nemotron_classes):
         # Arrange
         model = _tiny_nemotron_h().eval()
-        install_family_patches(model.config.model_type, model)
+        install_family_patches(
+            model.config.model_type, model, use_sequence_packing=True
+        )
 
         # Act
         with torch.no_grad():
@@ -152,7 +224,9 @@ class TestPatchNemotronMambaPackedSequences:
     def test_packed_gradients_match_padded_gradients(self, pristine_nemotron_classes):
         # Arrange
         model = _tiny_nemotron_h().train()
-        install_family_patches(model.config.model_type, model)
+        install_family_patches(
+            model.config.model_type, model, use_sequence_packing=True
+        )
         params = {
             "mixer_in_proj": model.model.layers[2].mixer.in_proj.weight,
             "mixer_A_log": model.model.layers[0].mixer.A_log,
@@ -171,6 +245,38 @@ class TestPatchNemotronMambaPackedSequences:
             torch.testing.assert_close(
                 packed_grad, padded_grad, atol=1e-5, rtol=1e-4, msg=name
             )
+
+    def test_multi_row_packed_logprobs_match_each_document_alone(
+        self, pristine_nemotron_classes
+    ):
+        # Arrange
+        model = _tiny_nemotron_h().eval()
+        install_family_patches(
+            model.config.model_type, model, use_sequence_packing=True
+        )
+
+        # Act
+        with torch.no_grad():
+            packed, documents = _multi_row_and_document_logprobs(model)
+
+        # Assert
+        torch.testing.assert_close(packed, documents, atol=1e-5, rtol=0)
+
+    def test_adapter_routed_packed_rows_match_each_adapter_alone(
+        self, pristine_nemotron_classes
+    ):
+        # Arrange
+        model = _tiny_nemotron_h().eval()
+        install_family_patches(
+            model.config.model_type, model, use_sequence_packing=True
+        )
+
+        # Act
+        with torch.no_grad():
+            routed, alone = _routed_logprobs_and_each_adapter(model)
+
+        # Assert
+        torch.testing.assert_close(routed, alone, atol=1e-5, rtol=0)
 
     def test_unpatched_mixer_carries_state_across_documents(
         self, pristine_nemotron_classes
@@ -215,13 +321,12 @@ class TestPatchNemotronMambaPackedSequences:
             weight = kwargs["outproj_weight"]
             return F.linear(zxbcdt[..., : weight.shape[1]], weight)
 
-        modeling_nemotron_h.mamba_split_conv1d_scan_combined = split_scan
         hidden = torch.randn(1, 6, model.config.hidden_size)
         seq_idx = torch.tensor([[0, 0, 0, 1, 1, 2]], dtype=torch.int32)
 
         # Act
         with torch.no_grad():
-            out = mixer.cuda_kernels_forward(hidden, seq_idx=seq_idx)
+            out = _fused_split_scan(mixer, split_scan, hidden, seq_idx)
 
         # Assert
         projected = mixer.in_proj(hidden)[..., : mixer.out_proj.weight.shape[1]]
@@ -229,9 +334,7 @@ class TestPatchNemotronMambaPackedSequences:
         assert torch.equal(received["seq_idx"], seq_idx)
         assert received["chunk_size"] == CHUNK_SIZE
 
-    def test_unpacked_eval_call_runs_the_unpatched_cuda_forward(
-        self, pristine_nemotron_classes
-    ):
+    def test_unpacked_call_runs_the_unpatched_forward(self, pristine_nemotron_classes):
         # Arrange
         received = []
 
@@ -239,14 +342,13 @@ class TestPatchNemotronMambaPackedSequences:
             received.append(hidden_states)
             return hidden_states * 2
 
-        NemotronHMamba2Mixer.cuda_kernels_forward = unpatched
-        model = _tiny_nemotron_h().eval()
+        NemotronHMamba2Mixer.forward = unpatched
         patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
-        mixer = model.model.layers[0].mixer
-        hidden = torch.randn(1, 6, model.config.hidden_size)
+        mixer = _tiny_nemotron_h().eval().model.layers[0].mixer
+        hidden = torch.randn(1, 6, mixer.in_proj.in_features)
 
         # Act
-        out = mixer.cuda_kernels_forward(hidden)
+        out = mixer(hidden)
 
         # Assert
         assert torch.equal(out, hidden * 2)
@@ -332,17 +434,16 @@ class TestPatchNemotronMambaPackedSequences:
         assert modeling_nemotron_h.NemotronHBlock.forward is block_forward
         assert getattr(NemotronHMamba2Mixer, RESETS_AT_DOCUMENT_BOUNDARY) is True
 
-    def test_absent_block_module_warns_and_leaves_the_mixer_unmarked(
-        self, pristine_nemotron_classes, caplog
+    def test_absent_block_module_raises_and_leaves_the_mixer_unmarked(
+        self, pristine_nemotron_classes
     ):
         # Act
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(ModuleNotFoundError, match="agilerl_missing_module"):
             patch_nemotron_mamba_packed_sequences(
                 mixer=MIXER_PATH, block="agilerl_missing_module.Block"
             )
 
         # Assert
-        assert "packed rows are not supported" in caplog.text
         assert RESETS_AT_DOCUMENT_BOUNDARY not in vars(NemotronHMamba2Mixer)
 
 
@@ -366,7 +467,7 @@ class KernelOutProj(torch.autograd.Function):
 
 
 def _stand_in_split_scan(weight_grads):
-    """CPU stand-in for ``mamba_split_conv1d_scan_combined`` with its ``out_proj`` contract."""
+    """CPU stand-in for ``mamba2_split_conv1d_scan_combined`` with its ``out_proj`` contract."""
 
     def split_scan(
         zxbcdt,
@@ -410,14 +511,12 @@ def _mixer_backward(seq_idx, train_out_proj):
     mixer = base.model.layers[0].mixer
     mixer.out_proj.weight.requires_grad_(train_out_proj)
     weight_grads = []
-    modeling_nemotron_h.mamba_split_conv1d_scan_combined = _stand_in_split_scan(
-        weight_grads
-    )
+    split_scan = _stand_in_split_scan(weight_grads)
     torch.manual_seed(3)
     hidden = torch.randn(1, 6, base.config.hidden_size, requires_grad=True)
     cotangent = torch.randn(1, 6, base.config.hidden_size)
 
-    out = mixer.cuda_kernels_forward(hidden, seq_idx=seq_idx)
+    out = _fused_split_scan(mixer, split_scan, hidden, seq_idx)
     (out * cotangent).sum().backward()
 
     lora_grads = {

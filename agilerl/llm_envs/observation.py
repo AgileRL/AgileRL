@@ -7,16 +7,20 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import torch
 from PIL import Image
 
 from agilerl.utils.algo_utils import is_str_keyed_dict
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 __all__ = [
     "DEFAULT_OBSERVATION_ROLE",
@@ -26,8 +30,13 @@ __all__ = [
     "OBSERVATION_ROLES",
     "QUESTION_AFTER_CONTEXT",
     "ImageProcessorCall",
+    "ImageTokens",
+    "apply_info_prefix_suffix",
     "encode_image_training_inputs",
     "goal_images_text",
+    "image_placeholder_logit_bias",
+    "image_to_base64_png",
+    "model_image_token",
     "observation_goal_images",
     "observation_role",
     "observation_text_and_image",
@@ -71,6 +80,22 @@ def _screenshot_to_pil_rgb(screenshot: object) -> Image.Image:
     raise TypeError(msg)
 
 
+def image_to_base64_png(image: Image.Image) -> str:
+    """PNG-encode an image as base64 text for a JSON observation."""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _decoded_image(image: object) -> object:
+    """PIL image for each base64 string an OpenEnv server sent; others unchanged."""
+    if isinstance(image, list):
+        return [_decoded_image(item) for item in image]
+    if isinstance(image, str):
+        return _screenshot_to_pil_rgb(image)
+    return image
+
+
 def _prompt_text_for_screenshot_obs(obs: Mapping[str, object]) -> str:
     goal = obs.get("goal")
     text = obs.get("text")
@@ -85,8 +110,15 @@ def _prompt_text_for_screenshot_obs(obs: Mapping[str, object]) -> str:
     return DEFAULT_SCREENSHOT_PROMPT
 
 
-def observation_text_and_image(obs: object) -> tuple[str, object | None]:
-    """Render observation text and an optional single image for VL rollouts."""
+def observation_text_and_image(
+    obs: object, *, screenshot_field: str = "screenshot"
+) -> tuple[str, object | None]:
+    """Render observation text and an optional single image for VL rollouts.
+
+    :param obs: The raw observation payload.
+    :param screenshot_field: Observation key holding the page image. ``""``
+        does not read one.
+    """
     if isinstance(obs, str):
         return obs, None
     if is_str_keyed_dict(obs) and obs.get("image") is not None:
@@ -96,23 +128,33 @@ def observation_text_and_image(obs: object) -> tuple[str, object | None]:
         if not isinstance(text, str):
             msg = f"VL observation text must be str, got {type(text).__name__}."
             raise TypeError(msg)
-        return _image_turn_text(text), obs["image"]
-    if is_str_keyed_dict(obs) and obs.get("screenshot") is not None:
+        return _image_turn_text(text), _decoded_image(obs["image"])
+    if (
+        screenshot_field
+        and is_str_keyed_dict(obs)
+        and obs.get(screenshot_field) is not None
+    ):
         text = _prompt_text_for_screenshot_obs(obs)
-        return _image_turn_text(text), _screenshot_to_pil_rgb(obs["screenshot"])
+        return _image_turn_text(text), _screenshot_to_pil_rgb(obs[screenshot_field])
     return process_observation(obs), None
 
 
-def observation_goal_images(obs: object) -> list[Image.Image]:
-    """Decode the task images an observation carries under ``goal_images``.
+def observation_goal_images(
+    obs: object, *, goal_images_field: str = "goal_images"
+) -> list[Image.Image]:
+    """Decode the task images an observation carries.
 
-    Each entry is base64 image bytes or a pixel list, as ``screenshot`` is.
+    Each entry is base64 image bytes or a pixel list, as the page image is.
 
     :param obs: The raw observation payload.
+    :param goal_images_field: Observation key holding the images. ``""`` reads none.
     :return: The goal images as RGB, in order; empty when there are none.
-    :rtype: list[Image.Image]
     """
-    images = obs.get("goal_images") if is_str_keyed_dict(obs) else None
+    images = (
+        obs.get(goal_images_field)
+        if goal_images_field and is_str_keyed_dict(obs)
+        else None
+    )
     if not isinstance(images, list):
         return []
     return [_screenshot_to_pil_rgb(image) for image in images]
@@ -125,6 +167,26 @@ def goal_images_text(count: int) -> str:
     :rtype: str
     """
     return f"\n{IMAGE_PLACEHOLDER}" * count
+
+
+def apply_info_prefix_suffix(text: str, info: Mapping[str, Any]) -> str:
+    """Wrap prompt text in the env's ``info`` prefix/suffix when present.
+
+    Game envs in the gem convention return instructions as the observation and
+    the task body as ``info["suffix"]``; gem's own observation wrapper
+    concatenates them the same way.
+
+    :param text: The rendered observation text.
+    :param info: The env turn's info mapping.
+    :return: ``text`` with the prefix prepended and the suffix appended.
+    """
+    prefix = info.get("prefix")
+    suffix = info.get("suffix")
+    if isinstance(prefix, str) and prefix:
+        text = prefix + text
+    if isinstance(suffix, str) and suffix:
+        text = text + suffix
+    return text
 
 
 def _image_turn_text(text: str) -> str:
@@ -153,7 +215,168 @@ def encode_image_training_inputs(
     ):
         msg = "processor must return torch input_ids and pixel_values tensors"
         raise TypeError(msg)
+    image_grid_hw = encoded.get("image_grid_hw")
+    image_grid_thw = encoded.get("image_grid_thw")
+    image_position_ids = encoded.get("image_position_ids")
+    if isinstance(image_grid_hw, torch.Tensor):
+        pixel_values = patch_grid_rows(pixel_values, image_grid_hw)
+    elif isinstance(image_grid_thw, torch.Tensor):
+        if (image_grid_thw[:, 0] != 1).any():
+            msg = f"Images must have one temporal patch, got grids {image_grid_thw.tolist()}"
+            raise ValueError(msg)
+        pixel_values = patch_grid_rows(pixel_values, image_grid_thw[:, 1:])
+    elif isinstance(image_position_ids, torch.Tensor):
+        pixel_values = position_grid_rows(pixel_values, image_position_ids)
     return input_ids, pixel_values
+
+
+def patch_grid_rows(
+    pixel_values: torch.Tensor, image_grid_hw: torch.Tensor
+) -> torch.Tensor:
+    """Fold packed ``(total_patches, patch_dim)`` patches into one ``(h, w, patch_dim)`` row per image.
+
+    :param pixel_values: Row-major patches of every image, concatenated.
+    :param image_grid_hw: ``(N, 2)`` patch grid of each image.
+    :return: ``(N, h, w, patch_dim)`` patch-grid rows.
+    :raises ValueError: If the images resize to different patch grids.
+    """
+    grids = {tuple(grid) for grid in image_grid_hw.tolist()}
+    if len(grids) != 1:
+        msg = (
+            f"Images of one processor call resize to patch grids {sorted(grids)}; "
+            "vision rows need one grid per call."
+        )
+        raise ValueError(msg)
+    ((grid_height, grid_width),) = grids
+    return pixel_values.reshape(
+        len(image_grid_hw), grid_height, grid_width, pixel_values.shape[-1]
+    )
+
+
+def position_grid_rows(
+    pixel_values: torch.Tensor, image_position_ids: torch.Tensor
+) -> torch.Tensor:
+    """Place padded ``(N, max_patches, patch_dim)`` patches into one ``(h, w, patch_dim)`` row per image.
+
+    :param pixel_values: Each image's patches, padded to a common length.
+    :param image_position_ids: ``(N, max_patches, 2)`` ``(x, y)`` patch position,
+        ``-1`` on padding.
+    :return: ``(N, h, w, patch_dim)`` patch-grid rows.
+    :raises ValueError: If the images cover different patch grids.
+    """
+    valid = (image_position_ids >= 0).all(dim=-1)
+    xs, ys = image_position_ids[..., 0], image_position_ids[..., 1]
+    grids = {
+        (
+            int(ys[image][keep].max()) + 1,
+            int(xs[image][keep].max()) + 1,
+            int(keep.sum()),
+        )
+        for image, keep in enumerate(valid)
+    }
+    if len(grids) != 1 or any(h * w != count for h, w, count in grids):
+        msg = (
+            f"Images of one processor call cover patch grids {sorted(grids)} "
+            "(height, width, patches); vision rows need one full grid per call."
+        )
+        raise ValueError(msg)
+    ((grid_height, grid_width, _),) = grids
+    images = torch.arange(len(valid)).unsqueeze(-1).expand_as(valid)
+    rows = pixel_values.new_zeros(
+        len(valid), grid_height, grid_width, pixel_values.shape[-1]
+    )
+    rows[images[valid], ys[valid], xs[valid]] = pixel_values[valid]
+    return rows
+
+
+class ImagePromptProcessor(Protocol):
+    """The checkpoint processor surface :meth:`ImageTokens.from_processor` reads."""
+
+    image_token: str
+
+    def apply_chat_template(
+        self, conversation: list[dict[str, Any]], /, **kwargs: Any
+    ) -> str: ...
+
+
+@dataclass(frozen=True)
+class ImageTokens:
+    """The prompt text one image takes in a model's chat format.
+
+    Prompts are built with :data:`IMAGE_PLACEHOLDER`; :meth:`render` swaps in
+    the model's own placeholder before the processor or vLLM sees the text.
+
+    :param placeholder: Text the chat template writes for one image.
+    :param image_token: Token the processor expands into the image's feature
+        positions.
+    """
+
+    placeholder: str = IMAGE_PLACEHOLDER
+    image_token: str = IMAGE_PLACEHOLDER
+
+    @classmethod
+    def from_processor(cls, processor: ImagePromptProcessor) -> ImageTokens:
+        """Read the placeholder a checkpoint processor's chat template writes for one image."""
+        sentinel = "IMAGE_TOKENS_SENTINEL"
+
+        def render(content: list[dict[str, str]]) -> str:
+            return processor.apply_chat_template(
+                [{"role": "user", "content": content}],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+
+        with_image = render([{"type": "image"}, {"type": "text", "text": sentinel}])
+        text_only = render([{"type": "text", "text": sentinel}])
+        start = len(os.path.commonprefix([with_image, text_only]))
+        return cls(
+            placeholder=with_image[start : with_image.index(sentinel, start)],
+            image_token=processor.image_token,
+        )
+
+    def render(self, text: str) -> str:
+        """``text`` with each canonical placeholder replaced by the model's.
+
+        A model image token already in ``text`` is escaped first, so only the
+        placeholders become images.
+        """
+        if self.placeholder == IMAGE_PLACEHOLDER:
+            return text
+        return self.placeholder.join(
+            self.escape(part) for part in text.split(IMAGE_PLACEHOLDER)
+        )
+
+    def escape(self, text: str) -> str:
+        """``text`` with the model image token spelled so no processor expands it."""
+        escaped_token = self.image_token.replace("<", "&lt;").replace(">", "&gt;")
+        return text.replace(self.image_token, escaped_token)
+
+
+def model_image_token(tokenizer: PreTrainedTokenizerBase) -> str:
+    """Token a checkpoint's processor expands into image features.
+
+    Processors read ``tokenizer.image_token`` and use :data:`IMAGE_PLACEHOLDER`
+    when the checkpoint's tokenizer names none.
+    """
+    return getattr(tokenizer, "image_token", None) or IMAGE_PLACEHOLDER
+
+
+def image_placeholder_logit_bias(
+    vocab: Mapping[str, int], image_token: str
+) -> dict[int, float] | None:
+    """Logit bias that keeps rollouts from sampling the model's image token.
+
+    A sampled image token takes an image feature row in the trainer's VL
+    forward, and the harness fails any turn that holds one.
+
+    :param vocab: Tokenizer vocabulary.
+    :param image_token: Token the model's processor expands into image features.
+    :return: ``{image_token_id: -100.0}``, or ``None`` when the vocabulary has
+        no such token.
+    """
+    if image_token not in vocab:
+        return None
+    return {vocab[image_token]: -100.0}
 
 
 @dataclass(frozen=True)
@@ -170,6 +393,24 @@ class ImageProcessorCall:
         """Record the ``text`` and ``image`` arguments of one processor call."""
         images = tuple(image) if isinstance(image, list) else (image,)
         return cls(text=text, images=images)
+
+
+def _field(value: object, name: str) -> object:
+    """``name`` of a dict (hosted env) or an attribute (in-process env), else ``None``."""
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _mcp_result_text(result: object) -> str | None:
+    """Text from an MCP tool result's content blocks or ``data``, else ``None``."""
+    content = _field(result, "content")
+    blocks = content if isinstance(content, list) else []
+    texts = [text for block in blocks if isinstance(text := _field(block, "text"), str)]
+    if texts:
+        return "\n".join(texts)
+    data = _field(result, "data")
+    return data if isinstance(data, str) else None
 
 
 def process_observation(obs: object, observation_field: str | None = None) -> str:
@@ -196,27 +437,16 @@ def process_observation(obs: object, observation_field: str | None = None) -> st
         if isinstance(named, str):
             return named
     result = obs.get("result")
-    if isinstance(result, dict):
-        raw_blocks = result.get("content")
-        blocks = raw_blocks if isinstance(raw_blocks, list) else []
-        texts: list[str] = []
-        for block in blocks:
-            if not is_str_keyed_dict(block):
-                continue
-            block_text = block.get("text")
-            if isinstance(block_text, str):
-                texts.append(block_text)
-        if texts:
-            return "\n".join(texts)
-        data = result.get("data")
-        if isinstance(data, str):
-            return data
+    if result is not None:
+        rendered = _mcp_result_text(result)
+        if rendered is not None:
+            return rendered
     prompt = obs.get("prompt")
     if isinstance(prompt, str):
         return prompt
     error = obs.get("error")
     if error:
-        return f"Error: {error}"
+        return f"Error: {_field(error, 'message') or error}"
     asked = (
         f" No '{observation_field}' either, which the manifest named."
         if observation_field is not None

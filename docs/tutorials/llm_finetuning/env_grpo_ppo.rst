@@ -247,7 +247,6 @@ These values are intentionally conservative and align with the shipped configs:
           "max_model_len": 1024,
           "max_output_tokens": 64,
           "vllm_config": vllm_config,
-          "micro_batch_size_per_gpu": 32,
       }
 
       pop = LLMPPO.population(
@@ -272,7 +271,6 @@ These values are intentionally conservative and align with the shipped configs:
           "max_model_len": 1024,
           "max_output_tokens": 64,
           "vllm_config": vllm_config,
-          "micro_batch_size_per_gpu": 32,
       }
 
       pop = LLMREINFORCE.population(

@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -54,6 +56,18 @@ def run_learn_calls(profiler: LearnProfiler, calls: int, micro_batches: int) -> 
             for _ in range(micro_batches):
                 with profiler.micro_batch():
                     torch.ones(4, 4) @ torch.ones(4, 4)
+
+
+def ping(depth: int) -> torch.Tensor:
+    """Matmul under ``depth`` alternating frames; distinct names stop the profiler merging them."""
+    if depth == 0:
+        return torch.ones(4, 4) @ torch.ones(4, 4)
+    return pong(depth - 1)
+
+
+def pong(depth: int) -> torch.Tensor:
+    """Partner frame of :func:`ping`."""
+    return ping(max(depth - 1, 0))
 
 
 def raise_in_learn_step(profiler: LearnProfiler, error: Exception) -> None:
@@ -159,6 +173,39 @@ class TestLearnProfilerMicroBatch:
         assert any(event.get("name") == "aten::mm" for event in trace["traceEvents"])
         assert caplog.text.count("Wrote torch.profiler trace of learn call 2") == 1
         assert "aten::mm" in caplog.text
+
+    def test_stack_trace_nested_past_recursion_limit_logs_without_summary(
+        self, tmp_path, caplog
+    ) -> None:
+        # Arrange
+        config = ProfilingConfig(
+            output_dir=str(tmp_path),
+            torch_profile_step=1,
+            torch_profile_with_stack=True,
+        )
+        profiler = LearnProfiler(config, rank=0, world_size=1, shard_group_size=None)
+        limit = sys.getrecursionlimit()
+
+        # Act
+        try:
+            with (
+                caplog.at_level(logging.INFO, logger="agilerl.utils.learn_profiler"),
+                profiler.learn_step(),
+                profiler.micro_batch(),
+            ):
+                ping(200)
+                # key_averages() needs a frame per nested event; leave fewer than 200
+                sys.setrecursionlimit(len(inspect.stack(0)) + 100)
+        finally:
+            sys.setrecursionlimit(limit)
+
+        # Assert
+        trace = json.loads((tmp_path / "rank0_learn1_trace.json").read_text())
+        assert any(event.get("name") == "aten::mm" for event in trace["traceEvents"])
+        trace_path = tmp_path / "rank0_learn1_trace.json"
+        assert caplog.messages == [
+            f"Wrote torch.profiler trace of learn call 1 on rank 0 to {trace_path}"
+        ]
 
     def test_rank_outside_default_ranks_writes_no_trace(self, tmp_path) -> None:
         config = ProfilingConfig(output_dir=str(tmp_path), torch_profile_step=1)

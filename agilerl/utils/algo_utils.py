@@ -39,6 +39,10 @@ from torch.optim.lr_scheduler import LambdaLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.arena.memory.resolve.sequences import (
+    COLOCATED_MAX_NUM_SEQS,
+    OMITTED_GPU_MEMORY_UTILIZATION,
+)
 from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import (
@@ -236,9 +240,15 @@ def narrow_tensor(value: object) -> torch.Tensor:
 
 def to_agent_tensors(per_agent: TensorDict, device: DeviceType) -> TensorMapping:
     """Move each per-agent leaf of ``per_agent`` onto ``device``."""
+    target = torch.device(device)
+    moved = (
+        per_agent
+        if per_agent.device == target
+        else per_agent.to(target, non_blocking=True)
+    )
     return {
-        agent_id: narrow_tensor(agent_tensor).to(device)
-        for agent_id, agent_tensor in per_agent.items()
+        agent_id: narrow_tensor(agent_tensor)
+        for agent_id, agent_tensor in moved.items()
     }
 
 
@@ -413,12 +423,11 @@ def share_encoder_parameters(
         )
         networks.append(other)
 
-    # detaching encoder parameters from computation graph reduces
-    # memory overhead and speeds up training
+    # Detached leaves must replace the borrower Parameter slots.
     param_vals: TensorDict = from_module(policy.encoder).detach()
     for network in networks:
         target_params: TensorDict = param_vals.clone().lock_()
-        target_params.to_module(network.encoder)
+        target_params.to_module(network.encoder, preserve_module_state=False)
 
 
 def get_hidden_states_shape_from_model(
@@ -1813,6 +1822,8 @@ def get_experiences_samples(
         sampled_exp: Any
         if isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
+        elif isinstance(exp, TensorDict):
+            sampled_exp = exp[torch.as_tensor(minibatch_indices, dtype=torch.long)]
         elif isinstance(exp, dict):
             sampled_exp = {key: _take(value) for key, value in exp.items()}
         elif isinstance(exp, tuple):
@@ -1861,7 +1872,13 @@ def stack_experiences(
         # each branch re-asserts that element type since narrowing `first` does
         # not narrow `exp`.
         first = exp[0]
-        if isinstance(first, dict):
+        if isinstance(first, TensorDict):
+            tds: list[TensorDict] = []
+            for e in exp:
+                assert isinstance(e, TensorDict)
+                tds.append(e)
+            stacked_exp = TensorDict.stack(tds, dim=0)
+        elif isinstance(first, dict):
             grouped: defaultdict[str, list[Any]] = defaultdict(list)
             for it in exp:
                 assert is_str_keyed_dict(it)
@@ -1891,7 +1908,11 @@ def stack_experiences(
             stacked_exp = torch.from_numpy(stacked_array) if to_torch else stacked_array
 
         elif isinstance(first, torch.Tensor):
-            stacked_exp = torch.stack([e for e in exp if isinstance(e, torch.Tensor)])
+            tensors: list[torch.Tensor] = []
+            for e in exp:
+                assert isinstance(e, torch.Tensor)
+                tensors.append(e)
+            stacked_exp = torch.stack(tensors)
 
         else:
             msg = f"Unsupported experience type: {type(first)}"
@@ -1929,7 +1950,10 @@ def stack_and_pad_experiences(
             # Pass-through experiences (e.g. an already-stacked tensor)
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
-            tensors = [e for e in exp if isinstance(e, torch.Tensor)]
+            tensors: list[torch.Tensor] = []
+            for e in exp:
+                assert isinstance(e, torch.Tensor)
+                tensors.append(e)
             stacked_exp = _stack_and_pad_tensor_list(tensors, padding, padding_side)
         elif isinstance(exp[0], (list, tuple)):
             tensors = [torch.tensor(e).unsqueeze(0) for e in exp]
@@ -1995,6 +2019,15 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         flattened_exp: Any
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
+        elif isinstance(exp, TensorDict):
+            if exp.batch_dims >= 2:
+                flattened_exp = exp.transpose(0, 1).reshape(-1)
+            elif exp.batch_dims == 1:
+                flattened_exp = (
+                    exp.unsqueeze(1).transpose(0, 1).reshape(exp.batch_size[0])
+                )
+            else:
+                flattened_exp = exp.clone()
         elif is_str_keyed_dict(exp):
             flattened_exp = {
                 key: flatten(value)
@@ -2111,8 +2144,9 @@ class CosineLRScheduleConfig:
 class VLLMConfig:
     """Data class to configure a colocated vLLM instance.
 
-    :param tensor_parallel_size: Number of GPUs for tensor parallelism, defaults to 1.
-    :type tensor_parallel_size: int, optional
+    :param tensor_parallel_size: GPUs for tensor parallelism. ``None`` leaves
+        the width unset.
+    :type tensor_parallel_size: int | None, optional
     :param gpu_memory_utilization: Fraction of GPU memory to reserve for vLLM KV cache,
         defaults to 0.3.
     :type gpu_memory_utilization: float, optional
@@ -2130,13 +2164,6 @@ class VLLMConfig:
         for training.  Cannot be used with agent populations on a single device,
         defaults to False.
     :type sleep_mode: bool, optional
-    :param sleep_mode_level: Sleep level passed to ``llm.sleep(level=...)`` when
-        ``sleep_mode`` is enabled. ``1`` backs the base weights up to CPU and
-        drops the KV cache; ``2`` discards the weights entirely, so it is only
-        safe when new base weights are pushed into vLLM after every wake. The
-        colocated LoRA-only sync never re-pushes the base, so it requires
-        level 1. Defaults to 1.
-    :type sleep_mode_level: int, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
         defaults to None.
@@ -2166,12 +2193,6 @@ class VLLMConfig:
     :param frequency_penalty: Penalise tokens proportionally to how often they have
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
-    :param max_lora_rank: Maximum LoRA rank passed to the vLLM ``LLM`` constructor.
-        Should be at least the trainer's ``lora_config.r``.  Defaults to 16.
-    :type max_lora_rank: int, optional
-    :param max_loras: Maximum number of LoRA adapters vLLM can hold concurrently.
-        Defaults to 1 (actor rollout only).
-    :type max_loras: int, optional
     :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
         letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
         uses this exact value for the KV cache and skips the auto-sizing path
@@ -2194,13 +2215,6 @@ class VLLMConfig:
         on the tiny test fixture; production deployments running a single
         vLLM should leave it unset.  Defaults to None.
     :type kv_cache_memory_bytes: int | None, optional
-    :param strip_multimodal_towers: Free the GPU memory held by a multimodal
-        base's unused towers after engine init (text-only RL). ``True`` strips
-        the standard HF attribute names (``vision_tower``, ``audio_tower``,
-        ``multi_modal_projector``, ``embed_vision``, ``embed_audio``); a list
-        of attribute names strips those instead, for models that mount
-        unwanted modalities elsewhere. Defaults to ``False``.
-    :type strip_multimodal_towers: bool | list[str], optional
     :param limit_mm_per_prompt: Most items of each modality one prompt may
         carry, e.g. ``{"image": 4, "video": 0}``. ``None`` keeps vLLM's limit.
     :type limit_mm_per_prompt: dict[str, int] | None, optional
@@ -2216,20 +2230,15 @@ class VLLMConfig:
     """
 
     # Colocate mode parameters
-    tensor_parallel_size: int = 1
-    gpu_memory_utilization: float = 0.3
-    max_num_seqs: int = 8
+    tensor_parallel_size: int | None = None
+    gpu_memory_utilization: float = OMITTED_GPU_MEMORY_UTILIZATION
+    max_num_seqs: int = COLOCATED_MAX_NUM_SEQS
     max_num_batched_tokens: int | None = None
-    enforce_eager: bool | None = None
     sleep_mode: bool = False
-    sleep_mode_level: int = 1
     dtype: str | None = None
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
     kv_cache_dtype: str | None = None
-    max_lora_rank: int = 16
-    max_loras: int = 1
-    strip_multimodal_towers: bool | list[str] = False
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
@@ -2240,13 +2249,6 @@ class VLLMConfig:
     lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:
-        if self.sleep_mode_level not in (1, 2):
-            msg = (
-                "vllm sleep_mode_level must be either 1 or 2, got "
-                f"{self.sleep_mode_level}."
-            )
-            raise ValueError(msg)
-
         # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
         # host RAM, KV freed) between rollout and training for a single colocated
         # agent; it is not usable with a population on one device.
@@ -2455,6 +2457,12 @@ def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
     :rtype: TorchObsType
     """
     first = tensors[0]
+    if isinstance(first, TensorDict):
+        tds: list[TensorDict] = []
+        for t in tensors:
+            assert isinstance(t, TensorDict)
+            tds.append(t)
+        return TensorDict.cat(tds, dim=0)
     if isinstance(first, dict):
         # Homogeneous by construction: all entries share the first entry's structure
         concat_dict: dict[str, Any] = {}
@@ -2768,6 +2776,7 @@ def inherit_init_signature(
     parent: type,
     fixed: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Callable[[type], type]:
     """Class decorator giving a subclass its ``parent``'s ``__init__`` signature.
 
@@ -2786,6 +2795,9 @@ def inherit_init_signature(
     :type fixed: set[str] | None, optional
     :param defaults: Inherited parameter defaults to replace on the subclass.
     :type defaults: dict[str, Any] | None, optional
+    :param extra: Parameters the subclass adds, by name, with their defaults;
+        appended after the inherited ones.
+    :type extra: dict[str, Any] | None, optional
     :return: A class decorator.
     :rtype: Callable[[type], type]
     """
@@ -2797,6 +2809,10 @@ def inherit_init_signature(
             p.replace(default=defaults[p.name]) if p.name in defaults else p
             for p in kept
         ]
+    kept += [
+        inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=value)
+        for name, value in (extra or {}).items()
+    ]
 
     def decorate(cls: type) -> type:
         if "__init__" not in cls.__dict__:

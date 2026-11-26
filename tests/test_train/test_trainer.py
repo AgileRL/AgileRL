@@ -39,6 +39,7 @@ from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.llm_envs.chat_formats import DsmlFormat
 from agilerl.models import (
     MANIFEST_REGISTRY,
     DDPGSpec,
@@ -46,7 +47,7 @@ from agilerl.models import (
     PPOSpec,
     TD3Spec,
 )
-from agilerl.models.env import GymEnvSpec
+from agilerl.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationProbabilities,
@@ -982,8 +983,8 @@ class TestArenaTrainerTrain:
             client=mock_client,
         )
         trainer.train(
-            resource_id="arena-medium",
-            num_nodes=2,
+            num_gpus=2,
+            gpu_type="l4",
             project="GSM8K Tutorial",
             experiment_name="gsm8k-grpo",
             reward_file="reward.py",
@@ -991,8 +992,8 @@ class TestArenaTrainerTrain:
         )
 
         kwargs = mock_client.submit_experiment.call_args.kwargs
-        assert kwargs["resource_id"] == "arena-medium"
-        assert kwargs["num_nodes"] == 2
+        assert kwargs["num_gpus"] == 2
+        assert kwargs["gpu_type"] == "l4"
         assert kwargs["project"] == "GSM8K Tutorial"
         assert kwargs["experiment_name"] == "gsm8k-grpo"
         assert kwargs["reward_file"] == "reward.py"
@@ -1396,7 +1397,7 @@ _LLM_COMMON_KWARGS = {
     "lora_config": {"lora_r": 8, "lora_alpha": 16, "lora_dropout": 0.1},
     "max_model_len": 512,
     "use_separate_reference_adapter": False,
-    "pretrained_model_name_or_path": "gpt2",
+    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
     "calc_position_embeddings": False,
 }
 
@@ -1421,7 +1422,7 @@ class TestLLMSpecConstruction:
         assert dpo_spec.env_type == "dataset"
         assert dpo_spec.objective == "preference"
         assert isinstance(dpo_spec, LLMAlgorithmSpec)
-        assert dpo_spec.pretrained_model_name_or_path == "gpt2"
+        assert dpo_spec.pretrained_model_name_or_path == "Qwen/Qwen2.5-0.5B-Instruct"
 
     def test_grpo_spec_fields(self, grpo_spec):
         assert grpo_spec.name == "GRPO"
@@ -1445,14 +1446,14 @@ class TestLLMSpecConstruction:
 
     def test_dpo_model_dump_contains_expected_fields(self, dpo_spec):
         dumped = dpo_spec.model_dump(mode="python", exclude={"hp_config"})
-        assert dumped["pretrained_model_name_or_path"] == "gpt2"
+        assert dumped["pretrained_model_name_or_path"] == "Qwen/Qwen2.5-0.5B-Instruct"
         assert dumped["update_epochs"] == 1
         assert dumped["beta"] == pytest.approx(0.1)  # DPO's constructor default
 
     def test_grpo_model_dump_contains_group_size(self, grpo_spec):
         dumped = grpo_spec.model_dump(mode="python", exclude={"hp_config"})
         assert dumped["group_size"] == 4
-        assert dumped["pretrained_model_name_or_path"] == "gpt2"
+        assert dumped["pretrained_model_name_or_path"] == "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 class TestLLMGetTrainingKwargs:
@@ -1471,7 +1472,6 @@ class TestLLMGetTrainingKwargs:
         assert "num_epochs" not in kwargs
 
     def test_llm_kwargs_include_max_reward(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.DATASET,
@@ -1543,7 +1543,7 @@ class TestLLMBuildAlgorithm:
 
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
-        assert call_kwargs["model_name"] == "gpt2"
+        assert call_kwargs["model_name"] == "Qwen/Qwen2.5-0.5B-Instruct"
         assert call_kwargs["pad_token_id"] == 50256
         assert call_kwargs["pad_token"] == "<|endoftext|>"
         assert call_kwargs["index"] == 0
@@ -1570,7 +1570,7 @@ class TestLLMBuildAlgorithm:
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
         assert call_kwargs["index"] == 1
-        assert call_kwargs["model_name"] == "gpt2"
+        assert call_kwargs["model_name"] == "Qwen/Qwen2.5-0.5B-Instruct"
 
     def test_build_algorithm_with_accelerator(
         self, dpo_spec, monkeypatch: pytest.MonkeyPatch
@@ -1666,7 +1666,9 @@ class TestLLMLocalTrainer:
 
         assert trainer.algorithm_spec is dpo_spec
         assert trainer.tokenizer is mock_tokenizer
-        mock_auto_tok.from_pretrained.assert_called_once_with("gpt2")
+        mock_auto_tok.from_pretrained.assert_called_once_with(
+            "Qwen/Qwen2.5-0.5B-Instruct"
+        )
         mock_create_pop.assert_called_once()
         _, create_kwargs = mock_create_pop.call_args
         assert create_kwargs["tokenizer"] is mock_tokenizer
@@ -1716,7 +1718,6 @@ class TestLLMLocalTrainer:
     # -- _make_env dispatches to LLMEnvSpec.make_dataset_env() --------------
 
     def test_make_env_dispatches_to_llm_env_spec(self, dpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
         mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
@@ -1758,8 +1759,6 @@ class TestLLMLocalTrainer:
 
     def test_rollout_factory_gets_the_run_seed(self, grpo_spec):
         """A rollout env builds no env here; the factory carries the run seed."""
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-
         mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
         mock_llm_env_spec.env_type = LLMEnvType.ROLLOUT
 
@@ -1886,7 +1885,6 @@ class TestLLMLocalTrainer:
                 algorithm=dpo_spec,
                 environment=env_spec,
                 training=TrainingSpec(
-                    max_steps=1_000_000,
                     evo_steps=10,
                     pop_size=self.POP_SIZE,
                     num_epochs=3,
@@ -1897,6 +1895,83 @@ class TestLLMLocalTrainer:
         call_kwargs = mock_train_fn.call_args[1]
         assert call_kwargs["max_steps"] is None
         assert call_kwargs["num_epochs"] == 3
+
+    @pytest.mark.parametrize(
+        ("training", "expected_max_steps"),
+        [
+            pytest.param(
+                TrainingSpec(evo_steps=10, pop_size=2),
+                None,
+                id="unset",
+            ),
+            pytest.param(
+                TrainingSpec(max_steps=1_000_000, evo_steps=10, pop_size=2),
+                1_000_000,
+                id="authored",
+            ),
+        ],
+    )
+    def test_dataset_train_max_steps_follows_whether_the_field_was_set(
+        self, dpo_spec, training, expected_max_steps
+    ):
+        mock_pop = [MagicMock()]
+        mock_env = MagicMock()
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>")
+        env_spec = MagicMock(max_reward=None)
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMDatasetStrategy, "get_training_loop", return_value=mock_train_fn
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=dpo_spec,
+                environment=env_spec,
+                training=training,
+            )
+            trainer.train()
+
+        assert mock_train_fn.call_args[1]["max_steps"] == expected_max_steps
+
+    def test_rollout_train_keeps_default_max_steps_when_unset(self, grpo_spec):
+        mock_pop = [MagicMock()]
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>")
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMRolloutStrategy, "get_training_loop", return_value=mock_train_fn
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=MagicMock(max_reward=None),
+                training=TrainingSpec(evo_steps=10, pop_size=1),
+            )
+            trainer.train()
+
+        assert mock_train_fn.call_args[1]["max_steps"] == 1_000_000
 
     # -- Missing LLM dependencies raises ImportError -----------------------
 
@@ -1943,6 +2018,47 @@ class TestLLMLocalTrainer:
             tokenizer = trainer._make_tokenizer()
 
         assert tokenizer.chat_template == DEFAULT_CHAT_TEMPLATE
+
+    def test_make_tokenizer_attaches_the_family_chat_template(self):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = _DPOSpec(
+            **{
+                **_LLM_COMMON_KWARGS,
+                "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V4-Flash-0731",
+            }
+        )
+        mock_tokenizer = MagicMock(
+            chat_template=None,
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == DsmlFormat.CHAT_TEMPLATE
+
+    def test_make_tokenizer_without_a_model_path_raises(self):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = _DPOSpec(
+            **{**_LLM_COMMON_KWARGS, "pretrained_model_name_or_path": None}
+        )
+
+        with (
+            patch("agilerl.training.trainer.AutoTokenizer", create=True),
+            pytest.raises(ValueError, match="has no pretrained_model_name_or_path"),
+        ):
+            trainer._make_tokenizer()
 
     def test_make_tokenizer_keeps_an_existing_chat_template(self, dpo_spec):
         trainer = LocalTrainer.__new__(LocalTrainer)
@@ -2314,7 +2430,7 @@ class TestLocalTrainerIntegration:
         reward_file = tmp_path / "reward.py"
         reward_file.write_text(
             "from agilerl.llm_envs.rubrics import reward_fn_to_rubric\n"
-            "def simple_reward(completion, answer, prompt, **kwargs):\n"
+            "def simple_reward(completion, answer, question, **kwargs):\n"
             "    return 1.0\n"
             "RUBRIC = reward_fn_to_rubric(simple_reward)\n"
         )
@@ -2647,7 +2763,6 @@ class TestLocalTrainerToManifestLLM:
         import json
 
         from agilerl.arena.models.algorithms import DPOSpec
-        from agilerl.models.env import LLMEnvSpec
 
         mock_create_pop.return_value = [MagicMock()]
         mock_tokenizer = MagicMock()
@@ -2788,7 +2903,6 @@ class TestLocalTrainerRollout:
         return TrainingSpec(max_steps=100, evo_steps=10, pop_size=self.POP_SIZE)
 
     def test_construction_rollout(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock()
@@ -2834,7 +2948,6 @@ class TestLocalTrainerRollout:
         assert trainer.train_fn is train_llm_rollout
 
     def test_train_delegates_rollout_kwargs(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
@@ -2885,7 +2998,6 @@ class TestLocalTrainerRollout:
         assert "max_wall_seconds" not in call_kwargs
 
     def test_train_forwards_max_wall_seconds(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
@@ -2951,8 +3063,6 @@ class TestMakeEnvBranches:
 
     def test_llm_rollout_returns_none(self):
         """ROLLOUT builds no env here; the factory builds one per trajectory."""
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
         trainer.env_spec.env_type = LLMEnvType.ROLLOUT
@@ -2963,8 +3073,6 @@ class TestMakeEnvBranches:
 
     def test_llm_dataset_calls_make_llm_env(self):
         """A dataset LLMEnvSpec passes algo fields into make_llm_env."""
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-
         mock_env = MagicMock()
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
@@ -3076,7 +3184,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
     [
         pytest.param(
             "mlp",
-            {"name": "CartPole-v1", "num_envs": 2},
+            {"name": "CartPole-v1", "num_envs": 2, "sync": True},
             {},
             {},
             # MlpSpec defaults (dataclass MlpNetConfig would be 500 / 3)
@@ -3088,6 +3196,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {
                 "name": "dict-obs-env",
                 "num_envs": 2,
+                "sync": True,
                 "entrypoint": "tests.test_train._dummy_envs:DictObsEnv",
             },
             {},
@@ -3101,6 +3210,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {
                 "name": "image-obs-env",
                 "num_envs": 2,
+                "sync": True,
                 "entrypoint": "tests.test_train._dummy_envs:ImageObsEnv",
             },
             {},
@@ -3111,7 +3221,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
         ),
         pytest.param(
             "lstm",
-            {"name": "CartPole-v1", "num_envs": 2},
+            {"name": "CartPole-v1", "num_envs": 2, "sync": True},
             {"recurrent": True},
             {},
             # LstmSpec defaults (dataclass LstmNetConfig would be 500 / 4)
@@ -3120,7 +3230,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
         ),
         pytest.param(
             "simba",
-            {"name": "CartPole-v1", "num_envs": 2},
+            {"name": "CartPole-v1", "num_envs": 2, "sync": True},
             {},
             {"simba": True},
             # SimbaSpec default (dataclass SimBaNetConfig would be 500)
@@ -3138,6 +3248,8 @@ def test_deferred_encoder_uses_spec_defaults_not_dataclass(
     Parametrized across every inferable arch (mlp, multiinput, cnn, lstm,
     simba) so the invariant is guarded regardless of which encoder the
     deferred path infers from the observation space / algorithm flags.
+    Environments use ``sync: True`` so this does not spawn AsyncVectorEnv
+    workers.
     """
     import yaml
 
@@ -3768,7 +3880,7 @@ class TestMakeRolloutFactoryGuards:
             env_type="rollout",
             dataset="ds",
             rubric_file_path="reward.py",
-            prompt_template={"user": "{q}"},
+            prompt_template={"user": "{question}"},
         )
 
     def test_a_non_llm_algorithm_gets_no_rollout_factory(self):

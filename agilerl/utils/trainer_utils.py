@@ -26,6 +26,7 @@ from agilerl.arena.models.algorithms import (
     MultiAgentAlgorithmSpec,
     SingleAgentAlgorithmSpec,
 )
+from agilerl.arena.models.env import EnvSpec
 from agilerl.components.replay_buffer import BufferType
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
@@ -206,6 +207,7 @@ def create_population_from_spec(
     hp_config: HyperparameterConfig | None = None,
     networks: Mapping[str, Any] | None = None,
     rollout_mode: str = "",
+    env_spec: EnvSpec | None = None,
 ) -> PopulationType:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -247,6 +249,9 @@ def create_population_from_spec(
     :param rollout_mode: ``training.rollout_mode``. Colocated runs vLLM in the
         trainer process.
     :type rollout_mode: str
+    :param env_spec: The run's environment spec; a text-only one lets the LLM
+        engine skip a vision-language model's towers.
+    :type env_spec: EnvSpec | None
     :returns: A list of algorithm instances.
     :rtype: PopulationType
     """
@@ -386,6 +391,7 @@ def create_population_from_spec(
             load_weights_from=load_weights_from,
         ),
         rollout_mode=rollout_mode,
+        environment=env_spec,
     )
     population: PopulationType = [agent_0]
 
@@ -407,6 +413,7 @@ def create_population_from_spec(
                 ),
                 actor_network=cloned_actor,
                 rollout_mode=rollout_mode,
+                environment=env_spec,
             )
         )
     _assign_subpopulations(population, selection_strategy_spec)

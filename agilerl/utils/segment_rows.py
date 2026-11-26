@@ -39,6 +39,8 @@ class SegmentRows:
     :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
     :param pixel_values: Vision rows in row order, or ``None``.
     :param pixel_image_counts: Vision rows per row, or ``None``.
+    :param sampling_supports: Per-row ``(n, K)`` sampling supports, parallel
+        to ``sampling_logps``, or ``None``.
     """
 
     token_ids: torch.Tensor
@@ -50,6 +52,7 @@ class SegmentRows:
     sampling_logps: list[torch.Tensor | None] | None = None
     pixel_values: torch.Tensor | None = None
     pixel_image_counts: list[int] | None = None
+    sampling_supports: list[torch.Tensor | None] | None = None
 
     def training_rows(self, episode_idxs: npt.NDArray) -> npt.NDArray[np.intp]:
         """Rows of the episodes in ``episode_idxs`` plus every filler row.
@@ -130,6 +133,7 @@ def split_episode_segments(
     sampling_logps: Sequence[torch.Tensor | None] | None = None,
     pixel_values: torch.Tensor | None = None,
     pixel_image_counts: Sequence[int] | None = None,
+    sampling_supports: Sequence[torch.Tensor | None] | None = None,
 ) -> SegmentRows:
     """Split each segmented episode into one row per segment; other episodes stay one row.
 
@@ -146,6 +150,8 @@ def split_episode_segments(
         order, or ``None``.
     :param pixel_values: Vision rows of every episode in batch order, or ``None``.
     :param pixel_image_counts: Vision rows per episode; required with ``pixel_values``.
+    :param sampling_supports: Per-episode ``(n, K)`` sampling supports in
+        action-mask order, or ``None``.
     :return: The batch's training rows.
     :raises ValueError: If vision rows cannot be assigned to segment rows.
     """
@@ -173,13 +179,18 @@ def split_episode_segments(
         return rows
 
     row_action_masks = frame_rows(action_masks, False, 1)
+    action_counts = row_action_masks.sum(dim=-1).tolist()
+    rows_per_episode = np.bincount(
+        row_episodes, minlength=len(episode_segments)
+    ).tolist()
     row_logps = (
-        _split_sampling_logps(
-            sampling_logps,
-            row_action_masks.sum(dim=-1).tolist(),
-            np.bincount(row_episodes, minlength=len(episode_segments)).tolist(),
-        )
+        _split_sampling_logps(sampling_logps, action_counts, rows_per_episode)
         if sampling_logps is not None
+        else None
+    )
+    row_supports = (
+        _split_sampling_logps(sampling_supports, action_counts, rows_per_episode)
+        if sampling_supports is not None
         else None
     )
     row_image_counts: list[int] | None = None
@@ -198,6 +209,7 @@ def split_episode_segments(
         sampling_logps=row_logps,
         pixel_values=pixel_values,
         pixel_image_counts=row_image_counts,
+        sampling_supports=row_supports,
     )
 
 
@@ -206,22 +218,24 @@ def _split_sampling_logps(
     action_counts: list[int],
     rows_per_episode: list[int],
 ) -> list[torch.Tensor | None]:
-    """Split each episode's flat sampling log-probs over its segment rows.
+    """Split each episode's per-token sampling values over its segment rows.
 
-    An episode whose log-probs do not cover its rows' action tokens keeps them
-    whole when it trains as one row, and gets ``None`` per row otherwise.
+    The values are one entry per action token along dim 0: flat log-probs, or
+    ``(n, K)`` supports. An episode whose values do not cover its rows' action
+    tokens keeps them whole when it trains as one row, and gets ``None`` per
+    row otherwise.
 
-    :param sampling_logps: Per-episode flat sampling log-probs, or ``None`` entries.
+    :param sampling_logps: Per-episode sampling values, or ``None`` entries.
     :param action_counts: Action tokens per row, rows grouped by episode in order.
     :param rows_per_episode: Rows each episode trains as.
-    :return: Per-row sampling log-probs.
+    :return: Per-row sampling values.
     """
     row_logps: list[torch.Tensor | None] = []
     first_row = 0
     for flat, num_rows in zip(sampling_logps, rows_per_episode, strict=True):
         sizes = action_counts[first_row : first_row + num_rows]
         first_row += num_rows
-        if flat is not None and flat.numel() == sum(sizes):
+        if flat is not None and flat.shape[0] == sum(sizes):
             row_logps.extend(flat.split(sizes))
         elif num_rows == 1:
             row_logps.append(flat)
@@ -453,6 +467,10 @@ def pad_segment_rows(
     if sampling_logps is not None:
         empty = token_ids.new_zeros(0, dtype=torch.float32)
         sampling_logps = [*sampling_logps, *([empty] * extra)]
+    sampling_supports = rows.sampling_supports
+    if sampling_supports is not None:
+        no_supports = token_ids.new_full((0, 1), -1, dtype=torch.int32)
+        sampling_supports = [*sampling_supports, *([no_supports] * extra)]
     no_span = np.zeros(extra, dtype=np.intp)
     return SegmentRows(
         token_ids=token_ids,
@@ -466,4 +484,5 @@ def pad_segment_rows(
         sampling_logps=sampling_logps,
         pixel_values=pixel_values,
         pixel_image_counts=pixel_image_counts,
+        sampling_supports=sampling_supports,
     )

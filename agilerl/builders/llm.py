@@ -12,13 +12,17 @@ from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
     RolloutLLMSpec,
 )
+from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
+from agilerl.arena.models.manifest import strips_multimodal_towers
+from agilerl.arena.models.model_info import catalog_lora_modules
 from agilerl.arena.models.networks import CosineLRScheduleConfig as CosineLRScheduleSpec
-from agilerl.arena.models.networks import LoraConfigDict, default_colocated_vllm_config
+from agilerl.arena.models.networks import LoraConfigDict, default_rollout_vllm_config
 from agilerl.builders.base import (
     AlgorithmBuilder,
     AlgorithmBuildRuntime,
@@ -32,7 +36,6 @@ from agilerl.utils.llm_utils import (
     apply_pad_token_id,
     build_bnb_quantization_config,
     load_pad_token_configs,
-    resolve_attn_implementation,
     resolve_pad_token_id,
 )
 
@@ -72,11 +75,13 @@ class LLMBuilder(AlgorithmBuilder):
             kwargs.pop("vllm_config", None)
             return
         if kwargs.get("vllm_config") is None:
-            kwargs["vllm_config"] = default_colocated_vllm_config()
+            kwargs["vllm_config"] = default_rollout_vllm_config()
         vllm_cfg = kwargs["vllm_config"]
         if isinstance(vllm_cfg, BaseModel):
             vllm_cfg = vllm_cfg.model_dump(exclude_none=True)
         if isinstance(vllm_cfg, dict):
+            # Colocated generation shares the trainer's GPU, so vLLM sleeps during learn.
+            vllm_cfg["sleep_mode"] = True
             kwargs["vllm_config"] = VLLMConfig(**vllm_cfg)
 
     @classmethod
@@ -88,6 +93,7 @@ class LLMBuilder(AlgorithmBuilder):
         runtime: AlgorithmBuildRuntime | None = None,
         actor_network: PreTrainedModel | PeftModel | None = None,
         rollout_mode: str = "",
+        environment: EnvSpec | None = None,
     ) -> LLMAlgorithm:
         """Build an LLM algorithm.
 
@@ -100,11 +106,14 @@ class LLMBuilder(AlgorithmBuilder):
         :type runtime: AlgorithmBuildRuntime | None
         :param actor_network: Pre-built or cloned actor. When provided it is
             handed to the constructor instead of loading the model from
-            ``pretrained_model_name_or_path``.
+            ``weights_path``, else ``pretrained_model_name_or_path``.
         :type actor_network: PreTrainedModel | PeftModel | None
         :param rollout_mode: ``training.rollout_mode``. Colocated runs vLLM in
             the trainer process.
         :type rollout_mode: str
+        :param environment: The run's environment spec; a text-only one lets
+            the engine skip a vision-language model's towers.
+        :type environment: EnvSpec | None
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
         :raises ValueError: If tokenizer is None.
@@ -124,13 +133,20 @@ class LLMBuilder(AlgorithmBuilder):
         kwargs = spec_kwargs(spec, hp_config=runtime.hp_config)
         kwargs.pop("pretrained_model_name_or_path", None)
 
-        cls._resolve_vllm_kwargs(
-            kwargs,
-            colocated=isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated",
-        )
+        colocated = isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated"
+        cls._resolve_vllm_kwargs(kwargs, colocated=colocated)
+        if isinstance(spec, RolloutLLMSpec):
+            kwargs["rollout_strip_multimodal_towers"] = strips_multimodal_towers(
+                spec,
+                isinstance(environment, LLMEnvSpec) and environment.text_only,
+            )
 
         if kwargs.get("lora_config") is not None:
-            kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])
+            hub_id = spec.pretrained_model_name_or_path
+            if hub_id is None:
+                msg = f"{type(spec).__name__} has no pretrained_model_name_or_path."
+                raise ValueError(msg)
+            kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"], hub_id)
         if kwargs.get("cosine_lr_schedule_config") is not None:
             kwargs["cosine_lr_schedule_config"] = cosine_lr_schedule_config(
                 kwargs["cosine_lr_schedule_config"]
@@ -144,19 +160,13 @@ class LLMBuilder(AlgorithmBuilder):
                 kwargs.pop("quantization")
             )
 
-        model_config = cls._model_config_with_family_defaults(spec, kwargs)
-        if model_config:
-            kwargs["model_config"] = model_config
-
         model_config = None
         generation_config = None
         if actor_network is not None:
             model_config = actor_network.config
             generation_config = getattr(actor_network, "generation_config", None)
         if model_config is None:
-            model_config, generation_config = load_pad_token_configs(
-                spec.pretrained_model_name_or_path
-            )
+            model_config, generation_config = load_pad_token_configs(spec.load_path)
 
         pad_token_id, pad_source = resolve_pad_token_id(
             tokenizer,
@@ -171,18 +181,15 @@ class LLMBuilder(AlgorithmBuilder):
             getattr(tokenizer, "eos_token_id", None),
         )
 
-        if "micro_batch_size_per_gpu" not in kwargs and is_distributed():
-            kwargs["micro_batch_size_per_gpu"] = max(
-                spec.batch_size // get_world_size(), 1
-            )
-        fsdp = getattr(spec, "fsdp", None)
-        if fsdp is not None:
-            kwargs["fsdp_config"] = fsdp
-
         algo_cls = cls.algo_class(spec)
+        kwargs["fsdp_config"] = spec.fsdp
+        if "micro_batch_size_per_gpu" not in kwargs and is_distributed():
+            kwargs["micro_batch_size_per_gpu"] = resolve_micro_batch_size_per_gpu(
+                spec, get_world_size()
+            )
         kwargs = constructor_kwargs(algo_cls, kwargs)
         algo = algo_cls(
-            model_name=spec.pretrained_model_name_or_path,
+            model_name=spec.load_path,
             pad_token_id=pad_token_id,
             pad_token=tokenizer.pad_token,
             index=index,
@@ -198,38 +205,21 @@ class LLMBuilder(AlgorithmBuilder):
         )
         return algo
 
-    @staticmethod
-    def _model_config_with_family_defaults(
-        spec: LLMAlgorithmSpec,
-        kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Merge explicit attn and the resolved trainer backend into ``model_config``.
 
-        :param spec: LLM spec whose checkpoint id is read for family defaults.
-        :type spec: LLMAlgorithmSpec
-        :param kwargs: Constructor kwargs; ``attn_implementation`` is popped.
-        :type kwargs: dict[str, Any]
-        :return: ``model_config`` with ``attn_implementation`` resolved.
-        :rtype: dict[str, Any]
-        """
-        attn_implementation = kwargs.pop("attn_implementation", None)
-        model_config = dict(kwargs.get("model_config") or {})
-        if attn_implementation is not None and attn_implementation != "auto":
-            model_config.setdefault("attn_implementation", attn_implementation)
-        model_config["attn_implementation"] = resolve_attn_implementation(
-            model_config.get("attn_implementation"),
-            model_name_or_path=spec.pretrained_model_name_or_path,
-        )
-        return model_config
-
-
-def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> LoraConfig:
+def peft_lora_config(
+    lora: LoraConfigDict | dict[str, Any] | LoraConfig, hub_id: str
+) -> LoraConfig:
     """Convert the manifest's LoRA section to the peft object the algorithm takes.
+
+    The adapter targets the catalog's modules for ``hub_id``; manifests name none.
 
     :param lora: The manifest's LoRA section, a mapping, or an already-built peft config.
     :type lora: LoraConfigDict | dict[str, Any] | LoraConfig
+    :param hub_id: The model's ``pretrained_model_name_or_path``.
+    :type hub_id: str
     :returns: A peft ``LoraConfig``.
     :raises ImportError: If the LLM extras are not installed.
+    :raises ValueError: If ``hub_id`` is not in the model catalog.
     """
     if not HAS_LLM_DEPENDENCIES:
         msg = "LLM dependencies are required to resolve LoRA configuration."
@@ -241,7 +231,7 @@ def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> Lora
         return lora
     peft_lora = LoraConfigDict.model_validate(lora).model_dump()
     peft_lora["r"] = peft_lora.pop("lora_r")
-    return PeftLoraConfig(**peft_lora)
+    return PeftLoraConfig(target_modules=catalog_lora_modules(hub_id), **peft_lora)
 
 
 def cosine_lr_schedule_config(schedule: CosineLRScheduleSpec) -> CosineLRScheduleConfig:

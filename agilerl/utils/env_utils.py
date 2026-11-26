@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
@@ -21,6 +23,9 @@ from agilerl.vector import AsyncPettingZooVecEnv
 if TYPE_CHECKING:
     from openenv.core.rubrics.base import Rubric
 
+    from agilerl.arena.models.env import JudgeSpec
+    from agilerl.llm_envs.rubrics import GroupRubric
+
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
 
@@ -30,53 +35,65 @@ EnvT = TypeVar("EnvT", bound=gym.Env | GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
-    """Make a conversation template for the model.
+    """Make chat messages from the template, ordered by the keys' ``_index`` when they have one.
 
     :param prompt_template: Template dictionary with prompt keys
     :type prompt_template: dict[str, str]
     :return: List of conversation dictionaries
     :rtype: list[dict[str, str]]
     """
+    indices = [key.rpartition("_")[2] for key in prompt_template]
+    numbered = [index.isdigit() for index in indices]
+    keys = list(prompt_template)
+    if any(numbered):
+        if not all(numbered) or len(set(map(int, indices))) != len(indices):
+            msg = (
+                "prompt_template keys must all end in a distinct index "
+                f"(system_0, user_1, ...) or none may: got {keys}"
+            )
+            raise ValueError(msg)
+        keys.sort(key=lambda key: int(key.rpartition("_")[2]))
     return [
         {
             "role": key.split("_")[0],
             "content": escape_non_format_braces(prompt_template[key]),
         }
-        for key in prompt_template
+        for key in keys
     ]
 
 
-def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]:
+def get_rubric_factory(
+    rubric_name: str,
+    file_path: str,
+    judge_spec: JudgeSpec | None = None,
+    judge_optional: bool = False,
+) -> Callable[[], Rubric]:
     """Load a rubric symbol once and return a factory building rubrics from it.
 
     The module is executed once, here, so its import-time cost and side effects
     are paid once however many rubrics the caller goes on to build. A ``Rubric``
-    subclass or a reward callable yields a fresh rubric per call, which is what
-    lets concurrently-stepped envs each own their scorer; a module-level
-    ``Rubric`` instance is the author's own single object and is returned as-is.
+    subclass, a reward callable, or a module-level ``Rubric`` instance each
+    yields a fresh rubric per call, so concurrently-stepped envs each own
+    their scorer. With ``judge_spec``, the symbol must be a ``Rubric`` subclass
+    whose ``__init__`` takes ``judge``; each rubric is built with the process's
+    shared client for that spec.
 
     :param rubric_name: Name of the symbol in ``file_path``.
     :param file_path: Path to the Python module defining the rubric or reward fn.
+    :param judge_spec: The judge handed to the rubric, or ``None``.
+    :param judge_optional: Load a symbol that does not take ``judge`` without it,
+        for a manifest whose group rubric is the one taking it.
     :returns: A zero-argument callable returning an OpenEnv ``Rubric``.
     :rtype: Callable[[], Rubric]
-    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or
+        callable, or a judge is set and the symbol does not take one.
     """
     file_path_obj = Path(file_path)
     if not file_path_obj.exists():
         msg = f"{file_path} not found"
         raise ValueError(msg)
     try:
-        abs_file_path = file_path_obj.resolve()
-        module_name = file_path_obj.stem
-        spec = importlib_util.spec_from_file_location(
-            module_name,
-            str(abs_file_path),
-        )
-        if spec is None or spec.loader is None:
-            msg = f"Could not create spec for {abs_file_path}"
-            raise ValueError(msg)
-        rubric_module = importlib_util.module_from_spec(spec)
-        spec.loader.exec_module(rubric_module)
+        rubric_module = _load_module_from_path(file_path, file_path_obj.resolve())
         obj = getattr(rubric_module, rubric_name)
     except Exception as e:
         msg = f"Error importing rubric {rubric_name} from {file_path}: {e}"
@@ -84,35 +101,90 @@ def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]
 
     from openenv.core.rubrics.base import Rubric  # optional extra: llm
 
+    from agilerl.llm_envs.judge import shared_judge_client  # optional extra: llm
     from agilerl.llm_envs.rubrics import reward_fn_to_rubric  # optional extra: llm
 
+    if judge_spec is not None:
+        if (
+            isinstance(obj, type)
+            and issubclass(obj, Rubric)
+            and "judge" in inspect.signature(obj).parameters
+        ):
+            judge = shared_judge_client(judge_spec)
+            return lambda: obj(judge=judge)
+        if not judge_optional:
+            msg = (
+                f"A judge is set, so {rubric_name!r} in {file_path} must be a "
+                "Rubric subclass whose __init__ takes judge."
+            )
+            raise TypeError(msg)
     if isinstance(obj, Rubric):
-        return lambda: obj
+        try:
+            deepcopy(obj)
+        except TypeError as e:
+            msg = (
+                f"{rubric_name!r} in {file_path} is a Rubric instance that cannot be "
+                "copied per env slot, likely because it holds a client. Make it a "
+                "Rubric class; a judge client goes in through __init__(judge)."
+            )
+            raise TypeError(msg) from e
+        return lambda: deepcopy(obj)
     if isinstance(obj, type) and issubclass(obj, Rubric):
         return obj
     if callable(obj):
         return lambda: reward_fn_to_rubric(obj)
     msg = (
         f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
-        f"subclass, or (completion, answer, question) -> float callable, "
+        f"subclass, or a callable of completion, answer, and question, "
         f"got {type(obj).__name__}."
     )
     raise TypeError(msg)
 
 
-def get_rubric(rubric_name: str, file_path: str) -> Rubric:
-    """Load one Rubric from a file, wrapping legacy reward callables.
+def get_group_rubric(
+    rubric_name: str, file_path: str, judge_spec: JudgeSpec | None = None
+) -> GroupRubric:
+    """Load a group rubric from a module; one instance serves a whole collector.
 
-    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
-    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
-    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
-
-    :param rubric_name: Name of the symbol in ``file_path``.
-    :param file_path: Path to the Python module defining the rubric or reward fn.
-    :returns: An OpenEnv ``Rubric`` instance.
-    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
+    :param rubric_name: Name of a ``GroupRubric`` subclass or instance in ``file_path``.
+    :param file_path: Path to the Python module defining it.
+    :param judge_spec: The judge handed to the rubric, or ``None``.
+    :returns: The group rubric.
+    :raises TypeError: If the symbol is not a group rubric, or a judge is set and
+        the symbol is not a class whose ``__init__`` takes one.
     """
-    return get_rubric_factory(rubric_name, file_path)()
+    file_path_obj = Path(file_path)
+    if not file_path_obj.exists():
+        msg = f"{file_path} not found"
+        raise ValueError(msg)
+    try:
+        rubric_module = _load_module_from_path(file_path, file_path_obj.resolve())
+        obj = getattr(rubric_module, rubric_name)
+    except Exception as e:
+        msg = f"Error importing group rubric {rubric_name} from {file_path}: {e}"
+        raise ValueError(msg) from e
+
+    from agilerl.llm_envs.judge import shared_judge_client  # optional extra: llm
+    from agilerl.llm_envs.rubrics import GroupRubric  # optional extra: llm
+
+    is_class = isinstance(obj, type) and issubclass(obj, GroupRubric)
+    if judge_spec is not None:
+        if not (is_class and "judge" in inspect.signature(obj).parameters):
+            msg = (
+                f"A judge is set, so {rubric_name!r} in {file_path} must be a "
+                "GroupRubric subclass whose __init__ takes judge."
+            )
+            raise TypeError(msg)
+        return obj(judge=shared_judge_client(judge_spec))
+    if is_class:
+        return obj()
+    if isinstance(obj, GroupRubric):
+        return obj
+    msg = (
+        f"{rubric_name!r} in {file_path} must be a GroupRubric instance or "
+        f"subclass, got {type(obj).__name__}."
+    )
+    raise TypeError(msg)
 
 
 def escape_non_format_braces(

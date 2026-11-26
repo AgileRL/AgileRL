@@ -4,12 +4,13 @@
 import copy
 import gc
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from unittest import mock
 
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 from datasets import Dataset
@@ -17,17 +18,34 @@ from peft import LoraConfig
 from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core.sequence_layout import ContextParallelSequence
 from agilerl.algorithms.sft import SFT
-from agilerl.distributed import FSDPConfig, resolve_device
+from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.distributed import FSDPConfig, FSDPRuntime, resolve_device
+from agilerl.distributed.mesh import ParallelMesh
 from agilerl.llm_envs import DatasetEnv
+from agilerl.utils.llm_packing import pack_next_token_frame
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
+from agilerl.utils.stochastic_round import bf16_round_step
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
+    LAYOUTS,
     create_module,
+    create_tiny_qwen3,
+    hand_laid_inputs,
     optimizer_state,
     record_outputs,
+    right_padded_batch,
     scale_losses,
+    take_grads,
     trainable_weights,
+    use_layout,
+    use_packed,
+)
+from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
+    patch_cuda_device,
+    save_checkpoint_config,
 )
 
 
@@ -74,7 +92,6 @@ def generate_sft(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
     from_name=False,
-    use_liger_loss=False,
     update_epochs=1,
 ):
     gc.collect()
@@ -113,10 +130,13 @@ def generate_sft(
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         lora_config=lora_config,
-        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
+        fsdp_config=(
+            FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+            if dist_mode == "fsdp2"
+            else None
+        ),
         device="cuda" if torch.cuda.is_available() else "cpu",
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_liger_loss=use_liger_loss,
         update_epochs=update_epochs,
     )
 
@@ -263,7 +283,6 @@ class TestSFTLearn:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [32])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    @pytest.mark.parametrize("use_liger_loss", [False, True])
     def test_sft_learn(
         self,
         sft_factory,
@@ -276,7 +295,6 @@ class TestSFTLearn:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
-        use_liger_loss,
     ):
         sft = sft_factory(
             dist_mode_factory,
@@ -287,7 +305,6 @@ class TestSFTLearn:
             max_tokens,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
-            use_liger_loss=use_liger_loss,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
@@ -462,120 +479,9 @@ class TestSFTTest:
             ),
             device="cpu",
             micro_batch_size_per_gpu=1,
-            use_liger_loss=False,
         )
         with pytest.raises(TypeError, match="needs an objective='sft'"):
             sft.test(DummyPreferenceEnv(), loop=1)
-
-
-class TestSFTLigerUnavailableBehaviour:
-    @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
-    def test_sft_liger_unavailable_behaviour(
-        self,
-        monkeypatch,
-        sft_factory,
-        dist_mode_factory,
-        model_factory,
-        assertion_mode,
-    ):
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-        monkeypatch.setattr("agilerl.algorithms.sft.HAS_LIGER_KERNEL", False)
-        if assertion_mode == "warns_and_fallback":
-            with pytest.warns(
-                UserWarning,
-                match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
-            ):
-                sft = sft_factory(
-                    dist_mode_factory=dist_mode_factory,
-                    model_factory=model_factory,
-                    dist_mode=None,
-                    vocab_size=30,
-                    input_size=5,
-                    max_tokens=10,
-                    pretrained_model_name_or_path=None,
-                    micro_batch_size_per_gpu=None,
-                    from_name=False,
-                    use_liger_loss=True,
-                )
-            assert sft.use_liger_loss is False
-        else:
-            # When liger is unavailable and use_liger_loss=False, training should
-            # proceed normally using the standard PyTorch cross-entropy loss path.
-            sft = sft_factory(
-                dist_mode_factory=dist_mode_factory,
-                model_factory=model_factory,
-                dist_mode=None,
-                vocab_size=30,
-                input_size=5,
-                max_tokens=10,
-                pretrained_model_name_or_path=None,
-                micro_batch_size_per_gpu=None,
-                from_name=False,
-                use_liger_loss=False,
-            )
-            assert sft.use_liger_loss is False
-
-        sft.clean_up()
-
-
-class TestSFTLigerBiasCast:
-    def test_liger_head_bias_cast_to_hidden_dtype(self, monkeypatch):
-        sft = SFT(
-            actor_network=create_module(
-                input_size=10, max_tokens=20, vocab_size=100, device="cpu"
-            ),
-            pad_token_id=99,
-            pad_token="<pad>",
-            lora_config=LoraConfig(
-                r=4,
-                lora_alpha=16,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            ),
-            device="cpu",
-            micro_batch_size_per_gpu=1,
-            use_liger_loss=False,
-        )
-        sft.use_liger_loss = True
-
-        hidden = torch.randn(2, 6, 10)
-        sft.actor = mock.MagicMock()
-        sft.actor.return_value.logits = hidden
-        sft.calc_position_embeddings = False
-        seen: dict[str, torch.Tensor] = {}
-
-        def fake_kernel(weight, flat_hidden, labels, bias):
-            seen["weight"] = weight
-            seen["bias"] = bias
-            return torch.tensor(1.0)
-
-        @contextmanager
-        def fake_gather():
-            yield (
-                torch.ones(100, 10, dtype=torch.float16),
-                torch.ones(100, dtype=torch.float16),
-            )
-
-        monkeypatch.setattr(
-            "agilerl.algorithms.sft.LigerFusedLinearCrossEntropyLoss",
-            lambda **kwargs: fake_kernel,
-            raising=False,
-        )
-        monkeypatch.setattr(sft, "_liger_head_gather", fake_gather)
-        monkeypatch.setattr(sft, "_patch_lm_head_to_identity", nullcontext)
-
-        loss = sft._sft_loss(
-            torch.randint(0, 100, (2, 6)),
-            torch.ones(2, 6),
-            torch.randint(0, 100, (2, 5)),
-            training=False,
-        )
-
-        assert loss.item() == 1.0
-        assert seen["weight"].dtype == hidden.dtype
-        assert seen["bias"].dtype == hidden.dtype
-        sft.clean_up()
 
 
 class TestSFTLoad:
@@ -663,10 +569,6 @@ class TestSFTSaveLoadCheckpoint:
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 lora_config=copy.deepcopy(sft.lora_config),
-                # Match the saved agent's setting so the constructor doesn't
-                # mutate ``lora_config`` differently (``use_liger_loss=True``
-                # adds ``exclude_modules=["lm_head"]``).
-                use_liger_loss=sft.use_liger_loss,
             )
             own_profiler = new_sft.learn_profiler
             new_sft.load_checkpoint(tmpdir)
@@ -703,6 +605,8 @@ class TestSFTSaveLoadCheckpoint:
                         getattr(new_sft, attr).is_sharded
                         == getattr(sft, attr).is_sharded
                     )
+                elif attr == "sequence_layout":
+                    assert type(getattr(new_sft, attr)) is type(getattr(sft, attr))
                 elif attr == "learn_profiler":
                     assert new_sft.learn_profiler is own_profiler
                 elif attr == "lora_config":
@@ -762,7 +666,7 @@ class TestSFTRecompile:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        # LLMAlgorithm.recompile() is a guarded no-op unless torch_compiler is enabled.
+        # LLM algorithms run with torch_compiler=None, so recompile is a no-op.
         sft.recompile()
         sft.clean_up()
 
@@ -831,6 +735,35 @@ class TestSFTGetLogprobs:
         )
         log_probs = sft._get_logprobs(ids=ids, batch_size=1)
         assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
+        sft.clean_up()
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_context_parallel_logprobs_match_padded(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        # SFT never samples, so it keeps temperature 0; log-probs divide by it.
+        sft.temperature = 1.0
+        ids, mask, _ = packing_sft_batch()
+        with torch.no_grad():
+            padded = sft._get_logprobs(ids=ids, batch_size=2, attention_mask=mask)
+        sft.sequence_layout = ContextParallelSequence(
+            pad_token_id=sft.pad_token_id,
+            cp=1,
+            group=torch.distributed.group.WORLD,
+            rank=0,
+            round_to=8,
+        )
+
+        # Act
+        with torch.no_grad():
+            cp = sft._get_logprobs(ids=ids, batch_size=2, attention_mask=mask)
+
+        # Assert: CP drops its round_to pad back to the input frame.
+        assert cp.shape == (4, 11)
+        scored = mask[:, 1:].bool()
+        torch.testing.assert_close(
+            cp[scored], padded[scored], atol=PACKING_ATOL, rtol=0
+        )
         sft.clean_up()
 
 
@@ -935,16 +868,14 @@ class TestSFTLearnPhaseTimings:
             batch_size=4,
             micro_batch_size_per_gpu=2,
             wrap=False,
-            gradient_checkpointing=False,
             device="cpu",
-            use_liger_loss=False,
         )
         experiences = {
             "input_ids": torch.randint(
                 0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
             ),
             "attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "prompt_lengths": [2, 2, 2, 2],
+            "loss_mask": torch.arange(6).expand(4, 6) >= 2,
         }
 
         # Act
@@ -978,21 +909,104 @@ def make_cpu_sft() -> SFT:
         batch_size=4,
         micro_batch_size_per_gpu=2,
         wrap=False,
-        gradient_checkpointing=False,
         device="cpu",
-        use_liger_loss=False,
     )
 
 
-def random_sft_batch() -> dict[str, torch.Tensor | list[int]]:
+def random_sft_batch() -> dict[str, torch.Tensor]:
     """Four six-token examples with two-token prompts."""
     return {
         "input_ids": torch.randint(
             0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
         ),
         "attention_mask": torch.ones(4, 6, dtype=torch.long),
-        "prompt_lengths": [2, 2, 2, 2],
+        "loss_mask": torch.arange(6).expand(4, 6) >= 2,
     }
+
+
+class TestSFTLearnActivationOffload:
+    @pytest.mark.parametrize("offload", [True, False])
+    def test_gradient_forward_saves_activations_to_the_offload_device(
+        self, offload: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        sft = make_cpu_sft()
+        sft.activation_offload = offload
+        saved_tensor_counts = []
+
+        # save_on_cpu pins memory, which needs a GPU; count what it would offload.
+        @contextmanager
+        def counting_save_on_cpu(pin_memory: bool = False):
+            def pack(tensor: torch.Tensor) -> torch.Tensor:
+                saved_tensor_counts.append(tensor.numel())
+                return tensor
+
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+                yield
+
+        monkeypatch.setattr(torch.autograd.graph, "save_on_cpu", counting_save_on_cpu)
+
+        # Act
+        metrics = sft.learn(random_sft_batch())
+
+        # Assert
+        assert np.isfinite(metrics["loss"])
+        assert bool(saved_tensor_counts) is offload
+        sft.clean_up()
+
+
+def _bf16_sft() -> SFT:
+    return SFT(
+        actor_network=create_module(
+            input_size=10, max_tokens=20, vocab_size=100, device="cpu"
+        ),
+        pad_token_id=99,
+        pad_token="<pad>",
+        lora_config=LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        ),
+        batch_size=4,
+        micro_batch_size_per_gpu=2,
+        device="cpu",
+    )
+
+
+class TestSFTLearnBf16Rounding:
+    def test_learn_leaves_the_draw_at_the_optimizer_step(self) -> None:
+        sft = _bf16_sft()
+
+        sft.learn(random_sft_batch())
+
+        assert sft.optimizer_steps > 0
+        assert bf16_round_step.get() == sft.optimizer_steps
+        sft.clean_up()
+
+    def test_forward_uses_the_draw_of_its_own_agent(self) -> None:
+        # Arrange
+        first = _bf16_sft()
+        second = _bf16_sft()
+        first.learn(random_sft_batch())
+        for _ in range(3):
+            second.learn(random_sft_batch())
+        steps_before = first.optimizer_steps
+        seen: list[int | None] = []
+        handle = first.actor.register_forward_pre_hook(
+            lambda _module, _args: seen.append(bf16_round_step.get())
+        )
+
+        # Act
+        first.learn(random_sft_batch())
+
+        # Assert
+        handle.remove()
+        assert steps_before < second.optimizer_steps
+        assert seen[0] == steps_before
+        first.clean_up()
+        second.clean_up()
 
 
 class TestSFTLearnMetrics:
@@ -1082,4 +1096,272 @@ class TestSFTLearnNonFiniteLoss:
         with pytest.raises(ValueError, match="Loss is not finite"):
             sft.learn(random_sft_batch())
         assert list(scales) == []
+        sft.clean_up()
+
+
+class TestSFTUnsetFSDPMemory:
+    def test_set_fields_skip_the_estimate(self) -> None:
+        # Arrange
+        agent = make_cpu_sft()
+        agent.device = "cuda"
+        config = FSDPConfig(
+            checkpoint_every_n_blocks=1,
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
+            cpu_offload=False,
+        )
+
+        # Act
+        resolved = agent._resolve_fsdp_config(config)
+
+        # Assert
+        assert resolved == config
+        agent.clean_up()
+
+    def test_unset_fields_are_searched_from_max_model_len(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        # Arrange
+        agent = make_cpu_sft()
+        save_checkpoint_config(
+            agent, tmp_path, SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
+        )
+        patch_cuda_device(agent, monkeypatch, 80 * 2**30)
+
+        # Act: a set memory field keeps the run FSDP.
+        resolved = agent._resolve_fsdp_config(FSDPConfig(cpu_offload=False))
+
+        # Assert
+        assert all(getattr(resolved, name) is not None for name in FSDP_MEMORY_FIELDS)
+        assert isinstance(agent.gradient_checkpointing, bool)
+        agent.clean_up()
+
+    def test_off_cuda_unset_fields_raise(self) -> None:
+        # Arrange
+        agent = make_cpu_sft()
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=r"fsdp\.reshard_after_forward.*CUDA"):
+            agent._resolve_fsdp_config(FSDPConfig())
+        agent.clean_up()
+
+
+# Packed and padded attention differ only in fp32 summation order.
+PACKING_ATOL = 1e-5
+
+
+def make_qwen3_sft() -> SFT:
+    """Tiny fp32 Qwen3 SFT on CPU with non-zero LoRA deltas."""
+    # Liger's instance patches are Triton kernels; this model runs on CPU.
+    with mock.patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+        sft = SFT(
+            actor_network=create_tiny_qwen3(),
+            pad_token_id=63,
+            pad_token="<pad>",
+            lora_config=LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["q_proj", "v_proj"],
+            ),
+            batch_size=4,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
+    with torch.no_grad():
+        for name, param in sft.actor.named_parameters():
+            if "lora_B" in name:
+                param.normal_(std=0.5)
+    return sft
+
+
+def packing_sft_batch() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Right-padded rows of 12, 9, 6 and 11 tokens with their response labels."""
+    ids, mask = right_padded_batch([12, 9, 6, 11])
+    prompt_masks = SFT._create_prompt_masks([3, 2, 4, 2], max_length=12)
+    labels = torch.where((prompt_masks.bool() & mask)[:, 1:], ids[:, 1:], -100)
+    return ids, mask.long(), labels
+
+
+def lora_grads(sft: SFT) -> list[torch.Tensor]:
+    """Clone and clear the gradient of every trainable parameter."""
+    grads = []
+    for param in sft.actor.parameters():
+        if param.requires_grad:
+            grads.append(param.grad.clone())
+            param.grad = None
+    return grads
+
+
+class TestSFTSFTLoss:
+    def test_padded_loss_is_the_token_mean_cross_entropy_over_response_tokens(
+        self,
+    ) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        ids, mask, labels = packing_sft_batch()
+        with torch.no_grad():
+            logits = sft.actor(input_ids=ids, attention_mask=mask).logits
+        expected = F.cross_entropy(
+            logits[:, :-1].reshape(-1, logits.shape[-1]),
+            labels.reshape(-1),
+            ignore_index=-100,
+        )
+
+        # Act
+        with torch.no_grad():
+            loss = sft._sft_loss(ids, mask, labels, training=False)
+
+        # Assert
+        torch.testing.assert_close(loss, expected, atol=PACKING_ATOL, rtol=0)
+        sft.clean_up()
+
+    def test_packed_loss_and_grads_match_padded(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        ids, mask, labels = packing_sft_batch()
+        forward_shapes = []
+        sft.actor.register_forward_pre_hook(
+            lambda _m, _a, kwargs: forward_shapes.append(kwargs["input_ids"].shape),
+            with_kwargs=True,
+        )
+        padded_loss = sft._sft_loss(ids, mask, labels, training=True)
+        padded_loss.backward()
+        padded_grads = lora_grads(sft)
+        use_packed(sft, True)
+
+        # Act
+        packed_loss = sft._sft_loss(ids, mask, labels, training=True)
+        packed_loss.backward()
+        packed_grads = lora_grads(sft)
+
+        # Assert: the packed forward is one row of the 38 real tokens.
+        assert forward_shapes == [torch.Size([4, 12]), torch.Size([1, 38])]
+        torch.testing.assert_close(packed_loss, padded_loss, atol=PACKING_ATOL, rtol=0)
+        assert padded_grads
+        for packed, padded in zip(packed_grads, padded_grads, strict=True):
+            torch.testing.assert_close(packed, padded, atol=PACKING_ATOL, rtol=0)
+        sft.clean_up()
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_context_parallel_loss_and_grads_match_padded(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        ids, mask, labels = packing_sft_batch()
+        forward_shapes = []
+        sft.actor.register_forward_pre_hook(
+            lambda _m, _a, kwargs: forward_shapes.append(kwargs["input_ids"].shape),
+            with_kwargs=True,
+        )
+        padded_loss = sft._sft_loss(ids, mask, labels, training=True)
+        padded_loss.backward()
+        padded_grads = lora_grads(sft)
+        sft.sequence_layout = ContextParallelSequence(
+            pad_token_id=sft.pad_token_id,
+            cp=1,
+            group=torch.distributed.group.WORLD,
+            rank=0,
+            round_to=8,
+        )
+
+        # Act
+        cp_loss = sft._sft_loss(ids, mask, labels, training=True)
+        cp_loss.backward()
+        cp_grads = lora_grads(sft)
+
+        # Assert: CP pads the 11 action tokens to a multiple of round_to=8.
+        assert forward_shapes == [torch.Size([4, 12]), torch.Size([4, 16])]
+        torch.testing.assert_close(cp_loss, padded_loss, atol=PACKING_ATOL, rtol=0)
+        assert padded_grads
+        for cp_grad, padded in zip(cp_grads, padded_grads, strict=True):
+            torch.testing.assert_close(cp_grad, padded, atol=PACKING_ATOL, rtol=0)
+        sft.clean_up()
+
+
+def hand_laid_sft_loss(
+    sft: SFT, layout: str, ids: torch.Tensor, mask: torch.Tensor, labels: torch.Tensor
+) -> torch.Tensor:
+    """Token-mean response cross-entropy of one hand-laid forward of *layout*."""
+    kwargs, packed, aligned_ids, _ = hand_laid_inputs(sft, layout, ids, mask)
+    with sft._patch_lm_head_to_identity():
+        hidden = sft.actor(**kwargs).logits
+    if packed is not None:
+        labels = pack_next_token_frame(labels, packed, -100)
+    elif layout == "cp":
+        hidden = torch.cat([hidden, hidden.new_zeros(hidden[:, :1].shape)], dim=1)
+        labels = F.pad(labels, (0, aligned_ids.shape[1] - ids.shape[1]), value=-100)
+    scored = labels != -100
+    fused_fn, head_w, head_b = sft._fused_logprob_fn_and_head()
+    log_probs = fused_fn(
+        hidden[:, :-1][scored].unsqueeze(0),
+        head_w,
+        head_b,
+        labels[scored].unsqueeze(0),
+        temperature=1.0,
+    )
+    return -log_probs.sum() / scored.sum()
+
+
+@pytest.mark.usefixtures("gloo_process_group")
+class TestSFTSFTLossLayouts:
+    """Each layout's SFT loss is one hand-laid forward of the same kind."""
+
+    @pytest.mark.parametrize("training", [False, True], ids=["eval", "train"])
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_matches_the_hand_laid_forward(self, layout: str, training: bool) -> None:
+        # Arrange: two trailing columns are padding in every row.
+        sft = make_qwen3_sft()
+        use_layout(sft, layout)
+        ids, mask = right_padded_batch([12, 9, 6, 11], seq_len=14)
+        prompt_masks = SFT._create_prompt_masks([3, 2, 4, 2], max_length=14)
+        labels = torch.where((prompt_masks.bool() & mask)[:, 1:], ids[:, 1:], -100)
+        mask = mask.long()
+        with torch.set_grad_enabled(training):
+            sft.actor.train(mode=training)
+            expected = hand_laid_sft_loss(sft, layout, ids, mask, labels)
+        if training:
+            expected.backward()
+        expected_grads = take_grads(sft.actor)
+
+        # Act
+        with torch.set_grad_enabled(training):
+            loss = sft._sft_loss(ids, mask, labels, training=training)
+        if training:
+            loss.backward()
+        grads = take_grads(sft.actor)
+
+        # Assert: the layouts run different matmul shapes and sum orders than
+        # the hand-laid forward, so fp32 results differ by rounding per BLAS backend.
+        torch.testing.assert_close(loss, expected, atol=1e-6, rtol=1e-6)
+        assert bool(grads) is training
+        assert grads.keys() == expected_grads.keys()
+        for name, grad in grads.items():
+            torch.testing.assert_close(
+                grad, expected_grads[name], atol=1e-6, rtol=1e-6, msg=name
+            )
+        sft.clean_up()
+
+
+class TestSFTBuildSequenceLayout:
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_cp_config_shards_over_the_runtime_cp_group(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        world = torch.distributed.group.WORLD
+        sft.fsdp_config = FSDPConfig(cp=2)
+        runtime = FSDPRuntime(sft.fsdp_config)
+        runtime.parallel_mesh = ParallelMesh(
+            dp_shard=mock.MagicMock(), cp=mock.MagicMock(get_group=lambda: world)
+        )
+        sft.shard_runtime = runtime
+
+        # Act
+        layout = sft._build_sequence_layout()
+
+        # Assert
+        assert isinstance(layout, ContextParallelSequence)
+        assert (layout.cp, layout.group, layout.rank) == (2, world, 0)
         sft.clean_up()

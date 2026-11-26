@@ -167,19 +167,19 @@ For standard RL algorithms, this section is validated against :class:`~agilerl.m
 **LLM Fine-tuning:**
 
 For LLM algorithms, the ``network`` section is validated against
-:class:`~agilerl.models.networks.FinetuningNetworkSpec`. ``pretrained_model_name_or_path`` can be
-any model available on Hugging Face or locally.
+:class:`~agilerl.models.networks.FinetuningNetworkSpec`. ``pretrained_model_name_or_path`` names a
+model from the Arena model catalog (``arena models supported``); for other weights of the same
+architecture, also set ``weights_path``. LoRA trains on the catalog's modules for the model, so
+``lora_config`` sets the rank and scaling, not the modules.
 
 .. code-block:: yaml
 
    network:
      pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
-     max_context_length: 512
+     max_context_length: 1024
      lora_config:
        lora_r: 16
        lora_alpha: 64
-       target_modules: [q_proj, k_proj, v_proj, o_proj]
-       lora_dropout: 0.05
        task_type: CAUSAL_LM
 
 1. ``mutation``
@@ -497,8 +497,6 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
 
          # Train on Arena.
          trainer.train(
-          resource_id="arena-medium",
-          num_nodes=2,
           project="my-project",
           experiment_name="lunar-lander-dqn",
          )
@@ -509,12 +507,10 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
       .. code-block:: bash
 
          arena experiments submit dqn.yaml \
-             --resource-id arena-medium \
-             --num-nodes 2 \
              --project my-project \
              --experiment-name lunar-lander-dqn
 
 .. seealso::
 
-   :ref:`tutorial_arena_end_to_end` for a complete walkthrough of validating, training, and deploying
-   using a custom environment.
+   :ref:`tutorial_arena_grpo_gsm8k` for a complete walkthrough of training and deploying
+   an LLM on Arena.

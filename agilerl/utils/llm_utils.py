@@ -16,7 +16,7 @@ import sys
 import tempfile
 import textwrap
 import warnings
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from io import BufferedWriter
@@ -27,7 +27,6 @@ from typing import (
     Any,
     Protocol,
     TypeGuard,
-    TypeVar,
     cast,
     runtime_checkable,
 )
@@ -41,24 +40,38 @@ from torch.optim.lr_scheduler import LambdaLR
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
     FAMILY_RUNTIME_CONFIGS,
+    ModelRuntimeConfig,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
+    trainer_model_class,
 )
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
 from agilerl.architectures.vllm_language import (
-    apply_language_tower_engine_kwargs,
-    apply_tower_connector_lora_engine_kwargs,
+    apply_multimodal_engine_kwargs,
     nested_language_config,
 )
+from agilerl.arena.memory.resolve.attention import (
+    FAMILY_ATTN_IMPLEMENTATIONS,
+    KERNEL_RULE_MODEL_TYPES,
+    resolve_attn_implementation,
+)
+from agilerl.arena.memory.resolve.lora import resolve_max_lora_rank
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
+from agilerl.distributed.fsdp_meta import (
+    checkpoint_quantization_config,
+    dequantizing_quantization_config,
+)
 from agilerl.distributed.process import (
     allreduce_minmax_int,
     barrier,
     is_main_process,
     resolve_device,
 )
-from agilerl.protocols import GenerationConfigProtocol
+from agilerl.distributed.tensor_parallel import (
+    tensor_parallel_row_orders,
+    tensor_rows_in_order,
+)
 from agilerl.typing import (
     JSONValue,
     PopulationType,
@@ -70,6 +83,7 @@ from agilerl.utils.algo_utils import (
     create_warmup_cosine_scheduler,
     stack_and_pad_experiences,
 )
+from agilerl.utils.stochastic_round import cast_exported_adapter
 
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
@@ -86,8 +100,6 @@ else:
 
 logger = logging.getLogger(__name__)
 
-GenConfigT = TypeVar("GenConfigT", bound=GenerationConfigProtocol)
-
 if HAS_LLM_DEPENDENCIES:
     from datasets import Dataset
     from peft import get_peft_model_state_dict
@@ -95,14 +107,14 @@ if HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file as safe_load_file
     from safetensors.torch import save_file
     from transformers import (
-        AutoConfig,
-        AutoModelForCausalLM,
         BitsAndBytesConfig,
         GenerationConfig,
+        PretrainedConfig,
     )
     from transformers.modeling_utils import PreTrainedModel
 
-    from agilerl.lora.moe import grouped_mm_supported
+    from agilerl.lora.moe import device_expert_backend
+    from agilerl.lora.moe.layouts import is_packed_experts_module
     from agilerl.utils.hf_remote_code import load_remote_code, remote_code_lock
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
@@ -110,7 +122,6 @@ else:
     # HAS_LLM_DEPENDENCIES, so these are never reached at runtime.
     PreTrainedModel = Any
     Dataset = Any
-    AutoModelForCausalLM: Any = None
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
     ParamWrapper: Any = None
@@ -131,6 +142,7 @@ LLM_RL_COMMON_METRIC_NAMES = (
     "loss",  # update-averaged objective
     "entropy",  # policy entropy proxy (mean negative logprob)
     "completion_length",  # mean token ids per trajectory
+    "micro_batches_per_step",  # mean micro-batches per optimizer step on this rank
     *ROW_PADDING_METRIC_NAMES,
 )
 
@@ -177,10 +189,11 @@ GRPO_METRIC_NAMES = (
 # PPO-only per-learn diagnostics.
 PPO_METRIC_NAMES = (
     "pg_loss",  # clipped policy-surrogate loss
-    "vf_loss",  # clipped value loss
+    "vf_loss",  # value MSE against GAE returns
     "kl",  # update-averaged K3 vs reference
     "kl_clamp_frac",  # action tokens whose K3 vs reference exceeds kl_clamp
     "clipfrac",  # binding-clip fraction
+    "off_policy_token_mask_frac",  # action tokens the off-policy token mask dropped
     "grad_norm_pre",  # actor LoRA grad norm before clipping
     "grad_norm_post",  # actor LoRA grad norm after clipping
     "critic_grad_norm_pre",  # critic LoRA + value head grad norm before clipping
@@ -194,6 +207,7 @@ PPO_METRIC_NAMES = (
 REINFORCE_METRIC_NAMES = (
     "kl",  # update-averaged K3 vs reference
     "pg_loss",  # clipped policy-surrogate loss
+    "off_policy_token_mask_frac",  # action tokens the off-policy token mask dropped
 )
 
 # Sampling-mismatch diagnostics shared by the GRPO/PPO/REINFORCE ``learn`` methods.
@@ -287,10 +301,6 @@ BNB_QUANT_NF4_ALIASES = frozenset(
 BNB_QUANT_PRESETS = (
     BNB_QUANT_NONE_ALIASES | BNB_QUANT_INT8_ALIASES | BNB_QUANT_NF4_ALIASES
 )
-
-# Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
-# submodule via regex (see https://github.com/huggingface/peft/issues/3129).
-CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
 def _as_optional_int(value: object | None) -> int | None:
@@ -437,13 +447,12 @@ def load_pad_token_configs(
     if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
         return None, None
 
-    trust_remote_code = (
-        family_runtime(model_name_or_path).trainer.trust_remote_code is True
-    )
+    trainer = family_runtime(model_name_or_path).trainer
+    trust_remote_code = trainer.trust_remote_code is True
     # A checkpoint can omit config.json or generation_config.json.
     try:
         with remote_code_lock(trust_remote_code):
-            model_config = AutoConfig.from_pretrained(
+            model_config = trainer.config_class.from_pretrained(
                 model_name_or_path,
                 trust_remote_code=trust_remote_code,
             )
@@ -481,37 +490,6 @@ def generation_tokens_for_turn(
     if max_output_tokens is None:
         return remaining
     return min(int(max_output_tokens), remaining)
-
-
-def hf_turn_generation_config(
-    generation_config: GenConfigT,
-    max_model_len: int,
-    prompt_length: int,
-    max_output_tokens: int | None,
-) -> GenConfigT:
-    """Copy of ``generation_config`` with this turn's token budget.
-
-    :param generation_config: Shared HuggingFace generation config.
-    :type generation_config: GenConfigT
-    :param max_model_len: Model context window (prompt + completion).
-    :type max_model_len: int
-    :param prompt_length: Token length of this turn's prompt.
-    :type prompt_length: int
-    :param max_output_tokens: Configured per-turn cap; ``None`` uses remaining context.
-    :type max_output_tokens: int | None
-    :return: Per-turn config; the original object is unchanged.
-    :rtype: GenConfigT
-    """
-    turn_config = copy.copy(generation_config)
-    turn_config.max_new_tokens = generation_tokens_for_turn(
-        max_model_len,
-        prompt_length,
-        max_output_tokens,
-    )
-    min_new_tokens = turn_config.min_new_tokens
-    if min_new_tokens is not None and min_new_tokens > turn_config.max_new_tokens:
-        turn_config.min_new_tokens = turn_config.max_new_tokens
-    return turn_config
 
 
 def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
@@ -579,10 +557,8 @@ def normalize_prompt_batch(
 def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
-    Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). FSDP2 full-shard (and any
-    collective-heavy DP path) also requires identical per-rank ``T`` so every
-    rank issues the same NCCL collectives.
+    FSDP2 full-shard (and any collective-heavy DP path) requires identical
+    per-rank ``T`` so every rank issues the same NCCL collectives.
 
     :param algo: LLM algorithm about to call ``learn``.
     :type algo: object
@@ -595,11 +571,7 @@ def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
         return False
     if getattr(algo, "fsdp_config", None) is not None:
         return True
-    if getattr(algo, "distributed", False):
-        return True
-    if not getattr(algo, "use_liger_loss", False):
-        return False
-    return getattr(algo, "importance_sampling_level", "token") == "token"
+    return bool(getattr(algo, "distributed", False))
 
 
 def pad_completion_batch_to_seq_len(
@@ -611,7 +583,7 @@ def pad_completion_batch_to_seq_len(
     """Right-pad stacked completions/masks to ``target_seq_len`` / ``target-1``.
 
     Pad positions use ``pad_token_id`` and ``False`` so they contribute nothing
-    to the masked CISPO/Liger objective.
+    to the masked CISPO objective.
 
     :param completion_ids: ``(B, T)`` token ids.
     :type completion_ids: torch.Tensor
@@ -702,8 +674,7 @@ def align_completion_batch_shapes_across_ranks(
     after pad so no rank enters sharded ``learn`` collectives while peers are
     still padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
-    to the global max ``T`` so Liger token-level chunk collectives stay in
-    lockstep.
+    to the global max ``T`` so sharded collectives stay in lockstep.
 
     :param completion_ids: Per-sample or stacked token ids.
     :type completion_ids: list[torch.Tensor] | torch.Tensor
@@ -793,6 +764,7 @@ def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
 def gather_to_host(
     named_tensors: Iterable[tuple[str, torch.Tensor]],
     keep: bool,
+    row_orders: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Gather each tensor in full and copy it into a new host tensor.
 
@@ -804,6 +776,8 @@ def gather_to_host(
     :type named_tensors: Iterable[tuple[str, torch.Tensor]]
     :param keep: Whether this rank keeps the host copies.
     :type keep: bool
+    :param row_orders: Dim-0 row index applied to the gathered tensor, by name.
+    :type row_orders: Mapping[str, torch.Tensor] | None
     :return: Host copies by name; empty when ``keep`` is false.
     :rtype: dict[str, torch.Tensor]
     """
@@ -816,6 +790,8 @@ def gather_to_host(
         full = value.full_tensor() if isinstance(value, DTensor) else value
         if not keep:
             continue
+        if row_orders is not None:
+            full = tensor_rows_in_order(full, row_orders.get(name))
         on_cuda = full.device.type == "cuda"
         buffer = torch.empty(full.shape, dtype=full.dtype, pin_memory=on_cuda)
         buffer.copy_(full, non_blocking=on_cuda)
@@ -922,6 +898,27 @@ class LoraAdapterSnapshot:
     value_head: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
+def adapter_hf_row_orders(
+    peft_model: nn.Module, adapter_name: str
+) -> dict[str, torch.Tensor]:
+    """Rows that put each tensor-parallel-permuted LoRA tensor back in Hugging Face order.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: nn.Module
+    :param adapter_name: Adapter to export.
+    :type adapter_name: str
+    :return: Row index by adapter state key (adapter segment and wrapper
+        segments stripped, as :func:`snapshot_lora_adapters` keys it).
+    :rtype: dict[str, torch.Tensor]
+    """
+    segment = f".{adapter_name}."
+    return {
+        canonical_fsdp_param_fqn(fqn.replace(segment, ".")): torch.argsort(order)
+        for fqn, order in tensor_parallel_row_orders(peft_model).items()
+        if segment in fqn
+    }
+
+
 def snapshot_lora_adapters(
     model: nn.Module,
     selected_adapters: Sequence[str],
@@ -965,6 +962,7 @@ def snapshot_lora_adapters(
                 for key, value in raw_state.items()
             ),
             keep=is_main,
+            row_orders=adapter_hf_row_orders(peft_model, adapter_name),
         )
         if not is_main:
             continue
@@ -1071,6 +1069,7 @@ def load_lora_adapters(
     adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
     adapter_state = safe_load_file(str(adapter_path), device=str(device))
 
+    row_orders = tensor_parallel_row_orders(model)
     missing: list[str] = []
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -1087,7 +1086,9 @@ def load_lora_adapters(
                 missing.append(loaded_key)
                 continue
 
-            full_tensor = adapter_state[loaded_key].to(device)
+            full_tensor = tensor_rows_in_order(
+                adapter_state[loaded_key].to(device), row_orders.get(name)
+            )
 
             if isinstance(param, DTensor):
                 # FSDP2 DTensor: scatter the full tensor onto the mesh
@@ -1171,55 +1172,6 @@ def build_bnb_quantization_config(
     raise TypeError(msg)
 
 
-def model_has_clippable_linear_wrappers(model: nn.Module) -> bool:
-    """Return True when the model uses *ClippableLinear projection wrappers.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Whether any ClippableLinear wrapper is present.
-    :rtype: bool
-    """
-    return any(
-        mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
-        for mod in model.modules()
-    )
-
-
-def discover_clippable_projection_leaf_names(model: nn.Module) -> list[str]:
-    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Sorted unique leaf names.
-    :rtype: list[str]
-    """
-    names: set[str] = set()
-    for name, mod in model.named_modules():
-        if mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
-            names.add(name.rsplit(".", 1)[-1])
-    return sorted(names)
-
-
-def discover_clippable_inner_linear_module_keys(model: nn.Module) -> list[str]:
-    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Module keys ending in ``.linear``.
-    :rtype: list[str]
-    """
-    named = dict(model.named_modules())
-    keys: list[str] = []
-    for name, mod in model.named_modules():
-        if not mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
-            continue
-        inner_key = f"{name}.linear"
-        inner = named.get(inner_key)
-        if inner is not None and _is_peft_adaptable_linear(inner):
-            keys.append(inner_key)
-    return sorted(keys)
-
-
 def _is_peft_adaptable_linear(module: nn.Module) -> bool:
     """Return True when PEFT LoRA can wrap this weight module."""
     if isinstance(module, nn.Linear):
@@ -1274,103 +1226,65 @@ def list_peft_matched_module_keys(
 
 
 def _looks_like_peft_target_regex(spec: str) -> bool:
-    """Heuristic: the user passed a regex ``target_modules`` spec.
-
-    Needed by :func:`adapt_lora_config_for_model` to pass regex specs through
-    untouched instead of rewriting them like plain suffix names.
-    """
+    """Heuristic: the user passed a regex ``target_modules`` spec, kept as given."""
     return spec.startswith(".*") or r"\." in spec or "(" in spec
 
 
-def build_clippable_linear_lora_target_regex(
-    projection_names: list[str],
-) -> str:
-    r"""Build a PEFT regex that targets inner ``.linear`` inside *ClippableLinear.
+def language_model_prefix(model: nn.Module) -> str | None:
+    """Return the module path of a VL model's language model, or None for a text-only model.
 
-    Example::
-
-        .*\.(q_proj|k_proj|v_proj)\.linear
-
-    For projections under a multimodal scope, use
-    :func:`build_scoped_lora_target_regex` instead (it also matches plain
-    ``nn.Linear`` projections under the scope).
-
-    See https://github.com/huggingface/peft/issues/3129
+    :param model: Model PEFT will wrap.
+    :type model: nn.Module
+    :return: Shortest ``named_modules`` key ending in ``language_model``.
+    :rtype: str | None
     """
-    if not projection_names:
-        msg = "At least one projection name is required for the LoRA target regex."
-        raise ValueError(msg)
-    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
-    # Optional prefix so top-level and nested keys both fullmatch.
-    return rf"(?:.*\.)?({alts})\.linear"
+    prefixes = [
+        name
+        for name, _ in model.named_modules()
+        if name.rsplit(".", 1)[-1] == "language_model"
+    ]
+    return min(prefixes, key=len) if prefixes else None
 
 
-def build_scoped_lora_target_regex(
-    projection_names: list[str],
-    scope: str,
-) -> str:
-    r"""PEFT regex for projections under a multimodal scope (e.g. ``language_model``).
+def _language_model_linear_leaf_names(model: nn.Module, prefix: str) -> list[str]:
+    """Leaf names of every adaptable linear under *prefix*, except ``lm_head``."""
+    names = {
+        name.rsplit(".", 1)[-1]
+        for name, module in model.named_modules()
+        if name.startswith(f"{prefix}.") and _is_peft_adaptable_linear(module)
+    }
+    # PEFT's all-linear leaves the output head frozen; some VL models nest it here.
+    return sorted(names - {"lm_head"})
 
-    Matches both:
 
-    * *ClippableLinear* inner weights (``…q_proj.linear``) on vision/audio towers
-    * Plain ``nn.Linear`` leaves (``…q_proj``) on the language model in Gemma 4
+def _anchored_lora_target_regex(language_names: list[str], prefix: str) -> str:
+    """PEFT regex matching *language_names* under *prefix*.
 
-    PEFT uses ``re.fullmatch`` on ``named_modules()`` keys (peft#3129).
+    PEFT matches a string ``target_modules`` with ``re.fullmatch`` on each
+    ``named_modules`` key.
     """
-    if not projection_names:
-        msg = "At least one projection name is required for the LoRA target regex."
-        raise ValueError(msg)
-    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
-    scope_esc = re.escape(scope.strip("."))
-    # Scope may be the first path component (``language_model.layers.0.q_proj``)
-    # or nested (``model.language_model.layers.0.q_proj``).
-    return rf"(?:.*\.)?{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+    alts = "|".join(re.escape(name) for name in language_names)
+    return rf"{re.escape(prefix)}\.(?:.*\.)?(?:{alts})"
 
 
-def _normalize_projection_leaf_name(name: str) -> str:
-    """Strip a trailing ``.linear`` so YAML can use either ``q_proj`` or ``q_proj.linear``."""
-    return name.removesuffix(".linear")
-
-
-def _projection_names_for_clippable_lora(
-    model: nn.Module, raw_targets: str | Iterable[str] | None
+def lora_target_module_names(
+    target_modules: str | Iterable[str] | None,
 ) -> list[str] | None:
-    """Resolve projection leaf names, or ``None`` if ``raw_targets`` is already regex."""
-    if raw_targets is None:
+    """Language-model LoRA leaf names, or None for ``all-linear`` / an opaque regex.
+
+    :param target_modules: PEFT ``target_modules`` list, ``all-linear``, or regex.
+    :type target_modules: str | Iterable[str] | None
+    :return: Suffix names from a list or an anchored VL rewrite regex; otherwise None.
+    :rtype: list[str] | None
+    """
+    if target_modules is None or target_modules == "all-linear":
         return None
-    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
-    if any(_looks_like_peft_target_regex(t) for t in raw_list):
+    if not isinstance(target_modules, str):
+        return list(target_modules)
+    match = re.search(r"\(\?:\.\*\\\.\)\?\(\?:([^)]+)\)", target_modules)
+    if match is None:
         return None
-
-    names: list[str] = []
-    for target in raw_list:
-        if target == "all-linear":
-            names.extend(discover_clippable_projection_leaf_names(model))
-        else:
-            names.append(_normalize_projection_leaf_name(target))
-    return sorted(set(names))
-
-
-def build_clippable_linear_lora_target_suffixes(
-    projection_names: list[str],
-) -> list[str]:
-    """Build PEFT list targets ``q_proj.linear`` (suffix match, avoids regex pitfalls)."""
-    return [f"{name}.linear" for name in sorted(set(projection_names))]
-
-
-def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
-    """Infer ``language_model`` / ``audio_tower`` scope only when all inner keys live under it."""
-    inner_keys = discover_clippable_inner_linear_module_keys(model)
-    if not inner_keys:
-        return None
-    for scope in ("language_model", "audio_tower"):
-        if all(
-            key == scope or key.startswith(f"{scope}.") or f".{scope}." in key
-            for key in inner_keys
-        ):
-            return scope
-    return None
+    return [re.sub(r"\\(.)", r"\1", part) for part in match.group(1).split("|")]
 
 
 # PEFT LoRA inject rejects these module names on Mamba-family model_type values
@@ -1476,7 +1390,7 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
         if new_targets != rewriteable:
             updates["target_modules"] = new_targets
             if dropped:
-                logger.info(
+                logger.warning(
                     "Dropped Mamba-incompatible LoRA target_modules %s",
                     dropped,
                 )
@@ -1494,7 +1408,7 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
             kept_params.append(str(param))
         if dropped_params:
             updates["target_parameters"] = kept_params or None
-            logger.info(
+            logger.warning(
                 "Dropped Mamba-incompatible LoRA target_parameters %s",
                 dropped_params,
             )
@@ -1517,128 +1431,108 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
     return _clone_lora_config(lora_config, **updates)
 
 
-def _example_module_keys_for_lora_scope(
-    model: nn.Module,
-    scope: str,
-    limit: int = 3,
-) -> list[str]:
-    """Sample ``named_modules`` keys under a scope (for error messages)."""
-    scope_token = scope.strip(".")
-    keys = [
-        key
-        for key, _ in model.named_modules()
-        if f".{scope_token}." in key or key.startswith(f"{scope_token}.")
-    ]
-    return keys[:limit]
+def _exclude_family_lora_modules(
+    model: nn.Module, lora_config: LoraConfig
+) -> LoraConfig:
+    """Add the family's ``lora_exclude_modules`` to ``exclude_modules``.
+
+    :raises ValueError: If ``exclude_modules`` is a regex and the family
+        excludes modules.
+    """
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
+    if runtime is None or not runtime.lora_exclude_modules:
+        return lora_config
+    if isinstance(lora_config.exclude_modules, str):
+        msg = (
+            f"exclude_modules regex {lora_config.exclude_modules!r} cannot take "
+            f"the {model_type} exclusions; pass a list of module names"
+        )
+        raise ValueError(msg)
+    existing = list(lora_config.exclude_modules or [])
+    missing = sorted(runtime.lora_exclude_modules - set(existing))
+    if not missing:
+        return lora_config
+    logger.info("Excluded %s modules %s from LoRA", model_type, missing)
+    return _clone_lora_config(lora_config, exclude_modules=existing + missing)
 
 
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
-    lora_target_scope: str | None = None,
 ) -> LoraConfig:
-    r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
+    """Rewrite ``LoraConfig.target_modules`` so PEFT wraps exactly the intended modules.
 
-    For *ClippableLinear* models (Gemma 4 vision/audio), short names like ``q_proj``
-    substring-match the wrapper and fail injection; use regex targets on the inner
-    ``.linear`` (https://github.com/huggingface/peft/issues/3129).
-
-    When ``lora_target_scope`` is set (e.g. ``language_model``), only modules under
-    that path are targeted. The scoped regex matches plain ``nn.Linear`` language
-    layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
-    not used when the scope is explicit.
+    On a VL model, named targets and ``all-linear`` land only under the
+    language model, so the towers stay frozen. A regex ``target_modules`` is
+    kept as given when every module it matches is under the language model.
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
+    A family's ``lora_exclude_modules`` join ``exclude_modules`` for every
+    ``target_modules`` form.
 
     Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
     factor dropout out of the parameter-level low-rank product.
+
+    :param model: Model PEFT will wrap.
+    :type model: nn.Module
+    :param lora_config: Trainer LoRA config.
+    :type lora_config: LoraConfig
+    :return: The config with resolved targets.
+    :rtype: LoraConfig
+    :raises ValueError: If the targets match no language-model module, or a
+        regex matches a module outside the language model.
     """
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
+    lora_config = _exclude_family_lora_modules(model, lora_config)
+    prefix = language_model_prefix(model)
+    if prefix is None:
+        return lora_config
     raw_targets = lora_config.target_modules
-    projection_names = _projection_names_for_clippable_lora(model, raw_targets)
-    if projection_names is None:
-        return lora_config
-
-    exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
-
-    explicit_scope = lora_target_scope is not None
-    scope = lora_target_scope if explicit_scope else _infer_clippable_lora_scope(model)
-
-    if scope is not None:
-        if not projection_names:
+    exclude_modules = list(lora_config.exclude_modules or [])
+    if isinstance(raw_targets, str) and raw_targets != "all-linear":
+        outside = [
+            key
+            for key in list_peft_matched_module_keys(
+                model, raw_targets, exclude_modules=exclude_modules
+            )
+            if key != prefix and not key.startswith(f"{prefix}.")
+        ]
+        if outside:
             msg = (
-                "lora_target_scope is set but no projection names were resolved "
-                f"from target_modules={raw_targets!r}."
+                f"LoRA target_modules regex {raw_targets!r} matches modules "
+                f"outside {prefix!r}, e.g. {outside[:3]}; the towers stay "
+                "frozen, so LoRA targets the language model only"
             )
             raise ValueError(msg)
-        target_spec = build_scoped_lora_target_regex(projection_names, scope)
-        matched = list_peft_matched_module_keys(
-            model, target_spec, exclude_modules=exclude_modules
-        )
-        if not matched:
-            examples = _example_module_keys_for_lora_scope(model, scope)
-            msg = (
-                f"No modules matched scoped LoRA target_modules for scope={scope!r} "
-                f"(regex={target_spec!r}). "
-                f"Example keys under scope: {examples}. "
-                "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
-            )
-            raise ValueError(msg)
-        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
-        logger.info(
-            "Adapted LoRA target_modules via scoped regex (%s) (%d modules), e.g. %s",
-            scope,
-            len(matched),
-            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
-        )
-        return adapted
-
-    if not model_has_clippable_linear_wrappers(model):
+        return lora_config
+    if raw_targets == "all-linear":
+        language_names = _language_model_linear_leaf_names(model, prefix)
+    else:
+        language_names = sorted(set(raw_targets or ()))
+    if not language_names:
         return lora_config
 
-    if not projection_names:
+    target_spec = _anchored_lora_target_regex(language_names, prefix)
+    matched = list_peft_matched_module_keys(
+        model, target_spec, exclude_modules=exclude_modules
+    )
+    if not matched:
         msg = (
-            "Model uses ClippableLinear wrappers but no projection names were "
-            "resolved for LoRA targeting."
+            f"No modules under {prefix!r} match LoRA targets {language_names}; "
+            "language-model linears are "
+            f"{_language_model_linear_leaf_names(model, prefix)}"
         )
         raise ValueError(msg)
-
-    suffix_targets = build_clippable_linear_lora_target_suffixes(projection_names)
-    candidate_specs: list[tuple[str, str | list[str]]] = [
-        ("suffix list", suffix_targets),
-        ("regex", build_clippable_linear_lora_target_regex(projection_names)),
-    ]
-
-    for label, target_spec in candidate_specs:
-        matched = list_peft_matched_module_keys(
-            model, target_spec, exclude_modules=exclude_modules
-        )
-        if not matched:
-            continue
-        if raw_targets == target_spec:
-            return lora_config
-        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
-        logger.info(
-            "Adapted LoRA target_modules for ClippableLinear wrappers via %s "
-            "(%d modules), e.g. %s",
-            label,
-            len(matched),
-            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
-        )
-        return adapted
-
-    sample_inner = discover_clippable_inner_linear_module_keys(model)[:5]
-    tried = [f"{label}={spec!r}" for label, spec in candidate_specs]
-    msg = (
-        "No modules matched LoRA target_modules for ClippableLinear layers. "
-        f"Tried: {'; '.join(tried)}. "
-        f"Example inner linear keys: {sample_inner}. "
-        "Set LORA_TARGET_SCOPE in INIT_HP if the tower path differs, or pass a "
-        "custom target_modules regex."
+    logger.info(
+        "Anchored LoRA target_modules at %s (%d modules), e.g. %s",
+        prefix,
+        len(matched),
+        ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
     )
-    raise ValueError(msg)
+    return _clone_lora_config_with_targets(lora_config, target_spec)
 
 
 def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
@@ -1648,7 +1542,7 @@ def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
     device = torch.device(f"cuda:{device_index}")
     alloc_gib = torch.cuda.memory_allocated(device) / (1024**3)
     reserved_gib = torch.cuda.memory_reserved(device) / (1024**3)
-    logger.info(
+    logger.debug(
         "%s: CUDA[%s] allocated=%.2f GiB reserved=%.2f GiB",
         label,
         device_index,
@@ -1725,42 +1619,51 @@ def format_colocated_vllm_oom_hint(
     return "\n".join(lines)
 
 
-def resolve_attn_implementation(
-    requested: str | None = None,
-    model_name_or_path: str | None = None,
-) -> str:
-    """Pick the trainer attention backend.
+def trainer_attn_implementation(model_name_or_path: str, cuda: bool) -> str:
+    """Pick the attention backend the trainer loads a checkpoint with.
 
-    Order: ``ATTN_IMPLEMENTATION`` / ``AGILERL_ATTN_IMPLEMENTATION`` → family
-    trainer default for ``model_name_or_path`` (Gemma SWA / gpt-oss
-    ``flex_attention``) → explicit ``requested`` → ``flash_attention_2`` if
-    ``flash_attn`` is installed, else ``sdpa``. Family defaults beat YAML /
-    spec values; env still overrides the catalog.
+    ``ATTN_IMPLEMENTATION`` or ``AGILERL_ATTN_IMPLEMENTATION`` in the
+    environment overrides the rule for an operator. Otherwise
+    :func:`~agilerl.arena.memory.resolve.attention.resolve_attn_implementation`
+    decides from the model family and the device.
 
-    :param requested: Explicit choice from the caller. ``None`` / ``"auto"``
-        continue to the flash/sdpa fallback when env and family are unset.
-    :type requested: str | None
-    :param model_name_or_path: Checkpoint id used to look up family trainer
-        defaults.
-    :type model_name_or_path: str | None
-    :return: The attention implementation string for ``from_pretrained`` /
-        ``from_config``.
+    :param model_name_or_path: Checkpoint id or local path.
+    :type model_name_or_path: str
+    :param cuda: The trainer runs on a CUDA device.
+    :type cuda: bool
+    :return: The attention implementation for ``from_pretrained`` / ``from_config``.
     :rtype: str
+    :raises ImportError: The rule picks ``flash_attention_2`` on CUDA and
+        ``flash_attn`` is not installed.
     """
-    env_attn = os.environ.get("ATTN_IMPLEMENTATION") or os.environ.get(
+    override = os.environ.get("ATTN_IMPLEMENTATION") or os.environ.get(
         "AGILERL_ATTN_IMPLEMENTATION"
     )
-    if env_attn and env_attn != "auto":
-        return env_attn.strip()
-    if model_name_or_path is not None:
-        family_attn = family_runtime(model_name_or_path).trainer.attn_implementation
-        if family_attn is not None and family_attn != "auto":
-            return family_attn
-    if requested is not None and requested != "auto":
-        return requested
-    if importlib.util.find_spec("flash_attn") is not None:
-        return "flash_attention_2"
-    return "sdpa"
+    if override:
+        return override.strip()
+    model_type = pretrained_model_type(model_name_or_path)
+    attn_implementation = resolve_attn_implementation(model_type, cuda)
+    if (
+        cuda
+        and attn_implementation == "flash_attention_2"
+        and importlib.util.find_spec("flash_attn") is None
+    ):
+        msg = (
+            f"flash_attn is required on CUDA for model_type '{model_type}'. "
+            "Install it: pip install flash-attn --no-build-isolation"
+        )
+        raise ImportError(msg)
+    if (
+        model_type not in FAMILY_ATTN_IMPLEMENTATIONS
+        and model_type not in KERNEL_RULE_MODEL_TYPES
+    ):
+        logger.warning(
+            "No attention backend is registered for model_type %r; loading with %s. "
+            "Check the family trains correctly with it, or set ATTN_IMPLEMENTATION.",
+            model_type,
+            attn_implementation,
+        )
+    return attn_implementation
 
 
 @runtime_checkable
@@ -1768,6 +1671,13 @@ class AttnImplementationConfig(Protocol):
     """Hugging Face config carrying the attention backend its layers dispatch on."""
 
     _attn_implementation: str | None
+
+
+@runtime_checkable
+class VisionTowerConfig(Protocol):
+    """Hugging Face VL config describing its vision tower under ``vision_config``."""
+
+    vision_config: object
 
 
 def set_sub_model_attn_implementation(
@@ -1814,6 +1724,18 @@ def language_model_attn_implementation(model: nn.Module) -> str | None:
     return language_config._attn_implementation
 
 
+def has_vision_tower(model: nn.Module) -> bool:
+    """Whether *model*'s config describes a vision tower.
+
+    :param model: Causal LM, VL model, or a PEFT / value-head wrapper of one.
+    :type model: nn.Module
+    :return: ``True`` when the config carries a ``vision_config``.
+    :rtype: bool
+    """
+    config = model.config
+    return isinstance(config, VisionTowerConfig) and config.vision_config is not None
+
+
 def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
     """Log the kernel each layer type uses on rank 0; raise if the language model ignores *attn_implementation*.
 
@@ -1837,17 +1759,23 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
                 f"{module.config._attn_implementation}",
             )
         namespace_name = type(module).__module__
-        # Mamba-style modeling modules expose a module-level fast-path flag.
-        fast_path = getattr(
-            sys.modules.get(namespace_name), "is_fast_path_available", None
-        )
+        namespace = sys.modules.get(namespace_name)
+        # Legacy modeling modules expose a module-level fast-path flag.
+        fast_path = getattr(namespace, "is_fast_path_available", None)
+        if fast_path is None and hasattr(
+            namespace, "mamba2_split_conv1d_scan_combined"
+        ):
+            # Transformers 5.16+ resolves the fused kernel from mamba_ssm when installed.
+            fast_path = importlib.util.find_spec("mamba_ssm") is not None
         if fast_path is not None and namespace_name not in namespaces_seen:
             namespaces_seen.add(namespace_name)
             lines.append(f"mamba fast path {namespace_name}: {fast_path}")
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and any(
+        is_packed_experts_module(module) for module in model.modules()
+    ):
         dtype = next(model.parameters()).dtype
-        supported = grouped_mm_supported(torch.cuda.current_device(), dtype)
-        lines.append(f"grouped_mm {dtype}: {supported}")
+        backend = device_expert_backend(torch.cuda.current_device(), dtype)
+        lines.append(f"expert GEMM backend {dtype}: {backend}")
     language_attn = language_model_attn_implementation(model)
     if is_main_process():
         logger.debug("Model kernels:\n  %s", "\n  ".join(lines))
@@ -1857,53 +1785,72 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
             f"{attn_implementation!r} was requested"
         )
         raise RuntimeError(msg)
+    if is_main_process():
+        logger.info("Trainer attention backend: %s", language_attn)
 
 
 def create_model_from_name_or_path(
     model_name_or_path: str,
+    attn_implementation: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
     use_distributed: bool = False,
+    use_sequence_packing: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
+    :param attn_implementation: Attention backend to load with, as
+        :func:`trainer_attn_implementation`.
+    :type attn_implementation: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
-        (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent, then
-        ``attn_implementation`` is resolved (env, family trainer default,
-        explicit value, then flash/sdpa). Other family trainer keys fill
-        via ``setdefault``.
+        (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent;
+        family trainer keys fill via ``setdefault``. Without a
+        ``quantization_config``, an FP8 / MXFP4 checkpoint dequantizes to
+        ``torch_dtype``.
     :type model_config: dict[str, Any ] | None
     :param add_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type add_value_head: bool, optional
     :param use_distributed: Whether the model is created for a distributed
         run, defaults to False
     :type use_distributed: bool, optional
+    :param use_sequence_packing: Install packed-sequence mixer wraps.
+    :type use_sequence_packing: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
+    :raises ValueError: If the checkpoint is quantized in a format that does
+        not dequantize on load.
     """
     # Class-level family patches wrap mixer ``__init__`` and must run
     # before ``from_pretrained``.
-    install_family_patches(pretrained_model_type(model_name_or_path))
+    install_family_patches(
+        pretrained_model_type(model_name_or_path),
+        use_sequence_packing=use_sequence_packing,
+    )
 
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault("torch_dtype", torch.bfloat16)
-    for key, value in (
-        family_runtime(model_name_or_path).trainer.model_dump(exclude_none=True).items()
-    ):
-        if key == "attn_implementation":
-            continue
+    trainer = family_runtime(model_name_or_path).trainer
+    for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
-    model_config["attn_implementation"] = resolve_attn_implementation(
-        model_config.get("attn_implementation"),
-        model_name_or_path=model_name_or_path,
-    )
-    if model_config["attn_implementation"] == "flex_attention":
+    if "quantization_config" not in model_config:
+        checkpoint_config, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+        quantization_config = checkpoint_quantization_config(checkpoint_config)
+        if quantization_config is not None:
+            # SM 8.9+ GPUs otherwise keep FP8 weights and swap in FP8Linear.
+            model_config["quantization_config"] = dequantizing_quantization_config(
+                quantization_config
+            )
+    model_config["attn_implementation"] = attn_implementation
+    if is_main_process():
+        logger.info("Trainer attention backend: %s", attn_implementation)
+    if attn_implementation == "flex_attention":
         patch_flex_attention_kernel_options()
+    model_class = trainer_model_class(model_name_or_path)
     load_remote_code(
         model_name_or_path,
-        AutoModelForCausalLM,
+        model_class,
         model_config.get("trust_remote_code"),
     )
     if add_value_head:
@@ -1912,7 +1859,7 @@ def create_model_from_name_or_path(
             **model_config,
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = model_class.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
@@ -2008,10 +1955,20 @@ def fill_outside_mask(
 def masked_mean(
     values: torch.Tensor, mask: torch.Tensor, axis: int | None = None
 ) -> torch.Tensor:
-    """Compute mean of tensor with a masked values."""
+    """Mean of ``values`` over a 0/1 ``mask``; an empty mask averages to ``0``.
+
+    :param values: Values to reduce.
+    :type values: torch.Tensor
+    :param mask: 0/1 mask selecting which values count.
+    :type mask: torch.Tensor
+    :param axis: Dimension to reduce, or ``None`` for all of them.
+    :type axis: int | None
+    :return: The masked mean.
+    :rtype: torch.Tensor
+    """
     if axis is not None:
-        return (values * mask).sum(dim=axis) / mask.sum(dim=axis)
-    return (values * mask).sum() / mask.sum()
+        return (values * mask).sum(dim=axis) / mask.sum(dim=axis).clamp(min=1)
+    return (values * mask).sum() / mask.sum().clamp(min=1)
 
 
 def masked_var(
@@ -2049,7 +2006,6 @@ def value_fit(
     returns: torch.Tensor,
     mask: torch.Tensor,
     turn_ids: torch.Tensor | None = None,
-    turn_reduction: str = "mean",
 ) -> tuple[float, float]:
     """Explained variance of ``returns`` by ``values`` and their Pearson correlation.
 
@@ -2065,15 +2021,13 @@ def value_fit(
     :param turn_ids: Turn index per token, ``-1`` for non-action. When given,
         values and returns are compared per turn instead of per token.
     :type turn_ids: torch.Tensor | None
-    :param turn_reduction: :func:`pool_by_turns` reduction for the values.
-    :type turn_reduction: str
     :return: ``(explained_variance, correlation)``.
     :rtype: tuple[float, float]
     """
     if turn_ids is not None:
         num_turns = int(turn_ids.max().item()) + 1
-        values = pool_by_turns(values, turn_ids, num_turns, reduction=turn_reduction)
-        returns = pool_by_turns(returns, turn_ids, num_turns)
+        values = turn_state_values(values, turn_ids, num_turns)
+        returns = turn_state_values(returns, turn_ids, num_turns)
         turns = torch.arange(num_turns, device=turn_ids.device)
         mask = (turn_ids.unsqueeze(-1) == turns).any(dim=1)
     mask = mask.bool()
@@ -2101,6 +2055,35 @@ def masked_whiten(
     return whitened
 
 
+def global_masked_whiten(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Whiten masked values with the mean and variance over every rank.
+
+    Every rank must call this once per learn, including ranks with no masked
+    values. Tensor- and context-parallel ranks repeat their group's rows
+    equally, so the world statistics match the data-parallel ones.
+
+    :param values: Values to whiten.
+    :type values: torch.Tensor
+    :param mask: 0/1 mask selecting which values count.
+    :type mask: torch.Tensor
+    :return: Whitened values.
+    :rtype: torch.Tensor
+    """
+    weights = mask.to(torch.float32)
+    values_f = values.to(torch.float32)
+    stats = torch.stack(
+        [weights.sum(), (values_f * weights).sum(), (values_f.pow(2) * weights).sum()]
+    )
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(stats)
+    count, total, total_sq = stats.tolist()
+    if count <= 1:
+        return values
+    mean = total / count
+    var = max(total_sq / count - mean * mean, 0.0) * count / (count - 1)
+    return ((values_f - mean) * (var + 1e-8) ** -0.5).to(values.dtype)
+
+
 def pool_by_turns(
     token_values: torch.Tensor,
     turn_ids: torch.Tensor,
@@ -2116,19 +2099,13 @@ def pool_by_turns(
     :param num_turns: Total number of turns (max turn_id + 1).
     :type num_turns: int
     :param reduction: ``"mean"`` (default) for mean-pooling,
-        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios),
-        ``"final_value"`` to select the last token value per turn.
+        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios).
     :type reduction: str
     :return: [batch, num_turns] aggregated values per turn.
     :rtype: torch.Tensor
     """
-    batch_size, seq_len = token_values.shape
+    batch_size = token_values.shape[0]
     turn_values = torch.zeros(batch_size, num_turns, device=token_values.device)
-    token_positions = (
-        torch.arange(seq_len, device=token_values.device)
-        .unsqueeze(0)
-        .expand_as(turn_ids)
-    )
     for t in range(num_turns):
         mask_t = (turn_ids == t).float()
         summed = (token_values * mask_t).sum(dim=1)
@@ -2137,30 +2114,45 @@ def pool_by_turns(
             turn_values[:, t] = summed / count
         elif reduction == "sum":
             turn_values[:, t] = summed
-        elif reduction == "final_value":
-            masked_positions = torch.where(
-                mask_t.bool(),
-                token_positions,
-                torch.full_like(token_positions, -1),
-            )
-            final_pos = masked_positions.max(dim=1).values
-            has_turn = final_pos >= 0
-            safe_final_pos = final_pos.clamp(min=0)
-            final_vals = token_values[
-                torch.arange(batch_size, device=token_values.device),
-                safe_final_pos,
-            ]
-            turn_values[:, t] = torch.where(
-                has_turn,
-                final_vals,
-                torch.zeros_like(final_vals),
-            )
         else:
-            msg = (
-                f"Invalid reduction: {reduction}. Must be 'mean', 'sum', 'final_value'."
-            )
+            msg = f"Invalid reduction: {reduction}. Must be 'mean' or 'sum'."
             raise ValueError(msg)
     return turn_values
+
+
+def turn_state_values(
+    token_values: torch.Tensor,
+    turn_ids: torch.Tensor,
+    num_turns: int,
+) -> torch.Tensor:
+    """Critic at the last query token of each turn (first action slot).
+
+    :param token_values: [batch, seq_len] per-token critic values.
+    :type token_values: torch.Tensor
+    :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
+    :type turn_ids: torch.Tensor
+    :param num_turns: Total number of turns (max turn_id + 1).
+    :type num_turns: int
+    :return: [batch, num_turns] state values per turn.
+    :rtype: torch.Tensor
+    """
+    batch_size, seq_len = token_values.shape
+    positions = torch.arange(seq_len, device=token_values.device).expand(
+        batch_size, seq_len
+    )
+    src = positions.masked_fill(turn_ids < 0, seq_len)
+    first_pos = torch.full(
+        (batch_size, num_turns),
+        seq_len,
+        device=token_values.device,
+        dtype=positions.dtype,
+    )
+    first_pos.scatter_reduce_(
+        1, turn_ids.clamp(min=0), src, reduce="amin", include_self=True
+    )
+    has_turn = first_pos < seq_len
+    gathered = token_values.gather(1, first_pos.clamp(max=seq_len - 1))
+    return torch.where(has_turn, gathered, torch.zeros_like(gathered))
 
 
 def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -2177,6 +2169,26 @@ def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.
     count = turn_mask.reshape(-1, group_size, num_turns).sum(dim=1, keepdim=True)
     lone = (count <= 1).expand(-1, group_size, -1).reshape(batch, num_turns)
     return turn_mask & lone
+
+
+def tied_reward_groups(
+    grouped: torch.Tensor, played: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Mark groups whose rewards are all equal, which float rounding leaves off-centre.
+
+    :param grouped: ``[groups, group_size, ...]`` rewards, members on dim 1.
+    :type grouped: torch.Tensor
+    :param played: Boolean mask like ``grouped`` of the members that count, or
+        ``None`` for every member.
+    :type played: torch.Tensor | None
+    :return: Boolean ``[groups, 1, ...]`` mask of tied groups.
+    :rtype: torch.Tensor
+    """
+    high, low = grouped, grouped
+    if played is not None:
+        high = grouped.masked_fill(~played, float("-inf"))
+        low = grouped.masked_fill(~played, float("inf"))
+    return high.amax(dim=1, keepdim=True) == low.amin(dim=1, keepdim=True)
 
 
 def batch_is_single_turn(turn_ids: torch.Tensor | None) -> bool:
@@ -2257,18 +2269,16 @@ def pool_log_ratio_by_level(
     turn_ids: torch.Tensor | None,
     level: str,
     num_turns: int | None = None,
-    turn_reduction: str = "mean",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool per-token log-ratios to a token/turn/trajectory importance-sampling unit.
 
     Returns the per-unit pooled log-ratio (the log importance weights) and the
-    matching unit mask, mirroring the pooling used by :func:`clipped_is_surrogate`:
+    matching unit mask:
 
     * ``"token"``    — identity: per-token log-ratio, ``action_mask`` as units.
-    * ``"turn"``     — per-turn pooling of token log-ratios (``turn_ids``
-      required); ``turn_reduction="mean"`` gives a length-normalized mean
-      (geometric-mean ratio), ``"sum"`` gives a sum (product ratio). A turn is
-      active when any of its tokens appear.
+    * ``"turn"``     — length-normalized mean of each turn's token log-ratios
+      (geometric-mean ratio; ``turn_ids`` required). A turn is active when any
+      of its tokens appear.
     * ``"trajectory"`` — length-normalized mean over the completion's action
       tokens; the trajectory is active when it has at least one action token.
 
@@ -2286,9 +2296,6 @@ def pool_log_ratio_by_level(
     :param num_turns: Number of turns for the turn level; inferred from
         ``turn_ids`` when ``None``.
     :type num_turns: int | None
-    :param turn_reduction: Turn-level pooling reduction for ``level="turn"``,
-        one of ``"mean"`` or ``"sum"``.
-    :type turn_reduction: str
     :return: ``(log_importance_weights, unit_mask)`` at the requested level.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     :raises ValueError: If ``level`` is unknown or turn ids are missing.
@@ -2298,12 +2305,6 @@ def pool_log_ratio_by_level(
     if level == "turn":
         if turn_ids is None:
             msg = "turn-level surrogate requires turn_ids."
-            raise ValueError(msg)
-        if turn_reduction not in {"mean", "sum"}:
-            msg = (
-                "turn_reduction must be one of ['mean', 'sum'], got "
-                f"{turn_reduction!r}."
-            )
             raise ValueError(msg)
         if num_turns is None:
             num_turns = int(turn_ids.max().item()) + 1
@@ -2318,7 +2319,7 @@ def pool_log_ratio_by_level(
             torch.full_like(turn_ids, -1),
         )
         log_importance_weights = pool_by_turns(
-            token_log_ratio, effective_turn_ids, num_turns, reduction=turn_reduction
+            token_log_ratio, effective_turn_ids, num_turns
         )
         # Per-turn action-token counts via the same pooling; a turn is active
         # iff it owns at least one action token.
@@ -2345,141 +2346,125 @@ def pool_log_ratio_by_level(
     raise ValueError(msg)
 
 
-def clipped_min_surrogate(
-    log_importance_weights: torch.Tensor,
-    advantages: torch.Tensor,
-    unit_mask: torch.Tensor,
-    clip_min: float,
-    clip_max: float,
-    loss_weight: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO min-surrogate from per-unit log importance weights.
-
-    Exponentiates the log importance weights, clamps the ratio to
-    ``[clip_min, clip_max]``, and reduces the masked pessimistic (min)
-    surrogate over the active units.
-
-    :param log_importance_weights: Per-unit pooled log-ratio.
-    :type log_importance_weights: torch.Tensor
-    :param advantages: Per-unit advantages (same shape).
-    :type advantages: torch.Tensor
-    :param unit_mask: Mask selecting active units (same shape).
-    :type unit_mask: torch.Tensor
-    :param clip_min: Lower clip bound for the ratio (e.g. ``1 - clip_coef``).
-    :type clip_min: float
-    :param clip_max: Upper clip bound for the ratio (e.g. ``1 + clip_coef``).
-    :type clip_max: float
-    :param loss_weight: Optional per-unit, **detached**, non-negative weight that
-        multiplies each unit's surrogate before the masked mean — e.g. the vLLM
-        sampling-mismatch (truncated-IS) correction ratio. ``None`` leaves the
-        surrogate unweighted. Since the weight is ``>= 0`` it commutes with the
-        ``max`` (pessimistic) reduction, so it is a faithful per-unit reweight.
-    :type loss_weight: torch.Tensor | None
-    :return: ``(pg_loss, clipfrac)`` scalars.
-    :rtype: tuple[torch.Tensor, torch.Tensor]
-    """
-    ratio = torch.exp(log_importance_weights)
-    clipped_ratio = torch.clamp(ratio, clip_min, clip_max)
-    clipfrac = masked_mean((ratio != clipped_ratio).float(), unit_mask)
-    surrogate = torch.max(-advantages * ratio, -advantages * clipped_ratio)
-    if loss_weight is not None:
-        surrogate = surrogate * loss_weight
-    pg_loss = masked_mean(surrogate, unit_mask)
-    return pg_loss, clipfrac
-
-
-def clipped_is_surrogate(
+def broadcast_log_ratio_by_level(
     token_log_ratio: torch.Tensor,
-    advantages: torch.Tensor,
     action_mask: torch.Tensor,
     turn_ids: torch.Tensor | None,
-    importance_sampling_level: str,
-    clip_coef: float,
-    loss_weight: torch.Tensor | None = None,
-    turn_reduction: str = "mean",
+    level: str,
     num_turns: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO-style policy surrogate at a token/turn/trajectory IS level.
+) -> torch.Tensor:
+    """Per-token log importance weight shared by every token of its IS unit.
 
-    The importance ratio (and the advantage paired with it) is pooled to
-    ``importance_sampling_level``:
-
-    * ``"token"``    — per-token ratio, clip per token.
-    * ``"turn"``     — per-turn pooling of token log-ratios, clip per turn
-      (``turn_ids`` required). ``turn_reduction="mean"`` uses a length-
-      normalized mean (geometric-mean ratio), ``"sum"`` uses a sum (product
-      ratio).
-    * ``"trajectory"`` — length-normalized mean over the whole completion, clip
-      per trajectory.
-
-    Thin composition of :func:`pool_log_ratio_by_level` (ratio + advantage
-    pooling) and :func:`clipped_min_surrogate` (clip + min-surrogate). Shared by
-    the non-Liger PPO and REINFORCE paths. Operates only on ``(B, T)`` tensors
-    (no vocab axis), so it is memory-bounded.
+    Pools with :func:`pool_log_ratio_by_level` and broadcasts back to ``(B, T)``,
+    so every token of a turn (or trajectory) carries that unit's geometric-mean
+    ratio. Non-action positions hold arbitrary values.
 
     :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
     :type token_log_ratio: torch.Tensor
+    :param action_mask: ``(B, T)`` action-token mask.
+    :type action_mask: torch.Tensor
+    :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
+        required for the turn level.
+    :type turn_ids: torch.Tensor | None
+    :param level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
+    :type level: str
+    :param num_turns: Number of turns for the turn level; inferred from
+        ``turn_ids`` when ``None``.
+    :type num_turns: int | None
+    :return: ``(B, T)`` log importance weights.
+    :rtype: torch.Tensor
+    """
+    if level == "token":
+        return token_log_ratio
+    pooled, _ = pool_log_ratio_by_level(
+        token_log_ratio, action_mask, turn_ids, level, num_turns
+    )
+    if level == "trajectory":
+        return pooled.expand_as(token_log_ratio)
+    assert turn_ids is not None
+    return pooled.gather(1, turn_ids.clamp(min=0).to(torch.int64))
+
+
+def clipped_token_surrogate(
+    log_importance_weights: torch.Tensor,
+    advantages: torch.Tensor,
+    action_mask: torch.Tensor,
+    clip_min: float,
+    clip_max: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token PPO loss ``max(-A w, -A clip(w))`` and the tokens the clip zeroes.
+
+    A token is clipped when ``A >= 0`` and ``w > clip_max``, or ``A < 0`` and
+    ``w < clip_min``: its gradient is zero.
+
+    :param log_importance_weights: ``(B, T)`` per-token log importance weights.
+    :type log_importance_weights: torch.Tensor
     :param advantages: ``(B, T)`` per-token advantages.
     :type advantages: torch.Tensor
     :param action_mask: ``(B, T)`` action-token mask.
     :type action_mask: torch.Tensor
-    :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
-        required for turn level.
-    :type turn_ids: torch.Tensor | None
-    :param importance_sampling_level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
-    :type importance_sampling_level: str
-    :param clip_coef: Symmetric clip coefficient (clip to ``[1-c, 1+c]``).
-    :type clip_coef: float
-    :param turn_reduction: Turn-level pooling reduction when
-        ``importance_sampling_level="turn"``, one of ``"mean"`` or ``"sum"``.
-    :type turn_reduction: str
-    :param num_turns: Number of turns for the turn level; inferred from
-        ``turn_ids`` when ``None``. Any count above the largest turn id gives
-        the same loss.
-    :type num_turns: int | None
-    :return: ``(pg_loss, clipfrac)`` scalars.
+    :param clip_min: Lower clip bound for the ratio (e.g. ``1 - clip_coef``).
+    :type clip_min: float
+    :param clip_max: Upper clip bound for the ratio (e.g. ``1 + clip_coef``).
+    :type clip_max: float
+    :return: ``(B, T)`` per-token loss, and the ``(B, T)`` bool clipped mask.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     """
-    if (
-        num_turns is None
-        and importance_sampling_level == "turn"
-        and turn_ids is not None
-    ):
-        num_turns = int(turn_ids.max().item()) + 1
-    log_importance_weights, unit_mask = pool_log_ratio_by_level(
-        token_log_ratio,
-        action_mask,
-        turn_ids,
-        importance_sampling_level,
-        num_turns,
-        turn_reduction=turn_reduction,
+    ratio = torch.exp(log_importance_weights)
+    surrogate = torch.max(
+        -advantages * ratio, -advantages * torch.clamp(ratio, clip_min, clip_max)
     )
-    adv, _ = pool_log_ratio_by_level(
-        advantages,
-        action_mask,
-        turn_ids,
-        importance_sampling_level,
-        num_turns,
-        turn_reduction="mean",
+    clipped = action_mask.bool() & (
+        ((advantages >= 0) & (ratio > clip_max))
+        | ((advantages < 0) & (ratio < clip_min))
     )
-    pooled_loss_weight = None
-    if loss_weight is not None:
-        pooled_loss_weight, _ = pool_log_ratio_by_level(
-            loss_weight,
-            action_mask,
-            turn_ids,
-            importance_sampling_level,
-            num_turns,
-            turn_reduction="mean",
+    return surrogate, clipped
+
+
+def validate_off_policy_token_mask_bounds(bounds: tuple[float, float] | None) -> None:
+    """Raise unless ``bounds`` is ``None`` or satisfies ``0 <= low < 1 < high``.
+
+    :param bounds: ``(low, high)`` ratio band, or ``None``.
+    :type bounds: tuple[float, float] | None
+    :raises ValueError: If the band does not bracket 1.
+    """
+    if bounds is None:
+        return
+    low, high = bounds
+    if not 0.0 <= low < 1.0 < high:
+        msg = (
+            "off_policy_token_mask_bounds must satisfy 0 <= low < 1 < high, "
+            f"got ({low}, {high})."
         )
-    return clipped_min_surrogate(
-        log_importance_weights,
-        adv,
-        unit_mask,
-        1 - clip_coef,
-        1 + clip_coef,
-        loss_weight=pooled_loss_weight,
-    )
+        raise ValueError(msg)
+
+
+def off_policy_token_drops(
+    log_probs: torch.Tensor,
+    behaviour_log_probs: torch.Tensor,
+    action_mask: torch.Tensor,
+    bounds: tuple[float, float] | None,
+) -> torch.Tensor | None:
+    """Action tokens whose ratio to the sampling policy leaves ``bounds`` (IcePop).
+
+    :param log_probs: ``(B, T)`` current-policy log-probs.
+    :type log_probs: torch.Tensor
+    :param behaviour_log_probs: ``(B, T)`` log-probs of the policy that sampled
+        the tokens.
+    :type behaviour_log_probs: torch.Tensor
+    :param action_mask: ``(B, T)`` action-token mask.
+    :type action_mask: torch.Tensor
+    :param bounds: ``(low, high)`` ratio band, or ``None`` to drop nothing.
+    :type bounds: tuple[float, float] | None
+    :return: ``(B, T)`` bool drops, or ``None`` when ``bounds`` is ``None``.
+    :rtype: torch.Tensor | None
+    """
+    if bounds is None:
+        return None
+    low, high = bounds
+    with torch.no_grad():
+        ratio = torch.exp(log_probs.detach() - behaviour_log_probs)
+    return action_mask.bool() & ((ratio < low) | (ratio > high))
 
 
 def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
@@ -2667,92 +2652,6 @@ def build_completion_mask(
     return mask[:, 1:]
 
 
-def hf_completion_lengths(
-    completion_id: torch.Tensor,
-    prompt_len: int,
-    pad_token_id: int,
-) -> torch.Tensor:
-    """Recover the true per-row generated-token count from an HF ``generate`` output.
-
-    HF ``generate`` pads finished rows with ``pad_token_id`` up to the batch's
-    longest generation. When ``pad_token_id == eos_token_id`` the padded
-    positions and a real stopping EOS share an id, so a token-id scan can't
-    tell them apart. This helper disambiguates by position: a row's generated
-    region is ``[prompt_len, prompt_len + G)`` where ``G`` is the batch max. The
-    first token equal to ``pad_token_id`` within that region is the stopping
-    EOS (so the row generated ``first_pad - prompt_len + 1`` tokens, EOS
-    included); if no such token exists the row ran to ``G`` (no EOS, hit the
-    cap). At most one EOS can appear because ``generate`` stops a row at its
-    first EOS.
-
-    :param completion_id: ``generate`` output, shape ``(B, prompt_len + G)``.
-    :type completion_id: torch.Tensor
-    :param prompt_len: Number of leading prompt tokens.
-    :type prompt_len: int
-    :param pad_token_id: Pad token id (may equal the eos id).
-    :type pad_token_id: int
-    :return: Per-row generated-token counts, shape ``(B,)``, on
-        ``completion_id``'s device.
-    :rtype: torch.Tensor
-    """
-    B, L = completion_id.shape
-    device = completion_id.device
-    G = L - prompt_len
-    if G <= 0:
-        return torch.zeros(B, dtype=torch.long, device=device)
-    gen_region = completion_id[:, prompt_len:]
-    is_pad = gen_region == pad_token_id
-    has_pad = is_pad.any(dim=1)
-    first_pad = is_pad.int().argmax(dim=1)
-    first_pad = torch.where(has_pad, first_pad, torch.full_like(first_pad, G))
-    gen_len = torch.where(first_pad < G, first_pad + 1, first_pad)
-    return gen_len.to(torch.long)
-
-
-def prepare_prompt_hf_generate(
-    prompt: RolloutPrompt,
-    device: torch.device,
-    *,
-    group_size: int = 1,
-) -> dict[str, torch.Tensor]:
-    """Turn one rollout prompt into HuggingFace ``generate`` inputs.
-
-    ``attention_mask`` is taken from the prompt when present (e.g. a padded
-    batch) and derived as all-ones otherwise (a single unpadded row, the
-    ``RolloutHarness`` prompt shape). ``pixel_values`` are forwarded when the
-    prompt carries them.
-
-    :param prompt: The prompt to prepare.
-    :type prompt: RolloutPrompt
-    :param device: The device to move the tensors to.
-    :type device: torch.device
-    :param group_size: Repeat each tensor this many times on the batch dim.
-    :type group_size: int
-    :return: ``input_ids`` / ``attention_mask`` (and ``pixel_values`` when set)
-        moved to ``device``.
-    :rtype: dict[str, torch.Tensor]
-    """
-    input_ids = prompt["input_ids"].to(device)
-    attention_mask = prompt.get("attention_mask")
-    tensors: dict[str, torch.Tensor] = {
-        "input_ids": input_ids,
-        "attention_mask": (
-            torch.ones_like(input_ids)
-            if attention_mask is None
-            else attention_mask.to(device)
-        ),
-    }
-    pixel_values = prompt.get("pixel_values")
-    if pixel_values is not None:
-        tensors["pixel_values"] = pixel_values.to(device)
-    if group_size > 1:
-        tensors = {
-            key: value.repeat(group_size, *([1] * (value.ndim - 1)))
-            for key, value in tensors.items()
-        }
-    return tensors
-
-
 def get_model_name_or_path(model: PreTrainedModel) -> str:
     """Get the name or path of a model.
 
@@ -2789,13 +2688,15 @@ def sample_eval_prompts(
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per gym type:
+    Columns are resolved from the held-out split:
 
-    * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
-      is ``None`` (SFT has no negative example).
-    * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
-      dataset's ``"chosen"`` / ``"rejected"`` columns.
-    * Any other gym — both are ``None``.
+    * A ``messages`` row gives its rendered text up to the first assistant
+      turn and that turn. ``rejected`` is ``None``.
+    * ``chosen`` and ``rejected`` for a ``preference`` env, or for an env with
+      no ``objective`` whose split has a ``chosen`` column.
+    * Otherwise ``response_column``, when that column is present: ``chosen`` is
+      that column and ``rejected`` is ``None``.
+    * Any other dataset: both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
     :type env: object
@@ -2814,14 +2715,26 @@ def sample_eval_prompts(
         raise TypeError(msg)
     indices = random.Random(seed).sample(range(len(dataset)), min(n, len(dataset)))
 
+    if "messages" in getattr(dataset, "features", ()):
+        # Deferred: agilerl.llm_envs imports this module.
+        from agilerl.llm_envs.dataset_env import sft_eval_sample
+
+        tokenizer = getattr(env, "tokenizer", None)
+        if tokenizer is None:
+            msg = "env.tokenizer is required to render messages rows"
+            raise TypeError(msg)
+        return [(*sft_eval_sample(tokenizer, dataset[i]), None) for i in indices]
+
     chosen_col: str | None = None
     rejected_col: str | None = None
+    features = getattr(dataset, "features", ())
     response_column = getattr(env, "response_column", None)
-    if isinstance(response_column, str):
-        chosen_col = response_column
-    elif "chosen" in getattr(dataset, "features", ()):
+    objective = getattr(env, "objective", None)
+    if objective == "preference" or (objective is None and "chosen" in features):
         chosen_col = "chosen"
         rejected_col = "rejected"
+    elif isinstance(response_column, str) and response_column in features:
+        chosen_col = response_column
 
     return [
         (
@@ -2971,8 +2884,7 @@ def calculate_k3_kl(
     """Schulman k3 estimator of ``KL(policy || reference)`` from policy samples.
 
     ``exp(ref - policy) - (ref - policy) - 1`` — always-positive,
-    lower-variance than the naive log-difference. Same form as the Liger
-    fused kernel and TRL.
+    lower-variance than the naive log-difference. Same form as TRL.
     """
     diff = reference_log_probs - policy_log_probs
     return torch.exp(diff) - diff - 1.0
@@ -3017,15 +2929,6 @@ def k3_kl_penalty_reference(
 # ---------------------------------------------------------------------------
 
 
-def resolve_vllm_max_lora_rank(
-    vllm_max_lora_rank: int,
-    lora_rank: int | None,
-) -> int:
-    """Ensure vLLM ``max_lora_rank`` is at least the trainer LoRA rank."""
-    trainer_rank = int(lora_rank or 0)
-    return max(int(vllm_max_lora_rank), trainer_rank)
-
-
 def resolve_vllm_max_num_batched_tokens(
     max_num_seqs: int,
     max_model_len: int,
@@ -3050,13 +2953,101 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
+VLLM_LOGPROBS_MODE = "processed_logprobs"
+"""vLLM ``logprobs_mode`` every rollout engine runs with.
+
+The trainer's importance ratio divides by the probability a token was drawn
+with, which is the distribution after penalties, logit bias, temperature,
+``min_p`` and top-k/top-p. vLLM's default ``raw_logprobs`` is taken before all
+of them.
+"""
+
+
+@dataclass(frozen=True)
+class RolloutSampling:
+    """Per-request vLLM sampling settings rollout generation draws tokens with.
+
+    :param temperature: Sampling temperature.
+    :type temperature: float
+    :param top_p: Nucleus sampling probability mass; ``1.0`` keeps every token.
+    :type top_p: float
+    :param top_k: Most likely tokens kept per step; ``0`` keeps every token.
+    :type top_k: int
+    :param min_p: Floor relative to the most likely token's probability.
+    :type min_p: float
+    :param repetition_penalty: Penalty on tokens already in the prompt or output.
+    :type repetition_penalty: float
+    :param presence_penalty: Penalty on tokens that already appeared.
+    :type presence_penalty: float
+    :param frequency_penalty: Penalty scaled by how often a token appeared.
+    :type frequency_penalty: float
+    :param min_tokens: Tokens generated before a stop token may end the request.
+    :type min_tokens: int
+    """
+
+    temperature: float
+    top_p: float = 1.0
+    top_k: int = 0
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    min_tokens: int = 0
+
+    def vllm_kwargs(self, max_tokens: int) -> dict[str, Any]:
+        """Return ``SamplingParams`` keyword arguments for one request.
+
+        :param max_tokens: Maximum tokens the request generates.
+        :type max_tokens: int
+        :return: Sampling keyword arguments, ``min_tokens`` capped at *max_tokens*.
+        :rtype: dict[str, Any]
+        """
+        return {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "repetition_penalty": self.repetition_penalty,
+            "presence_penalty": self.presence_penalty,
+            "frequency_penalty": self.frequency_penalty,
+            "max_tokens": max_tokens,
+            "min_tokens": min(self.min_tokens, max_tokens),
+        }
+
+
+def apply_vllm_compile_cache_env(gpu_ids: Sequence[int | str]) -> str:
+    """Point ``VLLM_CACHE_ROOT`` at a compile cache directory for this GPU set, under any explicit root.
+
+    :param gpu_ids: Node-local GPU ids, or ``CUDA_VISIBLE_DEVICES`` entries, of the engine's devices.
+    :type gpu_ids: Sequence[int | str]
+    :return: The cache root in effect after this call.
+    :rtype: str
+    """
+    # Compiled graphs hard-code ``cuda:<id>`` but vLLM's cache key omits the
+    # device. TP rank ``r`` runs on the ``r``-th lowest GPU, so the set fixes
+    # every rank's device.
+    gpu_dir = "gpu_" + "_".join(sorted(str(gpu_id) for gpu_id in gpu_ids))
+    existing = os.environ.get("VLLM_CACHE_ROOT")
+    parent = (
+        Path(existing)
+        if existing
+        else Path(tempfile.gettempdir()) / "vllm_compile_cache"
+    )
+    # A root this function set is already one GPU set's directory.
+    if parent.name.startswith("gpu_"):
+        parent = parent.parent
+    cache_root = str(parent / gpu_dir)
+    os.environ["VLLM_CACHE_ROOT"] = cache_root
+    return cache_root
+
+
 def build_vllm_llm_init_kwargs(
     vllm_config: VLLMConfig,
     trainer_model_name_or_path: str,
     max_model_len: int,
     process_index: int = 0,
     lora_rank: int | None = None,
-    lora_target_modules: str | Collection[str] | None = None,
+    strip_multimodal_towers: bool = False,
 ) -> dict[str, Any]:
     """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
 
@@ -3070,8 +3061,8 @@ def build_vllm_llm_init_kwargs(
     :type process_index: int
     :param lora_rank: Trainer LoRA rank, used to size ``max_lora_rank``.
     :type lora_rank: int | None
-    :param lora_target_modules: Trainer PEFT ``target_modules``; gates tower LoRA.
-    :type lora_target_modules: str | Collection[str] | None
+    :param strip_multimodal_towers: Whether the engine skips the model's towers.
+    :type strip_multimodal_towers: bool
     :return: Keyword arguments for ``vllm.LLM``.
     :rtype: dict[str, Any]
     """
@@ -3081,25 +3072,28 @@ def build_vllm_llm_init_kwargs(
         else trainer_model_name_or_path
     )
     try:
-        runtime = family_runtime(vllm_model)
-        family_vllm_kwargs = runtime.vllm.model_dump(exclude_none=True)
+        runtime: ModelRuntimeConfig | None = family_runtime(vllm_model)
     except OSError:
         runtime = None
-        family_vllm_kwargs = {}
+    family_vllm_kwargs = {} if runtime is None else runtime.vllm.engine_kwargs()
     explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
     batched_tokens = (
         explicit_batched_tokens
         if explicit_batched_tokens is not None
         else family_vllm_kwargs.get("max_num_batched_tokens")
     )
+    tensor_parallel_size = vllm_config.tensor_parallel_size
+    if tensor_parallel_size is None:
+        # Unset width: this in-process engine uses one GPU.
+        tensor_parallel_size = 1
     kwargs: dict[str, Any] = {
         "model": vllm_model,
-        "tensor_parallel_size": vllm_config.tensor_parallel_size,
+        "tensor_parallel_size": tensor_parallel_size,
         "gpu_memory_utilization": vllm_config.gpu_memory_utilization,
         "max_num_seqs": vllm_config.max_num_seqs,
         "max_model_len": max_model_len,
         "distributed_executor_backend": "external_launcher",
-        "seed": process_index // vllm_config.tensor_parallel_size,
+        "seed": process_index // tensor_parallel_size,
         "max_num_batched_tokens": resolve_vllm_max_num_batched_tokens(
             vllm_config.max_num_seqs,
             max_model_len,
@@ -3107,6 +3101,7 @@ def build_vllm_llm_init_kwargs(
         ),
         "model_impl": "vllm",
         "enable_sleep_mode": vllm_config.sleep_mode,
+        "logprobs_mode": VLLM_LOGPROBS_MODE,
     }
     if vllm_config.dtype is not None:
         kwargs["dtype"] = vllm_config.dtype
@@ -3118,34 +3113,19 @@ def build_vllm_llm_init_kwargs(
         kwargs["kv_cache_memory_bytes"] = vllm_config.kv_cache_memory_bytes
     if vllm_config.limit_mm_per_prompt is not None:
         kwargs["limit_mm_per_prompt"] = vllm_config.limit_mm_per_prompt
-    if getattr(vllm_config, "enforce_eager", None) is not None:
-        # Force vLLM to skip CUDA-graph capture. Saves the ~2 GiB CUDA-graph
-        # private pool (useful for colocated trainer/rollout setups with a
-        # tight GPU budget) at the cost of slightly slower per-step decode.
-        kwargs["enforce_eager"] = vllm_config.enforce_eager
     # Colocated vLLM always serves LoRA: the trainer shares vLLM's base and syncs
     # only the adapter per rollout.
     kwargs["enable_lora"] = True
-    kwargs["max_lora_rank"] = resolve_vllm_max_lora_rank(
-        vllm_config.max_lora_rank,
-        lora_rank,
-    )
-    kwargs["max_loras"] = vllm_config.max_loras
+    kwargs["max_lora_rank"] = resolve_max_lora_rank(int(lora_rank or 0))
+    kwargs["max_loras"] = 1
     for key, value in family_vllm_kwargs.items():
         kwargs.setdefault(key, value)
     if runtime is not None:
         if runtime.trainer.trust_remote_code is not None:
             kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
-        apply_tower_connector_lora_engine_kwargs(
+        apply_multimodal_engine_kwargs(
             kwargs,
-            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
-            runtime=runtime,
-            lora_target_modules=lora_target_modules,
-        )
-        apply_language_tower_engine_kwargs(
-            kwargs,
-            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
-            runtime=runtime,
+            strip_multimodal_towers=strip_multimodal_towers,
         )
     return kwargs
 
@@ -3193,70 +3173,19 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
     return key
 
 
-def _vllm_lora_key_prefix(model_type: str | None) -> str | None:
-    """Catalog vLLM language-layer prefix for ``model_type``, or None."""
-    if not isinstance(model_type, str):
-        return None
-    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
-    if runtime is None:
-        return None
-    return runtime.language_tower.lora_key_prefix
+def remap_peft_lora_key_for_vllm(key: str) -> str:
+    """Drop the PEFT ``.base_layer`` segment the Hugging Face checkpoint does not have.
 
-
-def remap_peft_lora_key_for_vllm(
-    key: str,
-    *,
-    strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
-) -> str:
-    """Normalize PEFT LoRA keys (ClippableLinear, Nemotron Super VL vision/language/projector) for vLLM.
+    Hugging Face to vLLM module renames are the serving model's
+    ``hf_to_vllm_mapper``, applied by vLLM. A Gemma 4 ClippableLinear keeps its
+    inner ``.linear``: vLLM serves the tower with that module wrapped.
 
     :param key: PEFT state-dict key.
     :type key: str
-    :param strip_multimodal_towers: ``True`` remaps language keys onto the
-        language-tower module (``model.``). Any other value keeps the nested
-        VL prefix (``language_model.model.``).
-    :type strip_multimodal_towers: bool | list[str]
-    :param model_type: Hugging Face ``model_type``; families declaring a
-        ``language_tower.lora_key_prefix`` gain vLLM's language-layer nesting
-        when towers are kept.
-    :type model_type: str | None
-    :return: Key vLLM's LoRA loader expects.
+    :return: Key in the checkpoint's module naming.
     :rtype: str
     """
-    key = key.replace(".linear.lora_A.", ".lora_A.").replace(
-        ".linear.lora_B.", ".lora_B."
-    )
-    key = key.replace(".base_layer.", ".")
-    vllm_prefix = _vllm_lora_key_prefix(model_type)
-    if (
-        vllm_prefix is not None
-        and strip_multimodal_towers is not True
-        and f"{vllm_prefix}layers." not in key
-    ):
-        if "model.language_model.layers." in key:
-            key = key.replace("model.language_model.layers.", f"{vllm_prefix}layers.")
-        elif "model.layers." in key:
-            key = key.replace("model.layers.", f"{vllm_prefix}layers.")
-    if "language_model.backbone." in key:
-        language_prefix = (
-            "model." if strip_multimodal_towers is True else "language_model.model."
-        )
-        key = key.replace("language_model.backbone.", language_prefix)
-    if "vision_model.encoder.layer." in key:
-        key = key.replace(
-            "vision_model.encoder.layer.", "vision_model.model.encoder.layers."
-        )
-    if "vision_model.model.encoder.layers." in key:
-        key = key.replace(".attention.attention.query", ".attn.query")
-        key = key.replace(".attention.attention.key", ".attn.key")
-        key = key.replace(".attention.attention.value", ".attn.value")
-        key = key.replace(".attention.output.dense", ".attn.proj")
-    if "vision_projector.mlp1.linear1" in key:
-        key = key.replace("vision_projector.mlp1.linear1", "mlp1.1")
-    if "vision_projector.mlp1.linear2" in key:
-        key = key.replace("vision_projector.mlp1.linear2", "mlp1.3")
-    return key
+    return key.replace(".base_layer.", ".")
 
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
@@ -3304,31 +3233,29 @@ def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
 
 
 def filter_peft_state_dict_for_vllm_lora(
-    state_dict: dict[str, torch.Tensor],
-    target_modules: str | list[str] | None,
-    expert_key_map: dict[str, str] | None = None,
-    strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
+    state_dict: Mapping[str, torch.Tensor],
+    expert_key_map: Mapping[str, str] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
+    """Keep the LoRA tensors of a PEFT state dict, keyed for vLLM's LoRA loader.
+
+    :param state_dict: PEFT state dict of one adapter.
+    :type state_dict: Mapping[str, torch.Tensor]
+    :param expert_key_map: Packed-expert key map from
+        :func:`expert_lora_vllm_key_map`.
+    :type expert_key_map: Mapping[str, str] | None
+    :return: LoRA tensors, the same tensor objects as ``state_dict``.
+    :rtype: dict[str, torch.Tensor]
+    """
     filtered: dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         module_key = peft_lora_state_dict_key_to_module_key(key)
+        if module_key == key:
+            continue
         if expert_key_map is not None and module_key in expert_key_map:
             suffix = key.removeprefix(module_key)
             filtered[f"{expert_key_map[module_key]}{suffix}"] = tensor
             continue
-        if target_modules is None or not peft_target_key_matches(
-            module_key, target_modules
-        ):
-            continue
-        filtered[
-            remap_peft_lora_key_for_vllm(
-                key,
-                strip_multimodal_towers=strip_multimodal_towers,
-                model_type=model_type,
-            )
-        ] = tensor
+        filtered[remap_peft_lora_key_for_vllm(key)] = tensor
     return filtered
 
 
@@ -3399,22 +3326,75 @@ def _json_safe_value(obj: object) -> JSONValue:
     return str(obj)
 
 
+def vllm_lora_state_dict(
+    peft_model: PeftModel,
+    adapter_name: str,
+    gathered_state: Mapping[str, torch.Tensor] | None = None,
+) -> dict[str, torch.Tensor]:
+    """Return an adapter's LoRA tensors keyed the way vLLM's LoRA loader parses them.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: PeftModel
+    :param adapter_name: Adapter to export.
+    :type adapter_name: str
+    :param gathered_state: Dense tensors keyed by ``named_parameters`` name, from
+        an all-rank gather. Under FSDP2 the state-dict hooks return sharded
+        DTensors even for gathered params, so the dense values are swapped in.
+    :type gathered_state: Mapping[str, torch.Tensor] | None
+    :return: LoRA tensors keyed for vLLM.
+    :rtype: dict[str, torch.Tensor]
+    :raises ValueError: If the adapter has no LoRA tensors, or a trainable LoRA
+        tensor is missing from the export.
+    """
+    if not HAS_LLM_DEPENDENCIES:
+        msg = "vllm_lora_state_dict requires peft and transformers."
+        raise ImportError(msg)
+
+    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
+    # names, which keep the wrapper segments that state_dict() drops.
+    live_state: dict[str, torch.Tensor] = dict(peft_model.named_parameters())
+    if gathered_state is not None:
+        live_state.update(gathered_state)
+    raw = {
+        canonical_fsdp_param_fqn(key): tensor
+        for key, tensor in get_peft_model_state_dict(
+            peft_model, state_dict=live_state, adapter_name=adapter_name
+        ).items()
+    }
+    target_parameters = getattr(
+        peft_model.peft_config[adapter_name], "target_parameters", None
+    )
+    state = filter_peft_state_dict_for_vllm_lora(
+        raw,
+        expert_key_map=(
+            expert_lora_vllm_key_map(peft_model) if target_parameters else None
+        ),
+    )
+    if not state:
+        msg = (
+            f"Adapter {adapter_name!r} has no LoRA tensors to export "
+            f"({len(raw)} state-dict tensors)"
+        )
+        raise ValueError(msg)
+    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
+    hf_orders = {
+        id(raw[name]): order
+        for name, order in adapter_hf_row_orders(peft_model, adapter_name).items()
+        if name in raw
+    }
+    return {
+        key: tensor_rows_in_order(tensor, hf_orders.get(id(tensor)))
+        for key, tensor in state.items()
+    }
+
+
 def save_peft_adapter_for_vllm_rollout(
     peft_model: PeftModel,
     staging_dir: Path | str,
     adapter_name: str,
-    target_modules: str | list[str] | None,
-    expert_key_map: dict[str, str] | None = None,
-    strip_multimodal_towers: bool | list[str] = False,
+    gathered_state: Mapping[str, torch.Tensor] | None = None,
 ) -> Path:
-    """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
-
-    Keeps only tensors that match the same ``target_modules`` spec used for PEFT
-    training (from :func:`adapt_lora_config_for_model`) or the packed-experts
-    ``expert_key_map`` (from :func:`expert_lora_vllm_key_map`). Rewrites
-    ClippableLinear ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must
-    be process-private (AgileRL stages per-rank when distributed): every caller
-    writes the adapter files.
+    """Write an adapter checkpoint that vLLM loads with ``LoRARequest``.
 
     :param peft_model: PEFT model holding the adapter.
     :type peft_model: PeftModel
@@ -3422,61 +3402,23 @@ def save_peft_adapter_for_vllm_rollout(
     :type staging_dir: Path | str
     :param adapter_name: Adapter to export.
     :type adapter_name: str
-    :param target_modules: PEFT ``target_modules`` spec used in training.
-    :type target_modules: str | list[str] | None
-    :param expert_key_map: Packed-expert key map from
-        :func:`expert_lora_vllm_key_map`.
-    :type expert_key_map: dict[str, str] | None
+    :param gathered_state: Dense LoRA tensors keyed by ``named_parameters`` name.
+    :type gathered_state: Mapping[str, torch.Tensor] | None
     :return: Directory containing the exported adapter.
     :rtype: Path
     """
-    if not HAS_LLM_DEPENDENCIES:
-        msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
-        raise ImportError(msg)
-
     adapter_path = Path(staging_dir) / adapter_name
-    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
-    # names, which keep the wrapper segments that state_dict() drops.
-    live_state = dict(peft_model.named_parameters())
-    state = {
-        canonical_fsdp_param_fqn(key): tensor
-        for key, tensor in get_peft_model_state_dict(
-            peft_model, state_dict=live_state, adapter_name=adapter_name
-        ).items()
-    }
-    n_before = len(state)
-    model_type = getattr(getattr(peft_model, "config", None), "model_type", None)
-    state = filter_peft_state_dict_for_vllm_lora(
-        state,
-        target_modules,
-        expert_key_map=expert_key_map,
-        strip_multimodal_towers=strip_multimodal_towers,
-        model_type=model_type if isinstance(model_type, str) else None,
-    )
-    if not state:
-        msg = (
-            f"No LoRA tensors left for vLLM export after filtering with "
-            f"target_modules={target_modules!r} (had {n_before} tensors). "
-            "Ensure adapt_lora_config_for_model ran with the intended "
-            "LORA_TARGET_SCOPE before training."
-        )
-        raise ValueError(msg)
-    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
-    if n_before != len(state):
-        logger.info(
-            "vLLM LoRA export: kept %d / %d tensors (target_modules=%r)",
-            len(state),
-            n_before,
-            target_modules,
-        )
-
+    state = vllm_lora_state_dict(peft_model, adapter_name, gathered_state)
     adapter_path.mkdir(parents=True, exist_ok=True)
     # FSDP2 keeps adapter params as sharded ``DTensor``s; ``gather_params``
     # may not install dense locals on the module for every param, so
     # materialise any remaining ``DTensor`` entries here before safetensors
     # serialisation (which cannot read a DTensor storage pointer).
     state = {
-        k: (v.full_tensor() if isinstance(v, DTensor) else v) for k, v in state.items()
+        key: cast_exported_adapter(
+            tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
+        )
+        for key, tensor in state.items()
     }
     save_file(state, adapter_path / "adapter_model.safetensors")
 
@@ -3484,7 +3426,7 @@ def save_peft_adapter_for_vllm_rollout(
     cfg_dict: dict[str, JSONValue] = {
         str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
     }
-    cfg_dict["target_modules"] = _json_safe_value(target_modules or [])
+    cfg_dict["target_modules"] = cfg_dict.get("target_modules") or []
 
     (adapter_path / "adapter_config.json").write_text(
         json.dumps(cfg_dict, indent=2),
@@ -3631,7 +3573,7 @@ def is_preference_prompts(batch: Mapping[str, object]) -> TypeGuard[PreferencePr
 
 
 def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
-    """Check whether a collated batch carries the prompt/response pair SFT needs.
+    """Check whether a collated batch carries the token ids and loss mask SFT needs.
 
     :param batch: A batch collated by an ``objective="sft"`` ``DatasetEnv``.
     :type batch: Mapping[str, object]
@@ -3639,5 +3581,5 @@ def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
     :rtype: TypeGuard[SFTPrompts]
     """
     return isinstance(batch.get("input_ids"), torch.Tensor) and isinstance(
-        batch.get("response"), list
+        batch.get("loss_mask"), torch.Tensor
     )

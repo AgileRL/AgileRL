@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
+from typing_extensions import Self
 
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.descriptions import (
@@ -28,9 +29,8 @@ class GRPOSpec(RolloutLLMSpec):
     """Group Relative Policy Optimization."""
 
     group_size: int = Field(default=8, ge=1, description=GROUP_SIZE)
-    lr: float = Field(default=5e-7, ge=0.0, description=LR)
+    lr: float = Field(default=5e-7, gt=0.0, le=1.0, description=LR)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
-
     adv_norm: Literal["mean_only", "mean_std"] = Field(
         default="mean_only",
         description=(
@@ -54,6 +54,7 @@ class GRPOSpec(RolloutLLMSpec):
     whiten_advantages: bool = Field(default=False, description=WHITEN_ADVANTAGES)
     adv_clip_range: float | None = Field(
         default=None,
+        gt=0.0,
         description="Clip advantages to +/- this value. Unset leaves them unclipped.",
     )
     filter_zero_adv: bool = Field(
@@ -69,13 +70,6 @@ class GRPOSpec(RolloutLLMSpec):
         description=(
             "With filter_zero_adv, also drop groups whose largest absolute "
             "advantage is below this threshold."
-        ),
-    )
-    offload_trainer_during_rollout: bool = Field(
-        default=True,
-        description=(
-            "For colocated vLLM, offload the trainer's parameters while the "
-            "engine generates, trading a copy for headroom."
         ),
     )
     turn_advantage_trajectory_fallback: bool = Field(
@@ -97,31 +91,23 @@ class GRPOSpec(RolloutLLMSpec):
             "outweigh short ones."
         ),
     )
-    old_logprobs_source: Literal["trainer", "rollout"] = Field(
-        default="trainer",
-        description=(
-            "Old policy for the clipped ratio. 'trainer' scores the learn-start "
-            "policy, skipping the extra forward for micro-batches before the "
-            "first optimizer step. 'rollout' uses the inference engine's "
-            "sampling log-probs and runs the extra forward only for completions "
-            "missing some of them, e.g. after env truncation."
-        ),
-    )
     off_policy_token_mask_bounds: tuple[float, float] | None = Field(
         default=(0.5, 5.0),
         description=(
             "(low, high) band on each token's ratio of the current policy to "
             "the policy that sampled it. Tokens outside get no policy or KL "
-            "gradient (IcePop). Set null to mask nothing."
+            "gradient (IcePop). Set null to mask nothing. GSPO leaves this unset."
         ),
     )
     off_policy_sequence_mask_threshold: float | None = Field(
         default=0.03,
         ge=0.0,
+        le=20.0,
         description=(
             "Drop the policy and KL gradient of negative-advantage completions whose "
             "mean log(sampling / current) log-prob gap exceeds this "
-            "(DeepSeek-V3.2 off-policy sequence masking). Set null to mask nothing."
+            "(DeepSeek-V3.2 off-policy sequence masking). Set null to mask "
+            "nothing. GSPO leaves this unset."
         ),
     )
     use_bias_correction_kl: bool = Field(
@@ -145,3 +131,31 @@ class GRPOSpec(RolloutLLMSpec):
             "torch.profiler trace of one micro-batch. Unset profiles nothing."
         ),
     )
+
+    @model_validator(mode="after")
+    def _kl_advantage_shaping_needs_beta(self) -> Self:
+        """KL shaping reads reference log-probs, which beta=0 never computes."""
+        if self.use_kl_advantage_shaping and self.beta == 0.0:
+            msg = "use_kl_advantage_shaping needs beta > 0"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _gspo_leaves_off_policy_masks_unset(self) -> Self:
+        """GSPO's sequence-level ratio has no per-token mask weight."""
+        if self.loss_type != "gspo":
+            return self
+        configured = [
+            name
+            for name in (
+                "off_policy_token_mask_bounds",
+                "off_policy_sequence_mask_threshold",
+            )
+            if name in self.model_fields_set and getattr(self, name) is not None
+        ]
+        if configured:
+            msg = "GSPO does not take " + " or ".join(configured)
+            raise ValueError(msg)
+        self.off_policy_token_mask_bounds = None
+        self.off_policy_sequence_mask_threshold = None
+        return self

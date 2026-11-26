@@ -290,21 +290,23 @@ class TestFinetuningNetworkSpec:
         dumped = spec.model_dump(mode="json")
         assert dumped["lora_config"]["target_parameters"] == experts
 
-    def test_serialize_lora_none(self):
-        """_serialize_lora_config with None value."""
+    def test_a_null_lora_dumps_the_default_adapter(self):
         spec = FinetuningNetworkSpec(
             pretrained_model_name_or_path="gpt2",
             max_context_length=512,
             lora_config=None,
         )
-        dumped = spec.model_dump(mode="json")
-        assert dumped["lora_config"] is None
 
-    def test_lora_config_dict_serialize_set_target_modules(self):
-        """Line 363, 368, 372 of networks.py: _serialize_target_modules with set."""
-        lc = LoraConfigDict(target_modules={"a", "b"})
+        dumped = spec.model_dump(mode="json")
+
+        assert dumped["lora_config"]["lora_r"] == 16
+        assert dumped["lora_config"]["lora_alpha"] == 32
+        assert "target_modules" not in dumped["lora_config"]
+
+    def test_lora_config_dict_drops_target_modules(self):
+        lc = LoraConfigDict.model_validate({"target_modules": {"a", "b"}})
         d = lc.model_dump(mode="json")
-        assert d["target_modules"] == ["a", "b"]
+        assert "target_modules" not in d
 
 
 class TestLLMEnvSpec:
@@ -979,24 +981,6 @@ class TestLLMAlgorithmSpecBuild:
             build_from_spec(derived, tokenizer=mock_tokenizer, index=0)
         assert "micro_batch_size_per_gpu" not in mock_algo_cls.call_args.kwargs
 
-    def test_chunk_rows_forwarded_to_constructor(self):
-        """The manifest chunk_rows field reaches the algorithm constructor."""
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.eos_token_id = 0
-        mock_tokenizer.eos_token = "<|endoftext|>"
-
-        spec = GRPOSpec(
-            pretrained_model_name_or_path="gpt2", group_size=4, chunk_rows=128
-        )
-        mock_algo_cls = MagicMock()
-        with patch.object(
-            select_builder(spec), "algo_class", return_value=mock_algo_cls
-        ):
-            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
-        assert mock_algo_cls.call_args.kwargs["chunk_rows"] == 128
-
     def test_build_algorithm_uses_model_config_pad(self):
         """Actor network config.pad_token_id wins over tokenizer pad=im_end."""
         from agilerl.arena.models.algorithms import GRPOSpec
@@ -1064,11 +1048,11 @@ class TestLLMAlgorithmSpecBuild:
                 spec, tokenizer=mock_tokenizer, index=0, rollout_mode="colocated"
             )
 
-        mock_vllm.assert_called_once_with(tensor_parallel_size=1)
+        mock_vllm.assert_called_once_with(tensor_parallel_size=1, sleep_mode=True)
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_build_algorithm_quantization_and_attn_implementation(self):
-        """build_algorithm resolves nf4 quantization and attn_implementation."""
+    def test_build_algorithm_quantization(self):
+        """build_algorithm resolves nf4 quantization to a quantization_config."""
         from agilerl.arena.models.algorithms import GRPOSpec
         from agilerl.utils.llm_utils import build_bnb_quantization_config
 
@@ -1076,7 +1060,6 @@ class TestLLMAlgorithmSpecBuild:
             pretrained_model_name_or_path="gpt2",
             group_size=4,
             quantization="nf4",
-            attn_implementation="sdpa",
         )
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
@@ -1091,121 +1074,7 @@ class TestLLMAlgorithmSpecBuild:
         kwargs = mock_algo_cls.call_args.kwargs
         assert "quantization" not in kwargs
         assert kwargs["quantization_config"] == build_bnb_quantization_config("nf4")
-        assert kwargs["model_config"] == {"attn_implementation": "sdpa"}
-
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_build_algorithm_gemma_defaults_to_flex_attention(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma4"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
-        )
-        spec = GRPOSpec(
-            pretrained_model_name_or_path="google/gemma-4",
-            group_size=4,
-        )
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.eos_token_id = 0
-        mock_tokenizer.eos_token = "<|endoftext|>"
-        mock_algo_cls = MagicMock()
-
-        with (
-            patch.object(
-                select_builder(spec), "algo_class", return_value=mock_algo_cls
-            ),
-            patch(
-                "agilerl.builders.llm.load_pad_token_configs",
-                return_value=(None, None),
-            ),
-        ):
-            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
-
-        kwargs = mock_algo_cls.call_args.kwargs
-        assert kwargs["model_config"] == {"attn_implementation": "flex_attention"}
-
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_build_algorithm_gemma2_does_not_default_to_flex_attention(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma2"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma2"}, {}),
-        )
-        spec = GRPOSpec(
-            pretrained_model_name_or_path="google/gemma-2-9b",
-            group_size=4,
-        )
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.eos_token_id = 0
-        mock_tokenizer.eos_token = "<|endoftext|>"
-        mock_algo_cls = MagicMock()
-
-        with (
-            patch.object(
-                select_builder(spec), "algo_class", return_value=mock_algo_cls
-            ),
-            patch(
-                "agilerl.builders.llm.load_pad_token_configs",
-                return_value=(None, None),
-            ),
-        ):
-            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
-
-        kwargs = mock_algo_cls.call_args.kwargs
-        assert (kwargs.get("model_config") or {}).get("attn_implementation") != (
-            "flex_attention"
-        )
-
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_build_algorithm_family_catalog_overrides_explicit_attn(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma4"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
-        )
-        spec = GRPOSpec(
-            pretrained_model_name_or_path="google/gemma-4",
-            group_size=4,
-            attn_implementation="sdpa",
-        )
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.eos_token_id = 0
-        mock_tokenizer.eos_token = "<|endoftext|>"
-        mock_algo_cls = MagicMock()
-
-        with (
-            patch.object(
-                select_builder(spec), "algo_class", return_value=mock_algo_cls
-            ),
-            patch(
-                "agilerl.builders.llm.load_pad_token_configs",
-                return_value=(None, None),
-            ),
-        ):
-            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
-
-        kwargs = mock_algo_cls.call_args.kwargs
-        assert kwargs["model_config"] == {"attn_implementation": "flex_attention"}
+        assert "model_config" not in kwargs
 
     def test_resume_from_checkpoint(self):
         """build_algorithm with resume_from_checkpoint."""
@@ -1215,6 +1084,7 @@ class TestLLMAlgorithmSpecBuild:
         attrs = {
             "batch_size": 4,
             "pretrained_model_name_or_path": "gpt2",
+            "weights_path": None,
             "lora_config": None,
             "hp_config": None,
             "max_model_len": 512,
@@ -1223,9 +1093,8 @@ class TestLLMAlgorithmSpecBuild:
             "update_epochs": 1,
             "use_separate_reference_adapter": False,
             "calc_position_embeddings": True,
-            "gradient_checkpointing": True,
-            "use_liger_loss": False,
             "seed": 42,
+            "fsdp": None,
         }
         object.__setattr__(spec, "__dict__", attrs)
         object.__setattr__(spec, "__pydantic_fields_set__", set(attrs.keys()))

@@ -32,6 +32,7 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 from agilerl.llm_envs import RolloutHarness
+from agilerl.llm_envs.dataset_env import completion_loss_mask
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
@@ -123,13 +124,14 @@ class TinyPreferenceEnv:
 
         return {
             "prompt": prompts,
-            "prompt_lengths": prompt_lengths,
             "chosen": chosen,
             "rejected": rejected,
             "chosen_input_ids": chosen_ids,
             "chosen_attention_mask": chosen_mask,
+            "chosen_loss_mask": completion_loss_mask(prompt_lengths, chosen_mask),
             "rejected_input_ids": rejected_ids,
             "rejected_attention_mask": rejected_mask,
+            "rejected_loss_mask": completion_loss_mask(prompt_lengths, rejected_mask),
         }
 
     def _encode_pairs(
@@ -168,7 +170,6 @@ def build_init_hp(
         "BATCH_SIZE": batch_size,
         "UPDATE_EPOCHS": 1,
         "USE_VLLM": False,
-        "GRADIENT_CHECKPOINTING": False,
         "MAX_MODEL_LEN": max_model_len,
         "MAX_OUTPUT_TOKENS": max_output_tokens,
         "SEED": seed,
@@ -232,7 +233,15 @@ def build_population(
                 {
                     "r": 4,
                     "lora_alpha": 8,
-                    "target_modules": ["c_attn", "c_proj", "c_fc"],
+                    "target_modules": [
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                        "o_proj",
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj",
+                    ],
                 }
             ),
         )

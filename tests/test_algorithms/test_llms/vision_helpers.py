@@ -10,7 +10,8 @@ VL forward does.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import weakref
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
 from typing import Any
 
@@ -21,11 +22,14 @@ from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.ppo_llm import PPO
+from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.lora.fused import ROUTING_STATE
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyHiddenStatesModel,
+    rollout_logps,
 )
 
 PAD_TOKEN_ID = 63
@@ -84,7 +88,11 @@ class VisionHiddenStatesModel(DummyHiddenStatesModel):
         embeds = self.embed(input_ids.long())
         if pixel_values is not None:
             image_embeds = torch.zeros_like(embeds)
-            image_embeds[placeholders] = self.vision_proj(pixel_values)
+            # Pixels in the tower dtype, features in the embedding dtype, as VL models cast.
+            tower_dtype = next(self.vision_proj.parameters()).dtype
+            image_embeds[placeholders] = self.vision_proj(
+                pixel_values.to(tower_dtype)
+            ).to(embeds.dtype)
             embeds = embeds + image_embeds
             routing = ROUTING_STATE.get(self.linear_1) or [
                 self.linear_1.active_adapters[0]
@@ -258,13 +266,19 @@ def learn_on_vision_episodes(
     token_ids, action_masks, rewards, turn_ids, pixel_values = vision_episodes()
     episode_pixels = pixel_values.split(IMAGE_COUNTS)
     order = list(episodes)
+    ordered_masks = [action_masks[i] for i in order]
+    # GRPO learns rows that have no sampling log-probs.
+    sampling_logps = (
+        rollout_logps(ordered_masks) if isinstance(agent, (PPO, REINFORCE)) else None
+    )
     return agent.learn(
         (
             [token_ids[i] for i in order],
-            [action_masks[i] for i in order],
+            ordered_masks,
             rewards[order],
         ),
         turn_ids=turn_ids[order],
+        sampling_logps=sampling_logps,
         episode_segments=[SEGMENTS[i] for i in order] if segmented else None,
         pixel_values=torch.cat([episode_pixels[i] for i in order]) + pixel_offset,
         pixel_image_counts=[IMAGE_COUNTS[i] for i in order],
@@ -289,3 +303,47 @@ def learn_rank_vision_episodes(
         agent, segmented=True, episodes=RANK_VISION_EPISODES[rank]
     )
     return sum(tower(agent).rows), {key: metrics[key] for key in ("loss", "kl")}
+
+
+class VisionRowsLifetime:
+    """Whether each learn backward starts after the vision rows of its micro-batch are freed.
+
+    Wraps the agent's learn vision rows and backward pass; read :attr:`freed`
+    after ``learn``.
+    """
+
+    def __init__(self, agent: LLMAlgorithm, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.returned: list[weakref.ref[torch.Tensor]] = []
+        self.freed: list[bool] = []
+        learn_vision_rows = agent._learn_vision_rows
+        backward_pass = agent._backward_pass
+
+        def recorded_vision_rows(*args: Any, **kwargs: Any) -> Iterator[Any]:
+            return RecordedVisionRows(learn_vision_rows(*args, **kwargs), self)
+
+        def recorded_backward(*args: Any, **kwargs: Any) -> Any:
+            self.freed.append(self.returned[-1]() is None)
+            return backward_pass(*args, **kwargs)
+
+        monkeypatch.setattr(agent, "_learn_vision_rows", recorded_vision_rows)
+        monkeypatch.setattr(agent, "_backward_pass", recorded_backward)
+
+
+class RecordedVisionRows:
+    """Learn vision rows that keep only a weak reference to what they return."""
+
+    def __init__(
+        self,
+        micro_batches: Iterator[tuple[torch.Tensor, torch.Tensor | None]],
+        lifetime: VisionRowsLifetime,
+    ) -> None:
+        self.micro_batches = micro_batches
+        self.lifetime = lifetime
+
+    def __iter__(self) -> RecordedVisionRows:
+        return self
+
+    def __next__(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+        pixel_values, keys = next(self.micro_batches)
+        self.lifetime.returned.append(weakref.ref(pixel_values))
+        return pixel_values, keys

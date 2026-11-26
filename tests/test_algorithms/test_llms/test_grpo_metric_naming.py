@@ -1,19 +1,16 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for GRPO's fixed per-update keys and loss-path routing.
+"""Unit tests for GRPO's fixed per-update keys.
 
-``learn`` always reports ``kl`` (except on the fused path at ``beta == 0.0``,
-where the kernel emits no divergence) and ``clipfrac`` on every path. Pure
-CPU: the loss paths are stubs, only the routing and the reported keys are
-under test.
+``learn`` always reports ``kl`` and ``clipfrac``. Pure CPU: the loss is a
+stub, only the reported keys are under test.
 """
 
 from __future__ import annotations
 
 import math
 import time
-import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +24,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.frozen_vision import VisionFeatureCache
+from agilerl.algorithms.core.sequence_layout import PackedSequence, PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_utils import LEARN_PHASES
@@ -59,9 +57,8 @@ class _Stub:
         self,
         *,
         beta: float = 0.0,
-        use_liger_loss: bool = False,
         importance_sampling_level: str = "token",
-        liger_level_supported: bool = True,
+        advantage_granularity: str = "auto",
         vllm_importance_sampling_correction: bool = True,
         filter_zero_adv: bool = False,
         survivors: int | None = None,
@@ -69,11 +66,14 @@ class _Stub:
         clipfrac_value: float = 0.1,
     ) -> None:
         self.device = torch.device("cpu")
+        self.actor = torch.nn.Linear(1, 1)
+        self.optimizer_steps = 0
         self.beta = beta
+        self.use_value_head = False
         self.loss_type = "grpo"
-        self.use_liger_loss = use_liger_loss
         self.importance_sampling_level = importance_sampling_level
-        self._liger_level_supported = liger_level_supported
+        self.advantage_granularity = advantage_granularity
+        self.final_logit_softcap = None
         self.vllm_importance_sampling_correction = vllm_importance_sampling_correction
         self.vllm_importance_sampling_cap = 2.0
         self.vllm_max_logprob_gap = 0.1
@@ -92,9 +92,12 @@ class _Stub:
         self.pad_token_id = PAD_TOKEN_ID
         self.update_epochs = 1
         self.micro_batch_size_per_gpu = 2
+        self.micro_batch_tokens_per_gpu = None
+        self.max_row_tokens = None
+        self.max_model_len = 64
+        self._window_micro_batches = None
+        self._micro_batch_rows = None
         self.gradient_accumulation_steps = 1
-        self._is_correction_liger_warned = False
-        self._is_per_token_trajectory_liger_warned = False
         self._survivors = survivors
         self._advantages: torch.Tensor | None = None
         self._kl_value = kl_value
@@ -103,14 +106,14 @@ class _Stub:
         self.learn_profiler = LearnProfiler(
             None, rank=0, world_size=1, shard_group_size=None
         )
-        self.packing_mode: str | None = None
+        self.fsdp_config = None
+        self.sequence_packing = False
+        self.sequence_layout = PaddedSequence(calc_position_embeddings=False)
         self.rng = np.random.default_rng(0)
-        self.liger_calls = 0
-        self.standard_calls = 0
-        self.old_logprobs_source = "trainer"
         self.lr_scheduler = None
         self.no_grad_forwards: list[tuple[int, bool, bool]] = []
         self._vision_cache = VisionFeatureCache()
+        self._vision_language_module = None
         self.shard_runtime = SimpleNamespace(
             timed=lambda _name, **_fields: nullcontext(),
             micro_batches_until_step=lambda steps: steps,
@@ -119,22 +122,28 @@ class _Stub:
 
     learn = GRPO.learn
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
-    _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
+    _align_sampling_supports = staticmethod(GRPO._align_sampling_supports)
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _clipped_units = GRPO._clipped_units
     _compute_policy_loss = GRPO._compute_policy_loss
-    _learn_start_log_probs = GRPO._learn_start_log_probs
-    _liger_path_selected = GRPO._liger_path_selected
+    _learn_start_forward = GRPO._learn_start_forward
     _check_segments_supported = LLMAlgorithm._check_segments_supported
     _device_index = staticmethod(LLMAlgorithm._device_index)
     _epoch_orders = LLMAlgorithm._epoch_orders
     _has_episode_segments = LLMAlgorithm._has_episode_segments
     _hold_loss_until_step = LLMAlgorithm._hold_loss_until_step
     _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
+    _learn_vision_rows = LLMAlgorithm._learn_vision_rows
+    _micro_batch_token_budget = LLMAlgorithm._micro_batch_token_budget
+    _sequence_layout_type = LLMAlgorithm._sequence_layout_type
+    _micro_batch_windows = LLMAlgorithm._micro_batch_windows
+    _micro_batches_per_step = staticmethod(LLMAlgorithm._micro_batches_per_step)
+    _row_token_budget = LLMAlgorithm._row_token_budget
     _row_padding_stats = LLMAlgorithm._row_padding_stats
     _segment_rows = LLMAlgorithm._segment_rows
     _start_learn_phases = LLMAlgorithm._start_learn_phases
     _step_lr_scheduler = LLMAlgorithm._step_lr_scheduler
+    _vision_step = LLMAlgorithm._vision_step
     _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
     _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
@@ -148,29 +157,20 @@ class _Stub:
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
     _token_loss_weights = GRPO._token_loss_weights
+    _rollout_actor_rows = staticmethod(GRPO._rollout_actor_rows)
     _rollout_old_log_probs = GRPO._rollout_old_log_probs
     _rows_with_full_sampling_logprobs = staticmethod(
         GRPO._rows_with_full_sampling_logprobs
     )
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
-    _self_scored_micro_batches = GRPO._self_scored_micro_batches
     _summarize_update = GRPO._summarize_update
-    _use_liger_path = GRPO._use_liger_path
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
-    )
-    _warn_liger_path_bypassed = GRPO._warn_liger_path_bypassed
-    _warn_per_token_trajectory_liger_bypass = (
-        GRPO._warn_per_token_trajectory_liger_bypass
     )
     _warn_on_sampling_mismatch = GRPO._warn_on_sampling_mismatch
 
     def _prepare_vllm_for_training(self) -> None:
         return
-
-    def _packing_mode(self) -> str | None:
-        """Packing mode of the gradient forward."""
-        return self.packing_mode
 
     def trainer_offload_context(self):
         """Match the context ``learn`` wraps its body in."""
@@ -210,24 +210,12 @@ class _Stub:
     ) -> None:
         return None
 
-    def _liger_loss(self, batch_ids: torch.Tensor, *_args: Any, **_kwargs: Any):
-        """Record that the fused path ran."""
-        self.liger_calls += 1
-        kl = (
-            torch.tensor(float("nan"))
-            if self.beta == 0.0
-            else torch.tensor(self._kl_value)
-        )
-        log_probs = torch.zeros(batch_ids.shape[0], batch_ids.shape[1] - 1)
-        return torch.tensor(1.0), kl, torch.tensor(self._clipfrac_value), log_probs
-
     def _get_logprobs(self, ids: torch.Tensor, **_kwargs: Any) -> torch.Tensor:
-        """Record that the standard path ran."""
-        self.standard_calls += 1
+        """Zero policy log-probs on the action frame."""
         return torch.zeros(ids.shape[0], ids.shape[1] - 1)
 
     def _loss_fn(self, *_args: Any, **_kwargs: Any):
-        """Stand in for the configured standard-path objective."""
+        """Stand in for the configured objective."""
         return (
             torch.tensor(1.0),
             torch.tensor(self._kl_value),
@@ -253,160 +241,6 @@ def _sampling_logps(batch_size: int = 2) -> list[torch.Tensor]:
     return [torch.full((SEQ_LEN - 1,), -3.0) for _ in range(batch_size)]
 
 
-class TestLigerPathSelection:
-    """Only configuration decides the loss path, never the batch in hand."""
-
-    @pytest.mark.parametrize("sampling_logps", [None, _sampling_logps()])
-    def test_token_level_keeps_the_fused_path_either_way(
-        self,
-        sampling_logps: list[torch.Tensor] | None,
-    ) -> None:
-        algo = _Stub(use_liger_loss=True)
-        assert algo._liger_path_selected is True
-        algo.learn(_experiences(), sampling_logps=sampling_logps)
-        assert (algo.liger_calls, algo.standard_calls) == (1, 0)
-
-    @pytest.mark.parametrize("sampling_logps", [None, _sampling_logps()])
-    def test_a_corrected_run_stays_on_the_standard_path_either_way(
-        self,
-        sampling_logps: list[torch.Tensor] | None,
-    ) -> None:
-        algo = _Stub(use_liger_loss=True, importance_sampling_level="trajectory")
-        assert algo._liger_path_selected is False
-        with pytest.warns(UserWarning, match="only at token-level"):
-            algo.learn(_experiences(), sampling_logps=sampling_logps)
-        assert (algo.liger_calls, algo.standard_calls) == (0, 1)
-
-    def test_dropping_the_correction_returns_the_fused_path(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-        )
-        assert algo._liger_path_selected is True
-        algo.learn(_experiences())
-        assert (algo.liger_calls, algo.standard_calls) == (1, 0)
-
-    def test_an_unsupported_level_does_not_warn_at_loss_time(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="turn",
-            liger_level_supported=False,
-        )
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert algo._use_liger_path() is False
-        assert caught == []
-
-    def test_the_bypass_warning_is_emitted_once(self) -> None:
-        algo = _Stub(use_liger_loss=True, importance_sampling_level="trajectory")
-        with pytest.warns(UserWarning, match="only at token-level"):
-            algo._use_liger_path()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            algo._use_liger_path()
-        assert caught == []
-
-    def test_no_bypass_warning_without_the_fused_kernel_requested(self) -> None:
-        algo = _Stub(importance_sampling_level="trajectory")
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert algo._use_liger_path() is False
-        assert caught == []
-
-    def test_gspo_per_sequence_advantages_run_the_fused_path(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-        )
-        algo._advantages = torch.tensor([[0.5], [-0.5]])
-
-        algo.learn(_experiences())
-
-        assert (algo.liger_calls, algo.standard_calls) == (1, 0)
-
-    def test_gspo_per_token_advantages_run_the_standard_path(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-        )
-        algo._advantages = torch.linspace(-1.0, 1.0, 2 * (SEQ_LEN - 1)).reshape(
-            2, SEQ_LEN - 1
-        )
-
-        with pytest.warns(UserWarning, match="no fused kernel for per-turn"):
-            algo.learn(_experiences())
-
-        assert (algo.liger_calls, algo.standard_calls) == (0, 1)
-
-    def test_the_per_token_gspo_bypass_warns_once(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-        )
-        algo._advantages = torch.ones(2, SEQ_LEN - 1)
-        with pytest.warns(UserWarning, match="no fused kernel for per-turn"):
-            algo.learn(_experiences())
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            algo.learn(_experiences())
-
-        assert [str(w.message) for w in caught if "per-turn" in str(w.message)] == []
-        assert (algo.liger_calls, algo.standard_calls) == (0, 2)
-
-
-class ObjectiveStub:
-    """Stand-in carrying the state ``_setup_objective`` reads."""
-
-    def __init__(self, advantage_granularity: str) -> None:
-        self.advantage_granularity = advantage_granularity
-        self.beta = 0.0
-        self.use_liger_loss = True
-
-    _setup_objective = GRPO._setup_objective
-    _resolve_standard_loss_fn = GRPO._resolve_standard_loss_fn
-    _grpo_loss_standard = GRPO._grpo_loss_standard
-    _cispo_loss = GRPO._cispo_loss
-
-
-class TestGRPOSetupObjectiveLigerSupport:
-    """Whether the configured objective has a fused kernel is decided at init."""
-
-    @pytest.mark.parametrize(
-        ("loss_type", "advantage_granularity"),
-        [("gspo", "trajectory"), ("gspo", "auto"), ("grpo", "turn")],
-    )
-    def test_supported_combinations_keep_the_fused_kernel(
-        self, loss_type: str, advantage_granularity: str
-    ) -> None:
-        algo = ObjectiveStub(advantage_granularity)
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            algo._setup_objective(loss_type, None, False)
-
-        assert algo._liger_level_supported is True
-        assert [w for w in caught if "no fused" in str(w.message)] == []
-
-    def test_gspo_with_turn_advantages_has_no_fused_kernel(self) -> None:
-        algo = ObjectiveStub("turn")
-
-        with pytest.warns(
-            UserWarning,
-            match=(
-                "no fused gspo kernel at importance_sampling_level='trajectory' "
-                "with advantage_granularity='turn'"
-            ),
-        ):
-            algo._setup_objective("gspo", None, False)
-
-        assert algo._liger_level_supported is False
-
-
 class TestLearnReportsFixedKeys:
     """Every ``learn`` return carries ``kl`` and ``clipfrac`` under fixed keys."""
 
@@ -416,22 +250,8 @@ class TestLearnReportsFixedKeys:
         assert metrics["kl"] == pytest.approx(0.25)
         assert metrics["clipfrac"] == pytest.approx(0.1)
 
-    def test_the_fused_path_at_zero_beta_reports_nan_kl(self) -> None:
-        algo = _Stub(beta=0.0, use_liger_loss=True)
-        metrics = algo.learn(_experiences())
-
-        assert math.isnan(metrics["kl"])
-        assert metrics["clipfrac"] == pytest.approx(0.1)
-
-    def test_the_fused_path_with_a_kl_coefficient_reports_both(self) -> None:
-        algo = _Stub(beta=0.04, use_liger_loss=True)
-        metrics = algo.learn(_experiences())
-
-        assert metrics["kl"] == pytest.approx(0.25)
-        assert metrics["clipfrac"] == pytest.approx(0.1)
-
     def test_an_emptied_batch_reports_zeros_under_fixed_keys(self) -> None:
-        algo = _Stub(beta=0.0, use_liger_loss=True, filter_zero_adv=True)
+        algo = _Stub(beta=0.0, filter_zero_adv=True)
         algo._survivors = 0
         with pytest.warns(UserWarning, match="advantage threshold"):
             emptied = algo.learn(_experiences())
@@ -442,11 +262,8 @@ class TestLearnReportsFixedKeys:
         assert emptied["completion_length"] == pytest.approx(SEQ_LEN)
 
     def test_a_batch_carrying_sampling_logprobs_reports_fixed_keys(self) -> None:
-        algo = _Stub(
-            beta=0.0, use_liger_loss=True, importance_sampling_level="trajectory"
-        )
-        with pytest.warns(UserWarning, match="only at token-level"):
-            corrected = algo.learn(_experiences(), sampling_logps=_sampling_logps())
+        algo = _Stub(beta=0.04)
+        corrected = algo.learn(_experiences(), sampling_logps=_sampling_logps())
         uncorrected = algo.learn(_experiences())
 
         for metrics in (corrected, uncorrected):
@@ -454,7 +271,7 @@ class TestLearnReportsFixedKeys:
             assert metrics["clipfrac"] == pytest.approx(0.1)
 
     def test_fixed_keys_reach_the_metrics_tracker(self) -> None:
-        algo = _Stub(beta=0.04, use_liger_loss=True)
+        algo = _Stub(beta=0.04)
         algo.learn(_experiences())
 
         assert algo.metrics.logged["kl"] == pytest.approx(0.25)
@@ -549,7 +366,7 @@ class TestLearnTelemetryReportsDiagnostics:
         assert metrics["vllm_is_ratio_mean"] == pytest.approx(2.0)
         assert metrics["vllm_is_ratio_p95"] == pytest.approx(2.0)
         assert metrics["vllm_is_frac_clamped"] == pytest.approx(1.0)
-        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert metrics["old_logprobs_trainer_rows"] == 0.0
         assert algo.metrics.logged["vllm_is_delta_mean"] == pytest.approx(3.0)
         assert algo.metrics.logged["vllm_is_ratio_mean"] == pytest.approx(2.0)
 
@@ -587,8 +404,8 @@ class TestLearnPhaseTimings:
     def test_old_logprob_forward_time_lands_in_its_phase(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange: one-row micro-batches leave the second row for the no-grad
-        # forward. The stub backward pass marks nothing. Sleep advances the
+        # Arrange: no sampling log-probs, so the no-grad forward scores both
+        # rows. The stub backward pass marks nothing. Sleep advances the
         # PhaseTimer clock.
         ticks = [0.0]
 
@@ -601,13 +418,12 @@ class TestLearnPhaseTimings:
         )
         monkeypatch.setattr(time, "sleep", fake_sleep)
         algo = _SlowOldLogprobsStub(beta=0.0)
-        algo.micro_batch_size_per_gpu = 1
 
         # Act
         metrics = algo.learn(_experiences())
 
         # Assert
-        assert algo.no_grad_forwards == [(1, False, True)]
+        assert algo.no_grad_forwards == [(2, False, True)]
         assert metrics["learn_phase_no_grad_forward_s"] == pytest.approx(
             OLD_LOGPROB_FORWARD_S
         )
@@ -697,7 +513,8 @@ class TestLearnPaddingStats:
     def test_packed_forward_runs_without_padding(self) -> None:
         # Arrange
         algo = _Stub()
-        algo.packing_mode = "varlen"
+        algo.sequence_packing = True
+        algo.sequence_layout = PackedSequence(varlen=True)
 
         # Act
         metrics = algo.learn(_ragged_experiences())

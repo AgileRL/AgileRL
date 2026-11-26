@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Empty arrays expand as ${a[@]+"${a[@]}"}: bash 3.2 (macOS) treats "${a[@]}" on one as unbound under set -u.
+
 # How agilerl.arena becomes importable in each context:
 #   - Wheel install:  files merge physically into site-packages; no extra config.
 #   - Editable dev:   uv's editable workspace install + extend_path() in
@@ -28,7 +30,7 @@ emit_coverage_reports() {
     return
   fi
 
-  for report in "${reports[@]}"; do
+  for report in ${reports[@]+"${reports[@]}"}; do
     case "$report" in
       --cov-report=xml) uv run coverage xml ;;
       --cov-report=term-missing) uv run coverage report -m ;;
@@ -89,11 +91,11 @@ junit_for() {
 if ((explicit_test_target)); then
   junit_for other
   if ((cov_enabled)); then
-    run_pytest "${pytest_args[@]}" "${flags[@]}" --cov-report= "${junit_flags[@]}"
+    run_pytest ${pytest_args[@]+"${pytest_args[@]}"} "${flags[@]}" --cov-report= ${junit_flags[@]+"${junit_flags[@]}"}
     combine_coverage
-    emit_coverage_reports "${cov_reports[@]}"
+    emit_coverage_reports ${cov_reports[@]+"${cov_reports[@]}"}
   else
-    run_pytest "${pytest_args[@]}" "${flags[@]}" "${junit_flags[@]}"
+    run_pytest ${pytest_args[@]+"${pytest_args[@]}"} "${flags[@]}" ${junit_flags[@]+"${junit_flags[@]}"}
   fi
   exit $?
 fi
@@ -101,17 +103,17 @@ fi
 rc=0
 if ((cov_enabled)); then
   junit_for tests
-  run_pytest tests "${pytest_args[@]}" "${flags[@]}" --cov-report= "${junit_flags[@]}" || rc=$?
+  run_pytest tests ${pytest_args[@]+"${pytest_args[@]}"} "${flags[@]}" --cov-report= ${junit_flags[@]+"${junit_flags[@]}"} || rc=$?
   combine_coverage
   flags+=("--cov-append")
   junit_for agilerl-arena/tests
-  run_pytest agilerl-arena/tests "${pytest_args[@]}" "${flags[@]}" --cov-report= "${junit_flags[@]}" || rc=$?
+  run_pytest agilerl-arena/tests ${pytest_args[@]+"${pytest_args[@]}"} "${flags[@]}" --cov-report= ${junit_flags[@]+"${junit_flags[@]}"} || rc=$?
   combine_coverage
-  emit_coverage_reports "${cov_reports[@]}"
+  emit_coverage_reports ${cov_reports[@]+"${cov_reports[@]}"}
 else
   junit_for tests
-  run_pytest tests "${pytest_args[@]}" "${flags[@]}" "${junit_flags[@]}" || rc=$?
+  run_pytest tests ${pytest_args[@]+"${pytest_args[@]}"} "${flags[@]}" ${junit_flags[@]+"${junit_flags[@]}"} || rc=$?
   junit_for agilerl-arena/tests
-  run_pytest agilerl-arena/tests "${pytest_args[@]}" "${flags[@]}" "${junit_flags[@]}" || rc=$?
+  run_pytest agilerl-arena/tests ${pytest_args[@]+"${pytest_args[@]}"} "${flags[@]}" ${junit_flags[@]+"${junit_flags[@]}"} || rc=$?
 fi
 exit $rc

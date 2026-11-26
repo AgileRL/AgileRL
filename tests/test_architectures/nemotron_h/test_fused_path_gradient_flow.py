@@ -15,7 +15,6 @@ from transformers.models.nemotron_h import modeling_nemotron_h
 from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHForCausalLM,
-    NemotronHMamba2Mixer,
 )
 
 from agilerl.architectures import install_family_patches
@@ -70,18 +69,10 @@ def _fake_chunk_scan(hidden_states, dt, A, B, C, **kwargs):
     return hidden_states, None
 
 
-def _force_cuda_kernels_path():
-    """Route the mixer through ``cuda_kernels_forward`` with CPU kernel stubs.
-
-    Mixer ``__init__`` resets the kernel globals, so call after model build.
-    """
-
-    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
-        return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask)
-
-    NemotronHMamba2Mixer.forward = forward
-    modeling_nemotron_h.mamba_split_conv1d_scan_combined = _fake_split_scan
-    modeling_nemotron_h.mamba_chunk_scan_combined = _fake_chunk_scan
+def _force_fused_path():
+    """Route training forwards through the fused kernel with CPU stubs."""
+    modeling_nemotron_h.mamba2_split_conv1d_scan_combined = _fake_split_scan
+    modeling_nemotron_h.mamba2_chunk_scan = _fake_chunk_scan
 
 
 def _lora_grad_sums(model, needle):
@@ -115,7 +106,7 @@ def test_fused_kernel_path_starves_out_proj_lora_of_gradients(
     base = _tiny_nemotron_h()
     mixer = base.model.layers[0].mixer
     assert mixer.use_mem_eff_path is True
-    _force_cuda_kernels_path()
+    _force_fused_path()
 
     model = _one_backward(base)
 
@@ -132,7 +123,7 @@ def test_family_patches_keep_the_fused_kernel_and_in_proj_lora_gradients(
     base = _tiny_nemotron_h()
     install_family_patches(base.config.model_type, base)
     assert base.model.layers[0].mixer.use_mem_eff_path is True
-    _force_cuda_kernels_path()
+    _force_fused_path()
 
     model = _one_backward(base)
 

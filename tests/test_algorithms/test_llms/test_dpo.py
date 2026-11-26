@@ -22,16 +22,26 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
+from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
+    create_tiny_qwen3,
     optimizer_state,
     record_outputs,
+    right_padded_batch,
     scale_losses,
+    score_every_token,
     trainable_weights,
+    use_packed,
+)
+from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
+    patch_cuda_device,
+    save_checkpoint_config,
 )
 
 
@@ -79,7 +89,6 @@ def generate_dpo(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
     from_name=False,
-    use_liger_loss=False,
 ):
     gc.collect()
     torch.cuda.empty_cache()
@@ -117,11 +126,14 @@ def generate_dpo(
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         lora_config=lora_config,
-        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
+        fsdp_config=(
+            FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+            if dist_mode == "fsdp2"
+            else None
+        ),
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_separate_reference_adapter=use_separate_reference_adapter,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_liger_loss=use_liger_loss,
     )
 
 
@@ -131,6 +143,7 @@ def dpo_factory():
 
 
 def _make_cpu_dpo_for_branch_tests(**kwargs):
+    """Tiny DPO on CPU."""
     vocab_size = kwargs.pop("vocab_size", 100)
     input_size = kwargs.pop("input_size", 10)
     max_tokens = kwargs.pop("max_tokens", 20)
@@ -153,12 +166,7 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         "batch_size": 4,
         "micro_batch_size_per_gpu": 2,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        # Pin so the unfused learn() path is exercised by default
-        # regardless of liger-kernel availability. Liger-specific tests
-        # override this.
-        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return DPO(**defaults)
@@ -284,7 +292,6 @@ class TestDPOLearn:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [2])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    @pytest.mark.parametrize("use_liger_loss", [False, True])
     def test_dpo_learn(
         self,
         dpo_factory,
@@ -298,7 +305,6 @@ class TestDPOLearn:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
-        use_liger_loss,
     ):
         dpo = dpo_factory(
             dist_mode_factory,
@@ -310,7 +316,6 @@ class TestDPOLearn:
             use_separate_reference_adapter,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
-            use_liger_loss=use_liger_loss,
         )
 
         num_samples = 4
@@ -410,7 +415,6 @@ class TestDPOLearn:
             False,
             pretrained_model_name_or_path,
             None,
-            use_liger_loss=False,
         )
         for group in dpo.optimizer.optimizer.param_groups:
             group["lr"] = 1e-3
@@ -542,142 +546,6 @@ class TestDPOTest:
             dpo.test(DummySFTEnv(), loop=1)
 
 
-class TestDPOLigerUnavailableBehaviour:
-    @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
-    def test_dpo_liger_unavailable_behaviour(
-        self,
-        monkeypatch,
-        dpo_factory,
-        dist_mode_factory,
-        model_factory,
-        assertion_mode,
-    ):
-        # LLMAlgorithm reads HAS_LIGER_KERNEL from core.base; DPO's module copy is
-        # separate. Patch both so fallback warning runs on machines where liger is
-        # installed and _dpo_loss_liger still raises when called directly.
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-        monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
-        if assertion_mode == "warns_and_fallback":
-            with pytest.warns(
-                UserWarning,
-                match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
-            ):
-                dpo = dpo_factory(
-                    dist_mode_factory=dist_mode_factory,
-                    model_factory=model_factory,
-                    dist_mode=None,
-                    vocab_size=30,
-                    input_size=5,
-                    max_tokens=10,
-                    use_separate_reference_adapter=False,
-                    pretrained_model_name_or_path=None,
-                    micro_batch_size_per_gpu=None,
-                    from_name=False,
-                    use_liger_loss=True,
-                )
-            assert dpo.use_liger_loss is False
-        else:
-            dpo = dpo_factory(
-                dist_mode_factory=dist_mode_factory,
-                model_factory=model_factory,
-                dist_mode=None,
-                vocab_size=30,
-                input_size=5,
-                max_tokens=10,
-                use_separate_reference_adapter=False,
-                pretrained_model_name_or_path=None,
-                micro_batch_size_per_gpu=None,
-                from_name=False,
-                use_liger_loss=False,
-            )
-            with pytest.raises(
-                ImportError,
-                match=r"Liger DPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
-            ):
-                dpo._dpo_loss_liger(
-                    chosen_ids=torch.ones((1, 2), dtype=torch.long),
-                    rejected_ids=torch.ones((1, 2), dtype=torch.long),
-                    chosen_attn=torch.ones((1, 2), dtype=torch.long),
-                    rejected_attn=torch.ones((1, 2), dtype=torch.long),
-                    chosen_mask=torch.ones((1, 1), dtype=torch.long),
-                    rejected_mask=torch.ones((1, 1), dtype=torch.long),
-                )
-
-        dpo.clean_up()
-
-
-class TestDPOLigerHiddenCapture:
-    def test_get_hidden_never_runs_lm_head(self, monkeypatch):
-        """``_get_hidden`` must identity-patch ``lm_head``, not run it: a
-        pre-hook capture still materializes a discarded ``(B, T, V)`` logits
-        tensor per forward (12+ GiB at production shapes).
-        """
-        vocab_size = 30
-        dpo = _make_cpu_dpo_for_branch_tests(
-            vocab_size=vocab_size,
-            input_size=5,
-            max_tokens=10,
-            use_liger_loss=False,
-        )
-        # Force the liger branch; stub the kernel so the test runs without
-        # liger-kernel (and off-GPU) while capturing what would be fed to it.
-        monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", True)
-
-        lm_head = dpo._get_lm_head()
-        hidden_size = lm_head.weight.shape[1]
-        monkeypatch.setattr(
-            lm_head,
-            "forward",
-            mock.MagicMock(
-                side_effect=AssertionError(
-                    "lm_head must not run inside _get_hidden: its (B, T, V) "
-                    "output is exactly the transient the identity patch avoids"
-                )
-            ),
-        )
-
-        captured = {}
-
-        class _FakeLigerDPO:
-            @staticmethod
-            def apply(policy_hidden, weight, target, bias, ref_hidden, *rest):
-                captured["policy_hidden"] = policy_hidden
-                captured["ref_hidden"] = ref_hidden
-                aux = tuple(torch.zeros(()) for _ in range(7))
-                return torch.zeros(()), aux
-
-        # raising=False: the guarded import means the attribute is absent
-        # when liger-kernel is not installed.
-        monkeypatch.setattr(
-            "agilerl.algorithms.dpo.LigerDPOWithAlpha", _FakeLigerDPO, raising=False
-        )
-
-        b, seq_len = 2, 6
-        ids = torch.randint(0, vocab_size, (b, seq_len))
-        attn = torch.ones((b, seq_len), dtype=torch.long)
-        mask = torch.ones((b, seq_len - 1), dtype=torch.long)
-
-        dpo._dpo_loss_liger(
-            chosen_ids=ids,
-            rejected_ids=ids,
-            chosen_attn=attn,
-            rejected_attn=attn,
-            chosen_mask=mask,
-            rejected_mask=mask,
-        )
-
-        # Hidden-state-sized (2B, T-1, H), never vocab-sized.
-        assert captured["policy_hidden"].shape == (2 * b, seq_len - 1, hidden_size)
-        assert captured["ref_hidden"].shape == (2 * b, seq_len - 1, hidden_size)
-        # Reference forwards ran under no_grad; policy forwards kept grad.
-        assert not captured["ref_hidden"].requires_grad
-        assert captured["policy_hidden"].requires_grad
-        # The patch restored the real lm_head after each forward.
-        assert dpo._get_lm_head() is lm_head
-
-        dpo.clean_up()
-
-
 class TestDPOLoad:
     def test_dpo_load(self):
         with pytest.raises(NotImplementedError):
@@ -772,10 +640,6 @@ class TestDPOSaveLoadCheckpoint:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 lora_config=copy.deepcopy(dpo.lora_config),
-                # Match the saved agent's setting so the constructor doesn't
-                # mutate ``lora_config`` differently (``use_liger_loss=True``
-                # adds ``exclude_modules=["lm_head"]``).
-                use_liger_loss=dpo.use_liger_loss,
             )
             own_profiler = new_dpo.learn_profiler
             new_dpo.load_checkpoint(tmpdir)
@@ -827,6 +691,8 @@ class TestDPOSaveLoadCheckpoint:
                         getattr(new_dpo, attr).is_sharded
                         == getattr(dpo, attr).is_sharded
                     )
+                elif attr == "sequence_layout":
+                    assert type(getattr(new_dpo, attr)) is type(getattr(dpo, attr))
                 elif attr == "learn_profiler":
                     assert new_dpo.learn_profiler is own_profiler
                 elif not isinstance(getattr(dpo, attr), torch.Tensor):
@@ -962,7 +828,7 @@ class TestDPOSetReferencePolicy:
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
         reference_update_tracker = 0
-        dpo.set_reference_policy(reference_update_tracker)
+        dpo.set_reference_policy()
         input_ids = torch.tensor([[i + 1 for i in range(input_size + max_tokens)]]).to(
             dpo.device,
         )
@@ -973,7 +839,9 @@ class TestDPOSetReferencePolicy:
         ).logits
         assert dpo.reference_update_tracker == reference_update_tracker
         reference_update_tracker += 1
-        dpo.set_reference_policy(reference_update_tracker)
+        dpo.reference_update_interval = 1
+        dpo.optimizer_steps = 1
+        dpo.set_reference_policy()
         output_after = dpo.actor(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1028,7 +896,8 @@ class TestDPOLearnPhaseTimings:
             "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
             "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
             "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "prompt_lengths": [2, 2, 2, 2],
+            "chosen_loss_mask": after_prompt(2, (4, 6)),
+            "rejected_loss_mask": after_prompt(2, (4, 6)),
         }
 
         # Act
@@ -1045,6 +914,13 @@ class TestDPOLearnPhaseTimings:
         dpo.clean_up()
 
 
+def after_prompt(prompt_length: int, shape: tuple[int, int]) -> torch.Tensor:
+    """Loss mask that is True after the first ``prompt_length`` tokens of every row."""
+    mask = torch.zeros(shape, dtype=torch.bool)
+    mask[:, prompt_length:] = True
+    return mask
+
+
 def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
     """Four chosen/rejected pairs of six tokens with two-token prompts."""
     generator = torch.Generator().manual_seed(0)
@@ -1053,7 +929,8 @@ def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
         "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
         "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
         "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
-        "prompt_lengths": [2, 2, 2, 2],
+        "chosen_loss_mask": after_prompt(2, (4, 6)),
+        "rejected_loss_mask": after_prompt(2, (4, 6)),
     }
 
 
@@ -1087,7 +964,13 @@ class TestDPOLearnMetrics:
     ) -> None:
         # Arrange: a second rank whose means differ from this rank's.
         dpo = _make_cpu_dpo_for_branch_tests()
-        other_rank = {"loss": 1.0, "chosen_reward": 2.0, "rejected_reward": -2.0}
+        other_rank = {
+            "loss": 1.0,
+            "chosen_reward": 2.0,
+            "rejected_reward": -2.0,
+            "chosen_length": 8.0,
+            "rejected_length": 2.0,
+        }
         local: dict[str, float] = {}
 
         def mean_with_other_rank(metrics: dict[str, float]) -> dict[str, float]:
@@ -1102,13 +985,16 @@ class TestDPOLearnMetrics:
         metrics = dpo.learn(random_preference_batch())
 
         # Assert
-        for name in ("loss", "chosen_reward", "rejected_reward"):
+        for name in other_rank:
             expected = (local[name] + other_rank[name]) / 2
             assert metrics[name] == expected, name
             assert dpo.metrics.get_mean(name) == pytest.approx(expected), name
         assert dpo.metrics.get_mean("reward_margin") == pytest.approx(
             metrics["chosen_reward"] - metrics["rejected_reward"]
         )
+        # Four trained tokens per side here: (4 + 8) / 2 - (4 + 2) / 2.
+        assert metrics["length_margin"] == pytest.approx(3.0)
+        assert dpo.metrics.get_mean("length_margin") == pytest.approx(3.0)
         dpo.clean_up()
 
 
@@ -1177,4 +1063,265 @@ class TestDPOLearnNonFiniteLoss:
         with pytest.raises(ValueError, match="Loss is not finite"):
             dpo.learn(random_preference_batch())
         assert list(scales) == []
+        dpo.clean_up()
+
+
+class TestDPOUnsetFSDPMemory:
+    def test_set_fields_skip_the_estimate(self) -> None:
+        # Arrange
+        agent = _make_cpu_dpo_for_branch_tests()
+        agent.device = "cuda"
+        config = FSDPConfig(
+            checkpoint_every_n_blocks=1,
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
+            cpu_offload=False,
+        )
+
+        # Act
+        resolved = agent._resolve_fsdp_config(config)
+
+        # Assert
+        assert resolved == config
+        agent.clean_up()
+
+    def test_unset_fields_are_searched_from_max_model_len(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        # Arrange
+        agent = _make_cpu_dpo_for_branch_tests()
+        save_checkpoint_config(
+            agent, tmp_path, SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
+        )
+        patch_cuda_device(agent, monkeypatch, 80 * 2**30)
+
+        # Act: a set memory field keeps the run FSDP.
+        resolved = agent._resolve_fsdp_config(FSDPConfig(cpu_offload=False))
+
+        # Assert
+        assert all(getattr(resolved, name) is not None for name in FSDP_MEMORY_FIELDS)
+        assert isinstance(agent.gradient_checkpointing, bool)
+        agent.clean_up()
+
+    def test_off_cuda_unset_fields_raise(self) -> None:
+        # Arrange
+        agent = _make_cpu_dpo_for_branch_tests()
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=r"fsdp\.reshard_after_forward.*CUDA"):
+            agent._resolve_fsdp_config(FSDPConfig())
+        agent.clean_up()
+
+
+def perturbed_cpu_dpo() -> DPO:
+    """CPU DPO without dropout whose actor differs from its reference."""
+    dpo = _make_cpu_dpo_for_branch_tests(
+        lora_config=LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        )
+    )
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for name, param in dpo.actor.named_parameters():
+            if "lora_B" in name:
+                param.normal_(std=0.5)
+    return dpo
+
+
+class TestDPOLearnLossMasks:
+    def test_reports_each_sides_trained_token_count(self) -> None:
+        # Arrange
+        dpo = perturbed_cpu_dpo()
+        batch = random_preference_batch()
+        batch["rejected_loss_mask"] = after_prompt(4, (4, 6))
+
+        # Act
+        metrics = dpo.learn(batch, training=False)
+
+        # Assert: masks shift by one, so 6 - 2 and 6 - 4 tokens are scored.
+        assert metrics["chosen_length"] == pytest.approx(4.0)
+        assert metrics["rejected_length"] == pytest.approx(2.0)
+        assert metrics["length_margin"] == pytest.approx(2.0)
+        dpo.clean_up()
+
+    def test_loss_reads_only_the_tokens_in_the_loss_mask(self) -> None:
+        # Arrange: the last rejected token, outside then inside its loss mask.
+        dpo = perturbed_cpu_dpo()
+        batch = random_preference_batch()
+        batch["rejected_loss_mask"][:, -1] = False
+        edited = {key: value.clone() for key, value in batch.items()}
+        edited["rejected_input_ids"][:, -1] = (
+            batch["rejected_input_ids"][:, -1] + 1
+        ) % 99
+
+        # Act
+        masked_out = (
+            dpo.learn(batch, training=False)["loss"],
+            dpo.learn(edited, training=False)["loss"],
+        )
+        batch["rejected_loss_mask"][:, -1] = True
+        edited["rejected_loss_mask"][:, -1] = True
+        masked_in = (
+            dpo.learn(batch, training=False)["loss"],
+            dpo.learn(edited, training=False)["loss"],
+        )
+
+        # Assert
+        assert masked_out[0] == pytest.approx(masked_out[1], rel=1e-6)
+        assert masked_in[0] != pytest.approx(masked_in[1], rel=1e-6)
+        dpo.clean_up()
+
+
+# Packed and padded attention differ only in fp32 summation order.
+PACKING_ATOL = 1e-5
+
+
+def make_qwen3_dpo() -> DPO:
+    """Tiny fp32 Qwen3 DPO on CPU whose actor and reference adapters differ."""
+    # Liger's instance patches are Triton kernels; this model runs on CPU.
+    with mock.patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+        dpo = DPO(
+            actor_network=create_tiny_qwen3(),
+            pad_token_id=63,
+            pad_token="<pad>",
+            lora_config=LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["q_proj", "v_proj"],
+            ),
+            batch_size=4,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
+    with torch.no_grad():
+        for name, param in dpo.actor.named_parameters():
+            if "lora_B" in name:
+                param.normal_(std=0.5)
+    return dpo
+
+
+def packing_preference_batch() -> dict[str, torch.Tensor]:
+    """Right-padded chosen and rejected rows with their shifted response masks."""
+    chosen_ids, chosen_attn = right_padded_batch([12, 9, 6, 11])
+    rejected_ids, rejected_attn = right_padded_batch([10, 12, 5, 8])
+    prompt_masks = DPO._create_prompt_masks([3, 2, 4, 2], max_length=12).bool()
+    return {
+        "chosen_ids": chosen_ids,
+        "chosen_attn": chosen_attn.long(),
+        "rejected_ids": rejected_ids,
+        "rejected_attn": rejected_attn.long(),
+        "chosen_mask": (prompt_masks & chosen_attn)[:, 1:].long(),
+        "rejected_mask": (prompt_masks & rejected_attn)[:, 1:].long(),
+    }
+
+
+def record_forward_shapes(dpo: DPO) -> list[torch.Size]:
+    """Input-id shapes of every actor forward from here on."""
+    shapes = []
+    dpo.actor.register_forward_pre_hook(
+        lambda _m, _a, kwargs: shapes.append(kwargs["input_ids"].shape),
+        with_kwargs=True,
+    )
+    return shapes
+
+
+def standard_dpo_loss_and_grads(
+    dpo: DPO, batch: dict[str, torch.Tensor]
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    """Loss, chosen reward and actor grads of one standard-path DPO micro-batch."""
+    with torch.no_grad():
+        ref_chosen, ref_rejected = (
+            dpo._get_logprobs(
+                batch[f"{side}_ids"],
+                4,
+                use_reference=True,
+                eval_mode=True,
+                attention_mask=batch[f"{side}_attn"],
+            )
+            for side in ("chosen", "rejected")
+        )
+    loss, chosen_reward, _ = dpo._dpo_loss(
+        4,
+        np.arange(4),
+        batch["chosen_ids"],
+        batch["chosen_attn"],
+        batch["rejected_ids"],
+        batch["rejected_attn"],
+        batch["chosen_mask"],
+        batch["rejected_mask"],
+        ref_rejected,
+        ref_chosen,
+        True,
+    )
+    loss.backward()
+    grads = []
+    for param in dpo.actor.parameters():
+        if param.requires_grad:
+            grads.append(param.grad.clone())
+            param.grad = None
+    return loss.detach(), chosen_reward, grads
+
+
+class TestDPODPOLoss:
+    def test_packed_standard_loss_and_grads_match_padded(self) -> None:
+        # Arrange
+        dpo = make_qwen3_dpo()
+        batch = packing_preference_batch()
+        padded_loss, padded_reward, padded_grads = standard_dpo_loss_and_grads(
+            dpo, batch
+        )
+        use_packed(dpo, True)
+        shapes = record_forward_shapes(dpo)
+
+        # Act
+        packed_loss, packed_reward, packed_grads = standard_dpo_loss_and_grads(
+            dpo, batch
+        )
+
+        # Assert: reference and policy forwards each ran on one packed row.
+        assert shapes == [
+            torch.Size([1, 38]),
+            torch.Size([1, 35]),
+            torch.Size([1, 35]),
+            torch.Size([1, 38]),
+        ]
+        assert padded_reward.abs().min() > 0
+        torch.testing.assert_close(packed_loss, padded_loss, atol=PACKING_ATOL, rtol=0)
+        torch.testing.assert_close(
+            packed_reward, padded_reward, atol=PACKING_ATOL, rtol=0
+        )
+        assert padded_grads
+        for packed, padded in zip(packed_grads, padded_grads, strict=True):
+            torch.testing.assert_close(packed, padded, atol=PACKING_ATOL, rtol=0)
+        dpo.clean_up()
+
+    def test_scored_token_head_matches_the_full_head(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        dpo = make_qwen3_dpo()
+        batch = packing_preference_batch()
+        with monkeypatch.context() as patched:
+            score_every_token(dpo, patched)
+            full_loss, full_reward, full_grads = standard_dpo_loss_and_grads(dpo, batch)
+
+        # Act
+        loss, reward, grads = standard_dpo_loss_and_grads(dpo, batch)
+
+        # Assert
+        # The head sees the scored rows as one flat row; fp32 GEMM blocking
+        # follows the row count.
+        torch.testing.assert_close(loss, full_loss, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(reward, full_reward, rtol=1e-5, atol=1e-6)
+        assert full_grads
+        for grad, full_grad in zip(grads, full_grads, strict=True):
+            torch.testing.assert_close(grad, full_grad, rtol=1e-5, atol=1e-6)
         dpo.clean_up()

@@ -6,7 +6,14 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
+
+# xdist workers already fill the CPUs. Per-worker OpenMP pools on top of that
+# contend for cores and run the suite 2-4x slower. Set before numpy/torch load.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import gymnasium as gym
 
@@ -131,6 +138,13 @@ _DIST_ENV_VARS = (
 _WORKER_MASTER_PORT = os.environ.get("MASTER_PORT") if _xdist_worker_id else None
 
 
+def _reset_bf16_rounding() -> None:
+    """Drop the shared bf16 draw so the next test starts on round-to-nearest."""
+    from agilerl.utils.stochastic_round import bf16_round_step
+
+    bf16_round_step.set(None)
+
+
 def _reset_distributed_env() -> None:
     """Clear distributed launch env vars leaked by GPU / LLM tests.
 
@@ -220,8 +234,11 @@ def pytest_collection_modifyitems(config, items):
     skip_no_cuda = pytest.mark.skip(
         reason="Requires a usable CUDA device (gpu/vllm-marked); none available."
     )
+    skip_no_gloo = pytest.mark.skip(reason="multi_rank tests need gloo")
     gputest_count = 0
     for item in items:
+        if sys.platform == "win32" and item.get_closest_marker("multi_rank"):
+            item.add_marker(skip_no_gloo)
         if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
             item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
             gputest_count += 1
@@ -260,12 +277,14 @@ def cleanup():
     _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
+    _reset_bf16_rounding()
 
     yield
 
     _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
+    _reset_bf16_rounding()
 
     # Only clear CUDA cache if CUDA was actually used
     if torch.cuda.is_available() and torch.cuda.is_initialized():
@@ -280,6 +299,38 @@ def cleanup():
     # Only run garbage collection every 10 tests
     if cleanup.call_count % 5 == 0:
         gc.collect()
+
+
+def hf_modeling_modules() -> list[ModuleType]:
+    """HF modeling modules imported so far."""
+    return [
+        module
+        for name, module in list(sys.modules.items())
+        if name.startswith("transformers.models.") and ".modeling_" in name
+    ]
+
+
+@pytest.fixture(scope="session")
+def hf_modeling_attrs() -> dict[ModuleType, dict[str, object]]:
+    """Attributes of the HF modeling modules imported at collection."""
+    return {module: dict(vars(module)) for module in hf_modeling_modules()}
+
+
+@pytest.fixture(autouse=True)
+def restore_hf_modeling_modules(
+    hf_modeling_attrs: dict[ModuleType, dict[str, object]],
+) -> Iterator[None]:
+    """Undo module-level class swaps, such as Liger's, on loaded HF modeling modules."""
+    # Session scope captures the modules before module-scoped fixtures patch them.
+    for module in hf_modeling_modules():
+        hf_modeling_attrs.setdefault(module, dict(vars(module)))
+
+    yield
+
+    for module, attrs in hf_modeling_attrs.items():
+        for attr, value in attrs.items():
+            if vars(module).get(attr) is not value:
+                setattr(module, attr, value)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -649,6 +700,25 @@ def serve_env():
         server.stop()
 
 
+@pytest.fixture
+def torch_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tiny CPU Qwen3.5 and Nemotron-H models run the PyTorch kernels."""
+    # Defers transformers, an llm extra.
+    from tests.torch_kernels import use_torch_kernels
+
+    use_torch_kernels(monkeypatch)
+
+
+@pytest.fixture
+def pristine_nemotron_classes() -> Iterator[None]:
+    """Undo Nemotron-H Mamba patches a test installs, so later tests see stock classes."""
+    # Defers transformers, an llm extra.
+    from tests.nemotron_classes import restore_nemotron_classes
+
+    with restore_nemotron_classes():
+        yield
+
+
 @pytest.fixture(autouse=True)
 def stub_family_config_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hub ids skip config download. A local checkout still loads its config.json."""
@@ -682,7 +752,7 @@ def stub_family_config_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
         unused = dict(kwargs)
         for key in hub_keys:
             unused.pop(key, None)
-        return {"model_type": "llama"}, unused
+        return {"model_type": "qwen3"}, unused
 
     monkeypatch.setattr(
         "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",

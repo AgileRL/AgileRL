@@ -18,6 +18,7 @@ CI_WORKFLOW = "ci.yml"
 MAIN_BRANCH = "main"
 SUCCESS = "success"
 COMPLETED = "completed"
+AFFECTED_TITLE_PREFIX = "CI affected"
 
 
 def env(name: str) -> str:
@@ -159,6 +160,16 @@ def runs_for_tree(
     return matched
 
 
+def gates_main(run: dict[str, Any]) -> bool:
+    """False for an affected-scope run: it tests a subset and gates nothing.
+
+    :param run: Workflow run payload.
+    :return: Whether the run can be the gating run.
+    """
+    title = run.get("display_title")
+    return not (isinstance(title, str) and title.startswith(AFFECTED_TITLE_PREFIX))
+
+
 def choose_ci_run(
     associated_pulls: object,
     workflow_runs: object,
@@ -168,7 +179,7 @@ def choose_ci_run(
     """Select the CI run that gated this commit.
 
     Merged PR into main first, then a run whose head commit has the same tree
-    (`workflow_dispatch` on `hub-ci/<iid>`).
+    (`workflow_dispatch` on a hub-ci ref). Affected-scope runs never gate.
 
     :param associated_pulls: `GET /commits/{sha}/pulls` JSON.
     :param workflow_runs: `workflow_runs` array from the CI workflow.
@@ -178,7 +189,7 @@ def choose_ci_run(
     """
     if not isinstance(workflow_runs, list):
         raise TypeError("workflow runs JSON must be an array")
-    runs = [run for run in workflow_runs if isinstance(run, dict)]
+    runs = [run for run in workflow_runs if isinstance(run, dict) and gates_main(run)]
     pull = merged_main_pull(associated_pulls)
     if pull is not None:
         number = pull.get("number")

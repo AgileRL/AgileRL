@@ -11,6 +11,11 @@ provider-agnostic and gives users the flexibility to train on a variety of compu
 The **Arena client** is how you interact with the platform from your machine: upload and validate
 custom environments, submit training jobs on scalable compute, and deploy trained agents for inference.
 
+.. note::
+
+   Arena trains LLMs. Classic RL algorithms such as PPO, DQN and TD3 are no longer available on
+   Arena; train them with open-source AgileRL, starting from the :ref:`Gymnasium tutorials <Gymnasium_tutorials>`.
+
 .. seealso::
 
    :ref:`arena_client` for the full CLI and Python SDK reference (commands, manifests, and API details).
@@ -21,14 +26,15 @@ custom environments, submit training jobs on scalable compute, and deploy traine
 Tutorials
 ---------
 
-- :doc:`PPO on a Custom Gym Environment <ppo_custom_env>`: Upload and validate a **Merge** air
-  traffic environment on Arena, train PPO with evolutionary HPO, and deploy the trained agent for inference.
 - :doc:`GRPO on GSM8K <grpo_gsm8k>`: Register the **GSM8K** math dataset from Hugging Face, write a
-  reward function, fine-tune ``Qwen2.5-0.5B-Instruct`` with GRPO, and deploy the model for inference.
+  reward function, fine-tune ``Qwen/Qwen3.5-0.8B`` with GRPO, and deploy the model for inference.
+- :doc:`GRPO with an LLM judge <grpo_llm_judge>`: Store a judge's API key as an organization
+  secret, combine a correctness check with an LLM judge in a rubric, watch the judge's metrics
+  and notes, and try RULER, which scores a whole group in one judge call.
 
 .. toctree::
    :maxdepth: 1
    :hidden:
 
-   PPO on a Custom Gym Environment <ppo_custom_env>
    GRPO on GSM8K <grpo_gsm8k>
+   GRPO with an LLM judge <grpo_llm_judge>

@@ -1,11 +1,15 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import json
 import logging
 import math
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +30,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
 from transformers import (
+    CONFIG_MAPPING,
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     AutoTokenizer,
     LlamaConfig,
     LlamaForCausalLM,
@@ -36,75 +44,79 @@ from transformers import (
     NemotronHForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
     SiglipVisionConfig,
     SiglipVisionModel,
 )
+from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from agilerl.architectures import install_family_patches, trainer_model_class
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
-from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
-from agilerl.architectures.nemotron_h.language_tower import (
-    omni_language_tower_hf_override,
+from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
+from agilerl.architectures.nemotron_h_omni.vision import (
+    nemotron_h_omni_vllm_hf_override,
 )
-from agilerl.architectures.qwen3_5 import (
-    QWEN3_5_MODEL_CLASS_OVERRIDES,
-    qwen3_5_language_tower_hf_override,
-)
-from agilerl.architectures.vllm_language import (
-    nested_language_config,
-)
+from agilerl.architectures.runtime import TrainerRuntimeConfig
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
+from agilerl.distributed.context_parallel import substitute_hf_ulysses_attn
 from agilerl.llm_envs import DatasetEnv
+from agilerl.lora.moe import device_expert_backend
+from agilerl.lora.moe import grouped_gemm as moe_gemm
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
+    MAMBA_LORA_FORBIDDEN_MODULES,
+    MAMBA_LORA_MODEL_TYPES,
     LoraAdapterSnapshot,
     MicroBatchMetrics,
+    RolloutSampling,
     adapt_lora_config_for_model,
     apply_pad_token_id,
+    apply_vllm_compile_cache_env,
     attention_mask_from_padded_ids,
     baseline_free_turn_cells,
     batch_is_single_turn,
+    broadcast_log_ratio_by_level,
     build_bnb_quantization_config,
-    build_clippable_linear_lora_target_regex,
-    build_clippable_linear_lora_target_suffixes,
     build_completion_mask,
-    build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     calculate_k3_kl,
     check_vllm_lora_export_complete,
-    clipped_is_surrogate,
+    clipped_token_surrogate,
     collect_trainable_param_stats,
     compare_responses,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
     directory_opener,
-    discover_clippable_inner_linear_module_keys,
-    discover_clippable_projection_leaf_names,
-    expert_lora_vllm_key_map,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
     gather_to_host,
     get_lora_params,
     get_model_name_or_path,
-    hf_completion_lengths,
+    global_masked_whiten,
+    has_vision_tower,
     k3_kl_penalty_reference,
     language_model_attn_implementation,
+    language_model_prefix,
     list_peft_matched_module_keys,
     load_lora_adapters,
     log_cuda_memory_snapshot,
+    lora_target_module_names,
     make_llm_optimizer,
     make_llm_scheduler,
     masked_mean,
     masked_var,
     masked_whiten,
     max_prompt_tokens_for_model_len,
-    model_has_clippable_linear_wrappers,
     move_params_to_cpu,
     move_params_to_gpu,
     normalize_prompt_batch,
@@ -113,27 +125,37 @@ from agilerl.utils.llm_utils import (
     peft_target_key_matches,
     pool_by_turns,
     pool_log_ratio_by_level,
-    prepare_prompt_hf_generate,
     remap_peft_lora_key_for_vllm,
     render_chat_template,
     report_model_kernels,
-    resolve_attn_implementation,
     resolve_batch_advantage_granularity,
     resolve_llm_device,
     resolve_pad_token_id,
-    resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
     save_lora_adapters,
     save_peft_adapter_for_vllm_rollout,
     set_sub_model_attn_implementation,
     snapshot_lora_adapters,
+    trainer_attn_implementation,
+    turn_state_values,
     validate_importance_sampling_level,
     value_fit,
     write_lora_adapters,
     write_safetensors,
 )
+from agilerl.utils.stochastic_round import bf16_round_step, stochastic_round_bf16
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helper_functions import skip_torch_compile_on_windows_cpu
+from tests.rank_launch import run_ranks
+from tests.test_distributed.quantized_checkpoints import (
+    INPUT_IDS,
+    QuantizedCheckpoint,
+    reference_model,
+    tiny_dsv4_config,
+    write_dsv4_checkpoint,
+    write_glm_checkpoint,
+)
 
 DUMMY_CONVERSATION_TEMPLATE = [
     {
@@ -598,6 +620,108 @@ class TestSampleEvalPrompts:
         assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
         assert all(r[2] is None for r in rows)
 
+    def test_sample_eval_prompts_preference_env_with_default_response_column(self):
+        """A preference ``DatasetEnv`` carries the default ``response_column`` too."""
+        from types import SimpleNamespace
+
+        ds = Datasets.from_dict(
+            {"prompt": ["p0"], "chosen": ["c0"], "rejected": ["x0"]},
+        )
+        env = SimpleNamespace(
+            response_column="response",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "c0", "x0")]
+
+    def test_sample_eval_prompts_response_column_wins_when_chosen_remains(self):
+        """An SFT split that still has chosen and rejected uses the target column."""
+        ds = Datasets.from_dict(
+            {
+                "prompt": ["p0"],
+                "target": ["answer"],
+                "chosen": ["preferred"],
+                "rejected": ["worse"],
+            },
+        )
+        env = SimpleNamespace(
+            objective="sft",
+            response_column="target",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "answer", None)]
+
+    def test_sample_eval_prompts_response_column_without_rejected(self):
+        """A leftover chosen column with no rejected does not raise."""
+        ds = Datasets.from_dict(
+            {"prompt": ["p0"], "target": ["answer"], "chosen": ["preferred"]},
+        )
+        env = SimpleNamespace(
+            objective="sft",
+            response_column="target",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "answer", None)]
+
+    def test_sample_eval_prompts_preference_ignores_response_column(self):
+        """A preference split with a ``response`` column keeps chosen and rejected."""
+        ds = Datasets.from_dict(
+            {
+                "prompt": ["p0"],
+                "response": ["unused"],
+                "chosen": ["preferred"],
+                "rejected": ["worse"],
+            },
+        )
+        env = SimpleNamespace(
+            objective="preference",
+            response_column="response",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "preferred", "worse")]
+
+    def test_sample_eval_prompts_messages_rows_without_prompt_columns(self):
+        """A ``messages`` row samples its rendered context and first assistant turn."""
+        from types import SimpleNamespace
+
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        user = {"role": "user", "content": "Hi"}
+        ds = Datasets.from_dict(
+            {"messages": [[user, {"role": "assistant", "content": "Hello"}]]}
+        )
+        env = SimpleNamespace(
+            response_column="response",
+            tokenizer=tokenizer,
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        # Act
+        rows = sample_eval_prompts(env, n=1, seed=0)
+
+        # Assert
+        assert rows == [
+            (
+                tokenizer.apply_chat_template(
+                    [user], tokenize=False, add_generation_prompt=True
+                ),
+                "Hello",
+                None,
+            )
+        ]
+
+    def test_sample_eval_prompts_messages_rows_need_a_tokenizer(self):
+        from types import SimpleNamespace
+
+        ds = Datasets.from_dict({"messages": [[{"role": "user", "content": "Hi"}]]})
+        env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+
+        with pytest.raises(TypeError, match=r"env\.tokenizer is required"):
+            sample_eval_prompts(env, n=1, seed=0)
+
     def test_sample_eval_prompts_preference_style_chosen_rejected(self):
         """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
         from types import SimpleNamespace
@@ -681,7 +805,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             # Verify the fallback sentinels
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
-            assert llm_utils_reloaded.AutoModelForCausalLM is None
             assert llm_utils_reloaded.AutoModelForCausalLMWithValueHead is None
             assert llm_utils_reloaded.BitsAndBytesConfig is None
     finally:
@@ -876,74 +999,6 @@ class TestValidateLlmContextLengths:
             validate_llm_context_lengths(64, 256)
 
 
-class TestHfTurnGenerationConfig:
-    def test_copies_config_and_sets_per_turn_max_new_tokens(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(
-            max_new_tokens=64, min_new_tokens=None, temperature=0.9
-        )
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config is not original
-        assert turn_config.max_new_tokens == 5
-        assert original.max_new_tokens == 64
-        assert turn_config.temperature == 0.9
-
-    def test_unset_cap_uses_remaining_context(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=None, min_new_tokens=None)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=32,
-            prompt_length=10,
-            max_output_tokens=None,
-        )
-
-        assert turn_config.max_new_tokens == 22
-        assert original.max_new_tokens is None
-
-    def test_clamps_min_new_tokens_to_per_turn_budget(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=16)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 5
-        assert original.min_new_tokens == 16
-
-    def test_leaves_min_new_tokens_when_it_fits(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=4)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 4
-        assert original.min_new_tokens == 4
-
-
 def test_move_params_helpers_call_model_move_and_cuda_sync():
     model_gpu = MagicMock()
     gpu_param = MagicMock()
@@ -1009,7 +1064,7 @@ def test_get_model_name_or_path_helpers():
 
 
 def test_k3_helper_matches_torch() -> None:
-    """K3 estimator helper is the same formula Liger ships."""
+    """K3 estimator helper matches the closed-form K3 formula."""
     torch.manual_seed(5)
     ref = torch.randn(3, 4) * 0.1
     policy = torch.randn(3, 4) * 0.1
@@ -1018,7 +1073,7 @@ def test_k3_helper_matches_torch() -> None:
     assert torch.allclose(calculate_k3_kl(ref, policy), expected)
 
 
-def test_k3_helper_matches_liger_direction() -> None:
+def test_k3_helper_uses_reference_first_order() -> None:
     """Reference-first order estimates KL(policy || reference), not the reverse."""
     ref = torch.tensor([-1.0, -1.0])
     policy = torch.tensor([-1.0, -2.0])
@@ -1182,6 +1237,11 @@ class TestMicroBatchMetrics:
         assert metrics.read() == []
         assert metrics.means() == {"loss": 0.0, "kl": 0.0}
 
+    def test_read_is_empty_before_any_micro_batch(self) -> None:
+        metrics = MicroBatchMetrics(("loss",))
+
+        assert metrics.read() == []
+
     def test_detaches_tensors_that_carry_gradients(self) -> None:
         weight = torch.tensor(2.0, requires_grad=True)
         metrics = MicroBatchMetrics(("loss",))
@@ -1202,6 +1262,28 @@ class TestMaskedMeanAxis:
         assert result.shape == (2,)
         assert result.tolist() == pytest.approx([2.0, 8.0])
 
+    def test_row_without_mask_averages_to_zero(self) -> None:
+        values = torch.tensor([[1.0, 3.0], [4.0, 8.0]])
+        mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]])
+
+        result = masked_mean(values, mask, axis=1)
+
+        assert result.tolist() == [2.0, 0.0]
+
+
+class TestMaskedMean:
+    def test_averages_the_masked_values(self) -> None:
+        values = torch.tensor([[1.0, 3.0], [4.0, 8.0]])
+        mask = torch.tensor([[1, 0], [1, 1]], dtype=torch.bool)
+
+        assert masked_mean(values, mask).item() == pytest.approx(13.0 / 3.0)
+
+    def test_empty_mask_averages_to_zero(self) -> None:
+        values = torch.tensor([[1.0, 3.0]])
+        mask = torch.zeros(1, 2, dtype=torch.bool)
+
+        assert masked_mean(values, mask).item() == 0.0
+
 
 class TestMaskedWhiten:
     def test_leaves_values_unchanged_with_fewer_than_two_unmasked(self) -> None:
@@ -1217,6 +1299,49 @@ class TestMaskedWhiten:
         whitened_shift = masked_whiten(values, mask, shift_mean=True)
         diff = whitened_no_shift - whitened_shift
         assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
+
+
+GLOBAL_WHITEN_VALUES = (
+    torch.tensor([[1.0, 2.0, 3.0]]),
+    torch.tensor([[10.0, 20.0, 30.0]]),
+)
+
+
+def _global_whiten_worker(rank: int, _world_size: int) -> list[float]:
+    """This rank's masked values after global whitening."""
+    values = GLOBAL_WHITEN_VALUES[rank]
+    mask = torch.ones_like(values)
+
+    return global_masked_whiten(values, mask)[mask.bool()].tolist()
+
+
+class TestGlobalMaskedWhiten:
+    def test_matches_masked_whiten_on_one_process(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0], [2.0, 9.0, 4.0]])
+        mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+
+        whitened = global_masked_whiten(values, mask)
+
+        expected = masked_whiten(values, mask)
+        assert torch.allclose(whitened[mask.bool()], expected[mask.bool()], atol=1e-6)
+
+    def test_leaves_values_unchanged_with_fewer_than_two_unmasked(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0]])
+        mask = torch.tensor([[1.0, 0.0, 0.0]])
+
+        assert torch.equal(global_masked_whiten(values, mask), values)
+
+    @pytest.mark.multi_rank
+    def test_uses_the_mean_and_variance_over_every_rank(self) -> None:
+        # Arrange
+        pooled = torch.cat(GLOBAL_WHITEN_VALUES, dim=1)
+        expected = masked_whiten(pooled, torch.ones_like(pooled)).flatten().tolist()
+
+        # Act
+        per_rank = run_ranks(_global_whiten_worker, 2)
+
+        # Assert
+        assert per_rank[0] + per_rank[1] == pytest.approx(expected, abs=1e-6)
 
 
 class TestBaselineFreeTurnCells:
@@ -1291,15 +1416,41 @@ class TestValueFit:
         assert value_fit(values, returns, mask) == (0.0, 0.0)
 
     def test_turn_ids_compare_pooled_turn_values(self) -> None:
-        values = torch.tensor([[1.0, 3.0, 5.0, 5.0, 7.0]])
+        values = torch.tensor([[2.0, 3.0, 5.0, 9.0, 7.0]])
         returns = torch.tensor([[2.0, 2.0, 5.0, 5.0, 0.0]])
         mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]])
         turn_ids = torch.tensor([[0, 0, 1, 1, -1]])
 
-        explained, correlation = value_fit(values, returns, mask, turn_ids, "mean")
+        explained, correlation = value_fit(values, returns, mask, turn_ids)
 
         assert explained == pytest.approx(1.0)
         assert correlation == pytest.approx(1.0)
+
+
+class TestTurnStateValues:
+    def test_selects_first_action_token_per_turn(self) -> None:
+        token_values = torch.tensor([[1.0, 9.0, 2.0, 8.0]])
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=2)
+
+        assert torch.equal(out, torch.tensor([[1.0, 2.0]]))
+
+    def test_missing_turn_is_zero(self) -> None:
+        token_values = torch.tensor([[4.0, 5.0]])
+        turn_ids = torch.tensor([[0, 0]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=2)
+
+        assert torch.equal(out, torch.tensor([[4.0, 0.0]]))
+
+    def test_non_action_tokens_do_not_count_as_a_turn(self) -> None:
+        token_values = torch.tensor([[9.0, 9.0]])
+        turn_ids = torch.tensor([[-1, -1]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=1)
+
+        assert torch.equal(out, torch.tensor([[0.0]]))
 
 
 class TestPoolByTurnsBadReduction:
@@ -1312,157 +1463,79 @@ class TestPoolByTurnsBadReduction:
             pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
 
 
-class TestPoolLogRatioByLevelBadReduction:
-    """``pool_log_ratio_by_level`` rejects unknown turn reductions at the turn level."""
+class TestPoolLogRatioByLevelErrors:
+    def test_turn_level_requires_turn_ids(self) -> None:
+        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
+            pool_log_ratio_by_level(torch.zeros(1, 2), torch.ones(1, 2), None, "turn")
 
-    def test_unknown_turn_reduction_raises(self) -> None:
-        token_log_ratio = torch.zeros(1, 2)
-        action_mask = torch.ones(1, 2)
-        turn_ids = torch.tensor([[0, 0]])
-        with pytest.raises(ValueError, match=r"turn_reduction must be one of"):
-            pool_log_ratio_by_level(
-                token_log_ratio,
-                action_mask,
-                turn_ids,
-                level="turn",
-                turn_reduction="unsupported",
-            )
+    def test_unknown_level_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
+            pool_log_ratio_by_level(torch.zeros(1, 2), torch.ones(1, 2), None, "bogus")
 
 
-class TestClippedIsSurrogate:
-    """The shared token/turn/sequence clipped surrogate used by the non-Liger
-    PPO and REINFORCE paths. token/turn/sequence are points on one
-    ratio-pooling axis, so the level collapses cleanly at the limits.
-    """
-
-    @staticmethod
-    def _setup():
-        torch.manual_seed(0)
-        B, T = 3, 6
-        token_log_ratio = torch.randn(B, T)
-        advantages = torch.randn(B, T)
-        mask = torch.ones(B, T)
-        mask[0, 5:] = 0  # ragged sequence
-        return token_log_ratio, advantages, mask, B, T
-
-    def test_turn_each_token_own_turn_equals_token(self):
-        tlr, adv, mask, _B, T = self._setup()
-        turn_each = torch.where(
-            mask.bool(),
-            torch.arange(T).unsqueeze(0).expand_as(mask).long(),
-            torch.full_like(mask, -1, dtype=torch.long),
-        )
-        pg_tok, cf_tok = clipped_is_surrogate(tlr, adv, mask, turn_each, "token", 0.2)
-        pg_turn, cf_turn = clipped_is_surrogate(tlr, adv, mask, turn_each, "turn", 0.2)
-        assert torch.allclose(pg_tok, pg_turn, atol=1e-5)
-        assert torch.allclose(cf_tok, cf_turn, atol=1e-5)
-
-    def test_single_turn_equals_sequence(self):
-        tlr, adv, mask, B, T = self._setup()
-        turn_one = torch.where(
-            mask.bool(),
-            torch.zeros(B, T, dtype=torch.long),
-            torch.full((B, T), -1, dtype=torch.long),
-        )
-        pg_turn, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "turn", 0.2)
-        pg_seq, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "trajectory", 0.2)
-        assert torch.allclose(pg_turn, pg_seq, atol=1e-5)
-
-    def test_sequence_pools_ratio_and_advantage(self):
-        """Trajectory level uses the length-normalized mean log-ratio and the
-        mean advantage over a completion's action tokens.
-        """
-        tlr = torch.tensor([[0.2, 0.4, 1.0, -5.0]])
-        adv = torch.tensor([[1.0, 3.0, 2.0, 99.0]])
-        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])  # last token non-action
-        pg, _ = clipped_is_surrogate(tlr, adv, mask, None, "trajectory", 0.2)
-        mean_lr = (0.2 + 0.4 + 1.0) / 3
-        mean_adv = (1.0 + 3.0 + 2.0) / 3
-        ratio = torch.exp(torch.tensor(mean_lr))
-        clipped = torch.clamp(ratio, 0.8, 1.2)
-        expected = torch.max(-mean_adv * ratio, -mean_adv * clipped)
-        assert torch.allclose(pg, expected, atol=1e-5)
-
-    def test_turn_sum_reduction_pools_ratio_by_product_but_advantage_by_mean(self):
-        """With ``turn_reduction="sum"`` the turn ratio is the product of token
-        ratios (nightly/Turn-PPO), while the (broadcast) advantage is still
-        recovered by the turn mean — i.e. it is *not* rescaled by turn length.
-        """
-        # One sample, one turn, two action tokens; advantage is the per-turn
-        # value broadcast across both tokens (as the GAE code produces).
-        tlr = torch.tensor([[0.1, 0.2]])
-        adv = torch.tensor([[2.0, 2.0]])
-        mask = torch.ones(1, 2)
-        turn_ids = torch.zeros(1, 2, dtype=torch.long)
-        # Wide clip so the ratio is never clamped, isolating the pooling logic.
-        pg, _ = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 10.0, turn_reduction="sum"
-        )
-        ratio = torch.exp(torch.tensor(0.1 + 0.2))  # product ratio
-        expected = -2.0 * ratio  # mean-pooled advantage, NOT 4.0
-        assert torch.allclose(pg, expected, atol=1e-5)
-
-    def test_turn_count_above_the_largest_turn_gives_the_same_loss(self):
-        # Arrange
-        tlr, adv, mask, _B, T = self._setup()
-        turn_ids = torch.where(
-            mask.bool(),
-            (torch.arange(T) // 3).unsqueeze(0).expand_as(mask),
-            torch.full_like(mask, -1, dtype=torch.long),
-        )
-        weight = torch.rand_like(tlr)
+class TestBroadcastLogRatioByLevel:
+    def test_turn_level_gives_every_token_its_turns_mean(self) -> None:
+        # Arrange: turn 0 owns tokens 0-1, turn 1 tokens 2-4; token 5 is not an action.
+        log_ratio = torch.tensor([[0.2, 0.4, 0.3, 0.6, 0.9, 5.0]])
+        action_mask = torch.tensor([[1, 1, 1, 1, 1, 0]], dtype=torch.bool)
+        turn_ids = torch.tensor([[0, 0, 1, 1, 1, -1]])
 
         # Act
-        inferred = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight
-        )
-        widened = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight, num_turns=5
-        )
+        out = broadcast_log_ratio_by_level(log_ratio, action_mask, turn_ids, "turn", 2)
 
         # Assert
-        assert torch.equal(widened[0], inferred[0])
-        assert torch.equal(widened[1], inferred[1])
+        expected = torch.tensor([0.3, 0.3, 0.6, 0.6, 0.6])
+        assert torch.allclose(out[0, :5], expected, atol=1e-6)
 
-    def test_turn_requires_turn_ids(self):
-        tlr, adv, mask, _B, _T = self._setup()
-        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
-            clipped_is_surrogate(tlr, adv, mask, None, "turn", 0.2)
+    def test_trajectory_level_gives_every_token_the_row_mean(self) -> None:
+        log_ratio = torch.tensor([[0.2, 0.4, 9.0], [1.0, 1.0, 1.0]])
+        action_mask = torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.bool)
 
-    def test_unknown_level_raises(self):
-        tlr, adv, mask, _B, _T = self._setup()
-        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
-            clipped_is_surrogate(tlr, adv, mask, None, "bogus", 0.2)
+        out = broadcast_log_ratio_by_level(log_ratio, action_mask, None, "trajectory")
 
-    def test_gradient_flows_to_log_ratio(self):
-        """All levels are differentiable w.r.t. the token log-ratio."""
-        for level, turn_ids in (
-            ("token", None),
-            ("trajectory", None),
-            ("turn", torch.zeros(3, 6, dtype=torch.long)),
-        ):
-            tlr, adv, mask, _B, _T = self._setup()
-            tlr = tlr.clone().requires_grad_(True)
-            pg, _ = clipped_is_surrogate(tlr, adv, mask, turn_ids, level, 0.2)
-            pg.backward()
-            assert tlr.grad is not None
-            assert torch.isfinite(tlr.grad).all()
+        assert out.shape == (2, 3)
+        assert torch.allclose(out[0, :2], torch.tensor([0.3, 0.3]), atol=1e-6)
+        assert torch.allclose(out[1], torch.ones(3), atol=1e-6)
 
-    def test_loss_weight_scales_per_unit_surrogate(self):
-        """A detached per-token loss weight reweights the surrogate; uniform
-        weights of 1 are a no-op and uniform weights of w scale pg_loss by w.
-        """
-        tlr, adv, mask, _B, _T = self._setup()
-        pg_base, cf_base = clipped_is_surrogate(tlr, adv, mask, None, "token", 0.2)
-        pg_ones, cf_ones = clipped_is_surrogate(
-            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.ones_like(tlr)
+    def test_token_level_is_the_identity(self) -> None:
+        log_ratio = torch.tensor([[0.2, -0.4]])
+
+        out = broadcast_log_ratio_by_level(
+            log_ratio, torch.ones(1, 2, dtype=torch.bool), None, "token"
         )
-        assert torch.allclose(pg_base, pg_ones, atol=1e-6)
-        assert torch.allclose(cf_base, cf_ones, atol=1e-6)
-        pg_half, _ = clipped_is_surrogate(
-            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.full_like(tlr, 0.5)
-        )
-        assert torch.allclose(pg_half, 0.5 * pg_base, atol=1e-6)
+
+        assert torch.equal(out, log_ratio)
+
+
+class TestClippedTokenSurrogate:
+    def test_clips_each_token_by_the_sign_of_its_advantage(self) -> None:
+        # Arrange: one shared ratio of e^0.5 > 1.2; only positive advantages
+        # past the upper bound lose their gradient.
+        log_w = torch.full((1, 3), 0.5, requires_grad=True)
+        advantages = torch.tensor([[1.0, -1.0, 2.0]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
+
+        # Act
+        surrogate, clipped = clipped_token_surrogate(log_w, advantages, mask, 0.8, 1.2)
+        surrogate.sum().backward()
+
+        # Assert
+        ratio = math.exp(0.5)
+        assert torch.allclose(surrogate, torch.tensor([[-1.2, ratio, -2.4]]), atol=1e-6)
+        assert clipped.tolist() == [[True, False, True]]
+        assert log_w.grad is not None
+        assert log_w.grad.tolist()[0][0] == 0.0
+        assert log_w.grad.tolist()[0][2] == 0.0
+        assert log_w.grad[0, 1].item() == pytest.approx(ratio, rel=1e-6)
+
+    def test_masked_tokens_are_never_clipped(self) -> None:
+        log_w = torch.full((1, 2), -1.0)
+        advantages = torch.tensor([[-1.0, -1.0]])
+        mask = torch.tensor([[True, False]])
+
+        _, clipped = clipped_token_surrogate(log_w, advantages, mask, 0.8, 1.2)
+
+        assert clipped.tolist() == [[True, False]]
 
 
 class TestCreateModelFromNameOrPathValueHead:
@@ -1471,7 +1544,7 @@ class TestCreateModelFromNameOrPathValueHead:
     """
 
     def test_add_value_head_calls_value_head_loader(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         from agilerl.utils import llm_utils as llm_utils_module
 
@@ -1492,22 +1565,27 @@ class TestCreateModelFromNameOrPathValueHead:
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         sentinel_model = nn.Identity()
-        with patch.object(
-            llm_utils_module.AutoModelForCausalLMWithValueHead,
-            "from_pretrained",
-            return_value=sentinel_model,
-        ) as mock_loader:
+        with (
+            patch.object(
+                llm_utils_module.AutoModelForCausalLMWithValueHead,
+                "from_pretrained",
+                return_value=sentinel_model,
+            ) as mock_loader,
+            caplog.at_level(logging.INFO, logger=llm_utils_module.__name__),
+        ):
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
+                "sdpa",
                 add_value_head=True,
                 use_distributed=False,
             )
         assert out is sentinel_model
+        assert "Trainer attention backend: sdpa" in caplog.messages
         # Default model_config is built when not supplied; verify the loader saw
         # the model name plus the synthesized dtype/attn keys.
         call_kwargs = mock_loader.call_args.kwargs
         assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
-        assert call_kwargs["attn_implementation"] == resolve_attn_implementation()
+        assert call_kwargs["attn_implementation"] == "sdpa"
 
 
 class TestMakeLlmOptimizer:
@@ -1669,69 +1747,38 @@ GiB = 1024**3
 
 
 # ---------------------------------------------------------------------------
-# Fixture models for the ClippableLinear / LoRA-targeting helpers
+# Fixture models for the LoRA-targeting helpers
 # ---------------------------------------------------------------------------
 
 
-class _FakeClippableLinear(nn.Module):
-    """Stand-in for Gemma's *ClippableLinear projection wrappers.
-
-    Only the class-name suffix matters to the helpers under test.
-    """
-
-    def __init__(self, inner: nn.Module | None = None):
-        super().__init__()
-        self.linear = nn.Linear(4, 4) if inner is None else inner
-
-
-class _ClippableTower(nn.Module):
-    """Vision-tower-like container of *ClippableLinear projection wrappers."""
-
+class _LanguageBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.q_proj = _FakeClippableLinear()
-        self.k_proj = _FakeClippableLinear()
+        self.self_attn = nn.Module()
+        self.self_attn.q_proj = nn.Linear(4, 4)
+        self.self_attn.k_proj = nn.Linear(4, 4)
+        self.mlp = nn.Module()
+        self.mlp.up_proj = nn.Linear(4, 8)
 
 
-class _RootClippableModel(nn.Module):
-    """ClippableLinear wrappers outside any language_model/audio_tower scope."""
-
-    def __init__(self):
-        super().__init__()
-        self.tower = _ClippableTower()
-
-
-class _ScopedClippableModel(nn.Module):
-    """ClippableLinear wrappers nested under ``model.language_model``."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.language_model = _ClippableTower()
-
-
-class _AudioScopedClippableModel(nn.Module):
-    """ClippableLinear wrappers nested under ``model.audio_tower``."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.audio_tower = _ClippableTower()
-
-
-class _LanguageScopedLinearModel(nn.Module):
-    """Plain ``nn.Linear`` projections under a nested ``language_model`` scope."""
+class _VisionLanguageModel(nn.Module):
+    """``model.language_model`` beside a vision tower that reuses ``q_proj``."""
 
     def __init__(self):
         super().__init__()
         self.model = nn.Module()
         self.model.language_model = nn.Module()
-        self.model.language_model.q_proj = nn.Linear(4, 4)
-        self.model.language_model.mlp = nn.Linear(4, 4)
+        self.model.language_model.layers = nn.ModuleList(
+            [_LanguageBlock(), _LanguageBlock()]
+        )
+        self.model.visual = nn.Module()
+        self.model.visual.qkv = nn.Linear(4, 12)
+        self.model.visual.q_proj = nn.Linear(4, 4)
+        self.lm_head = nn.Linear(4, 8)
 
 
 class _PlainLinearModel(nn.Module):
-    """No ClippableLinear wrappers at all."""
+    """Text-only model: no ``language_model`` submodule."""
 
     def __init__(self):
         super().__init__()
@@ -1871,36 +1918,8 @@ class TestBuildBnbQuantizationConfig:
         assert build_bnb_quantization_config(None) is None
 
 
-class TestClippableLinearDiscovery:
-    def test_model_has_clippable_linear_wrappers(self):
-        assert model_has_clippable_linear_wrappers(_RootClippableModel())
-        assert not model_has_clippable_linear_wrappers(_PlainLinearModel())
-
-    def test_discover_projection_leaf_names_sorted(self):
-        assert discover_clippable_projection_leaf_names(_RootClippableModel()) == [
-            "k_proj",
-            "q_proj",
-        ]
-        assert discover_clippable_projection_leaf_names(_PlainLinearModel()) == []
-
-    def test_discover_inner_linear_module_keys(self):
-        keys = discover_clippable_inner_linear_module_keys(_RootClippableModel())
-        assert keys == ["tower.k_proj.linear", "tower.q_proj.linear"]
-
-    def test_discover_inner_keys_skips_non_adaptable_inner_modules(self):
-        model = nn.Module()
-        model.q_proj = _FakeClippableLinear(inner=nn.SiLU())
-        assert discover_clippable_inner_linear_module_keys(model) == []
-
-    def test_discover_inner_keys_accepts_bnb_quantized_linear_names(self):
-        class Linear4bit(nn.Module):
-            """Class name mimics the bitsandbytes 4-bit linear layer."""
-
-        model = nn.Module()
-        model.q_proj = _FakeClippableLinear(inner=Linear4bit())
-        assert discover_clippable_inner_linear_module_keys(model) == ["q_proj.linear"]
-
-    def test_is_peft_adaptable_linear(self):
+class TestIsPeftAdaptableLinear:
+    def test_accepts_linear_and_bnb_linear_names(self):
         class Linear8bitLt(nn.Module):
             """Class name mimics the bitsandbytes 8-bit linear layer."""
 
@@ -1922,64 +1941,16 @@ class TestPeftTargetKeyMatching:
         assert not peft_target_key_matches("model.layers.0.q_proj_extra", ["q_proj"])
 
     def test_list_matched_module_keys_respects_exclusions(self):
-        model = _RootClippableModel()
-        targets = ["q_proj.linear", "k_proj.linear"]
-        assert list_peft_matched_module_keys(model, targets) == [
-            "tower.q_proj.linear",
-            "tower.k_proj.linear",
+        model = _VisionLanguageModel()
+
+        assert list_peft_matched_module_keys(model, ["qkv", "k_proj"]) == [
+            "model.language_model.layers.0.self_attn.k_proj",
+            "model.language_model.layers.1.self_attn.k_proj",
+            "model.visual.qkv",
         ]
         assert list_peft_matched_module_keys(
-            model, targets, exclude_modules=["k_proj"]
-        ) == ["tower.q_proj.linear"]
-
-
-class TestLoraTargetRegexBuilders:
-    def test_clippable_regex_targets_inner_linear(self):
-        regex = build_clippable_linear_lora_target_regex(["q_proj", "k_proj", "q_proj"])
-        assert regex == r"(?:.*\.)?(k_proj|q_proj)\.linear"
-        assert re.fullmatch(regex, "model.layers.0.q_proj.linear")
-        assert re.fullmatch(regex, "k_proj.linear")
-        assert not re.fullmatch(regex, "model.layers.0.q_proj")
-
-    def test_clippable_regex_requires_projection_names(self):
-        with pytest.raises(ValueError, match="At least one projection name"):
-            build_clippable_linear_lora_target_regex([])
-
-    def test_scoped_regex_matches_plain_and_wrapped_projections(self):
-        regex = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert re.fullmatch(regex, "model.language_model.layers.0.q_proj")
-        assert re.fullmatch(regex, "model.language_model.layers.0.q_proj.linear")
-        assert re.fullmatch(regex, "language_model.model.layers.0.q_proj")
-        assert re.fullmatch(regex, "language_model.q_proj")
-        assert not re.fullmatch(regex, "model.vision_tower.layers.0.q_proj")
-        assert not re.fullmatch(regex, "not_language_model.q_proj")
-
-    def test_scoped_regex_requires_projection_names(self):
-        with pytest.raises(ValueError, match="At least one projection name"):
-            build_scoped_lora_target_regex([], "language_model")
-
-    def test_suffix_targets_sorted_and_deduped(self):
-        assert build_clippable_linear_lora_target_suffixes(
-            ["q_proj", "k_proj", "q_proj"]
-        ) == ["k_proj.linear", "q_proj.linear"]
-
-
-class TestProjectionNameResolution:
-    def test_regex_spec_short_circuits_to_none(self):
-        assert (
-            llm_utils_module._projection_names_for_clippable_lora(
-                _PlainLinearModel(), r".*\.q_proj"
-            )
-            is None
-        )
-
-    def test_none_targets_returns_none(self):
-        assert (
-            llm_utils_module._projection_names_for_clippable_lora(
-                _PlainLinearModel(), None
-            )
-            is None
-        )
+            model, ["qkv", "k_proj"], exclude_modules=["k_proj"]
+        ) == ["model.visual.qkv"]
 
     def test_looks_like_peft_target_regex_heuristic(self):
         looks = llm_utils_module._looks_like_peft_target_regex
@@ -1989,149 +1960,170 @@ class TestProjectionNameResolution:
         assert not looks("q_proj")
         assert not looks("q_proj.linear")
 
-    def test_all_linear_expands_to_discovered_wrapper_names(self):
-        names = llm_utils_module._projection_names_for_clippable_lora(
-            _RootClippableModel(), "all-linear"
-        )
-        assert names == ["k_proj", "q_proj"]
 
-    def test_explicit_names_normalized_sorted_deduped(self):
-        names = llm_utils_module._projection_names_for_clippable_lora(
-            _PlainLinearModel(), ["v_proj.linear", "q_proj", "q_proj"]
-        )
-        assert names == ["q_proj", "v_proj"]
+class TestLanguageModelPrefix:
+    def test_vl_model_returns_shortest_language_model_path(self):
+        assert language_model_prefix(_VisionLanguageModel()) == "model.language_model"
 
-
-class TestInferClippableLoraScope:
-    def test_language_model_scope_inferred(self):
-        assert (
-            llm_utils_module._infer_clippable_lora_scope(_ScopedClippableModel())
-            == "language_model"
-        )
-
-    def test_audio_tower_scope_inferred(self):
-        assert (
-            llm_utils_module._infer_clippable_lora_scope(_AudioScopedClippableModel())
-            == "audio_tower"
-        )
-
-    def test_unscoped_wrappers_infer_none(self):
-        assert (
-            llm_utils_module._infer_clippable_lora_scope(_RootClippableModel()) is None
-        )
-
-    def test_no_wrappers_infer_none(self):
-        assert llm_utils_module._infer_clippable_lora_scope(_PlainLinearModel()) is None
-
-
-class TestExampleModuleKeysForLoraScope:
-    def test_returns_keys_under_scope_only(self):
-        model = _LanguageScopedLinearModel()
-        keys = llm_utils_module._example_module_keys_for_lora_scope(
-            model, "language_model"
-        )
-        assert keys == [
-            "model.language_model.q_proj",
-            "model.language_model.mlp",
-        ]
-
-    def test_limit_truncates_examples(self):
-        model = _LanguageScopedLinearModel()
-        keys = llm_utils_module._example_module_keys_for_lora_scope(
-            model, "language_model", limit=1
-        )
-        assert keys == ["model.language_model.q_proj"]
+    def test_text_model_returns_none(self):
+        assert language_model_prefix(_PlainLinearModel()) is None
 
 
 class TestAdaptLoraConfigForModel:
-    def test_regex_targets_returned_unchanged(self):
-        cfg = _PlainLoraConfig(target_modules=r".*\.q_proj")
-        assert adapt_lora_config_for_model(_RootClippableModel(), cfg) is cfg
-
-    def test_plain_model_short_names_returned_unchanged(self):
+    def test_text_model_named_targets_returned_unchanged(self):
         cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
         assert adapt_lora_config_for_model(_PlainLinearModel(), cfg) is cfg
 
-    def test_explicit_scope_rewrites_to_scoped_regex(self):
-        model = _LanguageScopedLinearModel()
+    def test_vl_named_targets_land_on_language_model_only(self):
+        # Arrange
+        model = _VisionLanguageModel()
         cfg = _PlainLoraConfig(target_modules=["q_proj"])
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
-        expected = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert adapted is not cfg
-        assert adapted.target_modules == expected
-        # Original config untouched (deepcopy clone path).
-        assert cfg.target_modules == ["q_proj"]
-        assert re.fullmatch(expected, "model.language_model.q_proj")
 
-    def test_explicit_scope_with_to_dict_config_reconstructs_class(self):
-        model = _LanguageScopedLinearModel()
+        # Act
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        # Assert
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
+            "model.language_model.layers.0.self_attn.q_proj",
+            "model.language_model.layers.1.self_attn.q_proj",
+        ]
+        assert cfg.target_modules == ["q_proj"]
+
+    def test_vl_all_linear_covers_language_linears_only(self):
+        model = _VisionLanguageModel()
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        matched = list_peft_matched_module_keys(model, adapted.target_modules)
+        assert len(matched) == 6
+        assert all(key.startswith("model.language_model.") for key in matched)
+
+    def test_to_dict_config_is_rebuilt_as_its_class(self):
         cfg = _DictLoraConfig(target_modules=["q_proj"], r=16)
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
+
+        adapted = adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
+
         assert isinstance(adapted, _DictLoraConfig)
         assert adapted is not cfg
         assert adapted.r == 16
-        assert adapted.target_modules == build_scoped_lora_target_regex(
-            ["q_proj"], "language_model"
+
+    @pytest.mark.parametrize("targets", [None, []])
+    def test_vl_empty_targets_returned_unchanged(self, targets):
+        cfg = _PlainLoraConfig(target_modules=targets)
+
+        assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
+
+    def test_vl_language_model_regex_returned_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.language_model\..*\.q_proj")
+
+        assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
+
+    def test_vl_regex_matching_tower_raises(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.q_proj")
+
+        with pytest.raises(
+            ValueError, match=r"matches modules outside 'model\.language_model'"
+        ) as exc_info:
+            adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
+        assert "model.visual.q_proj" in str(exc_info.value)
+
+    def test_vl_regex_tower_match_excluded_passes(self):
+        cfg = _PlainLoraConfig(
+            target_modules=r".*\.q_proj", exclude_modules=["model.visual.q_proj"]
         )
 
-    def test_explicit_scope_without_matches_raises_with_examples(self):
-        model = _LanguageScopedLinearModel()
-        cfg = _PlainLoraConfig(target_modules=["v_proj"])
+        assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
+
+    def test_tower_only_name_in_target_modules_raises(self):
+        cfg = _PlainLoraConfig(target_modules=["qkv"])
+
         with pytest.raises(
-            ValueError, match="No modules matched scoped LoRA target_modules"
+            ValueError, match=r"No modules under 'model\.language_model'"
         ) as exc_info:
-            adapt_lora_config_for_model(model, cfg, lora_target_scope="language_model")
-        assert "Example keys under scope" in str(exc_info.value)
-        assert "model.language_model.q_proj" in str(exc_info.value)
+            adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
+        assert "['k_proj', 'q_proj', 'up_proj']" in str(exc_info.value)
 
-    def test_explicit_scope_with_empty_targets_raises(self):
-        cfg = _PlainLoraConfig(target_modules=[])
-        with pytest.raises(ValueError, match="lora_target_scope is set but no"):
-            adapt_lora_config_for_model(
-                _LanguageScopedLinearModel(), cfg, lora_target_scope="language_model"
-            )
 
-    def test_inferred_language_model_scope_with_all_linear(self):
-        model = _ScopedClippableModel()
-        cfg = _PlainLoraConfig(target_modules="all-linear")
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert adapted.target_modules == build_scoped_lora_target_regex(
-            ["k_proj", "q_proj"], "language_model"
+def _shipped_by_transformers(model_type: str) -> bool:
+    """True when transformers ships this ``model_type``'s config class."""
+    config_class = CONFIG_MAPPING[model_type]
+    return getattr(config_class, "__module__", "").startswith("transformers.")
+
+
+VL_SUPPORTED_MODEL_IDS = sorted(
+    hub_id
+    for hub_id, entry in SUPPORTED_MODEL_INFO.items()
+    if entry.language_model_prefix is not None
+    # Checkpoint-code model types have no transformers config class.
+    # agilerl registers mimo_v2 into CONFIG_MAPPING.
+    and entry.model_type in CONFIG_MAPPING
+    and _shipped_by_transformers(entry.model_type)
+)
+
+
+def _decode_config_float(obj: dict[str, Any]) -> Any:
+    """Decode the ``{"__float__": "Infinity"}`` form configs store non-finite floats in."""
+    if obj.keys() == {"__float__"}:
+        return float(obj["__float__"])
+    return obj
+
+
+class TestAdaptLoraConfigForSupportedVlModels:
+    def test_covers_every_transformers_vl_family(self):
+        families = {SUPPORTED_MODEL_INFO[h].model_type for h in VL_SUPPORTED_MODEL_IDS}
+
+        assert families == {
+            "gemma4",
+            "glm5_next",
+            "nemotron_h_omni",
+            "qwen3_5",
+            "qwen3_5_moe",
+        }
+
+    @pytest.mark.parametrize("target_modules", ["default", "all-linear"])
+    @pytest.mark.parametrize("hub_id", VL_SUPPORTED_MODEL_IDS)
+    def test_default_lora_never_reaches_towers(
+        self, hub_id: str, target_modules: str
+    ) -> None:
+        # Arrange
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+        config_dict = json.loads(
+            json.dumps(entry.config), object_hook=_decode_config_float
         )
+        config = AutoConfig.for_model(**config_dict)
+        with torch.device("meta"):
+            model = trainer_model_class(hub_id).from_config(config)
+        targets = (
+            sorted(entry.default_lora_modules)
+            if target_modules == "default"
+            else target_modules
+        )
+        lora_config = LoraConfig(r=8, target_modules=targets)
 
-    def test_unscoped_clippable_rewrites_to_suffix_list(self):
-        model = _RootClippableModel()
-        cfg = _PlainLoraConfig(target_modules=["q_proj"])
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert adapted is not cfg
-        assert adapted.target_modules == ["q_proj.linear"]
-        assert cfg.target_modules == ["q_proj"]
+        # Act
+        adapted = adapt_lora_config_for_model(model, lora_config)
+        peft_model = get_peft_model(model, adapted)
 
-    def test_unscoped_clippable_with_matching_suffix_targets_is_identity(self):
-        model = _RootClippableModel()
-        cfg = _PlainLoraConfig(target_modules=["q_proj.linear"])
-        assert adapt_lora_config_for_model(model, cfg) is cfg
-
-    def test_unscoped_clippable_with_empty_targets_raises(self):
-        cfg = _PlainLoraConfig(target_modules=[])
-        with pytest.raises(
-            ValueError, match="ClippableLinear wrappers but no projection names"
-        ):
-            adapt_lora_config_for_model(_RootClippableModel(), cfg)
-
-    def test_unscoped_clippable_with_unmatched_projection_raises(self):
-        model = _RootClippableModel()
-        cfg = _PlainLoraConfig(target_modules=["v_proj"])
-        with pytest.raises(
-            ValueError,
-            match="No modules matched LoRA target_modules for ClippableLinear",
-        ) as exc_info:
-            adapt_lora_config_for_model(model, cfg)
-        assert "LORA_TARGET_SCOPE" in str(exc_info.value)
+        # Assert
+        adapter_modules = {
+            name.removeprefix("base_model.model.").rsplit(".lora_A", 1)[0]
+            for name, _ in peft_model.named_parameters()
+            if ".lora_A." in name
+        }
+        assert adapter_modules
+        assert all(
+            name.startswith(f"{entry.language_model_prefix}.")
+            for name in adapter_modules
+        ), sorted(adapter_modules)[:5]
+        leaf_names = {name.rsplit(".", 1)[-1] for name in adapter_modules}
+        expected = entry.default_lora_modules
+        if entry.model_type in MAMBA_LORA_MODEL_TYPES:
+            expected -= MAMBA_LORA_FORBIDDEN_MODULES
+        assert expected <= leaf_names
+        if target_modules == "default":
+            assert leaf_names == expected
 
 
 class TestAdaptLoraConfigForModelMamba:
@@ -2172,6 +2164,20 @@ class TestAdaptLoraConfigForModelMamba:
         assert adapted.target_parameters == ["mixer.experts.up_proj"]
         assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
         assert cfg.target_modules == ["in_proj", "out_proj", "conv1d"]
+
+    def test_dropped_targets_are_logged_as_warnings(self, caplog):
+        cfg = _PlainLoraConfig(
+            target_modules=["in_proj", "out_proj"],
+            target_parameters=["out_proj.weight", "mixer.experts.up_proj"],
+        )
+
+        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+            adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        dropped = [r for r in caplog.records if "Mamba-incompatible" in r.getMessage()]
+        assert [r.levelno for r in dropped] == [logging.WARNING, logging.WARNING]
+        assert "['out_proj']" in dropped[0].getMessage()
+        assert "['out_proj.weight']" in dropped[1].getMessage()
 
     def test_target_parameters_force_zero_dropout(self):
         cfg = _PlainLoraConfig(
@@ -2228,10 +2234,208 @@ class TestAdaptLoraConfigForModelMamba:
         assert adapt_lora_config_for_model(_MambaLikeModel(), cfg) is cfg
 
 
+def _meta_supported_model(hub_id: str) -> nn.Module:
+    """Full-size meta build of a ``SUPPORTED_MODEL_INFO`` entry."""
+    entry = SUPPORTED_MODEL_INFO[hub_id]
+    config_dict = json.loads(json.dumps(entry.config), object_hook=_decode_config_float)
+    if entry.model_type == "mimo_v2":
+        install_family_patches("mimo_v2")
+        config = MiMoV2Config.from_dict(config_dict)
+    else:
+        config = AutoConfig.for_model(**config_dict)
+    with torch.device("meta"):
+        return trainer_model_class(hub_id).from_config(config)
+
+
+def _adapter_module_patterns(hub_id: str, target_modules: str | list[str]) -> set[str]:
+    """Language-model module paths, layer index as ``N``, that get a LoRA adapter."""
+    model = _meta_supported_model(hub_id)
+    adapted = adapt_lora_config_for_model(
+        model, LoraConfig(r=8, target_modules=target_modules)
+    )
+    peft_model = get_peft_model(model, adapted)
+    return {
+        re.sub(r"\.\d+\.", ".N.", name.removeprefix("base_model.model.")).rsplit(
+            ".lora_A", 1
+        )[0]
+        for name, _ in peft_model.named_parameters()
+        if ".lora_A." in name and ".visual." not in name
+    }
+
+
+class TestAdaptLoraConfigForModelFamilyExclusions:
+    def test_all_linear_skips_deepseek_v4_compressor_and_grouped_output(self):
+        adapters = _adapter_module_patterns(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", "all-linear"
+        )
+
+        assert adapters == {
+            "model.layers.N.self_attn.q_a_proj",
+            "model.layers.N.self_attn.q_b_proj",
+            "model.layers.N.self_attn.kv_proj",
+            "model.layers.N.self_attn.o_b_proj",
+            "model.layers.N.mlp.shared_experts.gate_proj",
+            "model.layers.N.mlp.shared_experts.up_proj",
+            "model.layers.N.mlp.shared_experts.down_proj",
+        }
+
+    def test_all_linear_skips_glm5_next_indexer_and_replicated_gates(self):
+        adapters = _adapter_module_patterns("zai-org/GLM-5.3-Flash", "all-linear")
+
+        layer = "model.language_model.layers.N"
+        excluded = (
+            "indexer.wk",
+            "indexer.wq_b",
+            "weights_proj",
+            "f_a_proj",
+            "g_a_proj",
+        )
+        assert not any(name.endswith(excluded) for name in adapters)
+        assert {
+            f"{layer}.self_attn.q_proj",
+            f"{layer}.self_attn.b_proj",
+            f"{layer}.self_attn.g_b_proj",
+            f"{layer}.self_attn.forget_gate.f_b_proj",
+            f"{layer}.self_attn.q_a_proj",
+            f"{layer}.self_attn.kv_b_proj",
+            f"{layer}.mlp.down_proj",
+        } <= adapters
+
+    def test_all_linear_skips_mimo_v2_qkv(self):
+        adapters = _adapter_module_patterns(
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL", "all-linear"
+        )
+
+        assert adapters == {
+            "model.language_model.layers.N.self_attn.o_proj",
+            "model.language_model.layers.N.mlp.gate_proj",
+            "model.language_model.layers.N.mlp.up_proj",
+            "model.language_model.layers.N.mlp.down_proj",
+        }
+
+    @pytest.mark.parametrize(
+        ("hub_id", "target_modules", "expected"),
+        [
+            (
+                "deepseek-ai/DeepSeek-V4-Flash-0731",
+                ["kv_proj", "gate_proj", "o_a_proj"],
+                {
+                    "model.layers.N.self_attn.kv_proj",
+                    "model.layers.N.mlp.shared_experts.gate_proj",
+                },
+            ),
+            (
+                "zai-org/GLM-5.3-Flash",
+                ["f_a_proj", "f_b_proj", "wk"],
+                {"model.language_model.layers.N.self_attn.forget_gate.f_b_proj"},
+            ),
+            (
+                "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+                ["q_proj", "o_proj"],
+                {"model.language_model.layers.N.self_attn.o_proj"},
+            ),
+        ],
+    )
+    def test_named_targets_skip_excluded_modules(
+        self, hub_id: str, target_modules: list[str], expected: set[str]
+    ):
+        assert _adapter_module_patterns(hub_id, target_modules) == expected
+
+    def test_regex_targets_skip_excluded_modules(self):
+        adapters = _adapter_module_patterns(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", r".*self_attn\..*kv_proj"
+        )
+
+        assert adapters == {"model.layers.N.self_attn.kv_proj"}
+
+    def test_only_excluded_targets_raise(self):
+        model = _meta_supported_model("XiaomiMiMo/MiMo-V2.6-Flash-RL")
+
+        with pytest.raises(
+            ValueError, match=r"No modules under 'model\.language_model'"
+        ):
+            adapt_lora_config_for_model(
+                model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
+            )
+
+    def test_user_exclusions_are_kept(self):
+        # Arrange
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(target_modules=["o_proj"], exclude_modules=["gate_proj"])
+
+        # Act
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        # Assert
+        assert adapted.exclude_modules == ["gate_proj", "k_proj", "q_proj", "v_proj"]
+        assert cfg.exclude_modules == ["gate_proj"]
+
+    def test_regex_user_exclusions_raise(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(target_modules=["o_proj"], exclude_modules=r".*gate")
+
+        with pytest.raises(ValueError, match="cannot take the mimo_v2 exclusions"):
+            adapt_lora_config_for_model(model, cfg)
+
+    def test_already_excluded_family_modules_is_identity(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(
+            target_modules=["o_proj"], exclude_modules=["q_proj", "k_proj", "v_proj"]
+        )
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+    def test_family_without_exclusions_is_unchanged(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="qwen3")
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+
+class TestLoraTargetModuleNames:
+    def test_named_list_is_returned(self):
+        assert lora_target_module_names(["q_proj", "v_proj"]) == ["q_proj", "v_proj"]
+
+    def test_all_linear_is_none(self):
+        assert lora_target_module_names("all-linear") is None
+        assert lora_target_module_names(None) is None
+
+    def test_opaque_regex_is_none(self):
+        assert lora_target_module_names(r".*\.q_proj") is None
+
+    def test_anchored_attention_regex_yields_language_leaves(self):
+        spec = llm_utils_module._anchored_lora_target_regex(
+            ["q_proj", "k_proj", "v_proj", "o_proj"], "model.language_model"
+        )
+
+        assert set(lora_target_module_names(spec)) == {
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+        }
+
+    def test_vl_rewrite_keeps_attention_leaf_names(self):
+        adapted = adapt_lora_config_for_model(
+            _VisionLanguageModel(),
+            _PlainLoraConfig(target_modules=["q_proj", "k_proj"]),
+        )
+
+        assert isinstance(adapted.target_modules, str)
+        assert set(lora_target_module_names(adapted.target_modules)) == {
+            "k_proj",
+            "q_proj",
+        }
+
+
 class TestLogCudaMemorySnapshot:
     def test_noop_without_cuda(self, monkeypatch, caplog):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+        with caplog.at_level(logging.DEBUG, logger="agilerl.utils.llm_utils"):
             log_cuda_memory_snapshot("label")
         assert caplog.text == ""
 
@@ -2239,8 +2443,9 @@ class TestLogCudaMemorySnapshot:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 2 * GiB)
         monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3 * GiB)
-        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+        with caplog.at_level(logging.DEBUG, logger="agilerl.utils.llm_utils"):
             log_cuda_memory_snapshot("after wake_up", device_index=0)
+        assert [r.levelno for r in caplog.records] == [logging.DEBUG]
         assert "after wake_up" in caplog.text
         assert "allocated=2.00 GiB" in caplog.text
         assert "reserved=3.00 GiB" in caplog.text
@@ -2296,76 +2501,132 @@ class TestFormatColocatedVllmOomHint:
         assert "≈0.00 GiB more free VRAM" in hint
 
 
-class TestResolveAttnImplementation:
-    def test_explicit_choice_is_authoritative(self):
-        assert resolve_attn_implementation("flex_attention") == "flex_attention"
-        assert resolve_attn_implementation("eager") == "eager"
+class TestTrainerAttnImplementation:
+    @pytest.fixture(autouse=True)
+    def clear_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATTN_IMPLEMENTATION", raising=False)
+        monkeypatch.delenv("AGILERL_ATTN_IMPLEMENTATION", raising=False)
 
-    def test_auto_prefers_flash_attention_2_when_installed(self, monkeypatch):
+    @staticmethod
+    def stub_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": model_type}, {}),
+        )
+
+    def test_flash_attention_2_on_cuda_with_flash_attn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.stub_model_type(monkeypatch, "llama")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        assert resolve_attn_implementation(None) == "flash_attention_2"
-        assert resolve_attn_implementation("auto") == "flash_attention_2"
 
-    def test_auto_falls_back_to_sdpa(self, monkeypatch):
+        assert trainer_attn_implementation("meta/llama", True) == "flash_attention_2"
+
+    def test_sdpa_off_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stub_model_type(monkeypatch, "llama")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        assert resolve_attn_implementation(None) == "sdpa"
 
-    def test_env_override_when_unset(self, monkeypatch):
-        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation(None) == "eager"
+        assert trainer_attn_implementation("meta/llama", False) == "sdpa"
 
-    def test_attn_implementation_env_beats_agilerl_env(self, monkeypatch):
+    def test_family_backend_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stub_model_type(monkeypatch, "gemma4")
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        assert trainer_attn_implementation("google/gemma", True) == "flex_attention"
+
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            ("deepseek_v4", "flex_attention"),
+            ("glm5_next", "sdpa"),
+            ("glm5_next_text", "sdpa"),
+        ],
+    )
+    def test_pinned_backend_on_cuda_needs_no_flash_attn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_type: str,
+        expected: str,
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            attn = trainer_attn_implementation("org/model", True)
+
+        assert attn == expected
+        assert "No attention backend" not in caplog.text
+
+    @pytest.mark.parametrize("model_type", ["qwen3", "nemotron_h"])
+    def test_raises_on_cuda_without_flash_attn(
+        self, monkeypatch: pytest.MonkeyPatch, model_type: str
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with pytest.raises(
+            ImportError,
+            match=re.escape(
+                f"flash_attn is required on CUDA for model_type '{model_type}'. "
+                "Install it: pip install flash-attn --no-build-isolation"
+            ),
+        ):
+            trainer_attn_implementation("org/model", True)
+
+    def test_env_override_skips_the_flash_attn_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.stub_model_type(monkeypatch, "qwen3")
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
+
+        assert trainer_attn_implementation("org/model", True) == "sdpa"
+
+    def test_agilerl_env_overrides_the_rule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.stub_model_type(monkeypatch, "gemma4")
+        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", " eager ")
+
+        assert trainer_attn_implementation("google/gemma", True) == "eager"
+
+    def test_attn_implementation_env_beats_agilerl_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
         monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation(None) == "sdpa"
 
-    def test_env_beats_explicit(self, monkeypatch):
-        monkeypatch.setenv("ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation("flex_attention") == "eager"
+        assert trainer_attn_implementation("google/gemma", True) == "sdpa"
 
-    def test_family_default_when_unset(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
-        )
-        assert (
-            resolve_attn_implementation(None, model_name_or_path="google/gemma")
-            == "flex_attention"
-        )
-
-    def test_env_beats_family(self, monkeypatch):
-        monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
-        )
-        assert (
-            resolve_attn_implementation(None, model_name_or_path="google/gemma")
-            == "sdpa"
-        )
-
-    def test_nemotron_family_defaults_to_flash_attention_2(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "nemotron_h"}, {}),
-        )
+    def test_warns_for_an_unregistered_model_type(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self.stub_model_type(monkeypatch, "phi3")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        assert (
-            resolve_attn_implementation(None, model_name_or_path="nvidia/nemotron")
-            == "flash_attention_2"
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            attn = trainer_attn_implementation("microsoft/phi-3", False)
+
+        assert attn == "sdpa"
+        assert "No attention backend is registered for model_type 'phi3'" in (
+            caplog.text
         )
+
+    @pytest.mark.parametrize("model_type", ["qwen3", "gemma4"])
+    def test_registered_model_type_does_not_warn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_type: str,
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            trainer_attn_implementation("org/model", False)
+
+        assert "No attention backend" not in caplog.text
 
 
 class TinyVLConfig(PretrainedConfig):
@@ -2482,6 +2743,18 @@ class TestLanguageModelAttnImplementation:
             language_model_attn_implementation(module)
 
 
+class TestHasVisionTower:
+    def test_vision_language_model_has_one(self):
+        assert has_vision_tower(tiny_vl_model("eager")) is True
+
+    def test_causal_lm_has_none(self):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+
+        assert has_vision_tower(model) is False
+
+
 class TestReportModelKernels:
     def test_logs_attention_per_sub_model(self, caplog):
         # Arrange
@@ -2497,6 +2770,16 @@ class TestReportModelKernels:
         assert "attention language_model (LlamaForCausalLM): eager" in caplog.text
         assert "attention vision_model (SiglipVisionModel): eager" in caplog.text
         assert "mamba fast path" not in caplog.text
+
+    def test_logs_language_model_backend_at_info(self, caplog):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+
+        assert "Trainer attention backend: eager" in caplog.messages
 
     def test_logs_mamba_fast_path(self, caplog):
         # Arrange
@@ -2514,7 +2797,7 @@ class TestReportModelKernels:
             ),
         )
         mixer_namespace = type(model.backbone.layers[0].mixer).__module__
-        fast_path = sys.modules[mixer_namespace].is_fast_path_available
+        fast_path = importlib.util.find_spec("mamba_ssm") is not None
 
         # Act
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
@@ -2523,30 +2806,55 @@ class TestReportModelKernels:
         # Assert
         assert f"mamba fast path {mixer_namespace}: {fast_path}" in caplog.text
 
-    def test_logs_grouped_mm_probe_when_cuda_present(self, monkeypatch, caplog):
+    def test_logs_expert_gemm_backend_when_cuda_present(self, monkeypatch, caplog):
+        # Arrange
+        config = Qwen3MoeConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            moe_intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
+            num_experts=4,
+            num_experts_per_tok=2,
+        )
+        model = Qwen3MoeForCausalLM._from_config(
+            config, attn_implementation="eager", dtype=torch.bfloat16
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (10, 0))
+        monkeypatch.setattr(moe_gemm, "probe_grouped_mm", lambda *_args: None)
+        device_expert_backend.cache_clear()
+
+        # Act
+        with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+        device_expert_backend.cache_clear()
+
+        # Assert
+        assert "expert GEMM backend torch.bfloat16: grouped_mm" in caplog.text
+
+    def test_omits_expert_gemm_backend_for_a_model_without_experts(
+        self, monkeypatch, caplog
+    ):
         # Arrange
         model = LlamaForCausalLM._from_config(
             tiny_llama_config(), attn_implementation="eager"
         )
-        probed = []
-
-        def probe(device_index, dtype):
-            probed.append((device_index, dtype))
-            return True
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
-        monkeypatch.setattr(llm_utils_module, "grouped_mm_supported", probe)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
 
         # Act
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
             report_model_kernels(model, "eager")
 
         # Assert
-        assert probed == [(3, torch.float32)]
-        assert "grouped_mm torch.float32: True" in caplog.text
+        assert "expert GEMM backend" not in caplog.text
 
-    def test_omits_grouped_mm_probe_without_cuda(self, monkeypatch, caplog):
+    def test_omits_expert_gemm_backend_without_cuda(self, monkeypatch, caplog):
         model = LlamaForCausalLM._from_config(
             tiny_llama_config(), attn_implementation="eager"
         )
@@ -2555,7 +2863,7 @@ class TestReportModelKernels:
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
             report_model_kernels(model, "eager")
 
-        assert "grouped_mm" not in caplog.text
+        assert "expert GEMM backend" not in caplog.text
 
     def test_raises_when_language_model_ignores_request(self, monkeypatch):
         monkeypatch.setattr(LlamaPreTrainedModel, "_supports_flex_attn", False)
@@ -2583,6 +2891,9 @@ class _RegisterOnlyRegistry:
     def __init__(self):
         self.registered = {}
 
+    def __getitem__(self, key):
+        return self.registered[key]
+
     def __setitem__(self, key, value):
         msg = "immutable registry"
         raise TypeError(msg)
@@ -2603,12 +2914,19 @@ class TestPatchFlexAttentionKernelOptions:
             calls.append(kwargs)
             return "flex-out"
 
-        if already_patched:
-            fake_flex_attention_forward._agilerl_kernel_opts_patched = True
+        def patched_flex(*_args, **_kwargs):
+            return "patched-out"
+
+        patched_flex._agilerl_kernel_opts_patched = True
+        registered = patched_flex if already_patched else fake_flex_attention_forward
+        if registry is None:
+            registry = {"flex_attention": registered}
+        else:
+            registry.register("flex_attention", registered)
         flex_mod = types.ModuleType("transformers.integrations.flex_attention")
         flex_mod.flex_attention_forward = fake_flex_attention_forward
         modeling_mod = types.ModuleType("transformers.modeling_utils")
-        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry if registry is not None else {}
+        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry
         monkeypatch.setitem(
             sys.modules, "transformers.integrations.flex_attention", flex_mod
         )
@@ -2629,8 +2947,42 @@ class TestPatchFlexAttentionKernelOptions:
 
     def test_double_patch_guard_skips_reinstall(self, monkeypatch):
         registry, _ = self._install_fake_flex(monkeypatch, already_patched=True)
+        patched = registry["flex_attention"]
         patch_flex_attention_kernel_options()
-        assert registry == {}
+        assert registry["flex_attention"] is patched
+
+    def test_second_patch_keeps_the_first_wrapper(self, monkeypatch):
+        # Arrange
+        registry, _ = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        first = registry["flex_attention"]
+
+        # Act
+        patch_flex_attention_kernel_options()
+
+        # Assert
+        assert registry["flex_attention"] is first
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_second_patch_keeps_a_ulysses_wrapper_registered_over_the_first(
+        self, monkeypatch
+    ):
+        # Arrange
+        monkeypatch.setitem(
+            ALL_ATTENTION_FUNCTIONS, "flex_attention", flex_attention_forward
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        substitute_hf_ulysses_attn(torch.distributed.group.WORLD, "flex_attention")
+        ulysses_wrapper = ALL_ATTENTION_FUNCTIONS["flex_attention"]
+
+        # Act
+        patch_flex_attention_kernel_options()
+
+        # Assert
+        assert ulysses_wrapper._agilerl_ulysses is True
+        assert ALL_ATTENTION_FUNCTIONS["flex_attention"] is ulysses_wrapper
 
     @staticmethod
     def _query(seq_len_q):
@@ -2772,28 +3124,35 @@ class TestFlexDecodeKernelOptions:
 
 class TestCreateModelFromNameOrPathDefaults:
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_catalog_model_type(monkeypatch, "llama")
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_catalog_model_type(monkeypatch, "qwen3")
 
     @staticmethod
-    def _fake_loader(captured):
-        class _Loader:
-            @staticmethod
-            def from_pretrained(pretrained_model_name_or_path, **kwargs):
+    def _patch_auto_classes(monkeypatch, captured, on_load=None):
+        """Record which catalog auto class loads, and with what."""
+        for auto_class in (AutoModelForCausalLM, AutoModelForImageTextToText):
+
+            def from_pretrained(
+                pretrained_model_name_or_path, _cls=auto_class, **kwargs
+            ):
+                if on_load is not None:
+                    on_load()
+                captured["class"] = _cls
                 captured["name"] = pretrained_model_name_or_path
                 captured["kwargs"] = kwargs
                 return nn.Identity()
 
-        return _Loader
+            monkeypatch.setattr(
+                auto_class, "from_pretrained", staticmethod(from_pretrained)
+            )
 
-    def test_defaults_to_bf16_and_sdpa(self, monkeypatch):
+    def test_loads_bf16_with_the_given_backend(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        out = create_model_from_name_or_path("org/tiny")
+        out = create_model_from_name_or_path("org/tiny", "sdpa")
         assert isinstance(out, nn.Identity)
+        assert captured["class"] is AutoModelForCausalLM
         assert captured["name"] == "org/tiny"
         assert captured["kwargs"]["torch_dtype"] is torch.bfloat16
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
@@ -2801,91 +3160,72 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_caller_dtype_stays_authoritative(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         create_model_from_name_or_path(
-            "org/tiny", model_config={"torch_dtype": torch.float32}
+            "org/tiny", "sdpa", model_config={"torch_dtype": torch.float32}
         )
         assert captured["kwargs"]["torch_dtype"] is torch.float32
+
+    def test_given_backend_beats_model_config(self, monkeypatch):
+        captured = {}
+        self._patch_auto_classes(monkeypatch, captured)
+        caller_config = {"attn_implementation": "eager"}
+
+        create_model_from_name_or_path(
+            "org/tiny", "flash_attention_2", model_config=caller_config
+        )
+
+        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        assert caller_config == {"attn_implementation": "eager"}
 
     def test_flex_attention_triggers_kernel_options_patch(self, monkeypatch):
         captured = {}
         patch_calls = []
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
             llm_utils_module,
             "patch_flex_attention_kernel_options",
             lambda *a, **k: patch_calls.append(1),
         )
-        caller_config = {"attn_implementation": "flex_attention"}
-        create_model_from_name_or_path("org/tiny", model_config=caller_config)
+        create_model_from_name_or_path("org/tiny", "flex_attention")
         assert captured["kwargs"]["attn_implementation"] == "flex_attention"
         assert patch_calls == [1]
-        # The caller's dict is copied, not mutated.
-        assert caller_config == {"attn_implementation": "flex_attention"}
 
     @pytest.mark.parametrize("model_type", ["gemma3", "gemma4"])
-    def test_gemma_swa_defaults_to_flex_attention(self, monkeypatch, model_type: str):
+    def test_gemma_swa_loads_its_vl_class(self, monkeypatch, model_type: str):
         captured = {}
-        patch_calls = []
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+            llm_utils_module, "patch_flex_attention_kernel_options", lambda: None
         )
-        monkeypatch.setattr(
-            llm_utils_module,
-            "patch_flex_attention_kernel_options",
-            lambda *a, **k: patch_calls.append(1),
-        )
-        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         stub_catalog_model_type(monkeypatch, model_type)
-        create_model_from_name_or_path("google/gemma")
-        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
-        assert patch_calls == [1]
+        create_model_from_name_or_path("google/gemma", "flex_attention")
+        assert captured["class"] is AutoModelForImageTextToText
 
-    def test_gemma2_does_not_default_to_flex_attention(self, monkeypatch):
+    @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+    def test_qwen3_5_vl_loads_its_vl_class(self, monkeypatch, model_type: str):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
-        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        stub_catalog_model_type(monkeypatch, "gemma2")
-        create_model_from_name_or_path("google/gemma-2-9b")
-        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        self._patch_auto_classes(monkeypatch, captured)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        stub_catalog_model_type(monkeypatch, model_type)
 
-    def test_family_catalog_overrides_explicit_attn(self, monkeypatch):
-        captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
-        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        stub_catalog_model_type(monkeypatch, "gpt_oss")
-        create_model_from_name_or_path(
-            "openai/gpt-oss-20b",
-            model_config={"attn_implementation": "sdpa"},
-        )
-        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
+        create_model_from_name_or_path("Qwen/qwen3.5", "sdpa")
 
-    def test_nemotron_defaults_to_flash_attention_2(self, monkeypatch):
+        assert captured["class"] is AutoModelForImageTextToText
+
+    def test_nemotron_loads_without_remote_code(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h")
-        create_model_from_name_or_path("nvidia/nemotron")
-        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        create_model_from_name_or_path("nvidia/nemotron", "flash_attention_2")
         assert "trust_remote_code" not in captured["kwargs"]
 
     def test_nemotron_h_omni_forwards_trust_remote_code(self, monkeypatch):
         captured = {}
         remote_code_loads = []
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
             llm_utils_module,
             "load_remote_code",
@@ -2893,36 +3233,30 @@ class TestCreateModelFromNameOrPathDefaults:
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
-        create_model_from_name_or_path("nvidia/nemotron-omni")
-        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
-        assert captured["kwargs"]["trust_remote_code"] is True
-        assert remote_code_loads == [("nvidia/nemotron-omni", True)]
+        create_model_from_name_or_path("nvidia/nemotron-omni", "flash_attention_2")
+        assert captured["kwargs"]["trust_remote_code"] is False
+        assert remote_code_loads == [("nvidia/nemotron-omni", False)]
 
     def test_caller_trust_remote_code_false_is_not_overwritten(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h")
         create_model_from_name_or_path(
             "nvidia/nemotron",
+            "flash_attention_2",
             model_config={"trust_remote_code": False},
         )
         assert captured["kwargs"]["trust_remote_code"] is False
 
-    def test_family_trainer_non_attn_keys_fill_when_absent(self, monkeypatch):
+    def test_family_trainer_keys_fill_when_absent(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
-            attn_implementation = None
-
-            def model_dump(self, exclude_none=True):
-                return {"attn_implementation": "eager", "use_cache": False}
+            def load_kwargs(self):
+                return {"use_cache": False}
 
         monkeypatch.setattr(
             llm_utils_module,
@@ -2930,22 +3264,18 @@ class TestCreateModelFromNameOrPathDefaults:
             lambda *_a, **_k: SimpleNamespace(trainer=FakeTrainer()),
         )
 
-        create_model_from_name_or_path("org/tiny")
+        create_model_from_name_or_path("org/tiny", "sdpa")
 
         assert captured["kwargs"]["use_cache"] is False
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
 
-    def test_family_trainer_non_attn_keys_do_not_overwrite_caller(self, monkeypatch):
+    def test_family_trainer_keys_do_not_overwrite_caller(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
-            attn_implementation = None
-
-            def model_dump(self, exclude_none=True):
+            def load_kwargs(self):
                 return {"use_cache": False}
 
         monkeypatch.setattr(
@@ -2956,6 +3286,7 @@ class TestCreateModelFromNameOrPathDefaults:
 
         create_model_from_name_or_path(
             "org/tiny",
+            "sdpa",
             model_config={"use_cache": True},
         )
 
@@ -2964,24 +3295,81 @@ class TestCreateModelFromNameOrPathDefaults:
     def test_family_patches_install_before_from_pretrained(self, monkeypatch):
         order: list[str] = []
         captured = {}
-        loader = self._fake_loader(captured)
-
-        class _Loader:
-            @staticmethod
-            def from_pretrained(pretrained_model_name_or_path, **kwargs):
-                order.append("from_pretrained")
-                return loader.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         def _install(*args, **_kwargs):
             order.append("install")
             return frozenset({"nemotron_h"})
 
-        monkeypatch.setattr(llm_utils_module, "AutoModelForCausalLM", _Loader)
+        self._patch_auto_classes(
+            monkeypatch, captured, on_load=lambda: order.append("from_pretrained")
+        )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         monkeypatch.setattr(llm_utils_module, "install_family_patches", _install)
-        create_model_from_name_or_path("nvidia/Nemotron-H-8B")
+        create_model_from_name_or_path("nvidia/Nemotron-H-8B", "flash_attention_2")
         assert order == ["install", "from_pretrained"]
         assert captured["name"] == "nvidia/Nemotron-H-8B"
+
+
+@pytest.fixture(
+    scope="module",
+    params=[write_dsv4_checkpoint, write_glm_checkpoint],
+    ids=["deepseek_v4", "glm5_next"],
+)
+def quantized_checkpoint(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> QuantizedCheckpoint:
+    return request.param(tmp_path_factory.mktemp("quantized"))
+
+
+class TestCreateModelFromNameOrPathQuantizedCheckpoint:
+    def test_sm90_gpu_loads_dequantized_weights(
+        self, quantized_checkpoint, monkeypatch
+    ):
+        # Arrange
+        # SM 9.0 keeps FP8 weights unless the load dequantizes them.
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (9, 0))
+
+        # Act
+        model = create_model_from_name_or_path(
+            str(quantized_checkpoint.directory),
+            "eager",
+            model_config={"device_map": "cpu"},
+        )
+
+        # Assert
+        state = model.state_dict()
+        assert state.keys() == quantized_checkpoint.reference.keys()
+        for name, expected in quantized_checkpoint.reference.items():
+            assert state[name].dtype in (torch.bfloat16, torch.float32, expected.dtype)
+            assert torch.equal(state[name], expected.to(state[name].dtype)), name
+
+    @skip_torch_compile_on_windows_cpu
+    def test_bf16_logits_match_reference_model(self, quantized_checkpoint):
+        # Arrange
+        model = create_model_from_name_or_path(
+            str(quantized_checkpoint.directory), "eager"
+        ).eval()
+        expected_model = reference_model(quantized_checkpoint, model)
+
+        # Act
+        with torch.no_grad():
+            logits = model(input_ids=INPUT_IDS).logits
+            expected = expected_model(input_ids=INPUT_IDS).logits
+
+        # Assert
+        # Same bf16 weights, buffers and CPU kernels on both sides.
+        assert torch.equal(logits, expected)
+
+    def test_unsupported_quantization_raises(self, tmp_path):
+        # Arrange
+        config = tiny_dsv4_config()
+        config["quantization_config"] = {"quant_method": "awq", "bits": 4}
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Cannot train on AwqConfig checkpoints"):
+            create_model_from_name_or_path(str(tmp_path), "eager")
 
 
 class TestBatchIsSingleTurn:
@@ -3101,17 +3489,6 @@ class TestPoolLogRatioByLevel:
         assert unit_mask.tolist() == [[1.0, 0.0]]
         assert weights[0, 1].item() == pytest.approx(0.0)
 
-    def test_turn_level_sum_reduction_matches_product_ratio_log_pooling(self):
-        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-        mask = torch.ones(1, 4)
-        turn_ids = torch.tensor([[0, 0, 1, 1]])
-        weights, unit_mask = pool_log_ratio_by_level(
-            tlr, mask, turn_ids, "turn", turn_reduction="sum"
-        )
-        assert weights.shape == (1, 2)
-        assert weights[0].tolist() == pytest.approx([3.0, 7.0])
-        assert unit_mask.tolist() == [[1.0, 1.0]]
-
     def test_trajectory_level_masks_rows_without_action_tokens(self):
         tlr = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
         mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]])
@@ -3179,26 +3556,6 @@ class TestBuildCompletionMask:
             build_completion_mask(
                 completion, prompt_len=0, pad_token_id=0, completion_len=gen_lens
             )
-
-
-class TestHfCompletionLengths:
-    def test_recovers_gen_len_including_stopping_eos_when_pad_aliases_eos(self):
-        # pad == eos == 0. Row0 stops on EOS after 3 gen tokens; row1 after 1.
-        out = torch.tensor([[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]])
-        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
-        assert lens.tolist() == [4, 2]
-
-    def test_row_that_hits_cap_has_no_pad_in_gen_region(self):
-        out = torch.tensor([[10, 11, 12, 41, 42, 43, 44], [10, 11, 12, 31, 0, 0, 0]])
-        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
-        assert lens.tolist() == [4, 2]
-
-    def test_empty_gen_region_returns_zeros(self):
-        out = torch.tensor([[10, 11, 12, 13], [10, 11, 12, 13]])
-
-        lens = hf_completion_lengths(out, prompt_len=4, pad_token_id=0)
-
-        assert lens.tolist() == [0, 0]
 
 
 class TestCudaTensorBytesInModule:
@@ -3312,17 +3669,6 @@ class TestOffloadColocatedTrainerFromGpu:
         assert calls == {"sync": 1, "empty": 1}
 
 
-class TestResolveVllmMaxLoraRank:
-    def test_no_trainer_rank_keeps_configured_value(self):
-        assert resolve_vllm_max_lora_rank(16, None) == 16
-
-    def test_trainer_rank_raises_floor(self):
-        assert resolve_vllm_max_lora_rank(16, 32) == 32
-
-    def test_configured_value_wins_when_larger(self):
-        assert resolve_vllm_max_lora_rank(16, 8) == 16
-
-
 class TestResolveVllmMaxNumBatchedTokens:
     def test_explicit_value_is_authoritative(self):
         assert resolve_vllm_max_num_batched_tokens(8, 32768, explicit=4096) == 4096
@@ -3355,21 +3701,58 @@ def _vllm_config(**overrides):
         "quantization": None,
         "kv_cache_dtype": None,
         "kv_cache_memory_bytes": None,
-        "enforce_eager": None,
-        "max_lora_rank": 16,
-        "max_loras": 1,
         "max_num_batched_tokens": None,
-        "strip_multimodal_towers": False,
         "limit_mm_per_prompt": None,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
+class TestRolloutSamplingVllmKwargs:
+    def test_every_field_reaches_the_kwargs(self) -> None:
+        sampling = RolloutSampling(
+            temperature=0.9,
+            top_p=0.95,
+            top_k=50,
+            min_p=0.05,
+            repetition_penalty=1.1,
+            presence_penalty=0.3,
+            frequency_penalty=0.2,
+            min_tokens=4,
+        )
+
+        kwargs = sampling.vllm_kwargs(max_tokens=64)
+
+        assert kwargs == {
+            "temperature": 0.9,
+            "top_p": 0.95,
+            "top_k": 50,
+            "min_p": 0.05,
+            "repetition_penalty": 1.1,
+            "presence_penalty": 0.3,
+            "frequency_penalty": 0.2,
+            "max_tokens": 64,
+            "min_tokens": 4,
+        }
+
+    def test_defaults_leave_the_distribution_untruncated(self) -> None:
+        kwargs = RolloutSampling(temperature=1.0).vllm_kwargs(max_tokens=64)
+
+        assert (kwargs["top_p"], kwargs["top_k"], kwargs["min_p"]) == (1.0, 0, 0.0)
+        assert kwargs["min_tokens"] == 0
+
+    def test_min_tokens_is_capped_at_max_tokens(self) -> None:
+        sampling = RolloutSampling(temperature=1.0, min_tokens=32)
+
+        kwargs = sampling.vllm_kwargs(max_tokens=8)
+
+        assert kwargs["min_tokens"] == 8
+
+
 class TestBuildVllmLlmInitKwargs:
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_catalog_model_type(monkeypatch, "llama")
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_catalog_model_type(monkeypatch, "qwen3")
 
     def test_family_lookup_oserror_leaves_vllm_kwargs_empty(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3404,9 +3787,10 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 65536
         assert kwargs["model_impl"] == "vllm"
         assert kwargs["enable_sleep_mode"] is True
+        assert kwargs["logprobs_mode"] == "processed_logprobs"
         # Colocated vLLM always serves the trainer's LoRA adapter.
         assert kwargs["enable_lora"] is True
-        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_lora_rank"] == 8
         assert kwargs["max_loras"] == 1
         assert "trust_remote_code" not in kwargs
         for absent in (
@@ -3419,6 +3803,20 @@ class TestBuildVllmLlmInitKwargs:
         ):
             assert absent not in kwargs
 
+    def test_unset_tensor_parallel_size_uses_one_gpu(self):
+        config = _vllm_config(tensor_parallel_size=None)
+
+        kwargs = build_vllm_llm_init_kwargs(
+            config,
+            trainer_model_name_or_path="org/base",
+            max_model_len=128,
+            process_index=0,
+        )
+
+        assert kwargs["tensor_parallel_size"] == 1
+        assert kwargs["seed"] == 0
+        assert config.tensor_parallel_size is None
+
     def test_optional_fields_and_lora_rank_floor(self):
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(
@@ -3427,7 +3825,6 @@ class TestBuildVllmLlmInitKwargs:
                 quantization="bitsandbytes",
                 kv_cache_dtype="fp8",
                 kv_cache_memory_bytes=123456,
-                enforce_eager=True,
                 max_num_batched_tokens=4096,
                 tensor_parallel_size=2,
                 limit_mm_per_prompt={"image": 4, "video": 0},
@@ -3442,11 +3839,10 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["quantization"] == "bitsandbytes"
         assert kwargs["kv_cache_dtype"] == "fp8"
         assert kwargs["kv_cache_memory_bytes"] == 123456
-        assert kwargs["enforce_eager"] is True
         assert kwargs["max_num_batched_tokens"] == 4096
         assert kwargs["limit_mm_per_prompt"] == {"image": 4, "video": 0}
         assert kwargs["seed"] == 2  # process_index // tensor_parallel_size
-        assert kwargs["max_lora_rank"] == 64  # trainer rank outranks the config
+        assert kwargs["max_lora_rank"] == 64
 
     def test_nemotron_family_defaults_fill_unset_engine_kwargs(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h")
@@ -3457,9 +3853,9 @@ class TestBuildVllmLlmInitKwargs:
         )
         assert kwargs["mamba_cache_mode"] == "align"
         assert kwargs["max_num_batched_tokens"] == 8192
-        assert kwargs["reasoning_parser"] == "nemotron_v3"
+        assert "reasoning_parser" not in kwargs
         assert kwargs["enable_prefix_caching"] is True
-        assert kwargs["trust_remote_code"] is True
+        assert "trust_remote_code" not in kwargs
 
     def test_nemotron_family_default_is_capped_when_context_is_short(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h")
@@ -3480,7 +3876,6 @@ class TestBuildVllmLlmInitKwargs:
         )
         assert kwargs["max_num_batched_tokens"] == 4096
         assert kwargs["mamba_cache_mode"] == "align"
-        assert kwargs["reasoning_parser"] == "nemotron_v3"
         assert kwargs["enable_prefix_caching"] is True
 
     def test_family_defaults_follow_vllm_model_not_trainer_path(self, monkeypatch):
@@ -3523,89 +3918,71 @@ class TestBuildVllmLlmInitKwargs:
     def test_strip_multimodal_towers_peels_nested_config_for_generic_vl(
         self, monkeypatch
     ):
-        stub_catalog_model_type(monkeypatch, "qwen2_vl")
+        stub_catalog_model_type(monkeypatch, "gemma3")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
+            _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
-        assert kwargs["hf_overrides"] is nested_language_config
+        assert kwargs["language_model_only"] is True
+        assert "hf_overrides" not in kwargs
         assert "model_class_overrides" not in kwargs
         assert "enable_tower_connector_lora" not in kwargs
 
-    def test_kept_multimodal_towers_enable_tower_connector_lora(self, monkeypatch):
+    def test_kept_towers_get_no_lora(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=False),
-            trainer_model_name_or_path="org/vl-model",
-            max_model_len=32768,
-        )
-
-        assert kwargs["enable_tower_connector_lora"] is True
-
-    def test_kept_towers_skip_tower_connector_lora_for_language_only_targets(
-        self, monkeypatch
-    ):
-        stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
-        kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=False),
-            trainer_model_name_or_path="org/vl-model",
-            max_model_len=32768,
-            lora_target_modules={"q_proj", "in_proj", "up_proj"},
-        )
-
-        assert "enable_tower_connector_lora" not in kwargs
-
-    def test_kept_towers_skip_tower_connector_lora_for_unflagged_family(
-        self, monkeypatch
-    ):
-        stub_catalog_model_type(monkeypatch, "gemma4")
-        kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=False),
+            _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
         )
 
         assert "enable_tower_connector_lora" not in kwargs
 
-    def test_strip_multimodal_towers_applies_omni_language_tower(self, monkeypatch):
+    def test_strip_multimodal_towers_serves_omni_language_model_only(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
+            _vllm_config(),
             trainer_model_name_or_path="nvidia/nemotron-omni",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
-        assert kwargs["hf_overrides"] is omni_language_tower_hf_override
-        assert kwargs["model_class_overrides"] == {
-            "NemotronHOmniLanguageForCausalLM": (
-                "agilerl.architectures.nemotron_h.omni_language:"
-                "NemotronHOmniLanguageForCausalLM"
-            ),
-        }
-
-    def test_strip_multimodal_towers_applies_gemma4_language_tower(self, monkeypatch):
-        stub_catalog_model_type(monkeypatch, "gemma4")
-        kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
-            trainer_model_name_or_path="google/gemma-4-E4B-it",
-            max_model_len=32768,
-        )
-
-        assert kwargs["hf_overrides"] is gemma4_language_tower_hf_override
+        assert kwargs["language_model_only"] is True
+        assert kwargs["hf_overrides"] is nemotron_h_omni_vllm_hf_override
         assert "model_class_overrides" not in kwargs
 
-    def test_strip_multimodal_towers_applies_qwen3_5_language_tower(self, monkeypatch):
-        stub_catalog_model_type(monkeypatch, "qwen3_5_moe")
+    def test_strip_multimodal_towers_serves_gemma4_language_model_only(
+        self, monkeypatch
+    ):
+        stub_catalog_model_type(monkeypatch, "gemma4")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
-            trainer_model_name_or_path="Qwen/Qwen3.6-35B-A3B",
+            _vllm_config(),
+            trainer_model_name_or_path="google/gemma-4-E4B-it",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
-        assert kwargs["hf_overrides"] is qwen3_5_language_tower_hf_override
-        assert kwargs["model_class_overrides"] == QWEN3_5_MODEL_CLASS_OVERRIDES
+        assert kwargs["language_model_only"] is True
+        assert "hf_overrides" not in kwargs
+        assert "model_class_overrides" not in kwargs
+
+    def test_strip_multimodal_towers_serves_qwen3_5_language_model_only(
+        self, monkeypatch
+    ):
+        stub_catalog_model_type(monkeypatch, "qwen3_5_moe")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="Qwen/Qwen3.6-35B-A3B",
+            max_model_len=32768,
+            strip_multimodal_towers=True,
+        )
+
+        assert kwargs["language_model_only"] is True
+        assert "hf_overrides" not in kwargs
+        assert "model_class_overrides" not in kwargs
         assert kwargs["mamba_cache_mode"] == "align"
         assert kwargs["enable_prefix_caching"] is True
 
@@ -3647,15 +4024,11 @@ class TestPeftLoraKeyHelpers:
             == "base.layers.0.q_proj.weight"
         )
 
-    def test_remap_strips_clippable_inner_linear_suffix(self):
-        assert (
-            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.linear.lora_A.weight")
-            == "model.layers.0.q_proj.lora_A.weight"
-        )
-        assert (
-            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.linear.lora_B.weight")
-            == "model.layers.0.q_proj.lora_B.weight"
-        )
+    @pytest.mark.parametrize("matrix", ["lora_A", "lora_B"])
+    def test_remap_keeps_the_clippable_inner_linear(self, matrix):
+        key = f"model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.{matrix}.weight"
+
+        assert remap_peft_lora_key_for_vllm(key) == key
 
     def test_remap_strips_base_layer_segment(self):
         assert (
@@ -3667,142 +4040,58 @@ class TestPeftLoraKeyHelpers:
         key = "model.layers.0.q_proj.lora_A.weight"
         assert remap_peft_lora_key_for_vllm(key) == key
 
-    def test_remap_nemotron_super_vl_vision_attention_query(self):
-        hf_key = "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(hf_key)
-            == "vision_model.model.encoder.layers.0.attn.query.lora_A.weight"
-        )
-
-    def test_remap_nemotron_super_vl_vision_attention_output_dense(self):
-        hf_key = "vision_model.encoder.layer.0.attention.output.dense.lora_B.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(hf_key)
-            == "vision_model.model.encoder.layers.0.attn.proj.lora_B.weight"
-        )
-
-    def test_remap_nemotron_super_vl_vision_mlp_fc1(self):
-        hf_key = "vision_model.encoder.layer.3.mlp.fc1.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(hf_key)
-            == "vision_model.model.encoder.layers.3.mlp.fc1.lora_A.weight"
-        )
-
-    def test_remap_nemotron_super_vl_vision_projector_linear1(self):
-        assert (
-            remap_peft_lora_key_for_vllm("vision_projector.mlp1.linear1.lora_A.weight")
-            == "mlp1.1.lora_A.weight"
-        )
-
-    def test_remap_nemotron_super_vl_vision_projector_linear2(self):
-        assert (
-            remap_peft_lora_key_for_vllm("vision_projector.mlp1.linear2.lora_B.weight")
-            == "mlp1.3.lora_B.weight"
-        )
-
-    def test_remap_nemotron_super_vl_language_backbone(self):
-        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(hf_key)
-            == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
-        )
-
-    def test_remap_language_backbone_to_language_tower_when_stripping(self):
-        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(hf_key, strip_multimodal_towers=True)
-            == "model.layers.0.self_attn.q_proj.lora_A.weight"
-        )
-
-    def test_remap_language_backbone_keeps_vl_prefix_for_named_tower_list(self):
-        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(
-                hf_key, strip_multimodal_towers=["audio_tower"]
-            )
-            == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
-        )
-
-    def test_remap_qwen_flat_language_layers_to_vllm_nesting(self):
-        assert (
-            remap_peft_lora_key_for_vllm(
-                "model.layers.0.self_attn.q_proj.lora_A.weight",
-                model_type="qwen3_5_text",
-            )
-            == "model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
-        )
-
-    def test_remap_qwen_nested_language_layers_to_vllm_nesting(self):
-        assert (
-            remap_peft_lora_key_for_vllm(
-                "model.language_model.layers.0.mlp.down_proj.lora_B.weight",
-                model_type="qwen3_5",
-            )
-            == "model.language_model.model.layers.0.mlp.down_proj.lora_B.weight"
-        )
-
-    def test_remap_qwen_nesting_skipped_for_other_families(self):
-        key = "model.layers.0.self_attn.q_proj.lora_A.weight"
-        assert remap_peft_lora_key_for_vllm(key, model_type="llama") == key
-        assert remap_peft_lora_key_for_vllm(key) == key
-
-    def test_remap_qwen_nesting_skipped_when_stripping(self):
-        key = "model.layers.0.self_attn.q_proj.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(
-                key, strip_multimodal_towers=True, model_type="qwen3_5"
-            )
-            == key
-        )
-
-    def test_remap_passthrough_language_backbone_without_prefix(self):
-        key = "backbone.layers.0.mixer.in_proj.lora_A.weight"
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "language_model.backbone.layers.0.mixer.q_proj.lora_A.weight",
+            "model.language_model.layers.0.self_attn.q_proj.lora_A.weight",
+            "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight",
+            "model.layers.0.self_attn.q_proj.lora_B.weight",
+            "backbone.layers.0.mixer.in_proj.lora_A.weight",
+        ],
+    )
+    def test_remap_leaves_hf_module_names_for_the_vllm_mapper(self, key):
         assert remap_peft_lora_key_for_vllm(key) == key
 
 
 class TestFilterPeftStateDictForVllmLora:
-    def test_keeps_matching_modules_and_remaps_keys(self):
-        t_keep = torch.zeros(1)
-        t_drop = torch.ones(1)
+    def test_keeps_only_lora_tensors(self):
+        lora_a = torch.zeros(1)
+        lora_b = torch.ones(1)
         state = {
-            "model.layers.0.q_proj.linear.lora_A.weight": t_keep,
-            "model.layers.0.out_proj.lora_A.weight": t_drop,
+            "model.layers.0.q_proj.linear.lora_A.weight": lora_a,
+            "model.layers.0.out_proj.lora_B.weight": lora_b,
+            "v_head.summary.weight": torch.ones(1),
         }
-        out = filter_peft_state_dict_for_vllm_lora(state, ["q_proj.linear"])
-        assert list(out) == ["model.layers.0.q_proj.lora_A.weight"]
-        assert out["model.layers.0.q_proj.lora_A.weight"] is t_keep
 
-    def test_regex_target_modules_supported(self):
-        state = {"model.layers.0.q_proj.linear.lora_A.weight": torch.zeros(1)}
-        out = filter_peft_state_dict_for_vllm_lora(state, r"(?:.*\.)?(q_proj)\.linear")
-        assert list(out) == ["model.layers.0.q_proj.lora_A.weight"]
+        out = filter_peft_state_dict_for_vllm_lora(state)
 
-    def test_no_matches_yields_empty_dict(self):
-        state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(1)}
-        assert filter_peft_state_dict_for_vllm_lora(state, ["q_proj"]) == {}
+        assert out == {
+            "model.layers.0.q_proj.linear.lora_A.weight": lora_a,
+            "model.layers.0.out_proj.lora_B.weight": lora_b,
+        }
+        assert out["model.layers.0.q_proj.linear.lora_A.weight"] is lora_a
 
-    def test_nemotron_super_vl_vision_query_remaps_filtered_key(self):
+    def test_expert_key_map_routes_packed_expert_tensors(self):
         tensor = torch.zeros(1)
-        hf_key = "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight"
-        out = filter_peft_state_dict_for_vllm_lora({hf_key: tensor}, ["query"])
-        assert list(out) == [
-            "vision_model.model.encoder.layers.0.attn.query.lora_A.weight"
-        ]
-        assert (
-            out["vision_model.model.encoder.layers.0.attn.query.lora_A.weight"]
-            is tensor
-        )
+        state = {"model.layers.1.mixer.experts.base_layer.lora_A.weight": tensor}
 
-    def test_language_backbone_remaps_to_language_tower_when_stripping(self):
-        tensor = torch.zeros(1)
-        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
         out = filter_peft_state_dict_for_vllm_lora(
-            {hf_key: tensor},
-            ["q_proj"],
-            strip_multimodal_towers=True,
+            state,
+            expert_key_map={
+                "model.layers.1.mixer.experts.base_layer": (
+                    "model.layers.1.mixer.experts"
+                ),
+            },
         )
-        assert list(out) == ["model.layers.0.self_attn.q_proj.lora_A.weight"]
-        assert out["model.layers.0.self_attn.q_proj.lora_A.weight"] is tensor
+
+        assert out == {"model.layers.1.mixer.experts.lora_A.weight": tensor}
+
+    def test_non_lora_state_yields_empty_dict(self):
+        assert (
+            filter_peft_state_dict_for_vllm_lora({"v_head.weight": torch.zeros(1)})
+            == {}
+        )
 
 
 class TestJsonSafeValue:
@@ -3858,52 +4147,78 @@ class TestSavePeftAdapterForVllmRollout:
         return calls
 
     def _peft_model(self):
-        return SimpleNamespace(
-            peft_config={"actor": self._FakePeftConfig()}, named_parameters=list
-        )
+        model = nn.Module()
+        model.peft_config = {"actor": self._FakePeftConfig()}
+        return model
 
     def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
         monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
         with pytest.raises(ImportError, match="requires peft and transformers"):
-            save_peft_adapter_for_vllm_rollout(
-                MagicMock(), tmp_path, "actor", target_modules=["q_proj"]
-            )
+            save_peft_adapter_for_vllm_rollout(MagicMock(), tmp_path, "actor")
 
     def test_exports_filtered_remapped_adapter_with_config(self, monkeypatch, tmp_path):
         t_keep = torch.zeros(2)
         state = {
             "model.layers.0.q_proj.linear.lora_A.weight": t_keep,
-            "model.layers.0.out_proj.lora_A.weight": torch.ones(2),
+            "v_head.summary.weight": torch.ones(2),
         }
         calls = self._install_fakes(monkeypatch, state)
-        out = save_peft_adapter_for_vllm_rollout(
-            self._peft_model(),
-            tmp_path,
-            "actor",
-            target_modules=["q_proj.linear"],
-        )
+        out = save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
         assert out == tmp_path / "actor"
         assert calls["adapter_name"] == "actor"
-        assert list(calls["saved_tensors"]) == ["model.layers.0.q_proj.lora_A.weight"]
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is t_keep
+        assert list(calls["saved_tensors"]) == [
+            "model.layers.0.q_proj.linear.lora_A.weight"
+        ]
+        assert (
+            calls["saved_tensors"]["model.layers.0.q_proj.linear.lora_A.weight"]
+            is t_keep
+        )
         assert calls["saved_path"] == tmp_path / "actor" / "adapter_model.safetensors"
         cfg = json.loads(
             (tmp_path / "actor" / "adapter_config.json").read_text(encoding="utf-8")
         )
-        assert cfg["target_modules"] == ["q_proj.linear"]
+        assert cfg["target_modules"] == ["q_proj"]
         assert cfg["r"] == 8
         assert cfg["lora_dtype"] == "torch.bfloat16"
 
-    def test_raises_when_filter_drops_every_tensor(self, monkeypatch, tmp_path):
-        state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(2)}
-        self._install_fakes(monkeypatch, state)
-        with pytest.raises(ValueError, match="No LoRA tensors left for vLLM export"):
-            save_peft_adapter_for_vllm_rollout(
-                self._peft_model(),
-                tmp_path,
-                "actor",
-                target_modules=["q_proj"],
-            )
+    def test_gathered_state_replaces_sharded_parameters(self, monkeypatch, tmp_path):
+        shard = torch.zeros(2)
+        dense = torch.ones(2)
+        key = "model.layers.0.q_proj.lora_A.weight"
+        calls = {}
+
+        def fake_get_state(_model, state_dict, adapter_name):
+            calls["adapter_name"] = adapter_name
+            calls["state_dict"] = dict(state_dict)
+            return dict(state_dict)
+
+        def fake_save_file(tensors, path):
+            calls["saved_tensors"] = tensors
+            Path(path).write_bytes(b"")
+
+        monkeypatch.setattr(
+            llm_utils_module, "get_peft_model_state_dict", fake_get_state
+        )
+        monkeypatch.setattr(llm_utils_module, "save_file", fake_save_file)
+        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", True)
+        model = SimpleNamespace(
+            peft_config={"actor": self._FakePeftConfig()},
+            named_parameters=lambda: [(key, shard)],
+            named_modules=list,
+        )
+
+        save_peft_adapter_for_vllm_rollout(
+            model, tmp_path, "actor", gathered_state={key: dense}
+        )
+
+        assert calls["adapter_name"] == "actor"
+        assert calls["state_dict"][key] is dense
+        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is dense
+
+    def test_raises_when_adapter_has_no_lora_tensors(self, monkeypatch, tmp_path):
+        self._install_fakes(monkeypatch, {"v_head.summary.weight": torch.zeros(2)})
+        with pytest.raises(ValueError, match="has no LoRA tensors to export"):
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
 
     class _FakeDTensor:
         """Stand-in for ``torch.distributed.tensor.DTensor``: records
@@ -3933,21 +4248,19 @@ class TestSavePeftAdapterForVllmRollout:
         monkeypatch.setattr(llm_utils_module, "DTensor", self._FakeDTensor)
 
         # Act
-        save_peft_adapter_for_vllm_rollout(
-            self._peft_model(),
-            tmp_path,
-            "actor",
-            target_modules=["q_proj.linear"],
-        )
+        save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
 
         # Assert — DTensor was materialised via full_tensor()
         assert dt.full_tensor_calls == 1
         # Assert — plain tensor passed through untouched
         assert (
-            calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"]
+            calls["saved_tensors"]["model.layers.0.q_proj.linear.lora_A.weight"]
             is materialized
         )
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain
+        assert (
+            calls["saved_tensors"]["model.layers.0.q_proj.linear.lora_B.weight"]
+            is plain
+        )
 
     def test_state_with_only_plain_tensors_passes_through(self, monkeypatch, tmp_path):
         # Arrange — no DTensors at all
@@ -3961,16 +4274,114 @@ class TestSavePeftAdapterForVllmRollout:
         monkeypatch.setattr(llm_utils_module, "DTensor", self._FakeDTensor)
 
         # Act
-        save_peft_adapter_for_vllm_rollout(
-            self._peft_model(),
-            tmp_path,
-            "actor",
-            target_modules=["q_proj.linear"],
-        )
+        save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
 
         # Assert — both plain tensors saved as-is
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is plain_a
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain_b
+        saved = calls["saved_tensors"]
+        assert saved["model.layers.0.q_proj.linear.lora_A.weight"] is plain_a
+        assert saved["model.layers.0.q_proj.linear.lora_B.weight"] is plain_b
+
+    def test_active_step_writes_the_shared_bf16_draw(self, monkeypatch, tmp_path):
+        # Arrange
+        grid = torch.tensor(0.025).to(torch.bfloat16)
+        upper = torch.nextafter(grid, torch.tensor(float("inf"), dtype=torch.bfloat16))
+        master = ((grid.float() + upper.float()) / 2).expand(2, 1).contiguous().clone()
+        master.requires_grad_(True)
+        before = master.detach().clone()
+        nearest = master.to(torch.bfloat16)
+        step = next(
+            candidate
+            for candidate in range(64)
+            if not torch.equal(stochastic_round_bf16(master, candidate), nearest)
+        )
+        key = "model.layers.0.q_proj.linear.lora_A.weight"
+        calls = self._install_fakes(monkeypatch, {key: master})
+        token = bf16_round_step.set(step)
+
+        # Act
+        try:
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        saved = calls["saved_tensors"][key]
+        assert saved.dtype is torch.bfloat16
+        assert torch.equal(saved, stochastic_round_bf16(master, step))
+        assert not torch.equal(saved, nearest)
+        assert torch.equal(master, before)
+
+    def test_active_step_leaves_a_frozen_fp32_adapter_unchanged(
+        self, monkeypatch, tmp_path
+    ):
+        # Arrange
+        frozen = torch.tensor([0.025, 0.05], dtype=torch.float32)
+        key = "model.layers.0.q_proj.linear.lora_A.weight"
+        calls = self._install_fakes(monkeypatch, {key: frozen})
+        token = bf16_round_step.set(3)
+
+        # Act
+        try:
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        assert calls["saved_tensors"][key] is frozen
+
+    def test_active_step_leaves_a_bf16_adapter_unchanged(self, monkeypatch, tmp_path):
+        # Arrange
+        weight = torch.randn(2, 2, dtype=torch.bfloat16, requires_grad=True)
+        key = "model.layers.0.q_proj.linear.lora_A.weight"
+        calls = self._install_fakes(monkeypatch, {key: weight})
+        token = bf16_round_step.set(3)
+
+        # Act
+        try:
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        assert calls["saved_tensors"][key] is weight
+
+    def test_exported_file_matches_the_trainer_draw(self, tmp_path):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=False)
+        grid = torch.tensor(0.025).to(torch.bfloat16)
+        upper = torch.nextafter(grid, torch.tensor(float("inf"), dtype=torch.bfloat16))
+        mid = float((grid.float() + upper.float()) / 2)
+        with torch.no_grad():
+            for name, param in peft_model.named_parameters():
+                if (
+                    param.requires_grad
+                    and param.dtype is torch.float32
+                    and ".lora_" in name
+                ):
+                    param.fill_(mid)
+        sample = torch.tensor(mid, dtype=torch.float32)
+        nearest = sample.to(torch.bfloat16)
+        step = next(
+            candidate
+            for candidate in range(64)
+            if not torch.equal(stochastic_round_bf16(sample, candidate), nearest)
+        )
+        token = bf16_round_step.set(step)
+
+        # Act
+        try:
+            out = save_peft_adapter_for_vllm_rollout(peft_model, tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        saved = load_file(out / "adapter_model.safetensors")
+        assert saved
+        for tensor in saved.values():
+            source = torch.full(tensor.shape, mid, dtype=torch.float32)
+            assert tensor.dtype is torch.bfloat16
+            assert torch.equal(tensor, stochastic_round_bf16(source, step))
+            assert not torch.equal(tensor, source.to(torch.bfloat16))
 
     @pytest.mark.parametrize("wrap_blocks", [False, True], ids=["plain", "wrapped"])
     def test_exports_every_expert_lora_tensor_in_vllm_layout(
@@ -3982,13 +4393,7 @@ class TestSavePeftAdapterForVllmRollout:
         experts = "base_model.model.model.layers.1.mixer.experts"
 
         # Act
-        out = save_peft_adapter_for_vllm_rollout(
-            peft_model,
-            tmp_path,
-            "actor",
-            target_modules=peft_model.peft_config["actor"].target_modules,
-            expert_key_map=expert_lora_vllm_key_map(peft_model),
-        )
+        out = save_peft_adapter_for_vllm_rollout(peft_model, tmp_path, "actor")
 
         # Assert
         saved = load_file(out / "adapter_model.safetensors")
@@ -4004,24 +4409,6 @@ class TestSavePeftAdapterForVllmRollout:
             saved[f"{experts}.base_layer.lora_B.weight"],
             experts_module.base_layer.lora_B["actor"].weight,
         )
-
-    def test_raises_when_trainable_lora_has_no_exported_tensor(self, tmp_path):
-        # Arrange
-        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError,
-            match=r"6 trainable LoRA parameters of adapter 'actor' have no tensor "
-            r"in the vLLM export, e\.g\. \[.*k_proj",
-        ):
-            save_peft_adapter_for_vllm_rollout(
-                peft_model,
-                tmp_path,
-                "actor",
-                target_modules=["q_proj"],
-                expert_key_map=expert_lora_vllm_key_map(peft_model),
-            )
 
 
 def _tiny_nemotron_h_expert_lora(*, wrap_blocks: bool):
@@ -4126,48 +4513,23 @@ class TestCheckVllmLoraExportComplete:
             check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
 
 
-class TestCrossRankLigerAlign:
-    def test_needs_cross_rank_seq_padding_gates_on_liger_token_is(self):
+class TestCrossRankSeqPadding:
+    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(fsdp_config=object()),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(distributed=True),
+            world_size=2,
+        )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            SimpleNamespace(distributed=True),
             world_size=1,
         )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=False, importance_sampling_level="token"),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(
-                use_liger_loss=True, importance_sampling_level="trajectory"
-            ),
-            world_size=2,
-        )
-        # Missing attrs: use_liger_loss defaults False; IS level defaults "token".
         assert not llm_utils_module.needs_cross_rank_seq_padding(
             SimpleNamespace(),
             world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
-            world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=True),  # default IS level is token
-            world_size=2,
-        )
-
-    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(fsdp_config=object(), use_liger_loss=False),
-            world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, use_liger_loss=False),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, use_liger_loss=False),
-            world_size=1,
         )
 
     def test_pad_completion_batch_to_seq_len_happy_and_noop(self):
@@ -4639,7 +5001,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=True)
+                trainer=TrainerRuntimeConfig(trust_remote_code=True)
             ),
         )
         monkeypatch.setattr(
@@ -4667,7 +5029,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=False)
+                trainer=TrainerRuntimeConfig(trust_remote_code=False)
             ),
         )
         monkeypatch.setattr(
@@ -4704,7 +5066,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda _path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=False)
+                trainer=TrainerRuntimeConfig(trust_remote_code=False)
             ),
         )
 
@@ -4712,14 +5074,47 @@ class TestResolvePadTokenId:
             msg = "config.json"
             raise OSError(msg)
 
-        monkeypatch.setattr(
-            "agilerl.utils.llm_utils.AutoConfig.from_pretrained", missing
-        )
+        monkeypatch.setattr("transformers.AutoConfig.from_pretrained", missing)
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.GenerationConfig.from_pretrained", missing
         )
 
         assert llm_utils_module.load_pad_token_configs("org/model") == (None, None)
+
+    def test_load_pad_token_configs_reads_unregistered_mimo_v2_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        raw = SUPPORTED_MODEL_INFO["XiaomiMiMo/MiMo-V2.6-Flash-RL"].config
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    **raw,
+                    "auto_map": {
+                        "AutoConfig": "configuration_mimo_v2.MiMoV2Config",
+                    },
+                }
+            )
+        )
+        # A fresh interpreter: the mimo_v2 test conftest registers the config in this one.
+        script = (
+            "import sys\n"
+            "from transformers.models.auto.configuration_auto import CONFIG_MAPPING\n"
+            "from agilerl.utils.llm_utils import load_pad_token_configs\n"
+            "model_config, _ = load_pad_token_configs(sys.argv[1])\n"
+            "print('mimo_v2' in CONFIG_MAPPING, model_config.text_config.pad_token_id)\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip().splitlines()[-1] == "False 151643"
 
 
 class TestNormalizePromptBatch:
@@ -5090,18 +5485,75 @@ class TestResolveLlmDevice:
         mock_resolve.assert_called_once_with("cuda")
 
 
-class TestPreparePromptHfGenerate:
-    def test_forwards_pixel_values_onto_the_generate_device(self) -> None:
-        device = torch.device("cpu")
-        pixel_values = torch.ones(1, 3, 2, 2)
+class TestApplyVllmCompileCacheEnv:
+    """Compile cache root is per GPU set, under an explicit root when one is set."""
 
-        tensors = prepare_prompt_hf_generate(
-            {
-                "input_ids": torch.tensor([[1, 2]]),
-                "pixel_values": pixel_values,
-            },
-            device,
-        )
+    def test_sets_cache_root_from_sorted_gpu_ids(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
 
-        assert torch.equal(tensors["pixel_values"], pixel_values)
-        assert tensors["pixel_values"].device == device
+        root = apply_vllm_compile_cache_env([5, 3])
+
+        expected = str(Path(tempfile.gettempdir()) / "vllm_compile_cache" / "gpu_3_5")
+        assert root == expected
+        assert os.environ["VLLM_CACHE_ROOT"] == root
+
+    def test_reuses_root_on_the_same_gpus(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+        first = apply_vllm_compile_cache_env([2])
+        monkeypatch.delenv("VLLM_CACHE_ROOT")
+
+        second = apply_vllm_compile_cache_env([2])
+
+        assert first == second
+
+    def test_separates_roots_on_different_gpus(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+        first = apply_vllm_compile_cache_env([2])
+        monkeypatch.delenv("VLLM_CACHE_ROOT")
+
+        second = apply_vllm_compile_cache_env([6])
+
+        assert first != second
+
+    def test_separates_tp_set_from_its_first_gpu(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+        single = apply_vllm_compile_cache_env([1])
+        monkeypatch.delenv("VLLM_CACHE_ROOT")
+
+        pair = apply_vllm_compile_cache_env([1, 2])
+
+        assert single != pair
+
+    def test_keys_explicit_cache_root_by_gpu_ids(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+
+        root = apply_vllm_compile_cache_env([5, 3])
+
+        assert root == str(Path("/custom/vllm/cache") / "gpu_3_5")
+        assert os.environ["VLLM_CACHE_ROOT"] == root
+
+    def test_separates_explicit_cache_root_on_different_gpus(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+        first = apply_vllm_compile_cache_env([2, 3])
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+
+        second = apply_vllm_compile_cache_env([5, 6])
+
+        assert first != second
+
+    def test_repeat_call_on_the_same_gpus_keeps_the_root(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+        first = apply_vllm_compile_cache_env([2, 3])
+
+        second = apply_vllm_compile_cache_env([3, 2])
+
+        assert second == first == str(Path("/custom/vllm/cache") / "gpu_2_3")
+
+    def test_repeat_call_on_other_gpus_moves_to_a_sibling(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+        apply_vllm_compile_cache_env([0])
+
+        second = apply_vllm_compile_cache_env([1])
+
+        assert second == str(Path("/custom/vllm/cache") / "gpu_1")
+        assert os.environ["VLLM_CACHE_ROOT"] == second

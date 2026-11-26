@@ -90,7 +90,6 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
                 r=16,
                 lora_alpha=64,
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-                lora_dropout=0.05,
                 bias="none",
             ),
         }
@@ -430,6 +429,8 @@ for rollout training.
                         batch_steps,
                         group_seed,
                         all_sampling_logps,
+                        _all_pixel_values,
+                        all_sampling_supports,
                     ) = collect_rollouts_llm(
                         agent=agent,
                         env=rollout_env,
@@ -443,6 +444,8 @@ for rollout training.
                     learn_kwargs = {"turn_ids": all_turn_ids}
                     if all_sampling_logps is not None:
                         learn_kwargs["sampling_logps"] = all_sampling_logps
+                    if all_sampling_supports is not None:
+                        learn_kwargs["sampling_supports"] = all_sampling_supports
                     metrics = agent.learn(experiences, **learn_kwargs)
 
                     # Example distributed-safe metric aggregation.

@@ -20,10 +20,7 @@ from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.utils.segment_rows import SegmentRows
 from tests.test_algorithms.test_core_base import _LLM_DEPS_SKIP, _make_llm_agent
-from tests.test_algorithms.test_llms.llm_helpers import create_module
-from tests.test_algorithms.test_llms.test_grpo_episode_loss_norm import (
-    _ProbeFusedKernel,
-)
+from tests.test_algorithms.test_llms.llm_helpers import create_module, use_packed
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_TOKEN_ID,
     PAD_TOKEN_ID,
@@ -49,9 +46,7 @@ def _make_cpu_grpo_for_kernel_tests(**kwargs: object) -> GRPO:
         "max_output_tokens": 4,
         "max_model_len": 12,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "advantage_granularity": "trajectory",
     }
     defaults.update(kwargs)
@@ -60,79 +55,105 @@ def _make_cpu_grpo_for_kernel_tests(**kwargs: object) -> GRPO:
 
 @_LLM_DEPS_SKIP
 class TestFusedForwardPixelValues:
-    def test_fused_forward_passes_pixel_values_to_model_pass(self) -> None:
+    def test_fused_forward_no_grad_passes_pixel_values_to_actor(self) -> None:
         # Arrange
         agent = _make_llm_agent()
         agent.use_value_head = False
-        batch_size = 2
-        seq_len = 5
-        ids = torch.randint(1, 32, (batch_size, seq_len))
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        agent._packing_mode = MagicMock(return_value=None)
-        agent._fused_model_pass = MagicMock(
-            return_value=(torch.zeros(batch_size, seq_len - 1), None),
-        )
+        captured: list[dict[str, torch.Tensor]] = []
+        original_forward = agent.actor.forward
 
-        # Act
-        agent._fused_forward(ids, pixel_values=pixel_values)
+        def recording_forward(**kwargs: torch.Tensor) -> MagicMock:
+            captured.append(dict(kwargs))
+            return original_forward(**kwargs)
 
-        # Assert
-        kwargs = agent._fused_model_pass.call_args.kwargs
-        assert torch.equal(kwargs["pixel_values"], pixel_values)
-
-    def test_fused_forward_omits_pixel_values_when_absent(self) -> None:
-        # Arrange
-        agent = _make_llm_agent()
-        agent.use_value_head = False
-        batch_size = 2
-        seq_len = 5
-        ids = torch.randint(1, 32, (batch_size, seq_len))
-        agent._packing_mode = MagicMock(return_value=None)
-        agent._fused_model_pass = MagicMock(
-            return_value=(torch.zeros(batch_size, seq_len - 1), None),
-        )
-
-        # Act
-        agent._fused_forward(ids)
-
-        # Assert
-        assert agent._fused_model_pass.call_args.kwargs.get("pixel_values") is None
-
-    def test_fused_packed_forward_keeps_pixel_batch_size(self) -> None:
-        # Arrange
-        agent = _make_llm_agent()
-        agent.use_value_head = False
-        batch_size = 2
-        seq_len = 6
-        ids = torch.randint(1, 32, (batch_size, seq_len))
-        mask = torch.ones_like(ids)
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        hidden = torch.randn(1, seq_len, 8)
-        actor = MagicMock()
-        actor.forward = MagicMock(return_value=SimpleNamespace(logits=hidden))
-        agent.actor = actor
-        agent._get_unwrapped_actor = MagicMock(return_value=actor)
+        agent.actor.forward = recording_forward
         agent._fused_logprob_fn_and_head = MagicMock(
             return_value=(
-                MagicMock(return_value=torch.zeros(1, seq_len - 1)),
+                lambda hidden, *_args, **_kwargs: hidden.new_zeros(hidden.shape[:2]),
                 torch.randn(32, 8),
                 None,
             )
         )
-        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        agent._amp_ctx = MagicMock(return_value=nullcontext())
-        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
+        batch_size = 2
+        seq_len = 5
+        ids = torch.randint(1, 32, (batch_size, seq_len))
+        pixel_values = torch.randn(batch_size, 3, 4, 4)
 
         # Act
-        with patch(
-            "agilerl.algorithms.core.base.unpack_logprobs",
-            return_value=torch.zeros(batch_size, seq_len - 1),
-        ):
-            agent._fused_packed_forward(ids, mask, pixel_values=pixel_values)
+        agent._fused_forward_no_grad(ids, batch_size, pixel_values=pixel_values)
 
         # Assert
-        forwarded = actor.call_args.kwargs["pixel_values"]
-        assert forwarded.shape[0] == batch_size
+        assert captured
+        for forward in captured:
+            assert torch.equal(forward["pixel_values"].cpu(), pixel_values)
+
+    def test_fused_forward_no_grad_omits_pixel_values_when_absent(self) -> None:
+        # Arrange
+        agent = _make_llm_agent()
+        agent.use_value_head = False
+        captured: list[dict[str, torch.Tensor]] = []
+        original_forward = agent.actor.forward
+
+        def recording_forward(**kwargs: torch.Tensor) -> MagicMock:
+            captured.append(dict(kwargs))
+            return original_forward(**kwargs)
+
+        agent.actor.forward = recording_forward
+        agent._fused_logprob_fn_and_head = MagicMock(
+            return_value=(
+                lambda hidden, *_args, **_kwargs: hidden.new_zeros(hidden.shape[:2]),
+                torch.randn(32, 8),
+                None,
+            )
+        )
+        batch_size = 2
+        seq_len = 5
+        ids = torch.randint(1, 32, (batch_size, seq_len))
+
+        # Act
+        agent._fused_forward_no_grad(ids, batch_size)
+
+        # Assert
+        assert captured
+        assert all("pixel_values" not in forward for forward in captured)
+
+    def test_packed_fused_model_pass_keeps_pixel_batch_size(self) -> None:
+        # Arrange
+        agent = _make_llm_agent()
+        agent.use_value_head = False
+        captured: list[dict[str, torch.Tensor]] = []
+        original_forward = agent.actor.forward
+
+        def recording_forward(**kwargs: torch.Tensor) -> MagicMock:
+            captured.append(dict(kwargs))
+            return original_forward(**kwargs)
+
+        agent.actor.forward = recording_forward
+        agent._fused_logprob_fn_and_head = MagicMock(
+            return_value=(
+                lambda hidden, *_args, **_kwargs: hidden.new_zeros(hidden.shape[:2]),
+                torch.randn(32, 8),
+                None,
+            )
+        )
+        use_packed(agent, True)
+        batch_size = 2
+        seq_len = 6
+        ids = torch.randint(1, 32, (batch_size, seq_len))
+        pixel_values = torch.randn(batch_size, 3, 4, 4)
+
+        # Act
+        with torch.enable_grad():
+            agent._fused_model_pass(
+                ids,
+                torch.ones_like(ids),
+                ["actor"] * batch_size,
+                pixel_values=pixel_values,
+            )
+
+        # Assert
+        forwarded = captured[0]["pixel_values"]
+        assert captured[0]["input_ids"].shape[0] == 1
         assert torch.equal(forwarded, pixel_values)
 
     def test_get_logprobs_passes_pixel_values_to_actor(self) -> None:
@@ -237,168 +258,27 @@ class TestFusedForwardPixelValues:
             return original_forward(**kwargs)
 
         agent.actor.forward = recording_forward
-        agent._packing_mode = MagicMock(return_value="varlen")
+        agent._fused_logprob_fn_and_head = MagicMock(
+            return_value=(
+                lambda hidden, *_args, **_kwargs: hidden.new_zeros(hidden.shape[:2]),
+                torch.randn(32, 8),
+                None,
+            )
+        )
+        use_packed(agent, True)
         batch_size = 2
         seq_len = 5
         ids = torch.randint(1, 32, (batch_size, seq_len))
         pixel_values = torch.randn(batch_size, 3, 4, 4)
 
-        agent._fused_logprob_fn_and_head = MagicMock(
-            return_value=(
-                MagicMock(return_value=torch.zeros(1, seq_len - 1)),
-                torch.randn(32, 8),
-                None,
-            )
-        )
-        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        agent._amp_ctx = MagicMock(return_value=nullcontext())
-        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
-
         # Act
-        with (
-            patch(
-                "agilerl.algorithms.core.base.unpack_logprobs",
-                return_value=torch.zeros(batch_size, seq_len - 1),
-            ),
-            torch.enable_grad(),
-        ):
+        with torch.enable_grad():
             agent._get_logprobs(ids, batch_size=batch_size, pixel_values=pixel_values)
 
         # Assert
         forwarded = captured[0]["pixel_values"]
-        assert forwarded.shape[0] == batch_size
+        assert captured[0]["input_ids"].shape[0] == 1
         assert torch.equal(forwarded, pixel_values)
-
-
-@_LLM_DEPS_SKIP
-class TestFusedKernelLossPixelValues:
-    def test_fused_kernel_loss_moves_pixel_values_to_device(self) -> None:
-        # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(
-            use_liger_loss=True, loss_norm="micro_batch"
-        )
-        grpo.device = torch.device("cpu")
-        batch_size = 2
-        seq_len = 5
-        batch_ids = torch.randint(1, 32, (batch_size, seq_len))
-        action_mask = torch.ones(batch_size, seq_len - 1, dtype=torch.bool)
-        advantages = torch.zeros(batch_size)
-        old_log_probs = torch.zeros(batch_size, seq_len - 1)
-        reference_log_probs = torch.zeros(batch_size, seq_len - 1)
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        hidden = torch.randn(batch_size, seq_len, 6)
-        captured: list[dict[str, torch.Tensor]] = []
-
-        def recording_forward(**kwargs: torch.Tensor) -> tuple[torch.Tensor]:
-            captured.append(dict(kwargs))
-            return (hidden,)
-
-        grpo.actor.forward = recording_forward
-        grpo._packing_mode = MagicMock(return_value=None)
-        grpo._get_lm_head = MagicMock(
-            return_value=torch.nn.Linear(6, 64, bias=False),
-        )
-        grpo._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        grpo._amp_ctx = MagicMock(return_value=nullcontext())
-        head = grpo._get_lm_head.return_value
-        grpo._liger_head_gather = MagicMock(
-            return_value=nullcontext((head.weight, head.bias))
-        )
-        grpo._resolve_fused_chunk_rows = MagicMock(return_value=2)
-
-        # Act
-        with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
-                _ProbeFusedKernel,
-            ),
-            patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
-        ):
-            grpo._fused_kernel_loss(
-                batch_ids,
-                action_mask,
-                advantages,
-                old_log_probs,
-                reference_log_probs,
-                pixel_values=pixel_values,
-            )
-
-        # Assert
-        forwarded = captured[0]["pixel_values"]
-        assert forwarded.device == grpo.device
-        assert torch.equal(forwarded, pixel_values)
-        [inputs] = kernel_inputs
-        assert inputs["num_items_in_batch"] == 1.0
-        assert torch.equal(inputs["_input"], hidden[:, : seq_len - 1].reshape(-1, 1, 6))
-
-    def test_fused_kernel_loss_packed_keeps_pixel_batch_size(self) -> None:
-        # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(
-            use_liger_loss=True, loss_norm="micro_batch"
-        )
-        grpo.device = torch.device("cpu")
-        batch_size = 2
-        seq_len = 6
-        batch_ids = torch.randint(1, 32, (batch_size, seq_len))
-        action_mask = torch.ones(batch_size, seq_len - 1, dtype=torch.bool)
-        advantages = torch.zeros(batch_size)
-        old_log_probs = torch.zeros(batch_size, seq_len - 1)
-        reference_log_probs = torch.zeros(batch_size, seq_len - 1)
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        packed_hidden = torch.randn(1, seq_len, 6)
-        padded_hidden = torch.randn(batch_size, seq_len, 6)
-        captured: list[dict[str, torch.Tensor]] = []
-
-        def recording_forward(**kwargs: torch.Tensor) -> tuple[torch.Tensor]:
-            captured.append(dict(kwargs))
-            return (packed_hidden,)
-
-        grpo.actor.forward = recording_forward
-        grpo._packing_mode = MagicMock(return_value="varlen")
-        grpo._get_lm_head = MagicMock(
-            return_value=torch.nn.Linear(6, 64, bias=False),
-        )
-        grpo._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        grpo._amp_ctx = MagicMock(return_value=nullcontext())
-        head = grpo._get_lm_head.return_value
-        grpo._liger_head_gather = MagicMock(
-            return_value=nullcontext((head.weight, head.bias))
-        )
-        grpo._resolve_fused_chunk_rows = MagicMock(return_value=2)
-
-        # Act
-        with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            patch(
-                "agilerl.algorithms.core.base.unpack_hidden_states",
-                return_value=padded_hidden,
-            ),
-            patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
-                _ProbeFusedKernel,
-            ),
-            patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
-        ):
-            grpo._fused_kernel_loss(
-                batch_ids,
-                action_mask,
-                advantages,
-                old_log_probs,
-                reference_log_probs,
-                pixel_values=pixel_values,
-            )
-
-        # Assert
-        forwarded = captured[0]["pixel_values"]
-        assert forwarded.shape[0] == batch_size
-        assert forwarded.device == grpo.device
-        assert torch.equal(forwarded, pixel_values)
-        [inputs] = kernel_inputs
-        assert inputs["num_items_in_batch"] == 1.0
-        assert torch.equal(
-            inputs["_input"], padded_hidden[:, : seq_len - 1].reshape(-1, 1, 6)
-        )
 
 
 @_LLM_DEPS_SKIP
@@ -492,6 +372,80 @@ class TestLLMAlgorithmFusedForwardNoGrad:
 
         # Assert
         assert seen == [[0.0], [1.0, 2.0], [0.0], [1.0, 2.0]]
+
+    def test_every_adapter_reads_the_callers_vision_rows(self) -> None:
+        # Arrange: reference, actor and two micro-batches per adapter.
+        agent = _make_cpu_grpo_for_kernel_tests()
+        ids = torch.randint(1, 32, (4, 5))
+        pixel_values = torch.arange(6.0).reshape(6, 1)
+        storages: list[int] = []
+
+        def record_storage(
+            _module: torch.nn.Module,
+            _args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> None:
+            storages.append(kwargs["pixel_values"].untyped_storage().data_ptr())
+
+        handle = agent.actor.get_base_model().register_forward_pre_hook(
+            record_storage, with_kwargs=True
+        )
+
+        # Act
+        try:
+            agent._fused_forward_no_grad(
+                ids, 2, pixel_values=pixel_values, pixel_image_counts=[1, 2, 1, 2]
+            )
+        finally:
+            handle.remove()
+
+        # Assert: no forward reads a host copy of the vision rows.
+        assert len(storages) == 4
+        assert set(storages) == {pixel_values.untyped_storage().data_ptr()}
+
+
+@_LLM_DEPS_SKIP
+class TestGRPOLearnStartForward:
+    def test_actor_rows_read_the_callers_vision_rows(self) -> None:
+        # Arrange: actor log-probs for rows 1, 2 and 3 of 4, one row per forward.
+        agent = _make_cpu_grpo_for_kernel_tests(beta=0.0)
+        ids = torch.randint(1, 32, (4, 5))
+        action_masks = torch.ones(4, 4, dtype=torch.bool)
+        pixel_values = torch.arange(6.0).reshape(6, 1)
+        forwards: list[tuple[int, list[float]]] = []
+
+        def record_pixels(
+            _module: torch.nn.Module,
+            _args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> None:
+            pixels = kwargs["pixel_values"]
+            forwards.append(
+                (pixels.untyped_storage().data_ptr(), pixels.flatten().tolist())
+            )
+
+        handle = agent.actor.get_base_model().register_forward_pre_hook(
+            record_pixels, with_kwargs=True
+        )
+
+        # Act
+        try:
+            agent._learn_start_forward(
+                ids,
+                1,
+                np.array([1, 2, 3]),
+                score_mask=action_masks,
+                pixel_values=pixel_values,
+                pixel_image_counts=[1, 2, 1, 2],
+            )
+        finally:
+            handle.remove()
+
+        # Assert: each forward reads its row's vision rows from the caller's tensor.
+        assert [pixels for _, pixels in forwards] == [[1.0, 2.0], [3.0], [4.0, 5.0]]
+        assert {storage for storage, _ in forwards} == {
+            pixel_values.untyped_storage().data_ptr()
+        }
 
 
 @_LLM_DEPS_SKIP

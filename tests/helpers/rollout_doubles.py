@@ -79,6 +79,14 @@ class FakeEnvClient:
         return self._tools
 
     @property
+    def takes_tool_calls(self) -> bool:
+        return False
+
+    @property
+    def answer_tool(self) -> str | None:
+        return None
+
+    @property
     def rubric_components(self) -> tuple[str, ...]:
         return ()
 
@@ -94,6 +102,8 @@ class FakeEnvClient:
 
 class RolloutEnvDoubleMixin:
     """Map ``RolloutCollector``'s phased reset/step onto a double's reset()/step()."""
+
+    sampling_supports: tuple[torch.Tensor, ...] = ()
 
     @property
     def rubric_components(self) -> tuple[str, ...]:
@@ -117,11 +127,18 @@ class RolloutEnvDoubleMixin:
         del obs_text, info, image
         return self._pending_reset
 
-    def _step_prepare(self, full_completion: Any, sampling_logps: Any = None) -> str:
+    def _step_prepare(
+        self,
+        full_completion: Any,
+        sampling_logps: Any = None,
+        sampling_supports: torch.Tensor | None = None,
+    ) -> str:
         # Mirror the real phase contract: completions are normalized to 2-D here.
         if full_completion.dim() == 1:
             full_completion = full_completion.unsqueeze(0)
         self._pending_step = (full_completion, sampling_logps)
+        if sampling_supports is not None:
+            self.sampling_supports = (*self.sampling_supports, sampling_supports)
         return ""
 
     def _step_env(self, gen_text: str) -> Any:
@@ -133,11 +150,18 @@ class RolloutEnvDoubleMixin:
         full_completion, sampling_logps = self._pending_step
         return self.step(full_completion, sampling_logps=sampling_logps)
 
+    def _take_unscored_turn(self) -> None:
+        return None
+
 
 class MiniTokenizer:
     """Minimal tokenizer for the non-chat-template token path."""
 
     pad_token_id = 0
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def __call__(self, texts: list[str], **_: Any) -> dict[str, torch.Tensor]:
         del texts
@@ -234,14 +258,21 @@ def bare_rollout_env() -> RolloutHarness:
     w.sampling_logps = []  # read by get_episode_data
     w._segments = []  # read by get_episode_data
     w._segment_prompt_tokens = None  # __init__ default, read by the feedback path
+    w._segment_max_images = None  # __init__ default, read by the feedback path
     w._restart_keep_turns = 0  # __init__ default, read by the feedback path
-    # per-role boundary-frame cache; __init__ default, read by the feedback tokenize path
+    w._chat_format = None  # __init__ default, read by the step phases
+    w._takes_tool_calls = None  # __init__ default, read by the step phases
+    w._min_reward = 0.0  # __init__ default, read by the step phases
+    w._pending_tool_calls = []  # __init__ default, read by the step phases
+    w._pending_tool_error = None  # __init__ default, read by the step phases
+    # per-role-sequence boundary-frame cache; __init__ default, read by the feedback tokenize path
     w._boundary_parts = {}
     w._system_prompt = None  # __init__ default, read by the initial-prompt path
     w._special_ids_cache = None  # __init__ default, read by the feedback dedupe
     w._multimodal_turn = None
     w._episode_pixel_values = None
     w._image_placeholder_id = None  # __init__ default for a text-only harness
+    w._reasoning_end_ids = ()  # read by the step phases; empty sends the whole generation
     # These tests drive the ChatML fallback deliberately, so they opt out of strict.
     w._strict_chat_template_boundary = False
     return w

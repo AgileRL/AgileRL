@@ -10,7 +10,7 @@ requires-python = ">=3.10,<3.14"
 
 dependencies = [
     "accelerate>=1.7.0",
-    "agilerl-arena>=1.18.0,<2.0",
+    "agilerl-arena>=1.37.0,<2.0",
     "dill>=0.3.7",
     "fastrand>=1.3.0",
     "flatten_dict>=0.4.2",
@@ -38,8 +38,8 @@ dependencies = [
     "SuperSuit>=3.9.0",
     "tabulate>=0.9.0",
     "termcolor>=1.1.0",
-    "torch>=2.11.0",
-    "tensordict==0.13.0",
+    "torch>=2.13.0",
+    "tensordict==0.15.1",
     "tqdm>=4.66.4",
     "wandb>=0.18.0",
 ]
@@ -50,26 +50,36 @@ box2d = [
     "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
 ]
 cpu = [
-    # Same 2.11 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
-    "torch>=2.11.0,<2.12",
+    # Same 2.13 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
+    "torch>=2.13.0,<2.14",
 ]
 # LLM Python stack without vLLM. Hosted CPU CI uses this with the cpu extra.
 cpu-llm = [
-    "bitsandbytes==0.49.2; sys_platform == 'linux'",
-    "datasets==5.0.1",
-    "liger-kernel==0.8.2; sys_platform == 'linux'",
+    "bitsandbytes==0.50.2; sys_platform == 'linux'",
+    "datasets==5.1.0",
+    # Built-in json_schema reward.
+    "jsonschema>=4.0",
+    "liger-kernel==0.8.5; sys_platform == 'linux'",
     "openenv>=0.4.1,<0.5",
-    "peft==0.21.0",
-    "transformers==5.14.1",
+    "peft==0.21.2",
+    "transformers==5.19.0",
 ]
 vllm = [
-    "vllm==0.25.1; sys_platform == 'linux'",
+    "vllm==0.32.0; sys_platform == 'linux' and python_version >= '3.11'",
 ]
 llm = [
     "agilerl[cpu-llm,vllm]",
+    "flash-linear-attention==0.5.2; sys_platform == 'linux'",
+]
+verifiers = [
+    # verifiers needs Python >=3.11; agilerl supports 3.10.
+    # Custom runtime backends (type: custom) first ship in the 0.4.1 dev builds.
+    "verifiers==0.4.2.dev6; python_version >= '3.11'",
+    # Tool envs are served as OpenEnv MCP environments.
+    "openenv>=0.4.1,<0.5; python_version >= '3.11'",
 ]
 all = [
-    "agilerl[box2d,llm]",
+    "agilerl[box2d,llm,verifiers]",
 ]
 
 [dependency-groups]
@@ -112,7 +122,7 @@ explicit = true
 
 [tool.pytest.ini_options]
 addopts = [
-    "-n", "auto",
+    "-n", "logical",
     "--dist", "loadgroup",
     "--durations=0",
     "--durations-min=1.0",
@@ -136,6 +146,7 @@ filterwarnings = [
 markers = [
     "vllm: needs vLLM (import or real engine). Hosted Linux CPU excludes these; the GPU job runs them. Real vLLM init is loadgroup-pinned because GPU memory profiling fails when peer workers free memory mid-init.",
     "gpu: tests that use a GPU (CUDA, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
+    "multi_rank: runs a torch.distributed process group across child processes (tests.rank_launch.run_ranks). Skipped on Windows (no gloo).",
 ]
 
 [tool.coverage.run]
@@ -176,6 +187,12 @@ git_describe_command = [
 ]
 
 [tool.uv]
+# Not solved for s390x: Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 there.
+environments = [
+    "sys_platform == 'linux' and platform_machine != 's390x'",
+    "sys_platform == 'darwin'",
+    "sys_platform == 'win32'",
+]
 conflicts = [
     [
         { extra = "cpu" },
@@ -197,7 +214,7 @@ no-build-isolation-package = [
 
 # Overrides replace upstream transitive pins.
 override-dependencies = [
-    # torch 2.11.0's cu13 wheel pins nvidia-nccl-cu13==2.28.9 in its metadata,
+    # torch 2.13.0's cu13 wheel pins nvidia-nccl-cu13==2.29.7 in its metadata,
     # but its binary actually references ncclDevCommDestroy, which was only
     # added in NCCL 2.30. Following torch's pin gets you an undefined-symbol
     # ImportError on first `import torch`. Override the pin to >=2.30.
@@ -230,22 +247,33 @@ python-version = "3.13"
 include = ["agilerl", "agilerl/arena"]
 
 # Imports that only resolve on some platforms/extras: vllm is Linux-only and
-# conflicts with cpu. Box2D needs the box2d extra. GPU Linux (`--extra all`)
+# conflicts with cpu. Triton ships only with CUDA torch builds. Box2D needs the
+# box2d extra. flash-linear-attention and flash-attn are optional CUDA kernels.
+# GPU Linux (`--extra all`)
 # resolves vllm; GitHub-hosted CPU Linux (`--extra cpu --extra cpu-llm`) and
 # macOS/Windows cannot.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",
-    "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/architectures/glm5_next/liger.py",
+    "agilerl/architectures/granite_liger.py",
+    "agilerl/architectures/liger_rope.py",
     "agilerl/architectures/nemotron_h/liger.py",
-    "agilerl/architectures/nemotron_h/omni_language.py",
+    "agilerl/architectures/mimo_v2/liger.py",
+    "agilerl/lora/moe/layouts.py",
     "agilerl/architectures/qwen3_5/causal_lm.py",
     "agilerl/architectures/vllm_language.py",
     "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
+    "agilerl/lora/moe/triton_kernels.py",
+    "agilerl/utils/stochastic_round_kernel.py",
+    "agilerl/distributed/context_parallel/gdn.py",
+    "agilerl/distributed/context_parallel/ulysses.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/utils/llm_utils.py",
+    "agilerl/utils/sampling_supports.py",
     "agilerl/utils/utils.py",
+    "agilerl/lora/moe/layouts.py",
 ]
 
 [tool.ty.overrides.rules]
@@ -320,6 +348,15 @@ allow-star-arg-any = true
 "{benchmarking,demos,tutorials,scripts}/**" = ["ALL"]
 ".github/**" = [
     "INP001",        # standalone CI scripts, not a package
+]
+"{agilerl/lora/moe/triton_kernels.py,agilerl/utils/stochastic_round_kernel.py}" = [
+    "ANN001", "ANN201", # Triton's JIT reads kernel parameter annotations as kernel types; non-Triton annotations fail to compile
+]
+"agilerl-arena/snowflake_app/**" = [
+    "S608",          # SQL values pass through setup_sql.string_literal
+]
+"agilerl-arena/hatch_build.py" = [
+    "INP001",        # hatchling build hook at the project root, not a package
 ]
 "scripts/**" = [
     "INP001",        # standalone scripts, not a package

@@ -16,4 +16,4 @@ from agilerl.arena.models.registry import register
 class NeuralTSSpec(BanditSpec):
     """Neural Thompson Sampling."""
 
-    lr: float = Field(default=0.003, ge=0.0, description=LR)
+    lr: float = Field(default=0.003, gt=0.0, le=1.0, description=LR)
