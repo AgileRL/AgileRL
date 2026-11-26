@@ -45,6 +45,30 @@ def reject_legacy_llm_env_spelling(
         raise ValueError(msg)
 
 
+def check_factoryless_entrypoint(entrypoint: str) -> None:
+    """Reject an entrypoint the trainer cannot import when no factory is set.
+
+    Without a factory the trainer imports ``module:attr`` and calls ``attr``,
+    so the part after the last ``:`` must be a Python identifier. A registry
+    id such as ``game:GuessTheNumber-v0-easy`` fails that and needs a factory.
+    A registry id whose name is an identifier passes, since telling it from an
+    import path would need the import.
+
+    :param entrypoint: The env to build.
+    """
+    if entrypoint.startswith(("http://", "https://")):
+        msg = f"entrypoint {entrypoint!r} is a URL; use env_url instead."
+        raise ValueError(msg)
+    module_ref, _, attr = entrypoint.rpartition(":")
+    if not module_ref or not attr.isidentifier():
+        msg = (
+            f"environment.entrypoint {entrypoint!r} is a registry id, not a "
+            "module:attr import path; set environment.factory: gem:make (or "
+            "another factory) to build it."
+        )
+        raise ValueError(msg)
+
+
 DNS_LABEL_PATTERN = r"^[a-z]([-a-z0-9]*[a-z0-9])?$"
 # Env Pods are I/O-bound; this fits beside Ray workers that request a node's CPUs.
 ENV_POD_DEFAULT_CPUS = 0.01
@@ -1097,6 +1121,8 @@ class LLMEnvSpec(EnvSpecBase):
             factory=self.factory,
             env_config=self.env_config,
         )
+        if self.entrypoint is not None and self.factory is None:
+            check_factoryless_entrypoint(self.entrypoint)
         if self.env_type != "rollout":
             return self
         if self.task_family_field is not None and not self.adaptive_task_sampling:

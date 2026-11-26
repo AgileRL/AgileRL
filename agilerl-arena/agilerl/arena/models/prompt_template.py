@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Placeholders a prompt template over dataset rows may use."""
+"""Arena's prompt template over dataset rows, and the placeholders one may use."""
 
 from __future__ import annotations
 
@@ -10,6 +10,22 @@ from typing import Any
 # A single-braced ``{name}``; doubled braces are literal text.
 PROMPT_PLACEHOLDER = re.compile(r"(?<!\{)\{([A-Za-z_]\w*)\}(?!\})")
 ROW_PLACEHOLDERS = ("question", "answer")
+# The template Arena's starting manifest prompts each dataset row with. The
+# system prompt names no <think> tags: on a model with native thinking those
+# strings are control tokens, and a prompt that contains them puts the model
+# inside its thinking block.
+DEFAULT_PROMPT_TEMPLATE = {
+    "system_0": (
+        "A conversation between User and Assistant. The user asks a question, "
+        "and the Assistant solves it. The assistant first thinks about the "
+        "reasoning process in the mind and then gives the final answer inside "
+        "<answer> </answer> tags, i.e., <answer> answer here </answer>."
+    ),
+    "user_1": (
+        "Answer the following question as accurately, clearly, and concisely "
+        "as possible.\n\nQuestion: {question}\n"
+    ),
+}
 
 
 def check_row_placeholders(
