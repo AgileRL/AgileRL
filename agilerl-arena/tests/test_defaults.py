@@ -581,3 +581,50 @@ class TestSFTSpecBeta:
     def test_rejects_a_value_outside_zero_to_one(self, beta: float, match: str) -> None:
         with pytest.raises(ValidationError, match=match):
             SFTSpec(beta=beta)
+
+
+class TestDefaultVerdictOPDReference:
+    def test_dataset_rollout_teacher_reads_the_answer_column(self) -> None:
+        # Act
+        record = default_verdict(
+            document({"name": "OPD"}, dataset_rollout()), user_view=True
+        )
+
+        # Assert
+        assert record["ok"] is True
+        assert record["payload"]["algorithm"]["teacher"]["context_key"] == "answer"
+        assert verdict(record["payload"], submit=True)["ok"] is True
+
+    def test_keeps_an_authored_reference_column(self) -> None:
+        # Arrange
+        algorithm = {"name": "OPD", "teacher": {"context_key": "solution"}}
+
+        # Act
+        record = default_verdict(document(algorithm, dataset_rollout()))
+
+        # Assert
+        assert record["payload"]["algorithm"]["teacher"]["context_key"] == "solution"
+
+    def test_base_weights_teacher_gets_no_reference(self) -> None:
+        # Arrange
+        algorithm = {"name": "OPD", "teacher": {"base": True}}
+
+        # Act
+        record = default_verdict(document(algorithm, dataset_rollout()))
+
+        # Assert
+        assert "context_key" not in record["payload"]["algorithm"]["teacher"]
+
+    def test_environment_without_an_answer_column_keeps_the_trace_reference(
+        self,
+    ) -> None:
+        # Arrange
+        environment = {**dataset_rollout(), "columns": {"question": "question"}}
+
+        # Act
+        record = default_verdict(document({"name": "OPD"}, environment))
+
+        # Assert
+        assert record["payload"]["algorithm"]["teacher"]["context_key"] == (
+            "reference_trace"
+        )

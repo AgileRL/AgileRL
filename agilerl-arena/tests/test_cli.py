@@ -466,17 +466,18 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "Did you mean GRPO?" in result.output
 
-    def test_validate_warns_about_a_deprecated_model_without_failing(self, runner):
+    def test_validate_refuses_a_deprecated_model(self, runner):
         result = runner.invoke(
             main, ["manifest", "validate", "-"], input=_llm_manifest("Qwen/Qwen3-4B")
         )
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert (
-            "warning: Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
+            "network.pretrained_model_name_or_path: Model Qwen/Qwen3-4B is "
+            "deprecated and can no longer be submitted."
             in " ".join(result.output.split())
         )
-        assert "valid (GRPO)" in result.output
+        assert "valid (GRPO)" not in result.output
 
     def test_validate_refuses_a_hub_id_outside_the_catalog(self, runner):
         result = runner.invoke(
@@ -492,7 +493,7 @@ class TestManifestCommands:
             in " ".join(result.output.split())
         )
 
-    def test_validate_warns_about_a_preview_model(self, runner, monkeypatch):
+    def test_validate_refuses_a_preview_model(self, runner, monkeypatch):
         hub_id = "Qwen/Qwen3.5-0.8B"
         monkeypatch.setitem(
             SUPPORTED_MODEL_INFO,
@@ -504,8 +505,8 @@ class TestManifestCommands:
             main, ["manifest", "validate", "-"], input=_llm_manifest(hub_id)
         )
 
-        assert result.exit_code == 0
-        assert f"warning: Model {hub_id} is in preview" in result.output
+        assert result.exit_code == 1
+        assert f"Model {hub_id} is in preview" in result.output
 
     @pytest.mark.parametrize(
         "manifest",
@@ -575,15 +576,21 @@ class TestManifestCommands:
         assert result.exit_code == 0
         assert "Model ckpt is not in the Arena supported model catalog" in result.output
 
-    def test_validate_json_reports_model_warnings(self, runner):
+    def test_validate_json_reports_a_deprecated_model_as_an_error(self, runner):
         result = runner.invoke(
             main,
             ["manifest", "validate", "-", "--json"],
             input=_llm_manifest("Qwen/Qwen3-4B"),
         )
 
-        assert json.loads(result.output)["warnings"] == [
-            "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
+        assert json.loads(result.output)["errors"] == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": (
+                    "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
+                ),
+                "kind": "model_status",
+            }
         ]
 
     def test_validate_warns_that_lora_target_modules_are_ignored(self, runner):
@@ -3010,6 +3017,47 @@ class TestAgentGenerateCommand:
         assert result.exit_code == 0
         assert "foobar" in result.output
 
+    def test_generate_asks_for_512_tokens_by_default(
+        self, runner, mock_client, mock_agent
+    ):
+        mock_agent.generate_stream.return_value = iter(["ok"])
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["agent", "generate", "my-dep", "--prompt", "hi"]
+            )
+        assert result.exit_code == 0
+        params = mock_agent.generate_stream.call_args.kwargs["params"]
+        assert params == {"max_new_tokens": 512}
+
+    def test_generate_forwards_max_tokens(self, runner, mock_client, mock_agent):
+        mock_agent.generate_stream.return_value = iter(["ok"])
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "agent",
+                    "generate",
+                    "my-dep",
+                    "--prompt",
+                    "hi",
+                    "--max-tokens",
+                    "2048",
+                ],
+            )
+        assert result.exit_code == 0
+        params = mock_agent.generate_stream.call_args.kwargs["params"]
+        assert params == {"max_new_tokens": 2048}
+
+    def test_generate_refuses_zero_max_tokens(self, runner, mock_client, mock_agent):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["agent", "generate", "my-dep", "--prompt", "hi", "--max-tokens", "0"],
+            )
+        assert result.exit_code == 2
+        assert "--max-tokens" in result.output
+        mock_agent.generate_stream.assert_not_called()
+
     def test_first_prompt_starts_and_records_a_session(
         self, runner, mock_client, mock_agent
     ):
@@ -3082,7 +3130,9 @@ class TestAgentGenerateCommand:
                 ["agent", "generate", "my-dep", "--prompt", "hi", "--session-id", "s1"],
             )
         assert result.exit_code == 0
-        mock_agent.generate_stream.assert_called_once_with("hi", session_id="s1")
+        mock_agent.generate_stream.assert_called_once_with(
+            "hi", params={"max_new_tokens": 512}, session_id="s1"
+        )
 
     def test_generate_continues_the_resumed_session(
         self, runner, mock_client, mock_agent
@@ -3094,7 +3144,9 @@ class TestAgentGenerateCommand:
                 main, ["agent", "generate", "my-dep", "--prompt", "hi"]
             )
         assert result.exit_code == 0
-        mock_agent.generate_stream.assert_called_once_with("hi", session_id="s-resumed")
+        mock_agent.generate_stream.assert_called_once_with(
+            "hi", params={"max_new_tokens": 512}, session_id="s-resumed"
+        )
 
     def test_generate_only_resumes_its_own_deployment(
         self, runner, mock_client, mock_agent
@@ -3120,7 +3172,9 @@ class TestAgentGenerateCommand:
                 ["agent", "generate", "my-dep", "--prompt", "hi", "--session-id", "s1"],
             )
         assert result.exit_code == 0
-        mock_agent.generate_stream.assert_called_once_with("hi", session_id="s1")
+        mock_agent.generate_stream.assert_called_once_with(
+            "hi", params={"max_new_tokens": 512}, session_id="s1"
+        )
 
     def test_new_session_abandons_the_resumed_session(
         self, runner, mock_client, mock_agent
