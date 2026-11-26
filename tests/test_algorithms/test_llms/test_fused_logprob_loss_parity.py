@@ -295,13 +295,15 @@ class TestDPOLossParity:
         reference = ROLLOUT["reference"]
 
         def loss_fn(logps: torch.Tensor) -> torch.Tensor:
-            loss, _chosen_reward, _rejected_reward = agent._dpo_loss_standard(
-                logps[:2],
-                logps[2:],
-                reference[:2],
-                reference[2:],
-                mask[:2],
-                mask[2:],
+            loss, _chosen_reward, _rejected_reward, _loss_parts = (
+                agent._dpo_loss_standard(
+                    logps[:2],
+                    logps[2:],
+                    reference[:2],
+                    reference[2:],
+                    mask[:2],
+                    mask[2:],
+                )
             )
             return loss
 

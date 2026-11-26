@@ -217,6 +217,31 @@ def model_warnings(manifest: TrainingManifest) -> list[str]:
     return [msg]
 
 
+def model_status_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Report a catalog model that is deprecated or in preview, which Arena refuses on submit.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, LLMAlgorithmSpec):
+        return []
+    hub_id = algorithm.pretrained_model_name_or_path
+    info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
+    notice = info.status_notice if info else None
+    if notice is None:
+        return []
+    return [
+        {
+            "path": "network.pretrained_model_name_or_path",
+            "message": notice,
+            "kind": "model_status",
+        }
+    ]
+
+
 def context_warnings(manifest: TrainingManifest) -> list[str]:
     """Warn when Arena filled the context with its default because the manifest left it unset.
 
@@ -526,6 +551,7 @@ def submit_errors(
     return [
         *run_errors(manifest),
         *unsupported_hub_id_failures(document),
+        *model_status_errors(manifest),
         *arena_chosen_errors(manifest, document, context),
     ]
 
@@ -599,6 +625,7 @@ __all__ = [
     "is_local_model_path",
     "loc_to_path",
     "manifest_warnings",
+    "model_status_errors",
     "model_warnings",
     "override_warnings",
     "read_manifest",

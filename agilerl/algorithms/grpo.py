@@ -760,12 +760,24 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             adv_per_sample = (
                 advantages.detach().reshape(advantages.shape[0], -1).abs().amax(dim=-1)
             )
+            episode_returns = (
+                rewards.sum(dim=1)
+                if rewards.dim() > 1 and rewards.shape[0] == num_samples
+                else rewards.flatten()
+            )
             adv_stats = {
                 "adv_mean": float(adv_values.mean().item()),
                 "adv_min": float(adv_values.min().item()),
                 "adv_max": float(adv_values.max().item()),
                 "adv_zero_frac": float(
                     (adv_per_sample <= self.adv_filter_eps).float().mean().item()
+                ),
+                "group_reward_std": float(
+                    episode_returns.float()
+                    .reshape(-1, self.group_size)
+                    .std(dim=1, correction=0)
+                    .mean()
+                    .item()
                 ),
             }
             row_episodes = np.arange(num_samples)

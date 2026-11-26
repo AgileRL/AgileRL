@@ -993,6 +993,47 @@ class TestSubmitErrorsUnsupportedModel:
         assert record["ok"] is True
 
 
+class TestSubmitErrorsModelStatus:
+    def test_live_model_passes_submit(self) -> None:
+        record = verdict(_grpo_manifest(), submit=True)
+
+        assert record["ok"] is True
+
+    def test_deprecated_model_fails_submit(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3-4B"
+
+        # Act
+        record = verdict(document, submit=True)
+
+        # Assert
+        assert record["ok"] is False
+        assert record["errors"] == [
+            {
+                "path": "network.pretrained_model_name_or_path",
+                "message": (
+                    "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
+                ),
+                "kind": "model_status",
+            }
+        ]
+
+    def test_deprecated_model_only_warns_outside_submit(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3-4B"
+
+        # Act
+        record = verdict(document)
+
+        # Assert
+        assert record["ok"] is True
+        assert record["warnings"][0] == (
+            "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
+        )
+
+
 class TestVerdictUnsupportedModel:
     def test_unknown_model_without_context_reports_only_the_model(self) -> None:
         # Arrange
