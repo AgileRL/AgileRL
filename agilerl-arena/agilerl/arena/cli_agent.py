@@ -1,20 +1,47 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deployment update and archive commands for ``arena agent``."""
+"""Deployment update and archive commands, and chat session choice, for ``arena agent``."""
 
 from __future__ import annotations
+
+import logging
+import uuid
 
 import click
 
 from agilerl.arena.config import CommandConfig, arena_client
+from agilerl.arena.inference.cache import load_active_session, save_active_session
 from agilerl.arena.output import emit_result
+
+logger = logging.getLogger(__name__)
 
 
 def register_deployment_commands(group: click.Group) -> None:
     """Attach deployment update and archive commands to *group*."""
     group.add_command(agent_update)
     group.add_command(agent_delete)
+
+
+def session_for_prompt(
+    deployment: str, session_id: str | None, new_session: bool
+) -> str:
+    """Pick the session a prompt runs in, starting and recording one if needed.
+
+    A new conversation gets its id here rather than from the deployment, which is
+    what lets the next prompt carry on from it: a streamed reply is plain text
+    and has nowhere to hand an id back.
+    """
+    if session_id:
+        return session_id.strip()
+    if not new_session:
+        resumed = load_active_session(deployment)
+        if resumed:
+            return resumed
+    started = str(uuid.uuid4())
+    save_active_session(deployment, started)
+    logger.info("Started session %s.", started)
+    return started
 
 
 @click.command("update")
