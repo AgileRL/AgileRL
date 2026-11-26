@@ -261,6 +261,17 @@ class FailingHeadSession(AppSession):
         return super().sql(statement)
 
 
+class FailingLogsSession(AppSession):
+    """Procedure session where reading live service logs fails."""
+
+    def sql(self, statement: str) -> Result:
+        if statement.startswith("SELECT SYSTEM$GET_SERVICE_LOGS"):
+            self.statements.append(statement)
+            msg = "logs are unavailable"
+            raise SnowparkSQLException(msg)
+        return super().sql(statement)
+
+
 def exact(statement: str, rows: list[Row]) -> Route:
     return (lambda s: s == statement, rows)
 
@@ -289,6 +300,14 @@ def spec(statement: str) -> dict:
     return yaml.safe_load(statement.split("$$\n", 1)[1].removesuffix("$$"))
 
 
+def source_refs(reference: str, aliases: list[str]) -> Route:
+    """``SYSTEM$GET_ALL_REFERENCES`` on ``reference`` answering ``aliases``."""
+    return exact(
+        f"SELECT SYSTEM$GET_ALL_REFERENCES('{reference}') AS REFS",
+        [Row(REFS=json.dumps(aliases))],
+    )
+
+
 def submit_session(
     setup: dict | None = None,
     region: list[Row] | None = None,
@@ -296,6 +315,8 @@ def submit_session(
 ) -> AppSession:
     return AppSession(
         [
+            source_refs("SOURCE_TABLE", ["prompts", "x') --"]),
+            source_refs("SOURCE_VIEW", ["gsm8k"]),
             setup_route(setup),
             exact(
                 "SELECT app_code.object_prefix() AS PREFIX",
@@ -310,6 +331,12 @@ def submit_session(
                     "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
                 ),
                 [Row(instance_family="GPU_NV_S", max_nodes=2)],
+            ),
+            (
+                lambda s: s.startswith(
+                    "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_M"
+                ),
+                [Row(instance_family="GPU_NV_M", max_nodes=2)],
             ),
             (
                 lambda s: s.startswith(
@@ -332,6 +359,17 @@ def r6k_setup() -> dict:
     }
     pools = {**SETUP["pools"], "gpu": {**SETUP["pools"]["gpu"], "GPU_R6K_G1_48": r6k}}
     return {**SETUP, "pools": pools}
+
+
+def nv_m_setup(max_gpus: int = 8) -> dict:
+    """``SETUP`` with only a GPU_NV_M pool: 4 GPUs per node, at most ``max_gpus``."""
+    nv_m = {
+        "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_M",
+        "max_gpus": max_gpus,
+        "gpus_per_node": 4,
+        "gpu_memory_gib": 24,
+    }
+    return {**SETUP, "pools": {**SETUP["pools"], "gpu": {"GPU_NV_M": nv_m}}}
 
 
 def capabilities(priced: list[str] | None) -> httpx.Response:
@@ -479,7 +517,7 @@ class TestSubmit:
         session = submit_session()
 
         text = submit(
-            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
+            session, manifest, 2, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
@@ -557,7 +595,7 @@ class TestSubmit:
         session.routes.append(exact(REWARD_REFS, [Row(REFS='["ref-1"]')]))
 
         text = submit(
-            session, manifest, 1, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
+            session, manifest, 2, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
@@ -616,8 +654,51 @@ class TestSubmit:
 
         assert session.statements == []
 
+    def test_refuses_an_alias_not_bound_to_the_reference(self) -> None:
+        # Arrange
+        session = submit_session()
+
+        # Act
+        with pytest.raises(ValueError, match="Nothing is bound to source_table") as exc:
+            submit(session, SFT, 1, "source_table", "0000", None, None, None, None)
+
+        # Assert
+        assert str(exc.value) == (
+            "Nothing is bound to source_table with the alias 0000.\n"
+            "Aliases bound to source_table: prompts, x') --.\n"
+            "To bind a table, call\n"
+            "CALL <app>.app_code.register_reference('source_table', 'ADD', "
+            "SYSTEM$REFERENCE('TABLE', '<database>.<schema>.<name>', 'PERSISTENT', "
+            "'SELECT'));\n"
+            "then pass the alias SHOW REFERENCES IN APPLICATION <app> lists.\n"
+            "Nothing was started."
+        )
+        assert executes(session) == []
+        assert session.file.puts == {}
+        assert not any("usage_items" in s for s in session.statements)
+
+    def test_refuses_an_alias_bound_to_the_other_source_reference(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(
+            ValueError, match="Aliases bound to source_view: gsm8k"
+        ) as exc:
+            submit(session, SFT, 1, "source_view", "prompts", None, None, None, None)
+
+        assert "To bind a view, call" in str(exc.value)
+        assert "SYSTEM$REFERENCE('VIEW', " in str(exc.value)
+        assert executes(session) == []
+
+    def test_says_none_when_nothing_is_bound(self) -> None:
+        session = AppSession([source_refs("SOURCE_TABLE", [])])
+
+        with pytest.raises(ValueError, match=r"Aliases bound to source_table: none\."):
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        assert executes(session) == []
+
     def test_refuses_before_set_pools_has_run(self) -> None:
-        session = AppSession()
+        session = AppSession([source_refs("SOURCE_TABLE", ["prompts"])])
 
         with pytest.raises(ValueError, match=r"calls app_code\.set_pools first"):
             submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
@@ -634,13 +715,18 @@ class TestSubmit:
 
         assert session.statements == []
 
-    def test_refuses_more_workers_than_the_pool_holds(self) -> None:
+    def test_refuses_more_gpus_than_the_pool_holds_before_recording_the_run(
+        self,
+    ) -> None:
         session = submit_session()
 
-        with pytest.raises(ValueError, match="above MAX_NODES 2"):
+        with pytest.raises(ValueError, match="No GPU pool can run 4 GPUs") as exc:
             submit(session, SFT, 4, "source_table", "prompts", None, None, None, None)
 
+        assert "Valid GPU counts on GPU_NV_S: 1, 2 " in str(exc.value)
+        assert str(exc.value).endswith("Nothing was started.")
         assert executes(session) == []
+        assert not any("usage_items" in s for s in session.statements)
 
     def test_refuses_a_named_family_arena_has_no_price_for(
         self, priced_arena: Arena
@@ -762,6 +848,158 @@ class TestSubmit:
 
         with pytest.raises(ValueError, match="does not have GPU_NV_S with the GPUs"):
             submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        assert executes(session) == []
+
+    def test_refuses_a_family_with_no_pool_and_gives_the_set_pools_call(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        session = submit_session()
+
+        # Act
+        with pytest.raises(ValueError, match="no GPU pool for GPU_NV_L") as exc:
+            submit(
+                session, SFT, 1, "source_table", "prompts", "GPU_NV_L", None, None, None
+            )
+
+        # Assert
+        assert str(exc.value) == (
+            "The app has no GPU pool for GPU_NV_L. GPU pools it has: GPU_NV_S.\n"
+            "An app_admin adds the pool, keeping the ones it has, with\n"
+            "CALL <app>.app_code.set_pools(['GPU_NV_S', 'GPU_NV_L']);\n"
+            "Nothing was started."
+        )
+        assert priced_arena.calls == []
+        assert executes(session) == []
+        assert not any("usage_items" in s for s in session.statements)
+
+    def test_reads_a_lower_case_family_as_the_pool_family(self) -> None:
+        session = submit_session()
+
+        submit(
+            session, SFT, 1, "source_table", "prompts", " gpu_nv_s ", None, None, None
+        )
+
+        assert executes(session)[2].startswith(
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
+        )
+
+    def test_refuses_a_gpu_count_the_family_does_not_divide_and_lists_valid_ones(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_M"])]
+        session = submit_session(nv_m_setup(), [Row(name="GPU_NV_M", gpu_count=4)])
+
+        # Act
+        with pytest.raises(ValueError, match="cannot run 3 GPUs") as exc:
+            submit(
+                session, SFT, 3, "source_table", "prompts", "GPU_NV_M", None, None, None
+            )
+
+        # Assert
+        assert str(exc.value) == (
+            "GPU_NV_M has 4 GPUs per node, so it cannot run 3 GPUs.\n"
+            "Valid GPU counts on GPU_NV_M: 4, 8 (multiples of 4, up to the "
+            "8 GPUs the pool holds).\n"
+            "Nothing was started."
+        )
+        assert executes(session) == []
+        assert not any("usage_items" in s for s in session.statements)
+
+    def test_refuses_more_gpus_than_the_named_pool_holds(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_M"])]
+        session = submit_session(nv_m_setup(), [Row(name="GPU_NV_M", gpu_count=4)])
+
+        # Act
+        with pytest.raises(ValueError, match="holds 8 GPUs") as exc:
+            submit(
+                session,
+                SFT,
+                12,
+                "source_table",
+                "prompts",
+                "GPU_NV_M",
+                None,
+                None,
+                None,
+            )
+
+        # Assert
+        assert str(exc.value) == (
+            "The GPU_NV_M pool holds 8 GPUs, so it cannot run 12 GPUs.\n"
+            "Valid GPU counts on GPU_NV_M: 4, 8 (multiples of 4, up to the "
+            "8 GPUs the pool holds).\n"
+            "To run more GPUs, raise the pool's maximum GPUs first.\n"
+            "Nothing was started."
+        )
+        assert not any("usage_items" in s for s in session.statements)
+
+    def test_runs_on_every_gpu_of_a_max_between_whole_nodes(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_M"])]
+        session = submit_session(nv_m_setup(6), [Row(name="GPU_NV_M", gpu_count=4)])
+
+        # Act
+        submit(session, SFT, 8, "source_table", "prompts", "GPU_NV_M", None, None, None)
+
+        # Assert
+        assert executes(session)[2].startswith(
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_M\n"
+        )
+
+    def test_refuses_an_rl_run_on_one_gpu_instead_of_starting_it_unchecked(
+        self,
+    ) -> None:
+        # Arrange
+        session = submit_session()
+        manifest = grpo_manifest("Qwen/Qwen3.5-0.8B")
+
+        # Act
+        with pytest.raises(ValueError, match="GRPO needs at least 2 GPUs") as exc:
+            submit(
+                session,
+                manifest,
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                "GPU_NV_S",
+                None,
+                None,
+                None,
+            )
+
+        # Assert
+        assert str(exc.value) == (
+            "GRPO needs at least 2 GPUs on GPU_NV_S: training and rollout "
+            "generation run on separate GPUs.\n"
+            "Ask for 2 GPUs or more.\n"
+            "Nothing was started."
+        )
+        assert executes(session) == []
+        assert not any("usage_items" in s for s in session.statements)
+
+    def test_refuses_an_rl_run_on_one_gpu_when_the_family_is_picked(self) -> None:
+        session = submit_session()
+
+        with pytest.raises(ValueError, match="GRPO needs at least 2 GPUs on GPU_NV_S"):
+            submit(
+                session,
+                grpo_manifest("Qwen/Qwen3.5-0.8B"),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                None,
+                None,
+                None,
+            )
 
         assert executes(session) == []
 
@@ -994,20 +1232,32 @@ class TestStatus:
         assert session.statements == []
 
 
+def logs_session(
+    status: str, containers: list[Row], live: list[Row] | None = None
+) -> AppSession:
+    """A run whose workers service has ``status`` and ``containers``, and whose live logs are ``live``."""
+    return AppSession(
+        [
+            known(),
+            exact(
+                f"SHOW JOB SERVICES LIKE '{STEM}%' IN SCHEMA app_state",
+                [Row(name=f"{STEM}_WORKERS", status=status)],
+            ),
+            exact(
+                f"SHOW SERVICE CONTAINERS IN SERVICE app_state.{STEM}_WORKERS",
+                containers,
+            ),
+            (lambda s: s.startswith("SELECT SYSTEM$GET_SERVICE_LOGS"), live or []),
+        ]
+    )
+
+
 class TestLogs:
     def test_reads_the_live_logs_of_a_running_role(self) -> None:
-        session = AppSession(
-            [
-                known(),
-                exact(
-                    f"SHOW JOB SERVICES LIKE '{STEM}%' IN SCHEMA app_state",
-                    [Row(name=f"{STEM}_WORKERS", status="RUNNING")],
-                ),
-                (
-                    lambda s: s.startswith("SELECT SYSTEM$GET_SERVICE_LOGS"),
-                    [Row(LOGS="step 1 loss 0.5")],
-                ),
-            ]
+        session = logs_session(
+            "RUNNING",
+            [Row(instance_id=1, container_name="main", status="READY")],
+            [Row(LOGS="step 1 loss 0.5")],
         )
 
         text = logs(session, RUN_ID, "worker", 1)
@@ -1016,6 +1266,53 @@ class TestLogs:
         assert session.statements[-1] == (
             f"SELECT SYSTEM$GET_SERVICE_LOGS('app_state.{STEM}_WORKERS', 1, 'main')"
         )
+
+    @pytest.mark.parametrize(
+        "containers",
+        [
+            [Row(instance_id=1, container_name="main", status="PENDING")],
+            [Row(instance_id=None, container_name="main", status="PENDING")],
+            [],
+        ],
+    )
+    def test_says_a_container_that_has_not_started_is_pending(
+        self, containers: list[Row]
+    ) -> None:
+        session = logs_session("PENDING", containers)
+
+        text = logs(session, RUN_ID, "worker", 1)
+
+        assert text == (
+            "The worker container has not started yet (state: PENDING). "
+            "Its node can take several minutes to start; GPU nodes take longest. "
+            f"Check progress with CALL <app>.app_code.status('{RUN_ID}')."
+        )
+        assert not any("SYSTEM$GET_SERVICE_LOGS" in s for s in session.statements)
+
+    def test_says_a_started_container_has_no_logs_yet(self) -> None:
+        session = logs_session(
+            "RUNNING",
+            [Row(instance_id=0, container_name="main", status="READY")],
+            [Row(LOGS="")],
+        )
+
+        text = logs(session, RUN_ID, "worker", 0)
+
+        assert text == (
+            "The worker container has started but has written no logs yet. "
+            "Check again in a minute."
+        )
+
+    def test_a_log_read_error_on_a_started_container_is_raised(self) -> None:
+        # Arrange
+        started = logs_session(
+            "RUNNING", [Row(instance_id=0, container_name="main", status="READY")]
+        )
+        session = FailingLogsSession(started.routes)
+
+        # Act / Assert
+        with pytest.raises(SnowparkSQLException, match="logs are unavailable"):
+            logs(session, RUN_ID, "worker", 0)
 
     def test_refuses_an_unknown_role_before_any_sql(self) -> None:
         session = AppSession([known()])
