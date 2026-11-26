@@ -24,6 +24,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Protocol
 
+from agilerl.arena.broker import health_url
 from agilerl.arena.snowflake.job import (
     RUN_MOUNT,
     drop_service_sql,
@@ -562,7 +563,7 @@ def broker_is_healthy(ip: str) -> bool:
     :param ip: Broker instance IP.
     :return: Whether ``/admin/v2/brokers/health`` returned 200.
     """
-    url = f"http://{ip}:8080/admin/v2/brokers/health"
+    url = health_url(ip)
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
             return int(response.status) == 200
