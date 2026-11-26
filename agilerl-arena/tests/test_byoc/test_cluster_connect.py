@@ -17,7 +17,6 @@ from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.cluster_connect import (
     ConnectOptions,
     context_flag,
-    echo_suggested_classes,
     health_checks,
     registered_cluster,
     run_cluster_connect,
@@ -45,9 +44,24 @@ RED = {
     "fix": "Check the storage Secret",
 }
 SUGGESTION = {
-    "name": "corp-k8s-h100x8",
+    "name": "corp-k8s-h100-80-x8",
     "num_nodes": 2,
+    "on_prem_cluster_id": 7,
     "node_selector": {"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"},
+    "metadata": {
+        "computeResource": {
+            "numCpus": 128,
+            "numGpus": 8,
+            "memoryBytes": "1.9 TiB",
+            "gpu": {"type": "nvidia-h100-80gb", "count": 8, "driverVersion": "default"},
+        }
+    },
+}
+FOUND = {
+    "reported_at": "2026-11-25T12:00:00Z",
+    "suggestions": [SUGGESTION],
+    "classes_without_nodes": [],
+    "needs_agent_upgrade": False,
 }
 
 
@@ -186,81 +200,6 @@ class TestHealthChecks:
         ]
 
 
-class TestEchoSuggestedClasses:
-    def test_prints_each_suggestion(
-        self, api: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        api.suggested_classes.return_value = {"suggestions": [SUGGESTION]}
-
-        echo_suggested_classes(api, "corp-k8s")
-
-        out = capsys.readouterr().out
-        assert (
-            "  corp-k8s-h100x8: 2 node(s), node selector "
-            "nvidia.com/gpu.product=NVIDIA-H100-80GB-HBM3"
-        ) in out
-        assert "Create them from the cluster's page in Arena." in out
-
-    def test_says_when_there_is_nothing_to_suggest(
-        self, api: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        api.suggested_classes.return_value = {
-            "suggestions": [],
-            "needs_agent_upgrade": False,
-            "reported_at": "2026-01-01T00:00:00Z",
-        }
-
-        echo_suggested_classes(api, "corp-k8s")
-
-        assert "suggests no new resource classes" in capsys.readouterr().out
-
-    def test_says_when_the_agent_needs_an_upgrade(
-        self, api: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        api.suggested_classes.return_value = {
-            "suggestions": [],
-            "needs_agent_upgrade": True,
-            "reported_at": None,
-        }
-
-        echo_suggested_classes(api, "corp-k8s")
-
-        out = capsys.readouterr().out
-        assert "needs an upgrade" in out
-        assert "arena cluster upgrade" in out
-        assert "suggests no new resource classes" not in out
-
-    def test_says_when_the_agent_has_not_reported_nodes(
-        self, api: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        api.suggested_classes.return_value = {
-            "suggestions": [],
-            "needs_agent_upgrade": False,
-            "reported_at": None,
-        }
-
-        echo_suggested_classes(api, "corp-k8s")
-
-        out = capsys.readouterr().out
-        assert "has not reported its nodes" in out
-        assert "suggests no new resource classes" not in out
-
-    def test_arena_without_suggestions_is_skipped(
-        self, api: MagicMock, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        api.suggested_classes.side_effect = ArenaAPIError("Not Found", status_code=404)
-
-        echo_suggested_classes(api, "corp-k8s")
-
-        assert capsys.readouterr().out == ""
-
-    def test_other_errors_propagate(self, api: MagicMock) -> None:
-        api.suggested_classes.side_effect = ArenaAPIError("boom", status_code=500)
-
-        with pytest.raises(ArenaAPIError, match="boom"):
-            echo_suggested_classes(api, "corp-k8s")
-
-
 def connect_options(**overrides: object) -> ConnectOptions:
     fields: dict[str, Any] = {
         "name": "corp-k8s",
@@ -274,6 +213,7 @@ def connect_options(**overrides: object) -> ConnectOptions:
         "ray_data_storage_class_name": None,
         "rotate_token": False,
         "wait_timeout": 60.0,
+        "yes": False,
     }
     fields.update(overrides)
     return ConnectOptions(**fields)
@@ -296,7 +236,8 @@ class ConnectRun:
         self.preflight = MagicMock(return_value=preflight)
         self.register = MagicMock()
         self.byoc_cluster = MagicMock(side_effect=rows)
-        self.suggested = MagicMock(return_value={"suggestions": [SUGGESTION]})
+        self.suggested = MagicMock(return_value=FOUND)
+        self.create_suggested = MagicMock()
         monkeypatch.setattr(f"{MODULE}.helm_available", lambda: helm)
         monkeypatch.setattr(
             f"{MODULE}.arena_client", lambda _config: client_context(MagicMock())
@@ -309,6 +250,7 @@ class ConnectRun:
         )
         monkeypatch.setattr(ByocApi, "byoc_cluster", self.byoc_cluster)
         monkeypatch.setattr(ByocApi, "suggested_classes", self.suggested)
+        monkeypatch.setattr(ByocApi, "create_suggested_class", self.create_suggested)
 
 
 PASSING = [PreflightCheck("one_agent", CheckStatus.PASS, "No other Arena agent")]
@@ -359,7 +301,7 @@ class TestRunClusterConnect:
         assert register["placement"] == "in-cluster"
         out = capsys.readouterr().out
         assert "Preflight on --context 'corp':" in out
-        assert "corp-k8s-h100x8" in out
+        assert "corp-k8s-h100-80-x8: 2 node(s)" in out
         assert out.rstrip().endswith(
             "Cluster 'corp-k8s' is connected (--context 'corp')."
         )
@@ -469,4 +411,58 @@ class TestRunClusterConnect:
         assert run.register.call_args.kwargs["rotate_token"] is True
         out = capsys.readouterr().out
         assert "HeadBucket refused" in out
-        assert "corp-k8s-h100x8" in out
+        assert "corp-k8s-h100-80-x8: 2 node(s)" in out
+
+
+class TestRunClusterConnectSuggestedClasses:
+    def test_yes_creates_the_suggestions_once_the_agent_has_reported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_kube_target: Callable[..., MagicMock],
+        client_context: Callable[[MagicMock], MagicMock],
+        command_config: CommandConfig,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange
+        run = ConnectRun(
+            monkeypatch,
+            fake_kube_target,
+            client_context,
+            PASSING,
+            [row(), row("t1"), row("t1", "r1")],
+        )
+
+        # Act
+        run_cluster_connect(command_config, connect_options(yes=True))
+
+        # Assert
+        assert run.register.call_args.kwargs["suggest_classes"] is False
+        run.suggested.assert_called_once_with("corp-k8s")
+        run.create_suggested.assert_called_once_with(SUGGESTION)
+        assert (
+            "Created resource class 'corp-k8s-h100-80-x8'." in capsys.readouterr().out
+        )
+
+    def test_without_yes_or_a_terminal_lists_them_and_creates_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_kube_target: Callable[..., MagicMock],
+        client_context: Callable[[MagicMock], MagicMock],
+        command_config: CommandConfig,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        run = ConnectRun(
+            monkeypatch,
+            fake_kube_target,
+            client_context,
+            PASSING,
+            [row(), row("t1"), row("t1", "r1")],
+        )
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        run_cluster_connect(command_config, connect_options())
+
+        run.create_suggested.assert_not_called()
+        out = capsys.readouterr().out
+        assert "corp-k8s-h100-80-x8: 2 node(s)" in out
+        assert "Re-run with --yes to create them" in out
