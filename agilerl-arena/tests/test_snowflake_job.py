@@ -856,7 +856,9 @@ class TestRunState:
             ("cancelling", "running", "running", "cancelling"),
             ("cancelled", "cancelled", "cancelled", "cancelled"),
             ("gone", "gone", "gone", "gone"),
-            ("running", "gone", "running", "running"),
+            ("gone", "running", "running", "running"),
+            ("running", "gone", "running", "failed"),
+            ("running", "running", "gone", "failed"),
         ],
     )
     def test_states(self, broker: str, head: str, worker: str, state: str) -> None:
