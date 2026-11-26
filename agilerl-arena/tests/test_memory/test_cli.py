@@ -1195,6 +1195,30 @@ class TestUnsetRubricPath:
         assert unset_code == named_code == EXIT_OK
         assert json.loads(capsys.readouterr().out) == named
 
+    def test_a_builtin_reward_is_sized_like_a_named_rubric(
+        self, tmp_path, manifest_path, capsys
+    ):
+        # Arrange
+        doc = copy.deepcopy(MANIFEST)
+        del doc["environment"]["reward_file_path"]
+        doc["environment"]["reward"] = {"type": "numeric"}
+        rewarded = write_manifest(tmp_path, doc, "builtin_reward.yaml")
+
+        # Act
+        named_code = main(
+            manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+        named = json.loads(capsys.readouterr().out)
+        rewarded_code = main(
+            rewarded, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+        rewarded_report = json.loads(capsys.readouterr().out)
+
+        # Assert
+        assert rewarded_code == named_code == EXIT_OK
+        assert rewarded_report["training"] == named["training"]
+        assert rewarded_report["generation"] == named["generation"]
+
     def test_a_manifest_that_is_not_a_mapping_is_a_usage_error(self, tmp_path, capsys):
         # Arrange
         listed = tmp_path / "listed.yaml"
