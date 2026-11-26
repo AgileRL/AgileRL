@@ -140,7 +140,8 @@ class SnowflakeAccount:
 
     ``statuses`` holds one poll's ``service_status`` values. Containers report
     ``DONE`` throughout, so only the service status can end a wait. ``setup_doc``
-    is served as setup.json.
+    is served as setup.json. Pools named ``*head_pool`` are ``CPU_X64_SL``; every
+    other pool is ``family``.
     """
 
     setup_doc: dict[str, object] | None = None
@@ -200,6 +201,8 @@ class SnowflakeAccount:
         if query.startswith("SHOW SERVICES"):
             return [Row(name=name) for name in self.services]
         if query.startswith("DESCRIBE COMPUTE POOL"):
+            if query.endswith("head_pool"):
+                return [Row(instance_family="CPU_X64_SL")]
             return [Row(instance_family=self.family)]
         if query.startswith("SHOW SERVICE CONTAINERS"):
             return [
@@ -266,7 +269,7 @@ def settings(**overrides: object) -> PublishSettings:
         serve=True,
         ingress=True,
         compute_pool=None,
-        image_build_pool="arena_head_pool",
+        head_pool="arena_head_pool",
         image=None,
         warehouse=None,
         gpu_count=1,
@@ -307,7 +310,7 @@ class TestSubmitPublish:
         assert job.document == account.published(job.name)
         statement = account.statements[-1]
         assert statement.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL arena_gpu_pool\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL arena_head_pool\n"
             f"NAME = {job.name}\nASYNC = TRUE\nQUERY_WAREHOUSE = arena_wh\n"
         )
         container = account.job_spec()["spec"]["containers"][0]
@@ -323,7 +326,7 @@ class TestSubmitPublish:
         assert "args" not in container
         assert container["resources"] == {
             "requests": {"memory": "7Gi"},
-            "limits": {"memory": "177.5Gi"},
+            "limits": {"memory": "57.5Gi"},
         }
         assert account.job_spec()["spec"]["volumes"] == [
             {
@@ -345,7 +348,7 @@ class TestSubmitPublish:
                 version_name="v9",
                 service_name="policy_svc",
                 compute_pool="serve_pool",
-                image_build_pool="build_pool",
+                head_pool="build_head_pool",
                 image="/arena/training/images/snowflake-job:2.0",
                 warehouse="other_wh",
                 gpu_count=4,
@@ -375,13 +378,13 @@ class TestSubmitPublish:
             "version_name": "v9",
             "service_name": "policy_svc",
             "compute_pool": "serve_pool",
-            "image_build_compute_pool": "build_pool",
+            "image_build_compute_pool": "build_head_pool",
             "gpu_count": 4,
             "max_model_len": 4096,
             "database": "ml",
             "schema": "registry",
         }
-        assert "IN COMPUTE POOL serve_pool\n" in account.statements[-1]
+        assert "IN COMPUTE POOL build_head_pool\n" in account.statements[-1]
         assert "QUERY_WAREHOUSE = other_wh\n" in account.statements[-1]
         assert "SHOW SERVICES LIKE 'policy_svc' IN SCHEMA ml.registry" in (
             account.statements
@@ -498,7 +501,7 @@ class TestSubmitPublish:
             {"service_name": "svc$$x"},
             {"database": "ml;x", "schema": "registry"},
             {"compute_pool": "pool name"},
-            {"image_build_pool": "pool;x"},
+            {"head_pool": "pool;x"},
             {"warehouse": "wh'"},
         ],
     )
@@ -519,6 +522,21 @@ class TestSubmitPublish:
         with pytest.raises(ValueError, match="more than the 1 GPUs"):
             submit_publish(account, settings(gpu_count=2))
 
+    def test_the_job_leaves_a_one_gpu_node_to_the_service(self) -> None:
+        # Arrange
+        account = SnowflakeAccount(two_checkpoints(), family="GPU_NV_S")
+
+        # Act
+        job = submit_publish(account, settings(compute_pool="gpu_pool"))
+
+        # Assert
+        assert job.document["compute_pool"] == "gpu_pool"
+        assert account.statements[-1].startswith(
+            "EXECUTE JOB SERVICE IN COMPUTE POOL arena_head_pool\n"
+        )
+        container = account.job_spec()["spec"]["containers"][0]
+        assert container["resources"]["limits"] == {"memory": "57.5Gi"}
+
     def test_image_that_breaks_the_sql_quote_is_rejected(self) -> None:
         account = SnowflakeAccount(two_checkpoints())
 
@@ -527,16 +545,18 @@ class TestSubmitPublish:
 
         assert account.file.uploads == {}
 
-    def test_a_checkpoint_larger_than_a_node_is_rejected(self) -> None:
+    def test_a_checkpoint_larger_than_a_head_node_is_rejected(self) -> None:
         account = SnowflakeAccount(
             staged(
-                ("checkpoint_3/merged/model.safetensors", 40 * GIB),
+                ("checkpoint_3/merged/model.safetensors", 60 * GIB),
                 ("checkpoint_3/merged/.complete", 0),
-            ),
-            family="GPU_NV_S",
+            )
         )
 
-        with pytest.raises(ValueError, match="needs about 44 GiB"):
+        with pytest.raises(
+            ValueError,
+            match=r"needs about 64 GiB .* arena_head_pool node has 57\.5 GiB",
+        ):
             submit_publish(account, settings())
 
 
@@ -1117,7 +1137,7 @@ class TestPublishProfile:
         assert isinstance(settings, PublishSettings)
         assert seen["connection"] == "arena"
         assert settings.compute_pool == "arena_gpu_GPU_NV_S"
-        assert settings.image_build_pool == "team_head_pool"
+        assert settings.head_pool == "team_head_pool"
         assert settings.image == "/arena/training/images/snowflake-job:1"
         assert settings.warehouse == "arena_wh"
         assert settings.runs_stage == "arena.training.runs"
@@ -1147,7 +1167,7 @@ class TestPublishProfile:
         assert settings.compute_pool == "other_pool"
         assert settings.warehouse == "other_wh"
         assert settings.image == "/arena/training/images/snowflake-job:2"
-        assert settings.image_build_pool == "team_head_pool"
+        assert settings.head_pool == "team_head_pool"
 
     def test_several_gpu_families_use_the_runs_pool(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1179,7 +1199,7 @@ class TestPublishProfile:
         )
         execute = next(s for s in account.statements if s.startswith("EXECUTE JOB"))
         assert execute.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL arena_gpu_pool\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL team_head_pool\n"
         )
         container = account.job_spec()["spec"]["containers"][0]
         assert container["image"] == "/arena/training/images/snowflake-job:1"
