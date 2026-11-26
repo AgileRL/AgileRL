@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from pathlib import Path
+from typing import get_args
 
 import app_billing
 import app_keys
@@ -16,6 +17,7 @@ import pytest
 import yaml
 from snowflake_app.app_code import arena_app
 
+from agilerl.arena.models.rewards import BuiltinReward
 from agilerl.arena.snowflake.images import TRAINER_REPOSITORY
 from agilerl.arena.snowflake.license import DEFAULT_BASE_URL, arena_api_hostname
 from agilerl.arena.snowflake.profile import (
@@ -35,6 +37,7 @@ from tests.test_snowflake_setup import FakeSession, Row
 APP_DIR = Path(__file__).resolve().parents[1] / "snowflake_app"
 MANIFEST = yaml.safe_load((APP_DIR / "manifest.yml").read_text())
 SETUP_SQL = (APP_DIR / "setup_script.sql").read_text()
+APP_README = (APP_DIR / "app_readme.md").read_text()
 
 
 def quoted_lists(keyword: str) -> list[set[str]]:
@@ -183,6 +186,69 @@ class TestReadme:
         assert "GP07586" not in readme
         assert "oss/agilerl" not in readme
         assert "repository root" in readme
+
+
+class TestAppReadme:
+    def test_package_ships_it_as_the_app_readme(self) -> None:
+        # Arrange
+        project = yaml.safe_load((APP_DIR / "snowflake.yml").read_text())
+        recipe = (APP_DIR.parents[1] / "justfile").read_text()
+
+        # Act
+        artifacts = project["entities"]["arena_pkg"]["artifacts"]
+
+        # Assert
+        assert MANIFEST["artifacts"]["readme"] == "README.md"
+        assert {"src": "app_readme.md", "dest": "README.md"} in artifacts
+        assert "agilerl-arena/snowflake_app/app_readme.md" in recipe
+
+    def test_documents_every_granted_procedure_with_its_role(self) -> None:
+        granted = re.findall(
+            r"GRANT USAGE ON PROCEDURE app_code\.(\w+)\([^)]*\)\s+"
+            r"TO APPLICATION ROLE (\w+);",
+            SETUP_SQL,
+        )
+
+        rows = dict(
+            re.findall(
+                r"^\| `(\w+)\([^`]*\)` \| `(\w+)` \|", APP_README, flags=re.MULTILINE
+            )
+        )
+
+        assert rows == {name.upper(): role for name, role in granted}
+
+    def test_documents_privileges_access_requests_and_references(self) -> None:
+        privileges = [name for entry in MANIFEST["privileges"] for name in entry]
+        references = [name for entry in MANIFEST["references"] for name in entry]
+        specifications = re.findall(
+            r"ALTER APPLICATION SET SPECIFICATION (\w+)", SETUP_SQL
+        )
+
+        names = [*privileges, *references, *(s.upper() for s in specifications)]
+
+        assert specifications == ["hf_access", "arena_access"]
+        assert all(f"`{name}`" in APP_README for name in names)
+
+    def test_documents_every_built_in_reward_and_the_chat_function(self) -> None:
+        types = [
+            get_args(reward.model_fields["type"].annotation)[0]
+            for reward in get_args(BuiltinReward)
+        ]
+
+        assert types
+        assert all(f"| `{name}` |" in APP_README for name in types)
+        assert "snowflake_function" in APP_README
+        assert "<service>_CHAT(messages ARRAY" in APP_README
+
+    def test_is_self_contained_for_consumers(self) -> None:
+        text = APP_README.lower()
+
+        assert "gp07586" not in text
+        assert "oss/agilerl" not in text
+        assert "arena snowflake" not in text
+        assert "open source" not in text
+        assert "hyperparameter" not in text
+        assert "arena@agilerl.com" in text
 
 
 class TestSnowflakeProject:
