@@ -140,14 +140,41 @@ def learn_cost(
         :func:`routed_chunks_per_pass`.
     :return: Token-equivalents of work.
     """
-    checkpointed = checkpointed_blocks(n_layers, gradient_checkpointing, every_n_blocks)
-    recompute = costs.recompute_cost * checkpointed / n_layers
-    per_pass = (
-        costs.micro_batch_overhead_tokens
-        + gather_cost(residency, costs)
-        + routed_chunks * costs.routed_chunk_tokens
+    recompute = costs.recompute_cost * recomputed_share(
+        n_layers, gradient_checkpointing, every_n_blocks
+    )
+    per_pass = costs.micro_batch_overhead_tokens + fixed_pass_cost(
+        residency, costs, routed_chunks
     )
     return tokens * (1 + recompute) + passes * per_pass
+
+
+def recomputed_share(
+    n_layers: int, gradient_checkpointing: bool, every_n_blocks: int
+) -> float:
+    """Share of the decoder blocks backward runs forward again.
+
+    :param n_layers: Decoder blocks.
+    :param gradient_checkpointing: Activation checkpointing is on.
+    :param every_n_blocks: Checkpoint stride.
+    :return: Checkpointed blocks over all blocks.
+    """
+    return (
+        checkpointed_blocks(n_layers, gradient_checkpointing, every_n_blocks) / n_layers
+    )
+
+
+def fixed_pass_cost(
+    residency: Residency | None, costs: LearnCosts, routed_chunks: int
+) -> float:
+    """One micro-batch's frozen-base gathers and routed-expert chunks, in tokens of learn work.
+
+    :param residency: Where the frozen base lives, or ``None`` under DDP.
+    :param costs: Learn-time constants of the training GPU.
+    :param routed_chunks: Routed-expert row chunks of the micro-batch.
+    :return: Token-equivalents, whatever the micro-batch's length.
+    """
+    return gather_cost(residency, costs) + routed_chunks * costs.routed_chunk_tokens
 
 
 def offloaded_optimizer_bytes(
@@ -518,6 +545,9 @@ class TrainingMemoryPlan:
     # Modeled step, and the tokens it trains, from :func:`learn_cost`.
     cost: float
     tokens: float
+    # The part of ``cost`` its micro-batches spend on frozen-base gathers and
+    # routed-expert chunks, whatever their length (:func:`fixed_pass_cost`).
+    fixed_cost: float
     # The settings the plan was estimated at, and that estimate.
     settings: TrainingSettings
     breakdown: PhaseBreakdown
@@ -946,6 +976,7 @@ def _cached_training_memory(
                 n_layers, on, stride, passes, tokens, residency, costs, chunks
             ),
             tokens=tokens,
+            fixed_cost=passes * fixed_pass_cost(residency, costs, chunks),
             settings=sized,
             breakdown=breakdown,
             optimizer_offload_seconds=costs.optimizer_offload_seconds_per_gib
