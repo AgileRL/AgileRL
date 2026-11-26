@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +34,7 @@ from agilerl.arena.byoc.cluster_register import (
     _registered_scope,
     _same_byte_size,
     ensure_resource_class,
+    offer_suggested_classes,
     run_cluster_register,
 )
 from agilerl.arena.byoc.provisioning.providers.aws.gateway import (
@@ -56,6 +57,23 @@ COMMANDS = "agilerl.arena.byoc.commands"
 def pinned_target(fake_kube_target: Callable[..., MagicMock]) -> MagicMock:
     """Point every register install at a fixed context."""
     return fake_kube_target(COMMANDS)
+
+
+NO_SUGGESTIONS = {
+    "reported_at": "2026-11-25T12:00:00Z",
+    "suggestions": [],
+    "classes_without_nodes": [],
+    "needs_agent_upgrade": False,
+}
+
+
+@pytest.fixture(autouse=True)
+def nothing_to_suggest() -> Iterator[MagicMock]:
+    """Answer class suggestion calls as a cluster whose nodes all have classes."""
+    with patch.object(
+        ByocApi, "suggested_classes", return_value=NO_SUGGESTIONS
+    ) as suggested:
+        yield suggested
 
 
 NEBIUS_SPEC = """
@@ -3461,3 +3479,300 @@ class TestEnsureResourceClassCluster:
             call.args[1].endswith("/create")
             for call in http_client._http.request.call_args_list
         )
+
+
+H100_SUGGESTION = {
+    "name": "lab-cluster-h100-80-x8",
+    "enabled": True,
+    "description": "2 node(s) with 8x NVIDIA-H100-80GB-HBM3",
+    "num_nodes": 2,
+    "on_prem_cluster_id": 42,
+    "on_prem_cluster": None,
+    "node_selector": {"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"},
+    "placement": None,
+    "availabilities": None,
+    "metadata": {
+        "computeResource": {
+            "numCpus": 128,
+            "numGpus": 8,
+            "memoryBytes": "2.0 TiB",
+            "gpu": {"type": "nvidia-h100-80gb", "count": 8, "driverVersion": "default"},
+        }
+    },
+}
+
+
+def created_class_names(mock_client: MagicMock) -> list[str]:
+    """Names of the classes posted to ``classes/create`` through *mock_client*."""
+    return [
+        call.args[1]["name"]
+        for call in mock_client._invoke_manifest_command.call_args_list
+        if call.args[0]["path"].endswith("/classes/create")
+    ]
+
+
+class TestOfferSuggestedClasses:
+    def test_yes_creates_every_suggestion(
+        self,
+        byoc_api: ByocApi,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange
+        nothing_to_suggest.return_value = {
+            **NO_SUGGESTIONS,
+            "suggestions": [H100_SUGGESTION],
+        }
+
+        # Act
+        created = offer_suggested_classes(byoc_api, "lab-cluster", yes=True)
+
+        # Assert
+        assert created == ["lab-cluster-h100-80-x8"]
+        assert created_class_names(mock_client) == ["lab-cluster-h100-80-x8"]
+        body = mock_client._invoke_manifest_command.call_args.args[1]
+        assert "placement" not in body
+        out = capsys.readouterr().out
+        assert (
+            "lab-cluster-h100-80-x8: 2 node(s), 8x nvidia-h100-80gb, 128 CPUs, "
+            "2.0 TiB memory, node selector nvidia.com/gpu.product=NVIDIA-H100-80GB-HBM3"
+        ) in out
+        assert "Created resource class 'lab-cluster-h100-80-x8'." in out
+        nothing_to_suggest.assert_called_once_with("lab-cluster")
+
+    @pytest.mark.parametrize(
+        ("answer", "expected"), [(True, ["lab-cluster-h100-80-x8"]), (False, [])]
+    )
+    def test_a_terminal_asks_before_creating(
+        self,
+        byoc_api: ByocApi,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        answer: bool,
+        expected: list[str],
+    ) -> None:
+        nothing_to_suggest.return_value = {
+            **NO_SUGGESTIONS,
+            "suggestions": [H100_SUGGESTION],
+        }
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        with patch(
+            "agilerl.arena.byoc.cluster_register.click.confirm", return_value=answer
+        ) as confirm:
+            created = offer_suggested_classes(byoc_api, "lab-cluster", yes=False)
+
+        confirm.assert_called_once_with("Create these classes?", default=False)
+        assert created == expected
+        assert created_class_names(mock_client) == expected
+
+    def test_without_a_terminal_lists_them_and_creates_nothing(
+        self,
+        byoc_api: ByocApi,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nothing_to_suggest.return_value = {
+            **NO_SUGGESTIONS,
+            "suggestions": [H100_SUGGESTION],
+        }
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        created = offer_suggested_classes(byoc_api, "lab-cluster", yes=False)
+
+        assert created == []
+        assert created_class_names(mock_client) == []
+        out = capsys.readouterr().out
+        assert "lab-cluster-h100-80-x8: 2 node(s)" in out
+        assert "Re-run with --yes to create them" in out
+
+    def test_a_refused_create_does_not_stop_the_others(
+        self,
+        byoc_api: ByocApi,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange
+        b200 = {**H100_SUGGESTION, "name": "lab-cluster-b200-x8"}
+        nothing_to_suggest.return_value = {
+            **NO_SUGGESTIONS,
+            "suggestions": [H100_SUGGESTION, b200],
+        }
+        mock_client._invoke_manifest_command.side_effect = [
+            ArenaAPIError("name conflicts with a cloud tier", status_code=400),
+            {"id": 2},
+        ]
+
+        # Act
+        created = offer_suggested_classes(byoc_api, "lab-cluster", yes=True)
+
+        # Assert
+        assert created == ["lab-cluster-b200-x8"]
+        assert created_class_names(mock_client) == [
+            "lab-cluster-h100-80-x8",
+            "lab-cluster-b200-x8",
+        ]
+        err = capsys.readouterr().err
+        assert (
+            "Could not create resource class 'lab-cluster-h100-80-x8': "
+            "API error (400): name conflicts with a cloud tier"
+        ) in err
+
+    def test_flags_classes_without_nodes_and_an_old_agent(
+        self,
+        byoc_api: ByocApi,
+        nothing_to_suggest: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nothing_to_suggest.return_value = {
+            **NO_SUGGESTIONS,
+            "classes_without_nodes": [
+                {"resource_class_id": 3, "name": "a100-pool", "node_selector": {}}
+            ],
+            "needs_agent_upgrade": True,
+        }
+
+        created = offer_suggested_classes(byoc_api, "lab-cluster", yes=True)
+
+        assert created == []
+        out = capsys.readouterr().out
+        assert "No node matches the node selector of class 'a100-pool'" in out
+        assert "arena cluster upgrade --name lab-cluster" in out
+        assert "Suggested classes" not in out
+
+    def test_says_when_the_agent_has_not_reported(
+        self,
+        byoc_api: ByocApi,
+        nothing_to_suggest: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nothing_to_suggest.return_value = {**NO_SUGGESTIONS, "reported_at": None}
+
+        assert offer_suggested_classes(byoc_api, "lab-cluster", yes=True) == []
+
+        assert "The agent has not reported its nodes yet" in capsys.readouterr().out
+
+    def test_an_arena_without_suggestions_is_skipped(
+        self,
+        byoc_api: ByocApi,
+        nothing_to_suggest: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nothing_to_suggest.side_effect = ArenaAPIError("Not Found", status_code=404)
+
+        assert offer_suggested_classes(byoc_api, "lab-cluster", yes=True) == []
+
+        assert capsys.readouterr().out == ""
+
+    def test_other_errors_propagate(
+        self, byoc_api: ByocApi, nothing_to_suggest: MagicMock
+    ) -> None:
+        nothing_to_suggest.side_effect = ArenaAPIError("boom", status_code=500)
+
+        with pytest.raises(ArenaAPIError, match="boom"):
+            offer_suggested_classes(byoc_api, "lab-cluster", yes=True)
+
+
+class TestRunClusterRegisterSuggestedClasses:
+    @pytest.fixture(autouse=True)
+    def _no_helm(self) -> Iterator[None]:
+        with (
+            patch("agilerl.arena.byoc.cluster_helm.helm_available", return_value=False),
+            patch(
+                "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
+            ),
+            patch.object(ByocApi, "register_cluster", return_value=LAB_BUNDLE),
+        ):
+            yield
+
+    def test_yes_creates_the_suggestions_after_register(
+        self,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nothing_to_suggest.return_value = {
+            **NO_SUGGESTIONS,
+            "suggestions": [H100_SUGGESTION],
+        }
+
+        run_cluster_register(
+            mock_client,
+            name="lab-cluster",
+            output_dir=tmp_path,
+            skip_enable=True,
+            force=False,
+            yes=True,
+        )
+
+        assert created_class_names(mock_client) == ["lab-cluster-h100-80-x8"]
+        assert (
+            "Resource class 'lab-cluster-h100-80-x8' is linked"
+            in capsys.readouterr().out
+        )
+
+    def test_connect_turns_the_offer_off(
+        self,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        run_cluster_register(
+            mock_client,
+            name="lab-cluster",
+            output_dir=tmp_path,
+            skip_enable=True,
+            force=False,
+            yes=True,
+            suggest_classes=False,
+        )
+
+        nothing_to_suggest.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("byoc_scope", "resource_classes"),
+        [
+            ("platform", ()),
+            (
+                None,
+                (
+                    ClusterResourceClass(
+                        name="spec-gpu",
+                        num_nodes=1,
+                        node_selector={"class": "gpu"},
+                        metadata={},
+                    ),
+                ),
+            ),
+        ],
+    )
+    def test_platform_and_spec_classes_get_no_suggestions(
+        self,
+        mock_client: MagicMock,
+        nothing_to_suggest: MagicMock,
+        tmp_path: Path,
+        byoc_scope: str | None,
+        resource_classes: tuple[ClusterResourceClass, ...],
+    ) -> None:
+        with (
+            patch.object(ByocApi, "find_class", return_value=None),
+            patch.object(ByocApi, "create_class", return_value={"name": "spec-gpu"}),
+        ):
+            run_cluster_register(
+                mock_client,
+                name="lab-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+                byoc_scope=byoc_scope,
+                resource_classes=resource_classes,
+                yes=True,
+            )
+
+        nothing_to_suggest.assert_not_called()

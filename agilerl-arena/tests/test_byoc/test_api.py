@@ -909,3 +909,28 @@ class TestByocApiSuggestedClasses:
 
         with pytest.raises(ArenaAPIError, match="Unexpected class suggestions"):
             byoc_api.suggested_classes("corp-k8s")
+
+
+class TestByocApiCreateSuggestedClass:
+    def test_posts_the_suggestion_without_unset_fields(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        suggestion = {
+            "name": "lab-h100-80-x8",
+            "num_nodes": 2,
+            "on_prem_cluster_id": 7,
+            "node_selector": {"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"},
+            "placement": None,
+            "availabilities": None,
+        }
+
+        byoc_api.create_suggested_class(suggestion)
+
+        invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert invoke["path"] == "/api/cli/v1/byoc/classes/create"
+        assert body == {
+            "name": "lab-h100-80-x8",
+            "num_nodes": 2,
+            "on_prem_cluster_id": 7,
+            "node_selector": {"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"},
+        }

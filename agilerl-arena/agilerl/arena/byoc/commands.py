@@ -549,7 +549,11 @@ REGISTER_COMMAND_FLAGS = (
     ),
     (
         ("--yes",),
-        {"is_flag": True, "default": False, "help": "Provision without prompting."},
+        {
+            "is_flag": True,
+            "default": False,
+            "help": "Provision and create suggested classes without prompting.",
+        },
     ),
     (
         ("-v", "--verbose"),
@@ -1145,6 +1149,12 @@ def build_cluster_connect_command() -> click.Command:
         show_default=True,
         help="Seconds to wait for the agent to connect and send its health report.",
     )
+    @click.option(
+        "--yes",
+        is_flag=True,
+        default=False,
+        help="Create the resource classes Arena suggests without prompting.",
+    )
     @click.pass_obj
     def connect_cmd(
         config: CommandConfig,
@@ -1159,13 +1169,15 @@ def build_cluster_connect_command() -> click.Command:
         ray_data_storage_class_name: str | None,
         rotate_token: bool,
         wait_timeout: float,
+        yes: bool,
     ) -> None:
         """Connect a Kubernetes cluster to Arena in one step.
 
         Runs preflight and stops on a failed check, then registers the cluster
         (an existing name keeps its token), installs the agent, and waits until
-        it connects and reports its health after the install finishes. Prints
-        the resource classes Arena suggests, or why it has none yet.
+        it connects and reports its health after the install finishes. Lists
+        the resource classes Arena suggests from the cluster's nodes and
+        creates them on --yes or after a prompt.
         """
         cluster_name = name.strip()
         if not cluster_name:
@@ -1185,6 +1197,7 @@ def build_cluster_connect_command() -> click.Command:
                 ray_data_storage_class_name=ray_data_storage_class_name,
                 rotate_token=rotate_token,
                 wait_timeout=wait_timeout,
+                yes=yes,
             ),
         )
 
