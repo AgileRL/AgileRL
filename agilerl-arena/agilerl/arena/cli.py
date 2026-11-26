@@ -1304,7 +1304,7 @@ def agent_sessions_resume(
         chosen = _choose_session(sessions, session_id, load_active_session(deployment))
 
     save_active_session(deployment, chosen)
-    console.print(f"Resuming session {chosen} on {deployment}.")
+    console.print(f"Resuming session {chosen} on {deployment}.", markup=False)
 
 
 @agent_sessions.command("delete")
@@ -1347,9 +1347,9 @@ def agent_sessions_delete(
     if load_active_session(deployment) == session_id.strip():
         clear_active_session(deployment)
     if deleted:
-        console.print(f"Deleted session {session_id} on {deployment}.")
+        console.print(f"Deleted session {session_id} on {deployment}.", markup=False)
     else:
-        console.print(f"No session {session_id} on {deployment}.")
+        console.print(f"No session {session_id} on {deployment}.", markup=False)
 
 
 @agent_sessions.command("clear")
@@ -1363,9 +1363,9 @@ def agent_sessions_clear(deployment_name: str | None) -> None:
     """
     target, _, _ = _resolve_agent_target(deployment_name, None, None)
     if clear_active_session(target):
-        console.print(f"Cleared the session on {target}.")
+        console.print(f"Cleared the session on {target}.", markup=False)
     else:
-        console.print(f"No session to clear on {target}.")
+        console.print(f"No session to clear on {target}.", markup=False)
 
 
 @main.group("projects")

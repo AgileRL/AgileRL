@@ -190,7 +190,7 @@ class TestRendererStatusEvent:
         renderer.handle_event(event)
 
         mock_logger.info.assert_called_once_with(
-            "  [dim]%s[/dim]", "Downloading pygments"
+            "  [dim]%s[/dim]", "Downloading pygments", extra={"markup": True}
         )
 
     @patch("agilerl.arena.output.logger")
@@ -633,6 +633,81 @@ class TestHandleError:
                 }
             ],
         }
+
+
+class TestServerTextIsNotMarkup:
+    """Server text in brackets prints as sent, not as Rich markup."""
+
+    MESSAGE = (
+        "Dataset 'cov1-badmap' has a column mapping to columns it does not "
+        "have: question -> 'no_such_col'. Its columns: [question, answer]."
+    )
+
+    @pytest.fixture
+    def recorded(self, monkeypatch):
+        recorder = Console(record=True, file=io.StringIO(), width=500)
+        monkeypatch.setattr(output_module, "console", recorder)
+        monkeypatch.setattr(output_module, "error_console", recorder)
+        return recorder
+
+    def test_error_message_keeps_its_brackets(self, recorded):
+        with pytest.raises(click.exceptions.Exit):
+            handle_error(ArenaTrainingError(detail=self.MESSAGE))
+
+        assert "Its columns: [question, answer]." in recorded.export_text()
+
+    def test_table_cells_keep_their_brackets(self, recorded):
+        emit_result(
+            [{"name": "[bold]ds[/bold]", "columns": ["question", "answer"]}],
+        )
+        emit_result({"failure_reason": self.MESSAGE})
+        emit_result("[red]plain[/red]")
+
+        text = recorded.export_text()
+        assert "[bold]ds[/bold]" in text
+        assert "Its columns: [question, answer]." in text
+        assert "[red]plain[/red]" in text
+
+    def test_stream_rows_keep_their_brackets(self, recorded):
+        renderer = StreamRichRenderer()
+        renderer._live = MagicMock()
+        renderer.handle_event(
+            CheckEvent(
+                name="cols[1]",
+                success=False,
+                warnings=[],
+                error=self.MESSAGE,
+                raw={},
+            )
+        )
+        renderer.handle_event(
+            ErrorEvent(message=self.MESSAGE, extras={"columns": "[a, b]"})
+        )
+        renderer.handle_event(LogEvent(text="pip install uvicorn[standard]"))
+
+        recorded.print(renderer._build_table())
+
+        text = recorded.export_text()
+        assert "cols[1]" in text
+        assert text.count("Its columns: [question, answer].") == 2
+        assert "Columns: [a, b]" in text
+        assert "uvicorn[standard]" in text
+
+    def test_log_notices_keep_their_brackets(self):
+        code = (
+            "import logging, agilerl.arena._console; "
+            f"logging.getLogger('agilerl.arena').info({self.MESSAGE!r})"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "COLUMNS": "500"},
+        )
+
+        assert "Its columns: [question, answer]." in result.stderr
 
 
 def _validation_error(document: dict) -> ValidationError:
