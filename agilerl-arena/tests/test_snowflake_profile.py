@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from agilerl.arena.memory.gpus import lookup_gpu
 from agilerl.arena.snowflake.profile import (
     GPU_FAMILIES,
     NO_POOLS,
@@ -191,7 +192,8 @@ class TestGpuFamilies:
         [
             ("GPU_NV_S", 1, "A10G"),
             ("GPU_NV_SM", 1, "A10"),
-            ("GPU_NV_SL", 4, "A100"),
+            ("GPU_NV_3M", 2, "A100 80GB"),
+            ("GPU_NV_SL", 4, "A100 80GB"),
             ("GPU_GCP_NV_L4_1_24G", 1, "L4"),
             ("GPU_GCP_NV_A100_8_40G", 8, "A100"),
         ],
@@ -201,6 +203,26 @@ class TestGpuFamilies:
 
         assert spec.gpus == gpus
         assert spec.gpu == gpu
+
+    @pytest.mark.parametrize(
+        ("family", "name", "bandwidth"),
+        [
+            ("GPU_NV_3M", "NVIDIA A100-SXM4-80GB", 2039),
+            ("GPU_NV_SL", "NVIDIA A100-SXM4-80GB", 2039),
+            ("GPU_NV_L", "NVIDIA A100-SXM4-40GB", 1555),
+            ("GPU_A100_G1_12", "NVIDIA A100-SXM4-40GB", 1555),
+            ("GPU_A100_G1_48", "NVIDIA A100-SXM4-40GB", 1555),
+            ("GPU_GCP_NV_A100_8_40G", "NVIDIA A100-SXM4-40GB", 1555),
+        ],
+    )
+    def test_a100_families_resolve_to_the_matching_catalogue_row(
+        self, family: str, name: str, bandwidth: int
+    ) -> None:
+        info = lookup_gpu(GPU_FAMILIES[family].gpu)
+
+        assert info is not None
+        assert info.name == name
+        assert info.memory_gb_per_second == bandwidth
 
 
 class TestBrowserAdminRejection:
