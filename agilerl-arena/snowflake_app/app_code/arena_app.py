@@ -1115,7 +1115,7 @@ def publish(
             serve=serve,
             ingress=False,
             compute_pool=sole_gpu_pool(profile),
-            image_build_pool=profile.pools.head.pool,
+            head_pool=profile.pools.head.pool,
             image=profile.image,
             warehouse=profile.warehouse,
             gpu_count=gpu_count,

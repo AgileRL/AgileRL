@@ -79,7 +79,8 @@ snowflake-app-build connection tag:
     rm -rf "$build"
     mkdir -p "$build"
     cp -R agilerl-arena/snowflake_app/snowflake.yml agilerl-arena/snowflake_app/manifest.yml \
-        agilerl-arena/snowflake_app/setup_script.sql agilerl-arena/snowflake_app/app_code "$build"/
+        agilerl-arena/snowflake_app/setup_script.sql agilerl-arena/snowflake_app/app_readme.md \
+        agilerl-arena/snowflake_app/app_code "$build"/
     ML_BUNDLE_CHANNEL=stable ML_BUNDLE_VERSION="${tag%-py313-cu130}" \
         uv build --package agilerl-arena --wheel -o "$build/wheel"
     keycloak="$(uv export --frozen --package agilerl-arena --no-hashes --no-header \

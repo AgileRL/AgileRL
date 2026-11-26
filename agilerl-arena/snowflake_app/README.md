@@ -5,6 +5,9 @@ Application package files for the Arena Snowflake Native App. The
 Marketplace path to the same training, publish and serve behaviour. These files
 are not part of the `agilerl-arena` wheel or sdist.
 
+This file is for developers. `app_readme.md` is the README consumers see in
+the installed app; the package ships it as `README.md`.
+
 Check the manifest without a Snowflake account. Run this from the repository root:
 
 ```bash
