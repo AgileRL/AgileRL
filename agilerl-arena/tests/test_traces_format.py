@@ -20,6 +20,7 @@ from agilerl.arena.traces_format import (
     SNAPSHOT_SEGMENTS_FILE,
     ExcludedCounts,
     ModelVersionCount,
+    RowTokens,
     SnapshotFile,
     SnapshotManifest,
     TimeRange,
@@ -46,6 +47,7 @@ MANIFEST = SnapshotManifest(
     deployment_ids=["dep-1"],
     files=[SnapshotFile("segments.parquet", 2, "abc")],
     turn_count=7,
+    row_tokens=RowTokens(mean=300.0, mean_square=100000.0),
 )
 
 
@@ -79,6 +81,7 @@ class TestWriteManifest:
         assert set(REQUIRED_MANIFEST_FIELDS) <= set(MANIFEST_FIELDS)
         assert (data["format"], data["schema_version"]) == ("agilerl-traces", 1)
         assert data["created_at"] == "2026-11-12T09:00:00+00:00"
+        assert data["row_tokens"] == {"mean": 300.0, "mean_square": 100000.0}
         assert data["excluded"] == {
             "no_content": 1,
             "error_or_cancelled": 0,
@@ -174,6 +177,7 @@ class TestReadManifest:
         assert manifest.excluded == ExcludedCounts()
         assert manifest.deployment_ids == []
         assert manifest.turn_count is None
+        assert manifest.row_tokens is None
 
     def test_reads_z_timestamps(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.json"
@@ -237,6 +241,8 @@ class TestReadManifest:
             ),
             ("files", "sha256", None, "files entry sha256 is NoneType"),
             ("excluded", "no_content", "1", "excluded entry no_content is str"),
+            ("row_tokens", "mean", "300", "row_tokens entry mean is str"),
+            ("row_tokens", "mean", True, "row_tokens entry mean is bool"),
         ],
     )
     def test_rejects_a_wrong_nested_type(
@@ -245,12 +251,21 @@ class TestReadManifest:
         path = tmp_path / "manifest.json"
         write_manifest(path, MANIFEST)
         data = json.loads(path.read_text())
-        entry = data[section] if section == "excluded" else data[section][0]
+        entry = data[section] if isinstance(data[section], dict) else data[section][0]
         entry[key] = value
         path.write_text(json.dumps(data))
 
         with pytest.raises(ValueError, match=match):
             read_manifest(path)
+
+    def test_reads_whole_number_row_tokens(self, tmp_path: Path) -> None:
+        path = tmp_path / "manifest.json"
+        write_manifest(path, MANIFEST)
+        data = json.loads(path.read_text())
+        data["row_tokens"] = {"mean": 300, "mean_square": 100000}
+        path.write_text(json.dumps(data))
+
+        assert read_manifest(path).row_tokens == RowTokens(300.0, 100000.0)
 
     def test_an_excluded_count_it_lacks_reads_as_zero(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.json"
