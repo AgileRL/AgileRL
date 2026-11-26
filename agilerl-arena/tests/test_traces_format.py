@@ -83,6 +83,7 @@ class TestWriteManifest:
             "no_content": 1,
             "error_or_cancelled": 0,
             "invalid": 0,
+            "with_images": 0,
         }
         assert read_manifest(path) == MANIFEST
 

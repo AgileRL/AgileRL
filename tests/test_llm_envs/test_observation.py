@@ -66,6 +66,12 @@ class TestImageTokensFromProcessor:
 
         assert tokens == ImageTokens(placeholder=image_text, image_token=image_token)
 
+    def test_a_template_that_drops_images_is_a_value_error(self) -> None:
+        processor = ChatTemplateProcessor("", IMAGE_PLACEHOLDER)
+
+        with pytest.raises(ValueError, match="writes nothing for an image part"):
+            ImageTokens.from_processor(processor)
+
 
 class TestImageTokensRender:
     def test_swaps_each_canonical_placeholder_for_the_model_placeholder(self) -> None:

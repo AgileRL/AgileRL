@@ -38,8 +38,10 @@ from agilerl.arena.traces_format import (
 )
 from agilerl.llm_envs.chat_formats import ChatFormat
 from agilerl.llm_envs.chat_transcript import (
+    UnplacedTurnError,
     assistant_turn_text,
     chat_messages,
+    encode_chat_transcript,
     generation_prompt_addition,
     json_cell,
     render_chat_prompt,
@@ -203,11 +205,17 @@ def _target_turns(row: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[in
     ]
 
 
-def _run_starts(mask: list[bool]) -> list[int]:
-    """Start of each run of ``True`` in ``mask``."""
-    return [
+def _runs(mask: list[bool]) -> list[tuple[int, int]]:
+    """Start and end of each run of ``True`` in ``mask``."""
+    starts = [
         at for at, kept in enumerate(mask) if kept and (at == 0 or not mask[at - 1])
     ]
+    ends = [
+        at + 1
+        for at, kept in enumerate(mask)
+        if kept and (at == len(mask) - 1 or not mask[at + 1])
+    ]
+    return list(zip(starts, ends, strict=True))
 
 
 def _render_row(
@@ -216,11 +224,15 @@ def _render_row(
     chat_format: ChatFormat | None,
     chat_template_kwargs: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[int], list[str], tuple[str, str] | None]:
-    """A row's messages, SFT ids, rollout prompt texts, and the first target whose prompt is not a prefix of its SFT context.
+    """A row's messages, SFT ids, rollout prompt texts, and the first target SFT renders apart from a rollout.
+
+    A target matches when its rollout prompt is a token prefix of its SFT
+    context and its SFT tokens equal its render as the latest turn, which is
+    what a rollout samples.
 
     :return: The normalized messages, the SFT token ids, each checked target's
-        prompt text, and that prompt's text with the SFT context's text, or
-        ``None`` when every target matches.
+        prompt text, and the first mismatch as the rollout's text with SFT's
+        text, or ``None`` when every target matches.
     """
     tools = sft_tools(dict(row))
     messages, targets = _target_turns(row)
@@ -238,7 +250,7 @@ def _render_row(
     )
     texts: list[str] = []
     # A turn split into several runs misaligns the pairs, which reads as a mismatch: the safe answer.
-    for at, start in zip(targets, _run_starts(mask), strict=False):
+    for at, (start, end) in zip(targets, _runs(mask), strict=False):
         prompt_text = render_chat_prompt(
             tokenizer, messages[:at], tools, chat_format, chat_template_kwargs
         )
@@ -250,6 +262,21 @@ def _render_row(
                 ids,
                 texts,
                 (prompt_text, str(tokenizer.decode(ids[:start]))),
+            )
+        # A template may drop this turn's reasoning once later turns follow.
+        latest_ids, latest_mask = encode_chat_transcript(
+            tokenizer, messages[: at + 1], tools, chat_format, trained_from=at
+        )
+        latest_start, latest_end = _runs(latest_mask)[-1]
+        if latest_ids[latest_start:latest_end] != ids[start:end]:
+            return (
+                messages,
+                ids,
+                texts,
+                (
+                    str(tokenizer.decode(latest_ids[latest_start:latest_end])),
+                    str(tokenizer.decode(ids[start:end])),
+                ),
             )
     return messages, ids, texts, None
 
@@ -264,8 +291,9 @@ def check_traces_render(
 
     The generation prompt must not close the thinking block when a completion
     has reasoning, no tool call's arguments may appear as an escaped JSON
-    string, and each trained turn's prompt render, which a rollout samples
-    after, must be a token prefix of the context SFT trains that turn after.
+    string, each trained turn's prompt render, which a rollout samples after,
+    must be a token prefix of the context SFT trains that turn after, and the
+    turn's SFT tokens must equal its render as the latest turn.
     Applies ``chat_template_kwargs`` to ``tokenizer`` as the SFT env does.
 
     :param dataset: A checked traces split.
@@ -281,11 +309,11 @@ def check_traces_render(
             tokenizer, dataset[index], chat_format, chat_template_kwargs
         )
         if mismatch is not None:
-            prompt_text, context = mismatch
+            rollout, sft = mismatch
             msg = (
-                f"Row {index + 1}: the prompt a rollout samples after is not a "
-                "prefix of the context SFT trains the completion after: "
-                f"{prompt_text[-200:]!r} vs {context[-200:]!r}."
+                f"Row {index + 1}: SFT renders a trained turn or its context "
+                "differently from what a rollout samples: "
+                f"{rollout[-200:]!r} vs {sft[-200:]!r}."
             )
             raise ValueError(msg)
         _check_arguments_not_escaped(
@@ -325,14 +353,32 @@ def template_rewrites_turns(
     :param tokenizer: The student's tokenizer.
     :param chat_format: The student's chat format.
     :param chat_template_kwargs: The manifest's ``chat_template_kwargs``.
-    :return: Whether a trained turn's prompt render is not a prefix of the segment's render.
+    :return: Whether a trained turn's prompt render is not a prefix of the
+        segment's render, the segment renders the turn itself differently, or
+        the segment's render has no span to cut a trained turn from.
     """
     tokenizer = inject_chat_template_kwargs(tokenizer, chat_template_kwargs)
     return any(
-        _render_row(tokenizer, dataset[index], chat_format, chat_template_kwargs)[3]
-        is not None
+        _rewrites_row(tokenizer, dataset[index], chat_format, chat_template_kwargs)
         for index in _sample_indices(len(dataset))
     )
+
+
+def _rewrites_row(
+    tokenizer: PreTrainedTokenizerBase,
+    row: Mapping[str, Any],
+    chat_format: ChatFormat | None,
+    chat_template_kwargs: dict[str, Any],
+) -> bool:
+    """Whether one segment row renders a trained turn apart from a rollout."""
+    try:
+        return (
+            _render_row(tokenizer, row, chat_format, chat_template_kwargs)[3]
+            is not None
+        )
+    except UnplacedTurnError:
+        # The whole segment cannot place a turn; per-turn rows are checked again after the split.
+        return True
 
 
 def _check_arguments_not_escaped(
