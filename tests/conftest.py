@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import importlib.util
 import os
 import shutil
 import sys
@@ -652,6 +653,9 @@ def serve_env():
 @pytest.fixture(autouse=True)
 def stub_family_config_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hub ids skip config download. A local checkout still loads its config.json."""
+    if importlib.util.find_spec("transformers") is None:
+        # Core install: no llm extra, so there is no config lookup to stub.
+        return
     from transformers.configuration_utils import PretrainedConfig
 
     original = PretrainedConfig.get_config_dict
