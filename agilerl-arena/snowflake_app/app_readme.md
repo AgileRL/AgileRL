@@ -162,7 +162,7 @@ All procedures are in the app's `app_code` schema. Call them as `arena_app.app_c
 | `ROTATE_ARENA_KEY()` | `app_admin` | Swaps the app's Arena key for a new one. The app also does this itself once the key is 90 days old. |
 | `CONFIGURE(org_key STRING, external_user_id STRING, base_url STRING DEFAULT 'https://arena.agilerl.com')` | `app_admin` | Saves an Arena key that AgileRL gave you directly, after checking it with Arena. Use `connect_arena` unless AgileRL told you otherwise. |
 | `GPU_FAMILIES()` | `app_admin` | Lists the GPU families that your region has and that Arena has a price for. |
-| `SET_POOLS(gpu_families ARRAY, max_gpus NUMBER DEFAULT NULL, broker_family STRING DEFAULT 'CPU_X64_L', head_family STRING DEFAULT 'CPU_X64_SL')` | `app_admin` | Creates or resizes the broker, head and GPU pools, and drops app GPU pools for families not listed. |
+| `SET_POOLS(gpu_families ARRAY, max_gpus NUMBER DEFAULT NULL, broker_family STRING DEFAULT 'CPU_X64_L', head_family STRING DEFAULT 'CPU_X64_SL')` | `app_admin` | Creates or resizes the broker, head and GPU pools, and drops app GPU pools for families not listed. Refuses to drop or shrink a GPU pool that a queued or running run still needs, and a `max_gpus` that is not a multiple of a listed family's GPUs per node; nothing changes in either case. |
 | `REGISTER_REFERENCE(ref_name STRING, operation STRING, ref_or_alias STRING)` | `app_admin` | Binds (`ADD`), unbinds (`REMOVE`) or clears (`CLEAR`) an object on `source_table`, `source_view`, `reward_function` or `export_stage`. |
 
 ### Training
@@ -287,6 +287,8 @@ ORDER BY seq;
 -- To stop it early:
 CALL arena_app.app_code.cancel('<run_id>');
 ```
+
+A run whose head or worker service is gone before the run finished reads `failed`: it cannot make progress. Cancel it to free the nodes its other services still hold.
 
 ### Publish, serve and call the model
 

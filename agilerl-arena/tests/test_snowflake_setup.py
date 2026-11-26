@@ -1072,6 +1072,21 @@ class TestRunSetup:
         pool = next(s for s in created(session) if "arena_gpu_GPU_NV_M" in s)
         assert "MAX_NODES = 11" in pool
 
+    def test_a_max_gpus_that_is_not_whole_nodes_creates_no_pool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths(tmp_path, monkeypatch)
+        patch_copy(monkeypatch)
+        session = FakeSession(admin_routes())
+
+        with pytest.raises(ValueError, match="multiple of 4") as raised:
+            run_setup(
+                session, request(gpu_families=("GPU_NV_M",), max_gpus=6), Scripted()
+            )
+
+        assert "6 is not." in str(raised.value)
+        assert created(session) == []
+
     def test_a_google_cloud_family_is_sized(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1520,6 +1535,10 @@ class TestPrintSetupSql:
     def test_an_unknown_family_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="not a GPU family Arena sizes"):
             print_setup_sql(request(gpu_families=("GPU_NOPE",)))
+
+    def test_a_max_gpus_that_is_not_whole_nodes_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="multiple of 4"):
+            print_setup_sql(request(gpu_families=("GPU_NV_M",), max_gpus=6))
 
 
 class TestSetupCommand:
