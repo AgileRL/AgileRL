@@ -1373,7 +1373,7 @@ class ArenaClient:
         :type idempotency_key: str | None
         :raises ArenaValidationError: When ``num_gpus`` is below 1, the manifest
             turns on HPO, or the manifest's rubric path names a different file
-            than ``reward_file``.
+            than ``reward_file``, or a local file when ``reward_file`` is unset.
         """
         validated, resolved_project = self._checked_submit(
             manifest, num_gpus, project, reward_file
@@ -1466,7 +1466,9 @@ class ArenaClient:
         self._check_model_status(training_manifest)
         self._check_submit_rules(training_manifest, document)
         environment = training_manifest.environment
-        if reward_file is not None and isinstance(environment, LLMEnvSpec):
+        if reward_file is None:
+            self._check_rubric_file_uploaded(training_manifest)
+        elif isinstance(environment, LLMEnvSpec):
             check_reward_file(reward_file, environment)
         resolved_project = self._resolve_project(project)
         if not resolved_project:
@@ -1588,6 +1590,25 @@ class ArenaClient:
         notice = entry.status_notice if entry else None
         if notice is not None:
             raise ArenaValidationError(notice)
+
+    @staticmethod
+    def _check_rubric_file_uploaded(manifest: TrainingManifest) -> None:
+        """Reject a rollout whose rubric path names a local file that no reward file uploads."""
+        environment = manifest.environment
+        if not isinstance(environment, LLMEnvSpec) or environment.env_type != "rollout":
+            return
+        path = environment.rubric_file_path
+        if path is None or path.startswith("s3://"):
+            return
+        msg = (
+            f"environment.rubric_file_path names the local file {path!r}, "
+            "but the submit uploads no reward file."
+        )
+        raise ArenaValidationError(
+            msg,
+            sdk_hint=f"Pass reward_file={path!r}, or set rubric_file_path to an s3:// URI.",
+            cli_hint=f"Add --reward-file {path}, or set rubric_file_path to an s3:// URI.",
+        )
 
     @staticmethod
     def _check_submit_rules(
