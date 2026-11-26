@@ -56,6 +56,8 @@ cpu = [
 # LLM Python stack without vLLM. Hosted CPU CI uses this with the cpu extra.
 cpu-llm = [
     "bitsandbytes==0.50.2; sys_platform == 'linux'",
+    # Bedrock LLM judges.
+    "boto3>=1.34",
     "datasets==5.1.0",
     # Built-in json_schema reward.
     "jsonschema>=4.0",

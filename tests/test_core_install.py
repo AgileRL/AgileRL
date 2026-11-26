@@ -22,6 +22,7 @@ import agilerl
 # Import names of the distributions in the ``cpu-llm`` extra, plus vLLM.
 _LLM_MODULES = {
     "bitsandbytes": "bitsandbytes",
+    "boto3": "boto3",
     "datasets": "datasets",
     "jsonschema": "jsonschema",
     "liger-kernel": "liger_kernel",

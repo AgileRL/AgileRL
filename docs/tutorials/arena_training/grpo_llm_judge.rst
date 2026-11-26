@@ -126,8 +126,8 @@ The manifest is the GSM8K one with three additions to ``environment``:
   ``reward_fn``.
 * ``judge`` describes the judge:
 
-  * ``provider``: ``openai`` (the default) or ``anthropic``. ``openai`` covers any
-    OpenAI-compatible endpoint.
+  * ``provider``: ``openai`` (the default), ``anthropic`` or ``bedrock``. ``openai`` covers
+    any OpenAI-compatible endpoint.
   * ``model``: the judge's model id.
   * ``api_key_env``: the **name** of the organization secret holding the key, never the key.
   * ``max_tokens``: the judge's reply budget (default 4096). A judge that thinks before it
@@ -151,6 +151,17 @@ set ``base_url``. For example, through OpenRouter:
 A URL with a path is used as given. A bare host, such as a self-hosted vLLM server at
 ``http://judge:8000``, gets ``/v1`` added. Leave ``api_key_env`` out only when the endpoint
 needs no key; without ``base_url`` it is required.
+
+A ``bedrock`` judge calls Amazon Bedrock with the training machine's own AWS credentials,
+so it takes a ``region`` and no ``base_url`` or ``api_key_env``. Organizations billed
+through AWS Marketplace can use only Bedrock judges.
+
+.. code-block:: yaml
+
+   judge:
+       provider: bedrock
+       model: deepseek.v3.2
+       region: us-east-1
 
 The prompt asks the model to show its working and put the final number in
 ``<answer></answer>`` tags, which is what ``Correctness`` parses and the criteria check.
