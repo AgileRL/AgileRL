@@ -21,6 +21,9 @@ name: Publish release
 #   release — GITHUB_TOKEN creates the GitHub Release after PyPI succeeds.
 #             Title and body come from spoke commit messages (spoke-public
 #             copy), not GitHub generate-notes.
+#   docs    — Read the Docs generic webhook, environment `docs` (variable
+#             RTD_WEBHOOK_URL, secret RTD_WEBHOOK_TOKEN). The token can only
+#             trigger builds of this project.
 
 on:
     push:
@@ -263,3 +266,27 @@ jobs:
                     --title "${TITLE}" \
                     --notes-file "${notes_dir}/notes.md" \
                     "${latest_args[@]}"
+
+    # docs/releases lists the GitHub Releases that exist when Read the Docs
+    # builds. It builds `stable` as soon as the tag is pushed, before the
+    # release above exists, so rebuild `stable` and `latest` once it does.
+    # `latest` matches `main`; `stable` matches the commit of the newest tag,
+    # so this tag's commit rebuilds it when this tag is the newest.
+    docs:
+        needs: [fetch, github-release]
+        if: github.repository == 'AgileRL/AgileRL'
+        runs-on: ubuntu-latest
+        environment: docs
+        permissions: {}
+        steps:
+            - name: Rebuild stable and latest
+              env:
+                  RTD_WEBHOOK_URL: ${{ vars.RTD_WEBHOOK_URL }}
+                  RTD_WEBHOOK_TOKEN: ${{ secrets.RTD_WEBHOOK_TOKEN }}
+                  TAG_SHA: ${{ github.sha }}
+              run: |
+                  set -euo pipefail
+                  jq -n --arg token "${RTD_WEBHOOK_TOKEN}" --arg sha "${TAG_SHA}" \
+                    '{token: $token, branches: ["main", $sha]}' \
+                    | curl --fail-with-body --silent --show-error -X POST "${RTD_WEBHOOK_URL}" \
+                      -H 'Content-Type: application/json' --data @-
