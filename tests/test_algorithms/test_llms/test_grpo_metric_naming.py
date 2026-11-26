@@ -91,6 +91,7 @@ class _Stub:
         self._segment_accumulation_steps = None
         self.pad_token_id = PAD_TOKEN_ID
         self.update_epochs = 1
+        self.group_size = 1
         self.micro_batch_size_per_gpu = 2
         self.micro_batch_tokens_per_gpu = None
         self.max_row_tokens = None
@@ -478,6 +479,33 @@ class TestLearnAdvantageStats:
         # Assert
         assert metrics["adv_mean"] == pytest.approx(1.525)
         assert metrics["adv_zero_frac"] == pytest.approx(0.5)
+
+
+class TestLearnGroupRewardStd:
+    def test_averages_each_groups_population_std(self) -> None:
+        # Arrange: groups (1, 1) and (0, 4) have stds 0 and 2.
+        algo = _Stub()
+        algo.group_size = 2
+        algo._advantages = torch.zeros(4, 1)
+        completion_ids, action_masks, _ = _experiences(2)
+        rewards = torch.tensor([1.0, 1.0, 0.0, 4.0])
+
+        # Act
+        metrics = algo.learn((completion_ids * 2, action_masks * 2, rewards))
+
+        # Assert
+        assert metrics["group_reward_std"] == pytest.approx(1.0)
+
+    def test_is_zero_for_groups_of_one(self) -> None:
+        # Arrange
+        algo = _Stub()
+        algo._advantages = torch.zeros(2, 1)
+
+        # Act
+        metrics = algo.learn(_experiences(2))
+
+        # Assert
+        assert metrics["group_reward_std"] == 0.0
 
 
 def _ragged_experiences():

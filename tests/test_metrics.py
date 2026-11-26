@@ -11,7 +11,26 @@ import time
 import numpy as np
 import pytest
 
-from agilerl.metrics import AgentMetrics, BaseMetrics, MultiAgentMetrics
+from agilerl.metrics import AgentMetrics, BaseMetrics, MultiAgentMetrics, spread_stats
+
+
+class TestSpreadStats:
+    def test_population_std_quartiles_and_range(self):
+        # Act
+        stats = spread_stats("score", [0.0, 1.0, 2.0, 3.0, 4.0])
+
+        # Assert
+        assert stats == {
+            "score_std": pytest.approx(2.0**0.5),
+            "score_p25": 1.0,
+            "score_p50": 2.0,
+            "score_p75": 3.0,
+            "score_min": 0.0,
+            "score_max": 4.0,
+        }
+
+    def test_no_samples_gives_no_stats(self):
+        assert spread_stats("score", []) == {}
 
 
 class TestAgentMetricsInit:

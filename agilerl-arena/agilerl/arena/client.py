@@ -47,13 +47,11 @@ from agilerl.arena.inference.cache import (
 )
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
-    LLMAlgorithmSpec,
     TrainingManifest,
     __version__,
 )
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import warn_once
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.verdict import (
     CLASSIC_RL_UNAVAILABLE_MESSAGE,
@@ -1463,7 +1461,6 @@ class ArenaClient:
         for warning in manifest_warnings(training_manifest, document):
             warn_once(warning)
         self._check_runs_on_arena(training_manifest)
-        self._check_model_status(training_manifest)
         self._check_submit_rules(training_manifest, document)
         environment = training_manifest.environment
         if reward_file is None:
@@ -1578,18 +1575,6 @@ class ArenaClient:
                 for message, paths in paths_by_message.items()
             ]
             raise ArenaValidationError("\n".join(lines))
-
-    @staticmethod
-    def _check_model_status(manifest: TrainingManifest) -> None:
-        """Reject a deprecated or preview pretrained model."""
-        algorithm = manifest.algorithm
-        if not isinstance(algorithm, LLMAlgorithmSpec):
-            return
-        hub_id = algorithm.pretrained_model_name_or_path
-        entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
-        notice = entry.status_notice if entry else None
-        if notice is not None:
-            raise ArenaValidationError(notice)
 
     @staticmethod
     def _check_rubric_file_uploaded(manifest: TrainingManifest) -> None:

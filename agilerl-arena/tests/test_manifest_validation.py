@@ -1770,7 +1770,13 @@ class TestCli:
         )
 
     def test_reads_a_manifest_from_stdin(self, tmp_path) -> None:
-        document = manifest(GRPO, network={"max_context_length": 1024})
+        document = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 1024,
+            },
+        )
 
         result = self._run("validate", "-", "--json", stdin=json.dumps(document))
 

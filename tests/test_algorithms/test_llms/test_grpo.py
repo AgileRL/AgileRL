@@ -3402,6 +3402,7 @@ class TestGRPOLearn:
             "adv_min",
             "adv_max",
             "adv_zero_frac",
+            "group_reward_std",
             "padding_frac_before_packing",
             "padding_frac_after_packing",
             "train_rows_padded",

@@ -251,8 +251,9 @@ def aggregate_metrics_dict(
     metrics: Mapping[str, torch.Tensor | np.ndarray | float],
     excluded: Collection[str] = (),
     maximized: Collection[str] = (),
+    minimized: Collection[str] = (),
 ) -> dict[str, float]:
-    """Reduce every metric across ranks in one all-reduce: the mean, or the max for ``maximized``.
+    """Reduce every metric across ranks in one all-reduce: the mean, or the max / min for ``maximized`` / ``minimized``.
 
     Every rank must pass the same keys in the same order. On a single device
     each metric is its local mean.
@@ -265,8 +266,11 @@ def aggregate_metrics_dict(
     :param maximized: Metrics reduced to their largest value on any rank;
         ``excluded`` does not apply to them.
     :type maximized: Collection[str]
+    :param minimized: Metrics reduced to their smallest value on any rank;
+        ``excluded`` does not apply to them.
+    :type minimized: Collection[str]
     :return: Mean of each metric across the ranks that count it, or its max
-        across ranks for ``maximized``.
+        / min across ranks for ``maximized`` / ``minimized``.
     :rtype: dict[str, float]
     """
     if not metrics:
@@ -288,20 +292,24 @@ def aggregate_metrics_dict(
     maxed = torch.tensor(
         [name in maximized for name in metrics], dtype=torch.bool, device=device
     )
-    if maximized:
+    minned = torch.tensor(
+        [name in minimized for name in metrics], dtype=torch.bool, device=device
+    )
+    if maximized or minimized:
         # One row per rank, filled only by its owner, so the SUM keeps every
-        # rank's value and the max is taken after the same all-reduce.
+        # rank's value and the max / min is taken after the same all-reduce.
         world_size = dist.get_world_size() if distributed else 1
         per_rank = torch.zeros(world_size, len(metrics), device=device)
         per_rank[dist.get_rank() if distributed else 0] = torch.where(
-            maxed, local_means, 0.0
+            maxed | minned, local_means, 0.0
         )
         totals = torch.cat([totals, per_rank])
     if distributed:
         dist.all_reduce(totals, op=dist.ReduceOp.SUM)
     reduced = totals[0] / totals[1]
-    if maximized:
+    if maximized or minimized:
         reduced = torch.where(maxed, totals[2:].amax(dim=0), reduced)
+        reduced = torch.where(minned, totals[2:].amin(dim=0), reduced)
     return dict(zip(metrics, reduced.tolist(), strict=True))
 
 
