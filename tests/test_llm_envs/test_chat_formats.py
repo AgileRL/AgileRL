@@ -588,6 +588,37 @@ class TestGemma4Format:
         assert calls[0].arguments == {"a": "x", "b": "3"}
         assert calls[0].status is ToolCallParseStatus.OK
 
+    def test_bare_args_take_their_schema_type(self) -> None:
+        # Arrange
+        parser = Gemma4Format(FakeTokenizer(GEMMA_TOKENS))
+        properties = {
+            "n": {"type": "integer"},
+            "ok": {"type": "boolean"},
+            "code": {"type": "string"},
+            "o": {"type": "object", "properties": {"x": {"type": "number"}}},
+            "l": {"type": "array", "items": {"type": "integer"}},
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "f", "parameters": {"properties": properties}},
+            }
+        ]
+        ids = gemma_block("f", "{n:3,ok:true,code:007,o:{x:1.5},l:[1,2]}")
+
+        # Act
+        _, calls = parser.extract_tool_calls(ids, tools)
+
+        # Assert
+        assert calls[0].arguments == {
+            "n": 3,
+            "ok": True,
+            "code": "007",
+            "o": {"x": 1.5},
+            "l": [1, 2],
+        }
+        assert calls[0].status is ToolCallParseStatus.OK
+
     def test_parses_nested_args(self) -> None:
         parser = Gemma4Format(FakeTokenizer(GEMMA_TOKENS))
         ids = gemma_block("f", '{o:{k:<|"|>v<|"|>},l:[<|"|>a<|"|>]}')

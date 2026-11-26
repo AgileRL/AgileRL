@@ -316,7 +316,10 @@ class ImageTokens:
 
     @classmethod
     def from_processor(cls, processor: ImagePromptProcessor) -> ImageTokens:
-        """Read the placeholder a checkpoint processor's chat template writes for one image."""
+        """Read the placeholder a checkpoint processor's chat template writes for one image.
+
+        :raises ValueError: If the chat template writes nothing for an image.
+        """
         sentinel = "IMAGE_TOKENS_SENTINEL"
 
         def render(content: list[dict[str, str]]) -> str:
@@ -328,6 +331,9 @@ class ImageTokens:
 
         with_image = render([{"type": "image"}, {"type": "text", "text": sentinel}])
         text_only = render([{"type": "text", "text": sentinel}])
+        if with_image == text_only:
+            msg = "the chat template writes nothing for an image part"
+            raise ValueError(msg)
         start = len(os.path.commonprefix([with_image, text_only]))
         return cls(
             placeholder=with_image[start : with_image.index(sentinel, start)],

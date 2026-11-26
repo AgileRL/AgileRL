@@ -566,14 +566,15 @@ class Gemma4Format(ChatFormat):
         return reasoning.removeprefix(self.REASONING_CHANNEL).strip() or None
 
     def extract_tool_calls(
-        self, token_ids: list[int], _tools: list[Any] | None = None, /
+        self, token_ids: list[int], tools: list[Any] | None = None, /
     ) -> tuple[list[int], list[ParsedToolCall]]:
-        """Parse native Gemma calls after any thought channel."""
+        """Parse native Gemma calls after any thought channel; bare values take their schema's type."""
+        params = _param_schemas(tools)
         return self._tagged_calls(
             token_ids,
             self.CALL_START,
             self.CALL_END,
-            _parsed_gemma_call,
+            lambda raw, span: _parsed_gemma_call(raw, span, params),
             self.answer_start(token_ids),
         )
 
@@ -1082,8 +1083,10 @@ def _param_schemas(tools: list[Any] | None) -> dict[str, dict[str, dict[str, Any
     return index
 
 
-def _parsed_gemma_call(raw: str, span: tuple[int, int]) -> ParsedToolCall:
-    """One Gemma body: ``call:name{args}``."""
+def _parsed_gemma_call(
+    raw: str, span: tuple[int, int], params: dict[str, dict[str, dict[str, Any]]]
+) -> ParsedToolCall:
+    """One Gemma body: ``call:name{args}``, bare values typed by ``params``."""
     malformed = _failed(raw, span, ToolCallParseStatus.MALFORMED_STRUCTURE)
     if not raw.startswith("call:"):
         return malformed
@@ -1097,7 +1100,7 @@ def _parsed_gemma_call(raw: str, span: tuple[int, int]) -> ParsedToolCall:
     if close == -1 or raw[close + 1 :].strip():
         return malformed
     try:
-        arguments = _parse_gemma_args(raw[brace + 1 : close])
+        arguments = _parse_gemma_args(raw[brace + 1 : close], params.get(name, {}))
     except ValueError:
         return malformed
     return ParsedToolCall(raw=raw, name=name, arguments=arguments, token_span=span)
@@ -1124,8 +1127,8 @@ def _matching_brace(text: str, opening: int) -> int:
     return -1
 
 
-def _parse_gemma_args(text: str) -> dict[str, Any]:
-    """Parse ``key:value`` args; bare scalars stay strings."""
+def _parse_gemma_args(text: str, properties: dict[str, Any]) -> dict[str, Any]:
+    """Parse ``key:value`` args; a bare scalar takes its property's schema type, else stays a string."""
     args: dict[str, Any] = {}
     index = 0
     while index < len(text):
@@ -1137,12 +1140,15 @@ def _parse_gemma_args(text: str) -> dict[str, Any]:
         if colon == -1:
             msg = "Gemma args end mid-key."
             raise ValueError(msg)
-        args[text[index:colon].strip()], index = _parse_gemma_value(text, colon + 1)
+        key = text[index:colon].strip()
+        args[key], index = _parse_gemma_value(text, colon + 1, properties.get(key))
     return args
 
 
-def _parse_gemma_value(text: str, index: int) -> tuple[Any, int]:
-    """Parse one value at ``index``; return it plus the next index."""
+def _parse_gemma_value(
+    text: str, index: int, schema: dict[str, Any] | None
+) -> tuple[Any, int]:
+    """Parse one value at ``index``, typed by ``schema`` when bare; return it plus the next index."""
     while index < len(text) and text[index] in " \n\t":
         index += 1
     if text.startswith(GEMMA_STRING_DELIM, index):
@@ -1157,17 +1163,29 @@ def _parse_gemma_value(text: str, index: int) -> tuple[Any, int]:
         if close == -1:
             msg = "Gemma args hold unbalanced braces."
             raise ValueError(msg)
-        return _parse_gemma_args(text[index + 1 : close]), close + 1
+        properties = (schema or {}).get("properties")
+        return _parse_gemma_args(
+            text[index + 1 : close],
+            properties if isinstance(properties, dict) else {},
+        ), close + 1
     if text.startswith("[", index):
-        return _parse_gemma_array(text, index + 1)
+        items = (schema or {}).get("items")
+        return _parse_gemma_array(
+            text, index + 1, items if isinstance(items, dict) else None
+        )
     start = index
     while index < len(text) and text[index] not in ",}]":
         index += 1
-    return text[start:index].strip(), index
+    bare = text[start:index].strip()
+    if schema is None:
+        return bare, index
+    return _coerce_xml_value(bare, schema)[0], index
 
 
-def _parse_gemma_array(text: str, index: int) -> tuple[list[Any], int]:
-    """Parse array items from just past its ``[``."""
+def _parse_gemma_array(
+    text: str, index: int, items_schema: dict[str, Any] | None
+) -> tuple[list[Any], int]:
+    """Parse array items from just past its ``[``, bare items typed by ``items_schema``."""
     items: list[Any] = []
     while True:
         while index < len(text) and text[index] in " ,\n\t":
@@ -1177,7 +1195,7 @@ def _parse_gemma_array(text: str, index: int) -> tuple[list[Any], int]:
             raise ValueError(msg)
         if text[index] == "]":
             return items, index + 1
-        value, index = _parse_gemma_value(text, index)
+        value, index = _parse_gemma_value(text, index, items_schema)
         items.append(value)
 
 
