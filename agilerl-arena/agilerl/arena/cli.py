@@ -1053,6 +1053,14 @@ def agent_list(
     default=None,
     help="Short GPU name such as h100-80, b200 or l4.",
 )
+@click.option(
+    "--capture-traces/--no-capture-traces",
+    "capture_traces",
+    default=None,
+    help="Record the deployment's conversations to train on (LLM only). New LLM "
+    "deployments record unless --no-capture-traces. Redeploying without either "
+    "flag keeps the stored setting.",
+)
 @click.pass_obj
 def agent_deploy(
     config: CommandConfig,
@@ -1061,6 +1069,7 @@ def agent_deploy(
     memory_scope: MemoryScope | None,
     num_gpus: int | None,
     gpu_type: str | None,
+    capture_traces: bool | None,
 ) -> None:
     """Deploy an agent from an experiment checkpoint.
 
@@ -1077,6 +1086,7 @@ def agent_deploy(
             memory_scope=memory_scope,
             num_gpus=num_gpus,
             gpu_type=gpu_type,
+            capture_traces=capture_traces,
         )
     emit_json_result(result)
 

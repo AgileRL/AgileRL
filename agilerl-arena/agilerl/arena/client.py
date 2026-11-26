@@ -2183,6 +2183,7 @@ class ArenaClient:
         memory_scope: MemoryScope | None = None,
         num_gpus: int | None = None,
         gpu_type: str | None = None,
+        capture_traces: bool | None = None,
     ) -> dict[str, Any]:
         """Create an inference deployment from an experiment checkpoint.
 
@@ -2208,6 +2209,10 @@ class ArenaClient:
         :type num_gpus: int | None
         :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
         :type gpu_type: str | None
+        :param capture_traces: Whether an LLM deployment records its conversations
+            to train on. A new LLM deployment records unless this is ``False``;
+            redeploying with ``None`` keeps the stored setting.
+        :type capture_traces: bool | None
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
         :raises ArenaValidationError: When ``num_gpus`` is below 1 or
@@ -2224,6 +2229,8 @@ class ArenaClient:
             body["numGpus"] = num_gpus
         if gpu_type is not None:
             body["gpuType"] = gpu_type
+        if capture_traces is not None:
+            body["captureTraces"] = capture_traces
         result = self._request(
             "POST",
             "/api/cli/v1/inference/deploy",
@@ -2250,8 +2257,9 @@ class ArenaClient:
         enabled: bool | None = None,
         experiment_name: str | None = None,
         project_name: str | None = None,
+        capture_traces: bool | None = None,
     ) -> dict[str, Any]:
-        """Rename, describe, or enable a deployment.
+        """Rename, describe, enable, or start or stop recording a deployment.
 
         :param name: Current deployment name.
         :type name: str
@@ -2265,6 +2273,9 @@ class ArenaClient:
         :type experiment_name: str | None
         :param project_name: Project name when several deployments share ``name``.
         :type project_name: str | None
+        :param capture_traces: ``True`` records an LLM deployment's conversations
+            to train on, ``False`` stops recording.
+        :type capture_traces: bool | None
         :returns: The updated deployment.
         :rtype: dict[str, Any]
         """
@@ -2282,6 +2293,8 @@ class ArenaClient:
             body["description"] = description
         if enabled is not None:
             body["enabled"] = enabled
+        if capture_traces is not None:
+            body["captureTraces"] = capture_traces
         return self._request(
             "PATCH",
             "/api/cli/v1/inference/deployments",

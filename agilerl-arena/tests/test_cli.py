@@ -2837,6 +2837,7 @@ class TestAgentDeployCommand:
             memory_scope=None,
             num_gpus=None,
             gpu_type=None,
+            capture_traces=None,
         )
 
     def test_deploy_with_checkpoint(self, runner, mock_client):
@@ -2852,6 +2853,7 @@ class TestAgentDeployCommand:
             memory_scope=None,
             num_gpus=None,
             gpu_type=None,
+            capture_traces=None,
         )
 
     def test_deploy_with_gpu_flags(self, runner, mock_client):
@@ -2875,6 +2877,7 @@ class TestAgentDeployCommand:
             memory_scope=None,
             num_gpus=8,
             gpu_type="h100-80",
+            capture_traces=None,
         )
 
     def test_deploy_rejects_zero_gpus(self, runner, mock_client):
@@ -2912,7 +2915,19 @@ class TestAgentDeployCommand:
             memory_scope=scope,
             num_gpus=None,
             gpu_type=None,
+            capture_traces=None,
         )
+
+    @pytest.mark.parametrize(
+        ("flag", "capture"),
+        [("--capture-traces", True), ("--no-capture-traces", False)],
+    )
+    def test_deploy_with_capture_traces(self, runner, mock_client, flag, capture):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "deploy", "my-exp", flag])
+
+        assert result.exit_code == 0
+        assert mock_client.deploy_agent.call_args.kwargs["capture_traces"] is capture
 
     def test_deploy_rejects_unknown_memory_scope(self, runner, mock_client):
         with _patched_arena_client(mock_client):
@@ -2949,6 +2964,21 @@ class TestAgentUpdateCommand:
             enabled=False,
             experiment_name="exp1",
             project_name=None,
+            capture_traces=None,
+        )
+
+    @pytest.mark.parametrize(
+        ("flag", "capture"),
+        [("--capture-traces", True), ("--no-capture-traces", False)],
+    )
+    def test_update_starts_or_stops_recording(self, runner, mock_client, flag, capture):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "update", "agent-1", flag])
+
+        assert result.exit_code == 0
+        assert (
+            mock_client.update_inference_deployment.call_args.kwargs["capture_traces"]
+            is capture
         )
 
 

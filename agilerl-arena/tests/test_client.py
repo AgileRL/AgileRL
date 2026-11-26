@@ -3206,6 +3206,31 @@ class TestInferenceDeployments:
         api_key_client.deploy_agent("exp1")
         assert "memoryScope" not in api_key_client._request.call_args[1]["json"]
 
+    @pytest.mark.parametrize("capture", [True, False])
+    def test_deploy_agent_sends_capture_traces(self, api_key_client, capture):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1", capture_traces=capture)
+
+        assert api_key_client._request.call_args[1]["json"]["captureTraces"] is capture
+
+    def test_deploy_agent_omits_capture_traces_to_use_the_default(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1")
+
+        assert "captureTraces" not in api_key_client._request.call_args[1]["json"]
+
+    def test_update_inference_deployment_sends_capture_traces(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-1"})
+
+        api_key_client.update_inference_deployment("agent-1", capture_traces=False)
+
+        assert api_key_client._request.call_args.kwargs["json"] == {
+            "name": "agent-1",
+            "captureTraces": False,
+        }
+
     def test_update_inference_deployment(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"name": "agent-2"})
         result = api_key_client.update_inference_deployment(

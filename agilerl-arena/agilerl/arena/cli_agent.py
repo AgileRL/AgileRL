@@ -55,6 +55,13 @@ def session_for_prompt(
     help="Enable or disable the deployment.",
 )
 @click.option(
+    "--capture-traces/--no-capture-traces",
+    "capture_traces",
+    default=None,
+    help="Start or stop recording the deployment's conversations to train on "
+    "(LLM only).",
+)
+@click.option(
     "--experiment-name",
     default=None,
     help="Experiment name when several deployments share this name.",
@@ -71,10 +78,11 @@ def agent_update(
     new_name: str | None,
     description: str | None,
     enabled: bool | None,
+    capture_traces: bool | None,
     experiment_name: str | None,
     project_name: str | None,
 ) -> None:
-    """Rename, describe, or enable a deployment."""
+    """Rename, describe, enable, or start or stop recording a deployment."""
     with arena_client(config) as client:
         emit_result(
             client.update_inference_deployment(
@@ -84,6 +92,7 @@ def agent_update(
                 enabled=enabled,
                 experiment_name=experiment_name,
                 project_name=project_name,
+                capture_traces=capture_traces,
             )
         )
 
