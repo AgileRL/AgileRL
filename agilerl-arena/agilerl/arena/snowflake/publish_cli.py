@@ -63,8 +63,9 @@ from agilerl.arena.snowflake.source import SnowflakeSession
 @click.option(
     "--compute-pool",
     default=None,
-    help="Pool for the publish job and the service. Default: the account "
-    "profile's GPU pool when it has one GPU family, else the run's pool.",
+    help="GPU pool for the service. Default: the account profile's GPU pool "
+    "when it has one GPU family, else the run's pool. The publish job runs on "
+    f"the account profile's head pool, or {HEAD_POOL} without a profile.",
 )
 @click.option(
     "--image",
@@ -135,13 +136,13 @@ def publish(
         # Snowpark sessions also provide file.get_stream.
         with closing(cast("PublishSession", open_session(name))) as session:
             profile = remote_profile(session)
-            image_build_pool = HEAD_POOL
+            head_pool = HEAD_POOL
             if profile is not None:
                 runs_stage = runs_stage or profile.stage
                 compute_pool = compute_pool or sole_gpu_pool(profile)
                 image = image or profile.image or None
                 warehouse = warehouse or profile.warehouse
-                image_build_pool = profile.pools.head.pool
+                head_pool = profile.pools.head.pool
             if runs_stage is None:
                 msg = "This account has no setup.json. Pass --runs-stage."
                 raise click.UsageError(msg)
@@ -154,7 +155,7 @@ def publish(
                 serve=serve,
                 ingress=True,
                 compute_pool=compute_pool,
-                image_build_pool=image_build_pool,
+                head_pool=head_pool,
                 image=image,
                 warehouse=warehouse,
                 gpu_count=gpu_count,

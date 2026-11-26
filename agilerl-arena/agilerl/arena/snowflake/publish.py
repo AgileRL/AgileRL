@@ -22,6 +22,7 @@ import yaml
 from agilerl.arena.snowflake.job import (
     CONTAINER_NAME,
     RUN_MOUNT,
+    cpu_memory_gib,
     describe_instance_family,
     in_schema,
     job_state,
@@ -94,8 +95,9 @@ class PublishSettings:
     :param serve: Start a vLLM service after logging the model.
     :param ingress: Give the service a public endpoint. Without one, only SQL
         inside the account reaches it.
-    :param compute_pool: Pool for the publish job and the service. ``None`` uses the run's.
-    :param image_build_pool: CPU pool that builds the service's inference image.
+    :param compute_pool: GPU pool for the service. ``None`` uses the run's.
+    :param head_pool: CPU pool that runs the publish job and builds the
+        service's inference image.
     :param image: Job image. ``None`` uses the run's.
     :param warehouse: Query warehouse for the job. ``None`` uses the run's.
     :param gpu_count: GPUs the service requests.
@@ -114,7 +116,7 @@ class PublishSettings:
     serve: bool
     ingress: bool
     compute_pool: str | None
-    image_build_pool: str
+    head_pool: str
     image: str | None
     warehouse: str | None
     gpu_count: int
@@ -145,7 +147,7 @@ def submit_publish(
     :raises ValueError: A name is unsafe or taken, or the run has no usable checkpoint.
     """
     model_name = single_identifier(settings.model_name, "model name")
-    image_build_pool = single_identifier(settings.image_build_pool, "image build pool")
+    head_pool = single_identifier(settings.head_pool, "head pool")
     database, schema = registry_schema(session, settings.database, settings.schema)
     prefix = runs_prefix(settings.runs_stage, settings.run_id)
     run = json.loads(session.file.get_stream(f"{prefix}/job.json").read())
@@ -158,21 +160,21 @@ def submit_publish(
         settings.version_name or checkpoint, "version name"
     )
     reject_existing_version(session, database, schema, model_name, version_name)
-    service_name = None
-    if settings.serve:
-        service_name = single_identifier(
-            settings.service_name or f"{model_name}_{version_name}", "service name"
-        )
-        reject_existing_service(session, database, schema, service_name)
-    resources = node_resources(describe_instance_family(session, compute_pool))
-    if settings.serve and settings.gpu_count > resources.gpus:
-        msg = (
-            f"--gpu-count {settings.gpu_count} is more than the "
-            f"{resources.gpus} GPUs on a {compute_pool} node"
-        )
-        raise ValueError(msg)
+    service_name = resolve_service_name(
+        session,
+        settings,
+        database,
+        schema,
+        model_name,
+        version_name,
+        compute_pool,
+    )
+    # The job waits for the service, so it must not hold a node the service needs.
     request_gib, limit_gib = job_memory_gib(
-        checkpoint, checkpoint_bytes, compute_pool, resources.memory_gib
+        checkpoint,
+        checkpoint_bytes,
+        head_pool,
+        cpu_memory_gib(describe_instance_family(session, head_pool)),
     )
     name = publish_job_name(now)
     request_file = f"publish-{name}.json"
@@ -184,7 +186,7 @@ def submit_publish(
         limit_gib,
     )
     statement = publish_job_sql(
-        compute_pool,
+        head_pool,
         settings.warehouse or str(run["warehouse"]),
         name,
         spec,
@@ -195,7 +197,7 @@ def submit_publish(
         "compute_pool": compute_pool,
         "database": database,
         "gpu_count": settings.gpu_count,
-        "image_build_compute_pool": image_build_pool,
+        "image_build_compute_pool": head_pool,
         "ingress": settings.ingress,
         "max_model_len": settings.max_model_len,
         "model_name": model_name,
@@ -681,6 +683,43 @@ def reject_existing_service(
             "Drop it or pass another --service-name."
         )
         raise ValueError(msg)
+
+
+def resolve_service_name(
+    session: SnowflakeSession,
+    settings: PublishSettings,
+    database: str,
+    schema: str,
+    model_name: str,
+    version_name: str,
+    compute_pool: str,
+) -> str | None:
+    """Service name to start, or ``None`` when this publish does not serve.
+
+    :param session: Snowpark session.
+    :param settings: What to publish.
+    :param database: Registry database.
+    :param schema: Registry schema.
+    :param model_name: Model name.
+    :param version_name: Version name.
+    :param compute_pool: GPU pool for the service.
+    :return: The service name, or ``None``.
+    :raises ValueError: The name is taken, or the GPU count exceeds one node.
+    """
+    if not settings.serve:
+        return None
+    service_name = single_identifier(
+        settings.service_name or f"{model_name}_{version_name}", "service name"
+    )
+    reject_existing_service(session, database, schema, service_name)
+    gpus = node_resources(describe_instance_family(session, compute_pool)).gpus
+    if settings.gpu_count > gpus:
+        msg = (
+            f"--gpu-count {settings.gpu_count} is more than the "
+            f"{gpus} GPUs on a {compute_pool} node"
+        )
+        raise ValueError(msg)
+    return service_name
 
 
 def render_publish_spec(

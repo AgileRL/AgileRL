@@ -1132,9 +1132,13 @@ def publish_session(
             setup_route(),
             exact(f"LIST {RUN_DIR}/", listing),
             (lambda s: s.startswith("SELECT CURRENT_DATABASE()"), [CURRENT]),
+            exact(
+                "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_HEAD_POOL",
+                [Row(instance_family="CPU_X64_SL", max_nodes=4)],
+            ),
             (
                 lambda s: s.startswith("DESCRIBE COMPUTE POOL"),
-                [Row(instance_family="GPU_NV_S", max_nodes=2)],
+                [Row(instance_family="GPU_NV_S", max_nodes=1)],
             ),
             (
                 lambda s: s.startswith(
@@ -1191,7 +1195,7 @@ class TestPublish:
         assert request["ingress"] is False
         [job] = executes(session)
         assert job.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_HEAD_POOL\n"
         )
         assert "QUERY_WAREHOUSE = AGILERL_APP_ARENA_APP_WH" in job
         assert spec(job)["spec"]["containers"][0]["image"] == IMAGE
