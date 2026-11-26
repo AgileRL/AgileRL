@@ -27,6 +27,30 @@ HistogramStore = TypeVar("HistogramStore", deque[float], dict[str, deque[float]]
 # non-scalar metrics are bounded to avoid unbounded memory growth.
 NONSCALAR_WINDOW = 100_000
 
+# Companion series of a sampled metric, reported as ``<metric>_<suffix>``.
+SPREAD_STAT_SUFFIXES = ("std", "p25", "p50", "p75", "min", "max")
+
+
+def spread_stats(name: str, samples: Sequence[float]) -> dict[str, float]:
+    """Population std, quartiles and range of ``samples``, keyed ``<name>_<suffix>``.
+
+    :param name: Metric the samples belong to.
+    :type name: str
+    :param samples: Per-sample values, pooled over every rank and step they cover.
+    :type samples: Sequence[float]
+    :return: One value per :data:`SPREAD_STAT_SUFFIXES` entry; empty without samples.
+    :rtype: dict[str, float]
+    """
+    if not samples:
+        return {}
+    values = np.asarray(samples, dtype=np.float64)
+    p25, p50, p75 = np.percentile(values, (25, 50, 75))
+    stats = (values.std(), p25, p50, p75, values.min(), values.max())
+    return {
+        f"{name}_{suffix}": float(value)
+        for suffix, value in zip(SPREAD_STAT_SUFFIXES, stats, strict=True)
+    }
+
 
 class BaseMetrics(ABC, Generic[ScalarStore, HistogramStore]):
     """Base class for per-agent metrics.

@@ -35,6 +35,13 @@ from agilerl.utils.llm_utils import (
     is_preference_prompts,
 )
 
+# Histograms of this rank's per-pair implicit rewards a training learn logs,
+# and the metric each one spreads.
+PAIR_REWARD_SAMPLES = {
+    "chosen_rewards": "chosen_reward",
+    "rejected_rewards": "rejected_reward",
+}
+
 
 class DPO(LLMAlgorithm[PreferencePrompts]):
     """Direct Preference Optimization (DPO).
@@ -205,6 +212,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             "length_margin",
         ):
             self.metrics.register(name)
+        for name in PAIR_REWARD_SAMPLES:
+            self.metrics.register_histogram(name)
 
     def get_action(
         self,
@@ -275,8 +284,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         )
         batch_idxs = np.arange(num_samples)
         micro_batch_metrics = MicroBatchMetrics(
-            ("loss", "chosen_reward", "rejected_reward")
+            ("dpo_sum", "nll_logprob_sum", "nll_tokens")
         )
+        chosen_rewards: list[torch.Tensor] = []
+        rejected_rewards: list[torch.Tensor] = []
         held_loss: torch.Tensor | None = None
         phase_timer.mark("prepare")
         with torch.no_grad():
@@ -304,7 +315,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     start : min((start + batch_size), num_samples)
                 ]
                 phase_timer.mark("other")
-                loss, chosen_reward, rejected_reward = self._dpo_loss(
+                (
+                    loss,
+                    chosen_reward,
+                    rejected_reward,
+                    loss_parts,
+                ) = self._dpo_loss(
                     batch_size,
                     minibatch_idxs,
                     chosen_input_ids,
@@ -323,21 +339,35 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                         loss, held_loss, self.gradient_accumulation_steps
                     )
                     self._backward_pass(loss)
+                dpo_sum, nll_logprob_sum, nll_tokens = loss_parts
                 micro_batch_metrics.add(
                     {
-                        "loss": loss,
-                        "chosen_reward": chosen_reward.mean(),
-                        "rejected_reward": rejected_reward.mean(),
+                        "dpo_sum": dpo_sum,
+                        "nll_logprob_sum": nll_logprob_sum,
+                        "nll_tokens": nll_tokens,
                     }
                 )
+                chosen_rewards.append(chosen_reward.detach().float())
+                rejected_rewards.append(rejected_reward.detach().float())
         # Gradients still pending a step carry into the next learn call.
         if held_loss is not None:
             self._raise_if_loss_not_finite_on_any_rank(held_loss)
 
-        updates = micro_batch_metrics.read()
+        parts = micro_batch_metrics.read()
+        pair_count = sum(len(rewards) for rewards in chosen_rewards)
+        chosen = torch.cat(chosen_rewards).cpu()
+        rejected = torch.cat(rejected_rewards).cpu()
+        # DPO term is a mean over pairs. The NLL term is a mean over chosen tokens.
+        loss_value = sum(row["dpo_sum"] for row in parts) / pair_count
+        if self.nll_alpha > 0:
+            loss_value -= self.nll_alpha * (
+                sum(row["nll_logprob_sum"] for row in parts)
+                / sum(row["nll_tokens"] for row in parts)
+            )
         learn_metrics = {
-            name: sum(update[name] for update in updates) / num_samples
-            for name in micro_batch_metrics.names
+            "loss": loss_value,
+            "chosen_reward": chosen.mean(),
+            "rejected_reward": rejected.mean(),
         }
 
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
@@ -361,6 +391,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             )
             for name in ("chosen_length", "rejected_length", "length_margin"):
                 self.metrics.log(name, agg[name])
+            for name, rewards in zip(
+                PAIR_REWARD_SAMPLES, (chosen, rejected), strict=True
+            ):
+                self.metrics.log_histogram(name, rewards.numpy())
 
         phase_seconds = self._learn_phase_seconds()
         if training:
@@ -381,7 +415,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         ref_rejected_log_probs: torch.Tensor,
         ref_chosen_log_probs: torch.Tensor,
         training: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """Calculates the DPO loss.
 
         :param batch_size: Batch size
@@ -406,8 +445,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :type ref_chosen_log_probs: torch.Tensor
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Loss, chosen rewards, rejected rewards
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :return: Loss, chosen rewards, rejected rewards, and detached sums of
+            the per-pair DPO term, the chosen-token log-probs, and the chosen
+            token count. Backward uses ``loss``; the sums rebuild the logged loss.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple]
         """
         (
             batch_chosen_input_ids,
@@ -462,7 +503,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         ref_rejected_log_probs: torch.Tensor,
         chosen_mask: torch.Tensor,
         rejected_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """Calculate the DPO loss (standard PyTorch path, summed log-probs per sequence).
 
         :param chosen_log_probs: Policy log-probs for chosen completions ``[B, seq_len-1]``.
@@ -477,8 +523,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :type chosen_mask: torch.Tensor
         :param rejected_mask: Mask over completion tokens (shifted) for rejected.
         :type rejected_mask: torch.Tensor
-        :return: Tuple of ``(loss, implicit_chosen_reward, implicit_rejected_reward)``.
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :return: ``(loss, implicit_chosen_reward, implicit_rejected_reward, parts)``.
+            ``parts`` is detached sums of the per-pair DPO term, the chosen-token
+            log-probs, and the chosen token count.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple]
         """
         # Mask and sum the logprobs
         assert chosen_log_probs.shape == chosen_mask.shape, (
@@ -499,14 +547,18 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 rejected_log_probs,
                 ref_rejected_log_probs,
             )
-        loss = -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean()
+        dpo_terms = -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio))
+        loss = dpo_terms.mean()
+        nll_logprob_sum = chosen_log_probs.sum()
+        nll_tokens = chosen_mask.sum()
         if self.nll_alpha > 0:
-            loss = loss - self.nll_alpha * chosen_log_probs.sum() / chosen_mask.sum()
+            loss = loss - self.nll_alpha * nll_logprob_sum / nll_tokens
 
         return (
             loss,
             implicit_chosen_reward,
             implicit_rejected_reward,
+            (dpo_terms.detach().sum(), nll_logprob_sum.detach(), nll_tokens.detach()),
         )
 
     def _compute_implicit_reward(
