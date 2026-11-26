@@ -31,7 +31,7 @@ from agilerl.arena.models.bundled_envs import (
 )
 from agilerl.arena.models.defaults import default_verdict
 from agilerl.arena.models.env import BUNDLED_ENVIRONMENTS, LLMEnvSpec
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, fill_default_context_length
 from agilerl.arena.models.verdict import context_length_errors, verdict
 
 GEMMA4 = "google/gemma-4-E4B-it"
@@ -623,6 +623,118 @@ class TestApplyContextLengthCatalogCap:
         assert manifest["network"]["max_context_length"] == 40000
 
 
+class TestFillDefaultContextLength:
+    def test_fills_2048_for_an_unset_context(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+
+        # Act
+        filled = fill_default_context_length(manifest)
+
+        # Assert
+        assert filled is True
+        assert manifest["network"]["max_context_length"] == 2048
+
+    def test_leaves_room_for_the_output_cap(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+        manifest["algorithm"]["max_output_tokens"] = 4096
+
+        # Act
+        fill_default_context_length(manifest)
+
+        # Assert
+        assert manifest["network"]["max_context_length"] == 8192
+
+    def test_reads_a_quoted_output_cap(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+        manifest["algorithm"]["max_output_tokens"] = "4096"
+
+        # Act
+        fill_default_context_length(manifest)
+
+        # Assert
+        assert manifest["network"]["max_context_length"] == 8192
+
+    def test_keeps_2048_when_the_output_cap_is_not_an_int(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+        manifest["algorithm"]["max_output_tokens"] = "lots"
+
+        # Act
+        filled = fill_default_context_length(manifest)
+
+        # Assert
+        assert filled is True
+        assert manifest["network"]["max_context_length"] == 2048
+
+    def test_leaves_room_for_an_answer_continuation(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+        manifest["algorithm"]["max_output_tokens"] = 2048
+        manifest["algorithm"]["answer_continuation"] = True
+
+        # Act
+        fill_default_context_length(manifest)
+
+        # Assert
+        assert manifest["network"]["max_context_length"] == 8192
+
+    def test_reads_a_quoted_answer_continuation(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+        manifest["algorithm"]["max_output_tokens"] = "2048"
+        manifest["algorithm"]["answer_continuation"] = "true"
+
+        # Act
+        fill_default_context_length(manifest)
+
+        # Assert
+        assert manifest["network"]["max_context_length"] == 8192
+
+    def test_answer_continuation_without_a_cap_stays_at_2048(self) -> None:
+        # Arrange
+        manifest = _grpo_on({"name": "Mine"}, {"pretrained_model_name_or_path": QWEN})
+        manifest["algorithm"]["answer_continuation"] = True
+
+        # Act
+        fill_default_context_length(manifest)
+
+        # Assert
+        assert manifest["network"]["max_context_length"] == 2048
+
+    def test_caps_at_the_catalog_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            "agilerl.arena.models.manifest.SUPPORTED_MODEL_INFO",
+            {"fake/model": SimpleNamespace(max_context_length=1500)},
+        )
+        manifest = _grpo_on(
+            {"name": "Mine"}, {"pretrained_model_name_or_path": "fake/model"}
+        )
+
+        # Act
+        fill_default_context_length(manifest)
+
+        # Assert
+        assert manifest["network"]["max_context_length"] == 1500
+
+    def test_keeps_a_set_context(self) -> None:
+        # Arrange
+        manifest = _grpo_on(
+            {"name": "Mine"},
+            {"pretrained_model_name_or_path": QWEN, "max_context_length": 4096},
+        )
+
+        # Act
+        filled = fill_default_context_length(manifest)
+
+        # Assert
+        assert filled is False
+        assert manifest["network"]["max_context_length"] == 4096
+
+
 class TestApplyBundledRunSettings:
     def test_fills_a_name_only_visual_web_arena_from_its_segment(self) -> None:
         # Arrange
@@ -727,7 +839,7 @@ class TestTrainingManifestRunSettings:
         # Assert
         assert manifest.network.max_context_length == 32768
         assert manifest.algorithm.max_output_tokens == 2048
-        assert manifest.context_from_catalog is False
+        assert manifest.context_defaulted is False
         assert "max_context_length" not in document["network"]
 
     def test_rounds_a_visual_web_arena_segment_fill_to_an_allowed_length(
@@ -765,7 +877,7 @@ class TestTrainingManifestRunSettings:
         assert manifest.network.max_context_length == 65536
         assert context_length_errors(manifest) == []
 
-    def test_fills_the_catalog_window_for_an_unset_context(self) -> None:
+    def test_fills_the_default_context_for_an_unset_context(self) -> None:
         # Arrange
         document = _grpo_on(
             {
@@ -781,10 +893,8 @@ class TestTrainingManifestRunSettings:
         manifest = TrainingManifest.model_validate(document)
 
         # Assert
-        assert manifest.network.max_context_length == (
-            SUPPORTED_MODEL_INFO[QWEN].max_context_length
-        )
-        assert manifest.context_from_catalog is True
+        assert manifest.network.max_context_length == 2048
+        assert manifest.context_defaulted is True
 
     def test_keeps_a_set_context(self) -> None:
         # Arrange
@@ -803,7 +913,7 @@ class TestTrainingManifestRunSettings:
 
         # Assert
         assert manifest.network.max_context_length == 4096
-        assert manifest.context_from_catalog is False
+        assert manifest.context_defaulted is False
 
     def test_rejects_a_bundled_context_below_the_minimum(self) -> None:
         # Arrange

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import EXTERNAL_USER_ID_HEADER, ArenaClient, _TokenStore
@@ -35,6 +36,7 @@ from agilerl.arena.exceptions import (
     ArenaValidationError,
 )
 from agilerl.arena.models import MANIFEST_REGISTRY, TrainingManifest, __version__
+from agilerl.arena.models.manifest import warn_once
 from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
@@ -2263,18 +2265,108 @@ class TestExperimentMethods:
             )
         api_key_client._open_stream.assert_not_called()
 
-    def test_submit_experiment_allows_untracked_model(self, api_key_client, caplog):
+    def test_submit_experiment_refuses_a_hub_id_outside_the_catalog(
+        self, api_key_client
+    ):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"network.pretrained_model_name_or_path: Arena does not support the model 'org/untracked-model'\.$",
+        ):
+            api_key_client.submit_experiment(
+                manifest=_grpo_manifest("org/untracked-model"), project="proj"
+            )
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_sends_a_registered_model_name(self, api_key_client):
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 3})
         )
 
-        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
-            result = api_key_client.submit_experiment(
-                manifest=_grpo_manifest("org/untracked-model"), project="proj"
-            )
+        result = api_key_client.submit_experiment(
+            manifest=_grpo_manifest("my-registered-model"), project="proj"
+        )
 
         assert result == {"job_id": 3}
-        assert "is deprecated" not in caplog.text
+
+    def test_submit_experiment_reports_an_unknown_model_without_context(
+        self, api_key_client
+    ):
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("acme/not-a-model")
+        del manifest["network"]["max_context_length"]
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"network.pretrained_model_name_or_path: Arena does not support the model 'acme/not-a-model'\.$",
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_names_a_nearby_catalog_model(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=(
+                r"Arena does not support the model 'Qwen/Qwen3\.5-0\.9B'\. "
+                r"Did you mean Qwen/Qwen3\.5-0\.8B\?"
+            ),
+        ):
+            api_key_client.submit_experiment(
+                manifest=_grpo_manifest("Qwen/Qwen3.5-0.9B"), project="proj"
+            )
+        api_key_client._open_stream.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("context_length", "message"),
+        [
+            (None, "Field required"),
+            (
+                "lots",
+                "Input should be a valid integer, unable to parse string as an integer",
+            ),
+        ],
+    )
+    def test_submit_experiment_keeps_a_context_error_for_a_registered_model(
+        self, api_key_client, context_length, message
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("my-registered-model")
+        if context_length is None:
+            del manifest["network"]["max_context_length"]
+        else:
+            manifest["network"]["max_context_length"] = context_length
+
+        # Act
+        with pytest.raises(ValidationError, match=message):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_logs_the_default_context_warning(
+        self, api_key_client, caplog
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 3})
+        )
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        del manifest["network"]["max_context_length"]
+        warn_once.cache_clear()
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.models.manifest"):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert (
+            "network.max_context_length is unset, so Arena used a default context of 2048 tokens"
+            in caplog.text
+        )
 
     def test_submit_experiment_rejects_colocated_rollout(self, api_key_client):
         api_key_client._open_stream = MagicMock()
@@ -2337,7 +2429,7 @@ class TestExperimentMethods:
         [
             ("Qwen/Qwen3.5-0.8B", 1024),
             ("Qwen/Qwen3.5-0.8B", 262144),
-            ("org/untracked-model", 512),
+            ("my-registered-model", 512),
         ],
     )
     def test_submit_experiment_accepts_an_arena_context_length(
@@ -2513,7 +2605,7 @@ class TestExperimentMethods:
 
 def _rubric_rollout_manifest() -> dict:
     """A GSM8K rollout naming ``RUBRIC`` but no rubric file."""
-    manifest = _grpo_manifest("org/untracked-model")
+    manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
     manifest["environment"] = {
         "env_type": "rollout",
         "dataset": "gsm8k",
@@ -2699,7 +2791,7 @@ class TestArenaClientSubmitExperimentRewardFile:
             "algorithm": {"name": "SFT"},
             "environment": environment,
             "network": {
-                "pretrained_model_name_or_path": "org/untracked-model",
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
                 "max_context_length": 1024,
             },
             "training": {"max_steps": 100},
