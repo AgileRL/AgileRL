@@ -146,7 +146,7 @@ class ModelVersionCount:
 
 @dataclass(frozen=True)
 class TimeRange:
-    """The first and last ``received_at`` in a snapshot."""
+    """The first and last ``received_at`` of the calls in a snapshot."""
 
     start: datetime
     end: datetime
@@ -159,11 +159,13 @@ class ExcludedCounts:
     :ivar no_content: Captured without content.
     :ivar error_or_cancelled: Ended in ``error`` or ``cancelled``.
     :ivar invalid: In a segment that breaks the traces spec.
+    :ivar with_images: Sent an image, which traces SFT does not train.
     """
 
     no_content: int = 0
     error_or_cancelled: int = 0
     invalid: int = 0
+    with_images: int = 0
 
 
 @dataclass(frozen=True)

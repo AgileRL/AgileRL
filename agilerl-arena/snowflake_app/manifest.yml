@@ -3,6 +3,7 @@ manifest_version: 2
 
 artifacts:
     setup_script: setup_script.sql
+    readme: README.md
     container_services:
         uses_gpu: true
         images:
