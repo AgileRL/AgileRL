@@ -92,7 +92,7 @@ def _accept_every_family(monkeypatch: pytest.MonkeyPatch) -> None:
     """Submit tests that do not care about fit never call the estimator."""
     monkeypatch.setattr(
         "agilerl.arena.snowflake.cli.manifest_fits",
-        lambda manifest, pool, gpus: True,
+        lambda manifest, family, pool, gpus: True,
     )
 
 
@@ -872,7 +872,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         monkeypatch.setattr(
             "agilerl.arena.snowflake.cli.manifest_fits",
-            lambda manifest_path, pool, gpus: False,
+            lambda manifest_path, family, pool, gpus: False,
         )
         session = Closable()
         monkeypatch.setattr(
@@ -921,7 +921,7 @@ class TestSubmitProfile:
 
         monkeypatch.setattr(
             "agilerl.arena.snowflake.cli.manifest_fits",
-            lambda manifest_path, pool, gpus: pool.gpu_memory_gib >= 40,
+            lambda manifest_path, family, pool, gpus: pool.gpu_memory_gib >= 40,
         )
         monkeypatch.setattr("agilerl.arena.snowflake.cli.submit_job", fake_submit)
         monkeypatch.setattr(
@@ -945,7 +945,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         seen: list[tuple[GpuPool, int]] = []
 
-        def fits(path: Path, pool: GpuPool, gpus: int) -> bool:
+        def fits(path: Path, family: str, pool: GpuPool, gpus: int) -> bool:
             seen.append((pool, gpus))
             return True
 
@@ -977,7 +977,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         seen: list[SubmitSettings] = []
 
-        def unsized(path: Path, pool: GpuPool, gpus: int) -> bool:
+        def unsized(path: Path, family: str, pool: GpuPool, gpus: int) -> bool:
             msg = "no architecture for this model"
             raise ValueError(msg)
 
