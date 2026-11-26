@@ -105,7 +105,9 @@ CALL arena_app.app_code.gpu_families();
 CALL arena_app.app_code.set_pools(['GPU_NV_M'], 4);
 ```
 
-`set_pools` creates a broker pool, a head pool and one GPU pool for each family you list. The second argument is the most GPUs each GPU pool can hold. Pass every family you want each time: the app drops its GPU pools for families you leave out. Pools start when a job starts and suspend after 5 idle minutes. A suspended pool has no Snowflake compute charge, but a month in which any pool runs counts as a month of use for the monthly fee (see Billing and trial).
+`set_pools` creates a broker pool, a head pool and one GPU pool for each family you list. The second argument is the most GPUs each GPU pool can hold. A run uses whole nodes, so its GPU count must be a multiple of the family's GPUs per node, up to that number. Pass every family you want each time: the app drops its GPU pools for families you leave out. Pools start when a job starts and suspend after 5 idle minutes. A suspended pool has no Snowflake compute charge, but a month in which any pool runs counts as a month of use for the monthly fee (see Billing and trial).
+
+GPU nodes come from Snowflake. When Snowflake has little GPU capacity in your region, they can take a long time to start. A run waits until they do: `status` shows its containers as PENDING, and training starts once every GPU node has joined.
 
 ### 4. Bind a table or view
 
@@ -169,9 +171,9 @@ All procedures are in the app's `app_code` schema. Call them as `arena_app.app_c
 
 | Procedure | Role | What it does |
 |---|---|---|
-| `SUBMIT(manifest STRING, gpus NUMBER, source_reference STRING DEFAULT NULL, source_alias STRING DEFAULT NULL, gpu_family STRING DEFAULT NULL, reward_file STRING DEFAULT NULL, checkpoint_steps NUMBER DEFAULT NULL, resume_from STRING DEFAULT NULL)` | `app_admin` | Starts a training run from a YAML manifest on the bound table or view. Returns the run ID. Leave `reward_file` as `NULL`: set the reward in the manifest. |
-| `STATUS(run_id STRING)` | `app_user` | Shows the state of the run's services and the run: `running`, `succeeded`, `failed`, `cancelling`, `cancelled` or `gone`. |
-| `LOGS(run_id STRING, role STRING DEFAULT 'head', instance NUMBER DEFAULT 0)` | `app_user` | Shows the log of one service: `head`, `broker` or `worker`. Logs of a finished job need an active event table in your account. |
+| `SUBMIT(manifest STRING, gpus NUMBER, source_reference STRING DEFAULT NULL, source_alias STRING DEFAULT NULL, gpu_family STRING DEFAULT NULL, reward_file STRING DEFAULT NULL, checkpoint_steps NUMBER DEFAULT NULL, resume_from STRING DEFAULT NULL)` | `app_admin` | Starts a training run from a YAML manifest on the bound table or view. Returns the run ID. Leave `reward_file` as `NULL`: set the reward in the manifest. Before it starts anything, it checks that the alias is bound, that the app has a pool for the GPU family and that the pool can run that many GPUs. If a check fails, it says what to change and starts nothing. |
+| `STATUS(run_id STRING)` | `app_user` | Shows the state of the run's services and the run: `running`, `succeeded`, `failed`, `cancelling`, `cancelled` or `gone`. `cancel` drops the run's services, so a run you cancel reads `gone`. |
+| `LOGS(run_id STRING, role STRING DEFAULT 'head', instance NUMBER DEFAULT 0)` | `app_user` | Shows the log of one service: `head`, `broker` or `worker`. While its GPU node is still starting, it says the container has not started yet. Logs of a finished job need an active event table in your account. |
 | `CANCEL(run_id STRING)` | `app_admin` | Stops a run and suspends GPU pools left with nothing on them. |
 
 ### Models and serving
@@ -270,6 +272,8 @@ training:
 );
 -- Returns the run ID. Keep it for the calls below.
 ```
+
+Reinforcement learning (GRPO, CISPO) needs at least 2 GPUs: one trains while another generates answers. OPD with a separate teacher model needs a GPU family with at least 2 GPUs per node. `submit` refuses a smaller request and says what to ask for.
 
 `columns` maps the names the trainer expects (left) to your column names (right). For SFT, use `name: SFT`, `env_type: dataset`, `objective: sft` and map `prompt` and `target` columns.
 

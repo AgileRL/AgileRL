@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -129,6 +130,20 @@ class TierCheck:
         return self.reason is None
 
 
+# Matches every :func:`shortfall_message`; group 1 is the GPUs the job needs.
+SHORTFALL = re.compile(r"\d+ GPUs, the job needs (\d+)")
+
+
+def shortfall_message(allocation: int, needed: int) -> str:
+    """Why ``allocation`` GPUs cannot run a job that lays out on ``needed``.
+
+    :param allocation: GPUs in the allocation.
+    :param needed: GPUs the job lays out on.
+    :return: The message, which :data:`SHORTFALL` matches.
+    """
+    return f"{allocation} GPUs, the job needs {needed}"
+
+
 def gpus_required(manifest: TrainingManifest, tensor_parallel_size: int = 1) -> int:
     """GPUs one node needs: each member's trainers plus its rollout engines.
 
@@ -203,7 +218,7 @@ def engines_per_member(
     """
     needed = gpus_required(manifest, tensor_parallel_size)
     if num_gpus < needed:
-        msg = f"{num_gpus} GPUs, the job needs {needed}"
+        msg = shortfall_message(num_gpus, needed)
         raise ValueError(msg)
     training = manifest.training
     return resolve_rollout_engines_per_agent(
@@ -425,7 +440,7 @@ def _placement_shortfall(
         return None
     needed = gpus_required(placed, width)
     if allocation < needed:
-        return f"{allocation} GPUs, the job needs {needed}"
+        return shortfall_message(allocation, needed)
     return None
 
 
@@ -775,7 +790,7 @@ def _price(
     if allocation < needed:
         return _other_miss(
             tier,
-            f"{allocation} GPUs, the job needs {needed}",
+            shortfall_message(allocation, needed),
             num_nodes,
             cache.host_limited,
         )

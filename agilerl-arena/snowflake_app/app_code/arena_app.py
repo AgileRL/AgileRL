@@ -65,6 +65,7 @@ from agilerl.arena.snowflake.catalog import (
     remote_profile,
 )
 from agilerl.arena.snowflake.cli import run_status, service_logs
+from agilerl.arena.snowflake.gpu_fit import gpu_counts_message, pool_gpus
 from agilerl.arena.snowflake.job import (
     ROLES,
     SubmitSettings,
@@ -602,15 +603,11 @@ def submit(
         parsed = load_manifest(job_manifest, {IN_SNOWFLAKE_APP: True})
         refuse_remote_code(parsed)
         check_app_reward(session, parsed)
+        if source_reference is not None and source_alias is not None:
+            check_bound_alias(session, source_reference, source_alias)
         refuse_ended_trial(session)
         profile = app_setup(session)
-        pools = run_pools(session, profile, gpu_family)
-        family = choose_gpu_family(
-            pools,
-            gpus,
-            gpu_family,
-            lambda family, pool: manifest_fits(job_manifest, family, pool, gpus),
-        )
+        family = run_family(session, profile, job_manifest, gpus, gpu_family)
         settings = submit_settings(
             profile,
             app_names(session).api_integration,
@@ -644,6 +641,34 @@ def submit(
     return "\n".join(lines)
 
 
+def run_family(
+    session: SnowflakeSession,
+    profile: AccountProfile,
+    job_manifest: Path,
+    gpus: int,
+    gpu_family: str | None,
+) -> str:
+    """GPU family a new run uses: an app pool that is priced, sized, holds ``gpus`` and fits the manifest.
+
+    :param session: Procedure session.
+    :param profile: The app's ``setup.json``.
+    :param job_manifest: Manifest the run stages.
+    :param gpus: GPUs for the run.
+    :param gpu_family: Family the caller named in any case, or ``None``.
+    :return: The family.
+    :raises ValueError: No pool can run the request; the message says why.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    named = gpu_family.strip().upper() if gpu_family is not None else None
+    pools = holding_pools(run_pools(session, profile, named), gpus, named)
+    return choose_gpu_family(
+        pools,
+        gpus,
+        named,
+        lambda family, pool: manifest_fits(job_manifest, family, pool, gpus),
+    )
+
+
 def run_pools(
     session: SnowflakeSession, profile: AccountProfile, gpu_family: str | None
 ) -> dict[str, GpuPool]:
@@ -655,13 +680,56 @@ def run_pools(
     :param profile: The app's ``setup.json``.
     :param gpu_family: Family the caller named, or ``None``.
     :return: The pools, keyed by family.
-    :raises ValueError: No pool, or not the named one, has a price and the GPUs
-        the app sized.
+    :raises ValueError: The named family has no pool, or no pool, or not the
+        named one, has a price and the GPUs the app sized.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
+    if gpu_family is not None and gpu_family not in profile.pools.gpu:
+        raise ValueError(missing_pool_message(gpu_family, list(profile.pools.gpu)))
     partner = rotate_if_due(session, arena_partner())
     priced = priced_pools(profile.pools.gpu, gpu_family, partner)
     return sized_pools(priced, load_families(session), gpu_family)
+
+
+def holding_pools(
+    pools: dict[str, GpuPool], gpus: int, gpu_family: str | None
+) -> dict[str, GpuPool]:
+    """Keep the pools, or the named one, that hold ``gpus`` on their ``MAX_NODES``.
+
+    The app writes ``setup.json`` with every pool it sizes, so a run that
+    needs more nodes is refused here, before the run is recorded for billing.
+
+    :param pools: GPU pools a new run may use, keyed by family.
+    :param gpus: GPUs for the run.
+    :param gpu_family: Family the caller named, or ``None``. A named family
+        is one of ``pools``.
+    :return: The pools that hold ``gpus``.
+    :raises ValueError: None of them does.
+    """
+    candidates = pools if gpu_family is None else {gpu_family: pools[gpu_family]}
+    kept = {
+        family: pool for family, pool in candidates.items() if gpus <= pool_gpus(pool)
+    }
+    if not kept:
+        raise ValueError(gpu_counts_message(gpus, candidates, gpu_family))
+    return kept
+
+
+def missing_pool_message(gpu_family: str, families: list[str]) -> str:
+    """Refusal for a GPU family the app has no pool for, with the ``set_pools`` call that adds it.
+
+    :param gpu_family: Family the caller named.
+    :param families: Families the app has GPU pools for.
+    :return: The message.
+    """
+    kept = ", ".join(f"'{name}'" for name in [*families, gpu_family])
+    return (
+        f"The app has no GPU pool for {gpu_family}. "
+        f"GPU pools it has: {', '.join(families)}.\n"
+        "An app_admin adds the pool, keeping the ones it has, with\n"
+        f"CALL <app>.app_code.set_pools([{kept}]);\n"
+        "Nothing was started."
+    )
 
 
 def priced_pools(
@@ -883,6 +951,50 @@ def reference_source(reference: str | None, alias: str | None) -> QuerySource | 
     )
 
 
+def check_bound_alias(session: SnowflakeSession, reference: str, alias: str) -> None:
+    """Refuse a source alias that is not bound to its reference.
+
+    ``reference()`` on an unbound alias fails only when the run reads its
+    rows, after the GPU nodes have started, so ``submit`` checks first.
+
+    :param session: Procedure session.
+    :param reference: ``source_table`` or ``source_view``, as
+        :func:`reference_source` accepted it.
+    :param alias: Alias the caller passed.
+    :raises ValueError: No object is bound to ``reference`` under ``alias``.
+    """
+    name = reference.upper()
+    [row] = collect(
+        session, f"SELECT SYSTEM$GET_ALL_REFERENCES({string_literal(name)}) AS REFS"
+    )
+    bound = [str(item) for item in json.loads(str(lowered(row)["refs"]))]
+    if alias not in bound:
+        raise ValueError(unbound_alias_message(name, alias, bound))
+
+
+def unbound_alias_message(name: str, alias: str, bound: list[str]) -> str:
+    """Refusal for a source alias that is not bound, with the bound ones and how to bind.
+
+    :param name: ``SOURCE_TABLE`` or ``SOURCE_VIEW``.
+    :param alias: Alias the caller passed.
+    :param bound: Aliases bound to ``name``.
+    :return: The message.
+    """
+    reference = name.lower()
+    kind = "TABLE" if name == "SOURCE_TABLE" else "VIEW"
+    listed = ", ".join(bound) if bound else "none"
+    return (
+        f"Nothing is bound to {reference} with the alias {alias}.\n"
+        f"Aliases bound to {reference}: {listed}.\n"
+        f"To bind a {kind.lower()}, call\n"
+        f"CALL <app>.app_code.register_reference('{reference}', 'ADD', "
+        f"SYSTEM$REFERENCE('{kind}', '<database>.<schema>.<name>', 'PERSISTENT', "
+        "'SELECT'));\n"
+        "then pass the alias SHOW REFERENCES IN APPLICATION <app> lists.\n"
+        "Nothing was started."
+    )
+
+
 def app_registry(session: SnowflakeSession) -> tuple[str, str]:
     """Database and schema of the app's Model Registry: the app and ``app_state``.
 
@@ -904,7 +1016,10 @@ def app_setup(session: SnowflakeSession) -> AccountProfile:
         session, f"{SETUP_PREFIX}/setup.json", f"{APP_SCHEMA}.{FILE_FORMAT}"
     )
     if profile is None:
-        msg = "The app has no compute pools yet.\nAn app_admin calls app_code.set_pools first."
+        msg = (
+            "The app has no compute pools yet.\n"
+            "An app_admin calls app_code.set_pools first.\nNothing was started."
+        )
         raise ValueError(msg)
     return profile
 
@@ -941,7 +1056,8 @@ def logs(session: SnowflakeSession, run_id: str, role: str, instance: int) -> st
     :param run_id: Run id from ``submit``.
     :param role: ``broker``, ``head``, or ``worker``.
     :param instance: Instance id. ``0`` is the first instance.
-    :return: The log text.
+    :return: The log text, or a line saying the container has not started or
+        has written no logs yet.
     :raises ValueError: The role or instance is invalid, the app has no such
         run, or the service was dropped.
     """
@@ -952,7 +1068,14 @@ def logs(session: SnowflakeSession, run_id: str, role: str, instance: int) -> st
         msg = "instance must be 0 or more."
         raise ValueError(msg)
     known_run(session, run_id)
-    return service_logs(session, run_id, instance, role, APP_SCHEMA)
+    return service_logs(
+        session,
+        run_id,
+        instance,
+        role,
+        APP_SCHEMA,
+        status_command=f"CALL <app>.app_code.status('{run_id}')",
+    )
 
 
 def cancel(session: SnowflakeSession, run_id: str) -> str:
