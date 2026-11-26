@@ -921,6 +921,23 @@ def after_prompt(prompt_length: int, shape: tuple[int, int]) -> torch.Tensor:
     return mask
 
 
+def unequal_completion_batch() -> dict[str, torch.Tensor]:
+    """Four pairs whose chosen completions train 1, 2, 5 and 4 tokens."""
+    generator = torch.Generator().manual_seed(0)
+    seq_len = 8
+    chosen_loss_mask = torch.zeros(4, seq_len, dtype=torch.bool)
+    for row, length in enumerate((1, 2, 5, 4)):
+        chosen_loss_mask[row, 2 : 2 + length] = True
+    return {
+        "chosen_input_ids": torch.randint(0, 99, (4, seq_len), generator=generator),
+        "rejected_input_ids": torch.randint(0, 99, (4, seq_len), generator=generator),
+        "chosen_attention_mask": torch.ones(4, seq_len, dtype=torch.long),
+        "rejected_attention_mask": torch.ones(4, seq_len, dtype=torch.long),
+        "chosen_loss_mask": chosen_loss_mask,
+        "rejected_loss_mask": after_prompt(2, (4, seq_len)),
+    }
+
+
 def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
     """Four chosen/rejected pairs of six tokens with two-token prompts."""
     generator = torch.Generator().manual_seed(0)
@@ -935,7 +952,7 @@ def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
 
 
 class TestDPOLearnMetrics:
-    def test_metrics_sum_the_micro_batches_over_the_samples(
+    def test_metrics_are_means_over_the_pairs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: two micro-batches of two pairs.
@@ -948,14 +965,93 @@ class TestDPOLearnMetrics:
 
         # Assert
         assert len(outputs) == 2
+        chosen = torch.cat([output[1] for output in outputs])
+        rejected = torch.cat([output[2] for output in outputs])
         assert metrics["loss"] == pytest.approx(
-            sum(loss.item() for loss, _, _ in outputs) / 4, rel=1e-6
+            sum(output[0].item() for output in outputs) / 2, rel=1e-6
         )
-        assert metrics["chosen_reward"] == pytest.approx(
-            sum(chosen.mean().item() for _, chosen, _ in outputs) / 4, rel=1e-6
-        )
+        assert metrics["chosen_reward"] == pytest.approx(chosen.mean().item(), rel=1e-6)
         assert metrics["rejected_reward"] == pytest.approx(
-            sum(rejected.mean().item() for _, _, rejected in outputs) / 4, rel=1e-6
+            rejected.mean().item(), rel=1e-6
+        )
+        dpo.clean_up()
+
+    @pytest.mark.parametrize(
+        ("batch_size", "micro_batch_size"),
+        [(4, 1), (6, 3)],
+        ids=["equal_micro_batches", "uneven_last_micro_batch"],
+    )
+    def test_metrics_do_not_depend_on_the_micro_batch_size(
+        self, batch_size: int, micro_batch_size: int
+    ) -> None:
+        # Arrange: eval-mode learns, so dropout leaves the forward deterministic.
+        torch.manual_seed(0)
+        whole = _make_cpu_dpo_for_branch_tests(micro_batch_size_per_gpu=4)
+        split = _make_cpu_dpo_for_branch_tests(
+            batch_size=batch_size, micro_batch_size_per_gpu=micro_batch_size
+        )
+        split.actor.load_state_dict(whole.actor.state_dict())
+
+        # Act
+        expected = whole.learn(random_preference_batch(), training=False)
+        metrics = split.learn(random_preference_batch(), training=False)
+
+        # Assert
+        for name in ("loss", "chosen_reward", "rejected_reward"):
+            assert metrics[name] == pytest.approx(expected[name], rel=1e-5), name
+        whole.clean_up()
+        split.clean_up()
+
+    @pytest.mark.parametrize("nll_alpha", [0.0, 1.0])
+    @pytest.mark.parametrize(
+        ("batch_size", "micro_batch_size"),
+        [(4, 1), (6, 3)],
+        ids=["one_pair_per_micro_batch", "uneven_last_micro_batch"],
+    )
+    def test_loss_matches_one_batch_when_completion_lengths_differ(
+        self, batch_size: int, micro_batch_size: int, nll_alpha: float
+    ) -> None:
+        # Arrange: nll_alpha 0 drops the token term; the default 1 keeps it.
+        torch.manual_seed(0)
+        batch = unequal_completion_batch()
+        whole = _make_cpu_dpo_for_branch_tests(
+            micro_batch_size_per_gpu=4, nll_alpha=nll_alpha
+        )
+        split = _make_cpu_dpo_for_branch_tests(
+            batch_size=batch_size,
+            micro_batch_size_per_gpu=micro_batch_size,
+            nll_alpha=nll_alpha,
+        )
+        split.actor.load_state_dict(whole.actor.state_dict())
+
+        # Act
+        expected = whole.learn(batch, training=False)
+        metrics = split.learn(batch, training=False)
+
+        # Assert
+        for name in ("loss", "chosen_reward", "rejected_reward"):
+            assert metrics[name] == pytest.approx(expected[name], rel=1e-5), name
+        whole.clean_up()
+        split.clean_up()
+
+    def test_training_learn_logs_every_pair_reward(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        dpo = _make_cpu_dpo_for_branch_tests()
+        dpo_loss, outputs = record_outputs(dpo._dpo_loss)
+        monkeypatch.setattr(dpo, "_dpo_loss", dpo_loss)
+
+        # Act
+        dpo.learn(random_preference_batch())
+        dpo.learn(random_preference_batch(), training=False)
+
+        # Assert: only the training learn's four pairs are kept.
+        chosen = torch.cat([output[1] for output in outputs[:2]])
+        rejected = torch.cat([output[2] for output in outputs[:2]])
+        assert np.allclose(dpo.metrics.get_histogram("chosen_rewards"), chosen.numpy())
+        assert np.allclose(
+            dpo.metrics.get_histogram("rejected_rewards"), rejected.numpy()
         )
         dpo.clean_up()
 
@@ -1248,7 +1344,7 @@ def standard_dpo_loss_and_grads(
             )
             for side in ("chosen", "rejected")
         )
-    loss, chosen_reward, _ = dpo._dpo_loss(
+    loss, chosen_reward, _, _loss_parts = dpo._dpo_loss(
         4,
         np.arange(4),
         batch["chosen_ids"],
