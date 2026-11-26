@@ -137,7 +137,7 @@ def _emit_table(
     :type columns: list[str] | None
     :returns: None
     """
-    _print_rich(str(result), is_error=is_error)
+    _print_rich(_format_cell(result), is_error=is_error)
 
 
 @_emit_table.register(dict)
@@ -168,7 +168,7 @@ def _emit_key_value_table(
     for name in col_names:
         table.add_column(name)
     for key, value in values.items():
-        table.add_row(str(key), _format_cell(value))
+        table.add_row(_format_cell(key), _format_cell(value))
     _print_rich(table, is_error=is_error)
 
 
@@ -243,8 +243,8 @@ def _emit_environment_catalog(
         for version_name, metadata in versions.items():
             metadata_dict = metadata if isinstance(metadata, dict) else {}
             table.add_row(
-                f"[bold]{env_name}[/bold]",
-                str(version_name),
+                f"[bold]{escape(env_name)}[/bold]",
+                _format_cell(version_name),
                 "[green]✔[/green]"
                 if metadata_dict.get("validated")
                 else "[red]✘[/red]",
@@ -254,9 +254,10 @@ def _emit_environment_catalog(
 
 
 def _format_cell(value: object) -> str:
+    """*value* as table text, with Rich markup escaped so server text prints as sent."""
     if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str)
-    return str(value)
+        return escape(json.dumps(value, default=str))
+    return escape(str(value))
 
 
 _ROLE_STYLES = {
@@ -403,11 +404,9 @@ def _selection_table(
     for index, row in enumerate(values):
         cells = [_format_cell(row.get(key)) for key in keys]
         if index == selected:
-            table.add_row(
-                "[cyan]▸[/cyan]", *[f"[cyan]{escape(c)}[/cyan]" for c in cells]
-            )
+            table.add_row("[cyan]▸[/cyan]", *[f"[cyan]{c}[/cyan]" for c in cells])
         else:
-            table.add_row(" ", *[escape(c) for c in cells])
+            table.add_row(" ", *cells)
     return table
 
 
@@ -475,7 +474,7 @@ def handle_error(exc: Exception) -> None:
             error = {"error": str(exc), "type": type(exc).__name__}
             click.echo(json.dumps(error), err=True)
         else:
-            error_console.print(f"[red bold]Error:[/red bold] {exc}")
+            error_console.print(f"[red bold]Error:[/red bold] {escape(str(exc))}")
         raise click.exceptions.Exit(1) from exc
     raise exc
 
@@ -545,7 +544,9 @@ class StreamRichRenderer:
             if event.kind == "warning":
                 logger.warning("%s", event.message)
             elif event.level == "secondary-info":
-                logger.info("  [dim]%s[/dim]", escape(event.message))
+                logger.info(
+                    "  [dim]%s[/dim]", escape(event.message), extra={"markup": True}
+                )
             else:
                 logger.info("%s", event.message)
             return
@@ -595,19 +596,19 @@ class StreamRichRenderer:
         has_warnings = len(event.warnings) > 0
         if event.success is True and has_warnings:
             styled = self._styled_status("WARNING")
-            details = "; ".join(event.warnings)
+            details = escape("; ".join(event.warnings))
         elif event.success is True:
             styled = self._styled_status("PASS")
             details = ""
         elif event.success is False:
             styled = self._styled_status("FAIL")
-            details = event.error or ""
+            details = escape(event.error or "")
         else:
             styled = "UNKNOWN"
             details = ""
 
         self._rows.append(
-            StreamRow("check", f"[bold]{event.name}[/bold]", styled, details)
+            StreamRow("check", f"[bold]{escape(event.name)}[/bold]", styled, details)
         )
 
     def _render_error(self, event: ErrorEvent) -> None:
@@ -619,19 +620,20 @@ class StreamRichRenderer:
                 detail += f"\n{label}: {', '.join(str(v) for v in value)}"
             else:
                 detail += f"\n{label}: {value}"
+        detail = escape(detail)
 
         _, cli_hint = ArenaError._generate_hints(
             {"error": event.message, **event.extras}, event.extras
         )
         if cli_hint:
-            detail += f"\n[yellow]{cli_hint}[/yellow]"
+            detail += f"\n[yellow]{escape(cli_hint)}[/yellow]"
 
         self._rows.append(StreamRow("error", "-", f"[red]{detail}[/red]"))
 
     def _render_log(self, event: LogEvent) -> None:
         """Render a log event."""
         if event.text:
-            self._rows.append(StreamRow("log", "-", event.text))
+            self._rows.append(StreamRow("log", "-", escape(event.text)))
 
     def _ensure_live(self) -> None:
         """Ensure the live table renderer is started."""
