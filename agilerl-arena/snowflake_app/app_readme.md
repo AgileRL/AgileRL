@@ -102,7 +102,7 @@ List the GPU families the app can use in your region, then create the pools:
 
 ```sql
 CALL arena_app.app_code.gpu_families();
-CALL arena_app.app_code.set_pools(['GPU_NV_M'], 4);
+CALL arena_app.app_code.set_pools(['GPU_NV_S'], 4);
 ```
 
 `set_pools` creates a broker pool, a head pool and one GPU pool for each family you list. The second argument is the most GPUs each GPU pool can hold. A run uses whole nodes, so its GPU count must be a multiple of the family's GPUs per node, up to that number. Pass every family you want each time: the app drops its GPU pools for families you leave out. Pools start when a job starts and suspend after 5 idle minutes. A suspended pool has no Snowflake compute charge, but a month in which any pool runs counts as a month of use for the monthly fee (see Billing and trial).
@@ -265,10 +265,10 @@ network:
 training:
   max_steps: 200
 ',
-  4,                -- GPUs
+  2,                -- GPUs
   'source_table',
   '<alias>',        -- from SHOW REFERENCES
-  'GPU_NV_M'
+  'GPU_NV_S'
 );
 -- Returns the run ID. Keep it for the calls below.
 ```
