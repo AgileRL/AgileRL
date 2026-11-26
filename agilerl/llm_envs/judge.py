@@ -6,6 +6,8 @@
 Built on OpenEnv's ``LLMClient``. The provider SDK under it retries rate limits,
 server errors and timed-out attempts with backoff; this client caps calls in
 flight and bounds each attempt's time. A call still failing after that raises.
+A bedrock judge calls Amazon Bedrock with the machine's AWS credentials (the
+job VM's role), so no API key leaves the platform.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+import boto3
+from botocore.config import Config
 from openenv.core.llm_client import (
     AnthropicClient,
     LLMClient,
@@ -44,6 +48,43 @@ class AnthropicMessagesClient(AnthropicClient):
             max_tokens=kwargs.get("max_tokens", self.max_tokens),
         )
         return "".join(block.text for block in response.content if block.type == "text")
+
+
+class BedrockConverseClient(LLMClient):
+    """A judge on Amazon Bedrock's Converse API, signed by boto3's default credential chain.
+
+    :param spec: A bedrock judge's model, region and limits.
+    """
+
+    def __init__(self, spec: JudgeSpec) -> None:
+        super().__init__(f"https://bedrock-runtime.{spec.region}.amazonaws.com", 443)
+        self.model = spec.model
+        self.temperature = spec.temperature
+        self.max_tokens = spec.max_tokens
+        # boto3 calls block; complete runs them on threads, at most max_concurrency at once.
+        self._client = boto3.client(
+            "bedrock-runtime",
+            region_name=spec.region,
+            config=Config(
+                read_timeout=spec.timeout_s,
+                max_pool_connections=spec.max_concurrency,
+                retries={"mode": "standard"},
+            ),
+        )
+
+    async def complete(self, prompt: str, **kwargs: Any) -> str:
+        """Send one prompt and return the text blocks of the reply."""
+        response = await asyncio.to_thread(
+            self._client.converse,
+            modelId=self.model,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={
+                "maxTokens": kwargs.get("max_tokens", self.max_tokens),
+                "temperature": kwargs.get("temperature", self.temperature),
+            },
+        )
+        content = response["output"]["message"]["content"]
+        return "".join(block["text"] for block in content if "text" in block)
 
 
 @dataclass
@@ -102,6 +143,8 @@ def build_judge_client(spec: JudgeSpec) -> JudgeClient:
 
     :raises ValueError: If the key's variable is unset.
     """
+    if spec.provider == "bedrock":
+        return JudgeClient(spec, BedrockConverseClient(spec))
     api_key = None
     if spec.api_key_env is not None:
         api_key = os.environ.get(spec.api_key_env)

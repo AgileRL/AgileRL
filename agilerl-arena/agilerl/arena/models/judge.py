@@ -19,14 +19,24 @@ class JudgeSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    provider: Literal["openai", "anthropic"] = Field(
+    provider: Literal["openai", "anthropic", "bedrock"] = Field(
         default="openai",
         description=(
             "API the judge speaks. openai covers any OpenAI-compatible endpoint: "
-            "OpenRouter, Together, Groq or self-hosted vLLM, through base_url."
+            "OpenRouter, Together, Groq or self-hosted vLLM, through base_url. "
+            "bedrock calls Amazon Bedrock's Converse API with the machine's own "
+            "AWS credentials."
         ),
     )
-    model: str = Field(min_length=1, description="Judge model id.")
+    model: str = Field(
+        min_length=1,
+        description="Judge model id; for bedrock, the Bedrock model id (deepseek.v3.2).",
+    )
+    region: str | None = Field(
+        default=None,
+        min_length=1,
+        description="AWS region a bedrock judge's model runs in (us-east-1).",
+    )
     base_url: str | None = Field(
         default=None,
         description=(
@@ -67,6 +77,20 @@ class JudgeSpec(BaseModel):
 
     @model_validator(mode="after")
     def _check_endpoint(self) -> Self:
+        if self.provider == "bedrock":
+            if self.region is None:
+                msg = "A bedrock judge needs region."
+                raise ValueError(msg)
+            if self.base_url is not None or self.api_key_env is not None:
+                msg = (
+                    "A bedrock judge takes no base_url or api_key_env: it signs "
+                    "with the machine's AWS credentials."
+                )
+                raise ValueError(msg)
+            return self
+        if self.region is not None:
+            msg = f"region is for bedrock judges, not {self.provider}."
+            raise ValueError(msg)
         if self.base_url is None:
             if self.api_key_env is None:
                 msg = f"The hosted {self.provider} API needs api_key_env."

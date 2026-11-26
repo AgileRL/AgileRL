@@ -305,6 +305,9 @@ whose ``__init__`` takes ``judge`` is built with the run's shared client:
   ``/v1``. Leave ``api_key_env`` unset when the endpoint needs no key.
 - On Arena, ``api_key_env`` names an organization secret: store the key with
   ``arena secrets set OPENAI_API_KEY`` (see :ref:`arena_secrets`).
+- ``provider: bedrock`` calls Amazon Bedrock's Converse API with the machine's
+  AWS credentials. Set ``model`` to a Bedrock model id and ``region``; it takes
+  no ``base_url`` or ``api_key_env``.
 - The judge reads the prompt, each turn's text after its reasoning, and the env's
   replies. ``LLMJudgeRubric(..., include_reasoning=True)`` also shows it the
   reasoning. Scoring reasoning trains the model to write reasoning the judge
@@ -470,7 +473,7 @@ These are the names this package reads:
    * - ``judge``
      - ``None``
      - LLM judge handed to the rubric: ``provider``, ``model``, ``base_url``,
-       ``api_key_env``, ``max_concurrency``, ``timeout_s``, ``temperature``,
+       ``api_key_env``, ``region``, ``max_concurrency``, ``timeout_s``, ``temperature``,
        ``max_tokens``. Needs ``rubric_file_path``.
    * - ``prompt_template``
      - ``None``

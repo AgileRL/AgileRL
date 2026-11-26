@@ -16,7 +16,10 @@ import click
 
 from agilerl.arena.byoc.api import ByocApi
 from agilerl.arena.byoc.cluster_helm import helm_available, resolve_install_release
-from agilerl.arena.byoc.cluster_register import run_cluster_register
+from agilerl.arena.byoc.cluster_register import (
+    offer_suggested_classes,
+    run_cluster_register,
+)
 from agilerl.arena.byoc.kube_target import (
     KubeTarget,
     kube_target,
@@ -50,6 +53,7 @@ class ConnectOptions:
     ray_data_storage_class_name: str | None
     rotate_token: bool
     wait_timeout: float
+    yes: bool
 
 
 def registered_cluster(
@@ -158,43 +162,6 @@ def health_checks(cluster: dict[str, Any]) -> list[PreflightCheck]:
     ]
 
 
-def echo_suggested_classes(api: ByocApi, name: str) -> None:
-    """Print the resource classes Arena suggests from the agent's node report."""
-    try:
-        found = api.suggested_classes(name)
-    except ArenaAPIError as exc:
-        # Arena releases before class suggestions do not have the route.
-        if exc.status_code != HTTPStatus.NOT_FOUND:
-            raise
-        return
-    suggestions = found["suggestions"]
-    if suggestions:
-        click.echo("Suggested resource classes from the agent's node report:")
-        for suggestion in suggestions:
-            selector = ", ".join(
-                f"{key}={value}" for key, value in suggestion["node_selector"].items()
-            )
-            click.echo(
-                f"  {suggestion['name']}: {suggestion['num_nodes']} node(s), "
-                f"node selector {selector}"
-            )
-        click.echo("Create them from the cluster's page in Arena.")
-        return
-    if found.get("needs_agent_upgrade"):
-        click.echo(
-            "The agent needs an upgrade before Arena can suggest resource classes. "
-            "Run arena cluster upgrade."
-        )
-        return
-    if not found.get("reported_at"):
-        click.echo(
-            "The agent has not reported its nodes, so Arena has no resource classes "
-            "to suggest."
-        )
-        return
-    click.echo("Arena suggests no new resource classes for this cluster's nodes.")
-
-
 def context_flag(context: str) -> str:
     """Return ``--context '<context>'``, quoted for a POSIX shell."""
     quoted = context.replace("'", "'\"'\"'")
@@ -251,6 +218,7 @@ def run_cluster_connect(config: CommandConfig, options: ConnectOptions) -> None:
             placement="in-cluster",
             cluster_uid=target.cluster_uid,
             rotate_token=options.rotate_token,
+            suggest_classes=False,
         )
         # The new ReplicaSet is ready. A report before this is the previous pod.
         before = None if registered is None else api.byoc_cluster(name)
@@ -258,7 +226,7 @@ def run_cluster_connect(config: CommandConfig, options: ConnectOptions) -> None:
         health = health_checks(cluster)
         click.echo("Agent health:")
         echo_checks(health)
-        echo_suggested_classes(api, name)
+        offer_suggested_classes(api, name, options.yes)
     if any_failed(health):
         msg = (
             f"Cluster {name!r} ({flag}) is connected, but its health report has "
