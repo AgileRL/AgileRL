@@ -590,6 +590,23 @@ def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str
     return merged
 
 
+def write_values_file(path: Path, values: dict[str, Any]) -> None:
+    """Write Helm values as YAML with mode ``0600``.
+
+    The values hold credentials: the cluster token and the registry pull secret.
+
+    :param path: Destination file.
+    :type path: Path
+    :param values: Helm values.
+    :type values: dict[str, Any]
+    """
+    path.write_text(
+        yaml.safe_dump(values, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o600)
+
+
 def merge_agent_chart_defaults(
     chart_dir: Path, agent_values: dict[str, Any]
 ) -> dict[str, Any]:
@@ -628,10 +645,7 @@ def write_merged_agent_values(package_root: Path, agent_values: dict[str, Any]) 
     chart_dir = _chart_path_from_package(package_root, AGENT_CHART)
     merged = merge_agent_chart_defaults(chart_dir, agent_values)
     out = package_root / "agent-helm-values-merged.yaml"
-    out.write_text(
-        yaml.safe_dump(merged, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
-    )
+    write_values_file(out, merged)
     return out
 
 
@@ -1141,13 +1155,9 @@ def install_lab_cluster_charts(
     )
     agent_chart = _chart_path(charts_root, AGENT_CHART)
     merged_agent_values = output_dir / "agent-helm-values-merged.yaml"
-    merged_agent_values.write_text(
-        yaml.safe_dump(
-            merge_agent_chart_defaults(agent_chart, agent_values_dict),
-            sort_keys=False,
-            default_flow_style=False,
-        ),
-        encoding="utf-8",
+    write_values_file(
+        merged_agent_values,
+        merge_agent_chart_defaults(agent_chart, agent_values_dict),
     )
     helm_upgrade_install(
         release=agent_release,
@@ -1196,13 +1206,9 @@ def install_enterprise_agent_chart(
     )
     agent_chart = _chart_path(charts_root, AGENT_CHART)
     merged_agent_values = output_dir / "agent-helm-values-merged.yaml"
-    merged_agent_values.write_text(
-        yaml.safe_dump(
-            merge_agent_chart_defaults(agent_chart, agent_values_dict),
-            sort_keys=False,
-            default_flow_style=False,
-        ),
-        encoding="utf-8",
+    write_values_file(
+        merged_agent_values,
+        merge_agent_chart_defaults(agent_chart, agent_values_dict),
     )
     helm_upgrade_install(
         release=agent_release,
