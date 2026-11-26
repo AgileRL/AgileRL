@@ -21,9 +21,11 @@ error_console = Console(stderr=True)
 _logger = logging.getLogger("agilerl.arena")
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
+    # Log messages carry server text, so markup is opt-in per record with
+    # ``extra={"markup": True}``.
     _logger.addHandler(
         RichHandler(
-            show_time=False, show_path=False, markup=True, console=error_console
+            show_time=False, show_path=False, markup=False, console=error_console
         )
     )
     _logger.propagate = False
