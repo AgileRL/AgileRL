@@ -14,6 +14,7 @@ from agilerl.arena.memory.manifest import (
     GPU_CATALOGUE,
     GpuInfo,
     lookup_gpu,
+    training_memory_from_manifest,
     unsupported_gpu_reason,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
@@ -23,6 +24,7 @@ from agilerl.arena.memory.resolve.decode_costs import (
     UNMEASURED_MERGED_DENSE_SPEEDUP,
 )
 from agilerl.arena.memory.resolve.fsdp import CrossNodeSeconds
+from agilerl.arena.memory.resolve.learn_costs import learn_costs
 from agilerl.arena.memory.resolve.lengths import (
     DEFAULT_PROMPT_TOKENS,
     DEFAULT_REASONING_TURN_TOKENS,
@@ -40,11 +42,13 @@ from agilerl.arena.memory.resolve.split import (
     NGRAM_GENERATION_SPEEDUP,
     TIED_DROP_GENERATION_FACTOR,
     GpuSplit,
+    RowTokens,
     SplitWorkload,
     TrainerCost,
     active_matmul_params,
     choose_engine_width,
     choose_gpu_split,
+    dataset_learn_seconds,
     engine_prefill_rate,
     engine_steps,
     fullest_split_within,
@@ -1955,6 +1959,242 @@ def _catalog_spec(hub_id: str) -> ModelSpec:
         model_id=hub_id,
         arch=ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config),
     )
+
+
+def _dataset_manifest(name: str, **algorithm: object) -> TrainingManifest:
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {"name": name, "batch_size": 8, **algorithm},
+            "environment": {"dataset": "openai/gsm8k"},
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-4B",
+                "max_context_length": 2048,
+            },
+            "training": {"max_steps": 100, "training_gpus_per_agent": 1},
+        }
+    )
+
+
+class TestDatasetLearnSeconds:
+    model = _catalog_spec("Qwen/Qwen3.5-4B")
+    device = _device()
+
+    def _seconds(self, manifest: TrainingManifest, plan) -> float | None:
+        return dataset_learn_seconds(
+            manifest.algorithm,
+            manifest.training.training_gpus_per_agent,
+            self.model,
+            self.device,
+            plan,
+            None,
+        )
+
+    def _plan(self, manifest: TrainingManifest):
+        return training_memory_from_manifest(manifest, self.model, self.device)
+
+    def test_prices_a_positive_sft_step(self) -> None:
+        # Arrange
+        manifest = _dataset_manifest("SFT")
+
+        # Act
+        seconds = self._seconds(manifest, self._plan(manifest))
+
+        # Assert
+        assert seconds is not None
+        assert seconds > 0
+
+    def test_dpo_trains_two_rows_and_scores_them_with_the_reference(self) -> None:
+        # Arrange: one plan, so only the rows and passes differ.
+        sft = _dataset_manifest("SFT")
+        dpo = _dataset_manifest("DPO")
+        plan = self._plan(sft)
+
+        # Act
+        sft_seconds = self._seconds(sft, plan)
+        dpo_seconds = self._seconds(dpo, plan)
+
+        # Assert: 2 rows x (2 update + 1 reference) over 1 row x 2 update.
+        assert dpo_seconds == pytest.approx(3 * sft_seconds, rel=1e-9)
+
+    def test_update_epochs_repeat_only_the_update_passes(self) -> None:
+        # Arrange
+        plan = self._plan(_dataset_manifest("SFT"))
+
+        # Act
+        sft = self._seconds(_dataset_manifest("SFT"), plan)
+        sft_twice = self._seconds(_dataset_manifest("SFT", update_epochs=2), plan)
+        dpo = self._seconds(_dataset_manifest("DPO"), plan)
+        dpo_twice = self._seconds(_dataset_manifest("DPO", update_epochs=2), plan)
+
+        # Assert
+        assert sft_twice == pytest.approx(2 * sft, rel=1e-9)
+        assert dpo_twice == pytest.approx(5 / 3 * dpo, rel=1e-9)
+
+    def test_adds_offload_seconds_per_optimizer_step(self) -> None:
+        # Arrange: 8 rows on one rank in mini-batches of 4 is two optimizer steps.
+        manifest = _dataset_manifest("SFT", mini_batch_size=4)
+        plan = self._plan(manifest)
+        offloaded = replace(plan, optimizer_offload_seconds=0.5)
+
+        # Act
+        base = self._seconds(manifest, plan)
+        seconds = self._seconds(manifest, offloaded)
+
+        # Assert
+        assert seconds == pytest.approx(base + 2 * 0.5, rel=1e-9)
+
+    def test_a_gpu_without_a_peak_bf16_figure_has_no_step(self) -> None:
+        # Arrange
+        manifest = _dataset_manifest("SFT")
+        plan = self._plan(manifest)
+        unrated = self.device.model_copy(update={"peak_bf16_flops": None})
+
+        # Act
+        seconds = dataset_learn_seconds(
+            manifest.algorithm, 1, self.model, unrated, plan, None
+        )
+
+        # Assert
+        assert seconds is None
+
+
+class TestDatasetLearnSecondsRowTokens:
+    model = _catalog_spec("Qwen/Qwen3.5-4B")
+    device = _device()
+
+    def _plan(self, name: str, packing: bool = True, fixed_share: float | None = None):
+        manifest = _dataset_manifest(name)
+        plan = training_memory_from_manifest(manifest, self.model, self.device)
+        settings = plan.settings.model_copy(update={"sequence_packing": packing})
+        plan = replace(plan, settings=settings, optimizer_offload_seconds=0.0)
+        if fixed_share is not None:
+            plan = replace(plan, fixed_cost=fixed_share * plan.cost)
+        return manifest, plan
+
+    def _seconds(
+        self,
+        name: str,
+        row_tokens: RowTokens | None,
+        packing: bool = True,
+        fixed_share: float | None = None,
+    ) -> float | None:
+        manifest, plan = self._plan(name, packing, fixed_share)
+        return dataset_learn_seconds(
+            manifest.algorithm, 1, self.model, self.device, plan, row_tokens
+        )
+
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    def test_shorter_packed_rows_shorten_the_step(self, name: str) -> None:
+        # Act: the manifest's context is 2048.
+        full = self._seconds(name, None)
+        half = self._seconds(name, RowTokens(1024.0, 1024.0**2))
+        quarter = self._seconds(name, RowTokens(512.0, 512.0**2))
+
+        # Assert
+        assert quarter < half < full
+
+    def test_token_work_alone_scales_between_linear_and_quadratic(self) -> None:
+        # Act: one plan, so host time is the same at every row length.
+        full = self._seconds("SFT", None)
+        half = self._seconds("SFT", RowTokens(1024.0, 1024.0**2))
+        quarter = self._seconds("SFT", RowTokens(512.0, 512.0**2))
+
+        # Assert: matmul scales with the row, attention with its square, so
+        # doubling the row adds between 2x and 4x what the last doubling did.
+        assert 2 < (full - half) / (half - quarter) < 4
+
+    @pytest.mark.parametrize("rows", [None, RowTokens(64.0, 64.0**2)])
+    def test_gathers_and_chunks_do_not_shrink_with_the_row(
+        self, rows: RowTokens | None
+    ) -> None:
+        # Act
+        without = self._seconds("SFT", rows, fixed_share=0.0)
+        with_fixed = self._seconds("SFT", rows, fixed_share=1.0)
+
+        # Assert: the plan's fixed cost is priced at max_model_len rows.
+        full_without = self._seconds("SFT", None, fixed_share=0.0)
+        full_with = self._seconds("SFT", None, fixed_share=1.0)
+        assert with_fixed - without == pytest.approx(
+            full_with - full_without, rel=1e-12
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "checkpointing", "stride", "epochs", "calls"),
+        [
+            # Two micro-batches of four rows: a forward and a backward each.
+            ("SFT", False, 1, 1, 4),
+            # A chosen and a rejected forward and backward, and a reference
+            # forward for each, per micro-batch.
+            ("DPO", False, 1, 1, 12),
+            # Checkpointing recomputes every block's forward in backward.
+            ("SFT", True, 1, 1, 6),
+            ("DPO", True, 1, 1, 16),
+            # Every second of the 32 blocks recomputed: half a call per copy.
+            ("SFT", True, 2, 1, 5),
+            # Each epoch repeats the update calls, not the reference forwards:
+            # 2 copies x (2 epochs x 2 + 1) = 10 per micro-batch.
+            ("DPO", False, 1, 2, 20),
+        ],
+    )
+    def test_tiny_rows_leave_the_host_time_of_every_model_call(
+        self, name: str, checkpointing: bool, stride: int, epochs: int, calls: int
+    ) -> None:
+        # Arrange
+        manifest = _dataset_manifest(
+            name,
+            micro_batch_size_per_gpu=4,
+            gradient_checkpointing=checkpointing,
+            update_epochs=epochs,
+        )
+        plan = training_memory_from_manifest(manifest, self.model, self.device)
+        plan = replace(
+            plan,
+            checkpoint_every_n_blocks=stride,
+            fixed_cost=0.0,
+            optimizer_offload_seconds=0.0,
+        )
+
+        # Act
+        tiny = dataset_learn_seconds(
+            manifest.algorithm, 1, self.model, self.device, plan, RowTokens(1.0, 1.0)
+        )
+
+        # Assert
+        assert plan.gradient_checkpointing is checkpointing
+        overhead = learn_costs(self.device).pass_overhead_seconds
+        assert tiny == pytest.approx(calls * overhead, rel=1e-2)
+
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    @pytest.mark.parametrize("length", [2048.0, 10_000.0])
+    def test_rows_at_or_past_the_context_price_max_model_len_rows(
+        self, name: str, length: float
+    ) -> None:
+        # Act
+        unknown = self._seconds(name, None)
+        full = self._seconds(name, RowTokens(length, length**2))
+
+        # Assert
+        assert full == pytest.approx(unknown, rel=1e-12)
+
+    def test_a_padded_trainer_prices_max_model_len_rows(self) -> None:
+        # Act
+        unknown = self._seconds("DPO", None, packing=False)
+        short = self._seconds("DPO", RowTokens(256.0, 256.0**2), packing=False)
+
+        # Assert
+        assert short == unknown
+
+    def test_skewed_rows_cost_more_attention_than_uniform_rows(self) -> None:
+        # Arrange: same mean, but half the rows are three times as long.
+        uniform = RowTokens(1024.0, 1024.0**2)
+        skewed = RowTokens(1024.0, (512.0**2 + 1536.0**2) / 2)
+
+        # Act
+        uniform_seconds = self._seconds("SFT", uniform)
+        skewed_seconds = self._seconds("SFT", skewed)
+
+        # Assert
+        assert skewed_seconds > uniform_seconds
 
 
 class TestTensorParallelSeconds:
