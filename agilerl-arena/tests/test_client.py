@@ -73,7 +73,7 @@ def _grpo_manifest(hub_id: str) -> dict:
         "environment": {
             "env_type": "rollout",
             "dataset": "openai/gsm8k",
-            "reward_file_path": "reward.py",
+            "reward_file_path": "s3://bucket/reward.py",
             "prompt_template": {"user_0": "{question}"},
         },
         "network": {
@@ -2704,6 +2704,43 @@ class TestArenaClientSubmitExperimentRewardFile:
             )
 
         api_key_client._open_stream.assert_not_called()
+
+    def test_local_rubric_path_without_reward_file_names_the_flag(self, api_key_client):
+        # Arrange
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["rubric_file_path"] = "reward.py"
+        api_key_client._open_stream = MagicMock()
+
+        # Act
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"rubric_file_path names the local file 'reward\.py', but the "
+            r"submit uploads no reward file",
+        ) as raised:
+            api_key_client.quote_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert raised.value.cli_hint == (
+            "Add --reward-file reward.py, or set rubric_file_path to an s3:// URI."
+        )
+        assert raised.value.sdk_hint == (
+            "Pass reward_file='reward.py', or set rubric_file_path to an s3:// URI."
+        )
+        api_key_client._open_stream.assert_not_called()
+
+    def test_s3_rubric_path_needs_no_reward_file(self, api_key_client):
+        # Arrange
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["rubric_file_path"] = "s3://bucket/reward.py"
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 11})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 11}
 
     @pytest.mark.parametrize(
         ("source", "error"),
