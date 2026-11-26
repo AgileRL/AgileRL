@@ -168,6 +168,7 @@ GRPO_METRIC_NAMES = (
     "adv_min",  # min post-processed advantage
     "adv_max",  # max post-processed advantage
     "adv_zero_frac",  # samples with no contrastive signal
+    "group_reward_std",  # mean over prompt groups of the population std of their episode returns
     "kl_ref",  # K3 vs reference over the update loop
     "kl_old",  # K3 vs rollout policy over the update loop
     "kl_clamp_frac",  # action tokens whose K3 vs reference exceeds kl_clamp
