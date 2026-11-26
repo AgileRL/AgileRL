@@ -32,6 +32,7 @@ from agilerl.arena.snowflake.job import (
     in_schema,
     job_services_sql,
     log_text,
+    lowered,
     manifest_fits,
     qualified_table,
     role_states,
@@ -270,7 +271,15 @@ def logs_command(
         snowflake_errors(),
         closing(open_session(job_connection_name(connection_name))) as session,
     ):
-        click.echo(service_logs(session, run_id, instance, role))
+        click.echo(
+            service_logs(
+                session,
+                run_id,
+                instance,
+                role,
+                status_command=f"arena snowflake status {run_id}",
+            )
+        )
 
 
 @snowflake_group.command("cancel")
@@ -433,28 +442,60 @@ def service_logs(
     instance: int,
     role: str = "head",
     schema: str | None = None,
+    *,
+    status_command: str,
 ) -> str:
     """Logs of the main container of one role.
 
-    A running service reads ``SYSTEM$GET_SERVICE_LOGS``. A finished one reads
-    the event table, since its node may already be released.
+    A running service reads ``SYSTEM$GET_SERVICE_LOGS`` once its container has
+    started. A finished one reads the event table, since its node may already
+    be released.
 
     :param session: Snowpark session.
     :param run_id: Run id.
     :param instance: Instance id. ``0`` is the first instance.
     :param role: ``broker``, ``head``, or ``worker``.
     :param schema: Schema of the services, or ``None`` for the session's current one.
-    :return: The log text.
+    :param status_command: Command that shows the run's status, named while
+        the container has not started.
+    :return: The log text, or a line saying the container has not started or
+        has written no logs yet.
     :raises ValueError: The service was dropped.
     """
     service = in_schema(service_for_role(run_id, role), schema)
     rows = list(session.sql(job_services_sql(run_id, schema)).collect())
     state = role_states(run_id, rows)[role]
     if state == "running":
+        containers = list(session.sql(service_status_sql(service)).collect())
+        if not container_started(containers, instance):
+            return (
+                f"The {role} container has not started yet (state: PENDING). "
+                "Its node can take several minutes to start; GPU nodes take longest. "
+                f"Check progress with {status_command}."
+            )
         live = session.sql(service_logs_sql(service, instance)).collect()
-        return log_text(list(live))
+        return log_text(list(live)) or (
+            f"The {role} container has started but has written no logs yet. "
+            "Check again in a minute."
+        )
     if state == "gone":
         msg = f"{service} was dropped, so its logs cannot be read."
         raise ValueError(msg)
     stored = session.sql(service_event_logs_sql(service, instance)).collect()
     return event_log_text(list(stored))
+
+
+def container_started(containers: list[SnowflakeRow], instance: int) -> bool:
+    """Whether a container instance has left ``PENDING``.
+
+    :param containers: ``SHOW SERVICE CONTAINERS`` rows. A pending service
+        reports one row with no instance.
+    :param instance: Instance id.
+    :return: False while the instance is unlisted or ``PENDING``.
+    """
+    return any(
+        values.get("instance_id") is not None
+        and int(values["instance_id"]) == instance
+        and str(values.get("status", "")).upper() != "PENDING"
+        for values in map(lowered, containers)
+    )
