@@ -598,7 +598,7 @@ class TestSetPools:
         # Act
         with pytest.raises(
             ValueError,
-            match=r"APP\.APP_STATE\.ARENA_RUN_1_WORKERS is using 2 nodes\. "
+            match=r"APP\.APP_STATE\.ARENA_RUN_1_WORKERS needs 2 nodes\. "
             r"MAX_NODES 1 is below that\.\nThe pool was not changed\.",
         ):
             set_pools(session, ["GPU_NV_S"], 1, "CPU_X64_L", "CPU_X64_SL")
@@ -618,14 +618,78 @@ class TestSetPools:
         with pytest.raises(
             ValueError,
             match=r"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S is no longer listed, so it would be dropped\.\n"
-            r"APP\.APP_STATE\.ARENA_RUN_1_WORKERS is using 1 nodes\.",
+            r"APP\.APP_STATE\.ARENA_RUN_1_WORKERS needs 1 node\.",
         ):
             set_pools(session, ["GPU_NV_M"], 4, "CPU_X64_L", "CPU_X64_SL")
 
         assert not any(s.startswith("DROP") for s in session.statements)
 
-    def test_a_finished_service_does_not_block_a_shrink(self) -> None:
-        done = service_row("DONE", 2)
+    def test_refuses_to_drop_a_pool_with_a_job_waiting_for_a_node(self) -> None:
+        # Arrange
+        queued = Row(
+            database_name="APP",
+            schema_name="APP_STATE",
+            name="ARENA_RUN_2_WORKERS",
+            status="PENDING",
+            current_instances=0,
+            target_instances=1,
+            min_instances=1,
+        )
+        session = pools_session(
+            [GPU_NV_S_POOL], services={"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S": [queued]}
+        )
+
+        # Act
+        with pytest.raises(ValueError, match="no longer listed") as raised:
+            set_pools(session, ["GPU_NV_M"], 4, "CPU_X64_L", "CPU_X64_SL")
+
+        # Assert
+        assert str(raised.value) == (
+            "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S is no longer listed, "
+            "so it would be dropped.\n"
+            "APP.APP_STATE.ARENA_RUN_2_WORKERS needs 1 node. MAX_NODES 0 is below that.\n"
+            "The pool was not changed."
+        )
+        assert not any(
+            s.startswith(("CREATE", "ALTER", "DROP")) for s in session.statements
+        )
+        assert session.file.uploads == []
+
+    def test_refuses_to_shrink_below_the_nodes_a_queued_job_asked_for(self) -> None:
+        queued = Row(
+            database_name="APP",
+            schema_name="APP_STATE",
+            name="ARENA_RUN_2_WORKERS",
+            status="PENDING",
+            current_instances=0,
+            target_instances=2,
+            min_instances=2,
+        )
+        session = pools_session(
+            [GPU_NV_S_POOL], services={"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S": [queued]}
+        )
+
+        with pytest.raises(ValueError, match=r"needs 2 nodes\. MAX_NODES 1"):
+            set_pools(session, ["GPU_NV_S"], 1, "CPU_X64_L", "CPU_X64_SL")
+
+        assert not any(s.startswith("ALTER") for s in session.statements)
+
+    def test_refuses_a_cap_that_is_not_whole_nodes_before_any_sql(self) -> None:
+        session = pools_session([GPU_NV_S_POOL])
+
+        with pytest.raises(ValueError, match="multiple of 4") as raised:
+            set_pools(session, ["GPU_NV_M", "GPU_NV_S"], 1, "CPU_X64_L", "CPU_X64_SL")
+
+        assert str(raised.value) == (
+            "GPU_NV_M has 4 GPUs per node, so its cap is a multiple of 4: "
+            "4, 8, 12 and so on. 1 is not.\n"
+            "No pool was changed."
+        )
+        assert session.statements == []
+
+    @pytest.mark.parametrize("status", ["DONE", "INTERNAL_ERROR", "DELETED"])
+    def test_a_finished_service_does_not_block_a_shrink(self, status: str) -> None:
+        done = service_row(status, 2)
         session = pools_session(
             [GPU_NV_S_POOL], services={"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S": [done]}
         )

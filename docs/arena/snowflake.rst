@@ -237,7 +237,8 @@ caps, and pools unless you pass new values.
      - GPU pool family. Repeat for each one. Default: the families already
        set up, else the smallest GPU family in the region.
    * - ``--max-gpus``
-     - GPUs each GPU pool can hold. Default: the saved cap, else two nodes.
+     - GPUs each GPU pool can hold, a multiple of the family's GPUs per
+       node. Default: the saved cap, else two nodes.
    * - ``--broker-family`` / ``--head-family``
      - CPU families for the broker and head pools. Defaults ``CPU_X64_L`` and
        ``CPU_X64_SL``.
@@ -351,7 +352,10 @@ Compute pools and GPU caps
 
 ``pools`` lists each pool, its family, its cap, and the nodes in use.
 ``pools set`` sets a family's GPU cap. The pool's ``MAX_NODES`` becomes the
-node count that holds that many GPUs. A family with no pool yet gets one.
+node count that holds that many GPUs, so the cap is a multiple of the
+family's GPUs per node. A family with no pool yet gets one. ``pools set``
+refuses a cap below the nodes a queued or running service on the pool asked
+for, and changes nothing.
 Snowflake limits nodes per family (see `GPUs`_); above that, ask your
 Snowflake account team.
 
@@ -584,7 +588,9 @@ Status, logs, and cancel
 
 ``status`` prints the state of the broker, head, and workers, the containers
 of each, and one overall state: ``running``, ``succeeded``, ``failed``,
-``cancelling``, ``cancelled``, or ``gone``.
+``cancelling``, ``cancelled``, or ``gone``. A run whose head or worker
+service is gone before the head finished reads ``failed``, since it cannot
+make progress; ``cancel`` frees the nodes its other services hold.
 
 ``logs`` prints the ``main`` container log of one role (``broker``, ``head``,
 or ``worker``; default ``head``) and instance (default 0). Logs of a finished

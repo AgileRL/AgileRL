@@ -123,6 +123,7 @@ from agilerl.arena.snowflake.publish import unpublish as drop_served
 from agilerl.arena.snowflake.rewards import REWARD_REFERENCE
 from agilerl.arena.snowflake.setup import (
     ORG_KEY_PREFIX,
+    check_gpu_cap,
     family_listed,
     format_family_lines,
     missing_family_message,
@@ -310,8 +311,9 @@ def set_pools(
         ``CPU_X64_SL``.
     :return: One line per pool.
     :raises ValueError: A family is unknown, missing from this region or with
-        another GPU count per node here, an existing pool uses another family,
-        or a running service blocks the change.
+        another GPU count per node here, ``max_gpus`` is not whole nodes of a
+        family, an existing pool uses another family, or a queued or running
+        service blocks the change.
     """
     names = gpu_names(gpu_families, max_gpus)
     # An explicit NULL from SQL skips the procedure's DEFAULT, so default here too.
@@ -364,7 +366,7 @@ def gpu_names(gpu_families: list[str], max_gpus: int | None) -> list[str]:
     :param max_gpus: GPU cap for each family, or ``None``.
     :return: The families.
     :raises ValueError: No family is named, a family is unknown, or
-        ``max_gpus`` is below 1.
+        ``max_gpus`` is below 1 or not whole nodes of a family.
     """
     names = list(dict.fromkeys(str(item).strip().upper() for item in gpu_families))
     if not names:
@@ -373,9 +375,13 @@ def gpu_names(gpu_families: list[str], max_gpus: int | None) -> list[str]:
     for name in names:
         if name not in GPU_FAMILIES:
             raise ValueError(unsupported_gpu_message(name))
-    if max_gpus is not None and max_gpus < 1:
+    if max_gpus is None:
+        return names
+    if max_gpus < 1:
         msg = "max_gpus must be at least 1.\nNo pool was changed."
         raise ValueError(msg)
+    for name in names:
+        check_gpu_cap(name, max_gpus, GPU_FAMILIES[name].gpus)
     return names
 
 
@@ -475,8 +481,8 @@ def checked_leftovers(
     :param plans: Pools to create or resize.
     :param existing: Compute pools in the account, keyed by upper-case name.
     :return: Upper-case names of the pools to drop.
-    :raises ValueError: An existing pool uses another family, or a running
-        service blocks a resize or drop.
+    :raises ValueError: An existing pool uses another family, or a queued or
+        running service blocks a resize or drop.
     """
     for plan in plans:
         state = existing.get(plan.name.upper())
