@@ -18,7 +18,10 @@ class LearnCosts:
 
     # Recomputing one checkpointed token.
     recompute_cost: float
-    # Fixed cost of one micro-batch: launches, hooks and host work.
+    # Fixed cost of one micro-batch: launches, hooks and host work. The
+    # training-memory search ranks plans by it, and GRPO learn seconds and
+    # step timing price it. SFT and DPO step seconds use
+    # ``pass_overhead_seconds`` instead.
     micro_batch_overhead_tokens: float
     # Frozen-base all-gather of one micro-batch resharded after forward.
     reshard_gather_tokens: float
@@ -32,6 +35,11 @@ class LearnCosts:
     # Learn work per second per peak bf16 FLOP, over the A100's, for the GPU
     # split's learn time.
     peak_speed: float = 1.0
+    # Host seconds one forward or backward call of an SFT or DPO learn step
+    # takes whatever its length: kernel launches, hooks and adapter switches.
+    # It does not grow with the model or the row, so short rows on a fast GPU
+    # wait on it. Zero leaves it unpriced.
+    pass_overhead_seconds: float = 0.0
     # Bytes per second one node sends the others, per direction, in an FSDP
     # ring all-gather and in a routed-token exchange, over the pod network
     # with NCCL's default socket settings. Zero leaves that traffic unpriced.
@@ -50,6 +58,9 @@ SM80_LEARN_COSTS = LearnCosts(
     # token dispatch and combine at ep=8 at 1.29 GB/s. The A100 is unmeasured.
     cross_node_gather_bytes_per_second=0.73e9,
     cross_node_exchange_bytes_per_second=1.29e9,
+    # Fitted to measured LoRA SFT/DPO steps on L4, A100 and H100. Short rows
+    # on one A100 left the GPU 80% idle, waiting on this.
+    pass_overhead_seconds=0.20,
 )
 """A100-80.
 
@@ -75,16 +86,20 @@ SM90_LEARN_COSTS = LearnCosts(
     # token dispatch and combine at ep=16, 8192 tokens per GPU, at 3.4 GB/s.
     cross_node_gather_bytes_per_second=2.43e9,
     cross_node_exchange_bytes_per_second=3.4e9,
+    # Fitted to measured LoRA SFT/DPO steps on L4, A100 and H100.
+    pass_overhead_seconds=0.14,
 )
-"""H100 80GB HBM3: a micro-batch's host work is about 0.5 s, so fewer, larger micro-batches win."""
+"""H100 80GB HBM3: each SFT or DPO model call adds 0.14 s of host time, so fewer, larger micro-batches win."""
 
 L4_LEARN_COSTS = replace(
     SM80_LEARN_COSTS,
-    # Qwen3.5 0.8B / 4B LoRA SFT on one GPU (arena-dev, November 2026): an
-    # A100-40 stepped 1.82x / 1.29x faster than an L4, not the 2.58x their
-    # peak bf16 predicts. Small steps keep a big GPU further below its peak
-    # (lower MFU), so the L4 learns 1.7x the A100's work per peak FLOP.
-    peak_speed=1.7,
+    # GRPO LoRA on four GPUs at 16k and 32k context (Qwen3.5 0.8B to 4B,
+    # Nemotron-3-Nano-4B) learns 3.8-5.9x slower on L4 than on A100, 4.6x on
+    # geometric mean, against a 2.58x peak bf16 ratio. Long SFT/DPO steps fit
+    # the same speed once pass_overhead_seconds is priced.
+    peak_speed=0.55,
+    # Fitted to measured LoRA SFT/DPO steps on L4, A100 and H100.
+    pass_overhead_seconds=0.13,
 )
 """L4: the A100 costs at its measured learn speed."""
 
@@ -94,7 +109,11 @@ LEARN_COSTS_BY_CAPABILITY: dict[tuple[int, int], LearnCosts] = {
 }
 
 LEARN_COSTS_BY_GPU: dict[str, LearnCosts] = {"NVIDIA L4": L4_LEARN_COSTS}
-"""GPUs measured apart from others of their compute capability (L40S shares the L4's)."""
+"""GPUs measured apart from others of their compute capability.
+
+The L40S shares only the L4's compute capability, not its row, so it uses
+:data:`SM80_LEARN_COSTS`.
+"""
 
 
 def learn_costs(device: DeviceSpec) -> LearnCosts:

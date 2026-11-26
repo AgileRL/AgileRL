@@ -13,6 +13,8 @@ entities:
         artifacts:
             - manifest.yml
             - setup_script.sql
+            - src: app_readme.md
+              dest: README.md
             - src: app_code/arena_app.py
               dest: app_code/
             - src: app_code/app_billing.py

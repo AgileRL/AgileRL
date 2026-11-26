@@ -11,11 +11,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from botocore.stub import Stubber
 from openenv.core.llm_client import LLMClient
 
 from agilerl.arena.models.env import JudgeSpec
 from agilerl.llm_envs import judge as judge_module
 from agilerl.llm_envs.judge import (
+    BedrockConverseClient,
     JudgeClient,
     JudgeStats,
     build_judge_client,
@@ -128,6 +130,63 @@ class TestBuildJudgeClient:
         client = build_judge_client(spec)
 
         assert client.base_url == "https://api.anthropic.com:443"
+
+
+BEDROCK = JudgeSpec(
+    provider="bedrock", model="deepseek.v3.2", region="us-east-1", max_tokens=64
+)
+
+
+@pytest.fixture
+def aws_test_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDTEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+
+@pytest.mark.usefixtures("aws_test_credentials")
+class TestBedrockJudge:
+    def test_points_at_bedrock_runtime_in_the_region(self) -> None:
+        client = build_judge_client(BEDROCK)
+
+        assert client.base_url == "https://bedrock-runtime.us-east-1.amazonaws.com:443"
+
+    def test_sends_the_prompt_to_converse_and_joins_the_text_blocks(self) -> None:
+        # Arrange
+        inner = BedrockConverseClient(BEDROCK)
+        stubber = Stubber(inner._client)
+        stubber.add_response(
+            "converse",
+            {
+                "output": {
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"reasoningContent": {"reasoningText": {"text": "hmm"}}},
+                            {"text": '{"score": 1}'},
+                        ],
+                    }
+                },
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 3, "outputTokens": 4, "totalTokens": 7},
+                "metrics": {"latencyMs": 5},
+            },
+            {
+                "modelId": "deepseek.v3.2",
+                "messages": [{"role": "user", "content": [{"text": "grade this"}]}],
+                "inferenceConfig": {"maxTokens": 64, "temperature": 0.0},
+            },
+        )
+        client = JudgeClient(BEDROCK, inner)
+
+        # Act
+        with stubber:
+            reply = asyncio.run(client.complete("grade this"))
+
+        # Assert
+        assert reply == '{"score": 1}'
+        stubber.assert_no_pending_responses()
+        assert client.drain_stats().calls == 1
 
 
 class TestAnthropicMessagesClientComplete:

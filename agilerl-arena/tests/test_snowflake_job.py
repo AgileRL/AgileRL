@@ -1437,11 +1437,11 @@ def _gpu(family: str, per_node: int, memory: int, max_gpus: int) -> GpuPool:
     return GpuPool(f"arena_gpu_{family}", max_gpus, per_node, memory)
 
 
-def _accepts(pool: GpuPool) -> bool:
+def _accepts(family: str, pool: GpuPool) -> bool:
     return True
 
 
-def _rejects(pool: GpuPool) -> bool:
+def _rejects(family: str, pool: GpuPool) -> bool:
     raise AssertionError(pool.pool)
 
 
@@ -1475,7 +1475,7 @@ class TestChooseGpuFamily:
     def test_a_named_family_the_estimator_cannot_size_warns(self) -> None:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 8)}
 
-        def unsized(pool: GpuPool) -> bool:
+        def unsized(family: str, pool: GpuPool) -> bool:
             msg = "unknown model architecture"
             raise ValueError(msg)
 
@@ -1488,7 +1488,7 @@ class TestChooseGpuFamily:
     def test_an_omitted_family_the_estimator_cannot_size_raises(self) -> None:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 8)}
 
-        def unsized(pool: GpuPool) -> bool:
+        def unsized(family: str, pool: GpuPool) -> bool:
             msg = "unknown model architecture"
             raise ValueError(msg)
 
@@ -1502,7 +1502,7 @@ class TestChooseGpuFamily:
         }
 
         chosen = choose_gpu_family(
-            pools, 8, None, lambda pool: pool.gpu_memory_gib >= 40
+            pools, 8, None, lambda family, pool: pool.gpu_memory_gib >= 40
         )
 
         assert chosen == "GPU_NV_L"
@@ -1511,7 +1511,7 @@ class TestChooseGpuFamily:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 8)}
 
         with pytest.raises(ValueError, match=r"GPU_NV_S \(24 GiB\)") as raised:
-            choose_gpu_family(pools, 8, "GPU_NV_S", lambda pool: False)
+            choose_gpu_family(pools, 8, "GPU_NV_S", lambda family, pool: False)
 
         assert "cannot hold this manifest" in str(raised.value)
 
@@ -1523,7 +1523,9 @@ class TestChooseGpuFamily:
         }
 
         with pytest.raises(ValueError, match="Too small") as raised:
-            choose_gpu_family(pools, 4, None, lambda pool: pool.gpu_memory_gib >= 80)
+            choose_gpu_family(
+                pools, 4, None, lambda family, pool: pool.gpu_memory_gib >= 80
+            )
 
         text = str(raised.value)
         assert "GPU_NV_M (24 GiB)" in text
@@ -1584,12 +1586,12 @@ class TestManifestFits:
     def test_a_manifest_within_the_gpu_memory_fits(self, tmp_path: Path) -> None:
         pool = _gpu("GPU_NV_SL", 1, 80, 8)
 
-        assert manifest_fits(_write(tmp_path, _sft()), pool, 1) is True
+        assert manifest_fits(_write(tmp_path, _sft()), "GPU_NV_SL", pool, 1) is True
 
     def test_a_manifest_over_the_gpu_memory_does_not_fit(self, tmp_path: Path) -> None:
         pool = _gpu("GPU_NV_S", 1, 1, 8)
 
-        assert manifest_fits(_write(tmp_path, _sft()), pool, 1) is False
+        assert manifest_fits(_write(tmp_path, _sft()), "GPU_NV_S", pool, 1) is False
 
     def test_the_estimate_lays_the_run_out_on_the_family_nodes(
         self, tmp_path: Path
@@ -1601,11 +1603,36 @@ class TestManifestFits:
         eight_nodes = _gpu("GPU_NV_S", 1, 4, 8)
 
         # Act
-        on_one_node = manifest_fits(manifest, one_node, 8)
-        on_eight_nodes = manifest_fits(manifest, eight_nodes, 8)
+        on_one_node = manifest_fits(manifest, "GPU_NV_L", one_node, 8)
+        on_eight_nodes = manifest_fits(manifest, "GPU_NV_S", eight_nodes, 8)
 
         # Assert
         assert (on_one_node, on_eight_nodes) == (False, True)
+
+    def test_a_rollout_with_a_builtin_reward_is_sized_on_the_family_gpu(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        document = {
+            "algorithm": {"name": "CISPO", "group_size": 4, "batch_size": 8},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "questions",
+                "columns": {"question": "QUESTION", "answer": "ANSWER"},
+                "prompt_template": {"user_0": "{question}"},
+                "reward": {"type": "numeric"},
+            },
+            "network": NETWORK,
+            "training": {"max_steps": 2},
+        }
+
+        # Act
+        fits = manifest_fits(
+            _write(tmp_path, document), "GPU_NV_M", _gpu("GPU_NV_M", 4, 24, 4), 4
+        )
+
+        # Assert
+        assert fits is True
 
     def test_an_invalid_manifest_raises_the_estimator_message(
         self, tmp_path: Path
@@ -1614,7 +1641,7 @@ class TestManifestFits:
         path.write_text("algorithm: [\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="could not validate"):
-            manifest_fits(path, _gpu("GPU_NV_S", 1, 24, 8), 1)
+            manifest_fits(path, "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 8), 1)
 
 
 class TestSubmitServices:

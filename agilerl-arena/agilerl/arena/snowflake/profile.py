@@ -103,8 +103,9 @@ GPU_FAMILIES = {
     "GPU_NV_XS": GpuFamilySpec(1, 16, 26, 10, "T4"),
     "GPU_NV_SM": GpuFamilySpec(1, 24, 424, 10, "A10"),
     "GPU_NV_2M": GpuFamilySpec(2, 24, 858, 5, "A10"),
-    "GPU_NV_3M": GpuFamilySpec(2, 80, 424, 0, "A100"),
-    "GPU_NV_SL": GpuFamilySpec(4, 80, 858, 0, "A100"),
+    # "A100" is the 40GB row. 80 GiB families need "80" in the name.
+    "GPU_NV_3M": GpuFamilySpec(2, 80, 424, 0, "A100 80GB"),
+    "GPU_NV_SL": GpuFamilySpec(4, 80, 858, 0, "A100 80GB"),
     "GPU_GCP_NV_L4_1_24G": GpuFamilySpec(1, 24, 28, 10, "L4"),
     "GPU_GCP_NV_L4_4_24G": GpuFamilySpec(4, 24, 178, 10, "L4"),
     "GPU_A100_G1_12": GpuFamilySpec(1, 40, 77, 0, "A100"),

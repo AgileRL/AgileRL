@@ -609,7 +609,7 @@ def submit(
             pools,
             gpus,
             gpu_family,
-            lambda pool: manifest_fits(job_manifest, pool, gpus),
+            lambda family, pool: manifest_fits(job_manifest, family, pool, gpus),
         )
         settings = submit_settings(
             profile,
@@ -1115,7 +1115,7 @@ def publish(
             serve=serve,
             ingress=False,
             compute_pool=sole_gpu_pool(profile),
-            image_build_pool=profile.pools.head.pool,
+            head_pool=profile.pools.head.pool,
             image=profile.image,
             warehouse=profile.warehouse,
             gpu_count=gpu_count,

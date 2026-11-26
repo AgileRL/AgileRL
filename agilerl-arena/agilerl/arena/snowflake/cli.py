@@ -380,7 +380,7 @@ def _submit_settings(
         profile.pools.gpu,
         gpus,
         gpu_family,
-        lambda pool: manifest_fits(manifest, pool, gpus),
+        lambda family, pool: manifest_fits(manifest, family, pool, gpus),
     )
     pool = profile.pools.gpu[family]
     return SubmitSettings(

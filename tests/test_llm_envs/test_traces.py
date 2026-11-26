@@ -866,7 +866,10 @@ class TestCheckTracesRender:
         row = {"messages": [*helpdesk_prompt()[:2], *helpdesk_completion()]}
         dataset = HFDataset.from_list([row])
 
-        with pytest.raises(ValueError, match=r"Row 1: the prompt .* not a prefix"):
+        with pytest.raises(
+            ValueError,
+            match="Row 1: SFT renders a trained turn or its context differently",
+        ):
             check_traces_render(dataset, tokenizer, None, {})
 
 
@@ -1353,7 +1356,50 @@ def thinking_segment() -> dict[str, Any]:
     return segment
 
 
+def two_question_segment(reasoning_key: str) -> dict[str, Any]:
+    """A plain two-question chat whose turns both reason."""
+    return {
+        "messages": [
+            {"role": "user", "content": "What is 2+3?"},
+            {"role": "assistant", reasoning_key: "Two plus three.", "content": "5."},
+            {"role": "user", "content": "And 4+4?"},
+            {"role": "assistant", reasoning_key: "Four plus four.", "content": "8."},
+        ]
+    }
+
+
 class TestTracesSegmentSftRewritingTemplate:
+    def test_detects_a_template_that_drops_a_trained_turns_own_analysis(
+        self,
+    ) -> None:
+        # Arrange: the first turn's analysis is gone once the second final follows.
+        dataset = HFDataset.from_list([two_question_segment("thinking")])
+        harmony = template_tokenizer(DROPS_PAST_ANALYSIS_TEMPLATE, HARMONY_SPECIALS)
+
+        # Act / Assert
+        assert template_rewrites_turns(dataset, harmony, HarmonyFormat(harmony), {})
+
+    def test_qwen3_trains_each_turn_with_its_reasoning(self) -> None:
+        # Arrange
+        tokenizer = cached_tokenizer("Qwen/Qwen3-4B")
+        dataset = HFDataset.from_list([two_question_segment("reasoning_content")])
+        chat_format = detect_chat_format(tokenizer)
+
+        # Act
+        split = traces_sft_split(dataset, "train split", tokenizer, chat_format, {})
+        trained = [
+            tokenizer.decode(target)
+            for row in split
+            for _, target in per_turn_targets(
+                *encode_sft_row(tokenizer, row, "completion", chat_format, True)
+            )
+        ]
+
+        # Assert
+        assert len(trained) == 2
+        assert "Two plus three." in trained[0]
+        assert "Four plus four." in trained[1]
+
     def test_detects_a_template_that_drops_past_analysis(
         self, tokenizer: PreTrainedTokenizerBase
     ) -> None:
@@ -1448,5 +1494,8 @@ class TestCheckTracesRenderSegments:
         harmony = template_tokenizer(DROPS_PAST_ANALYSIS_TEMPLATE, HARMONY_SPECIALS)
         dataset = HFDataset.from_list([thinking_segment()])
 
-        with pytest.raises(ValueError, match=r"Row 1: the prompt .* not a prefix"):
+        with pytest.raises(
+            ValueError,
+            match="Row 1: SFT renders a trained turn or its context differently",
+        ):
             check_traces_render(dataset, harmony, HarmonyFormat(harmony), {})

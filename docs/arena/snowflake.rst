@@ -701,8 +701,8 @@ prints the model, version, service, and endpoint.
    * - ``--max-model-len``
      - vLLM ``--max-model-len``. Unset uses vLLM's default.
    * - ``--compute-pool``
-     - Pool for the publish job and the service. Default: the account's GPU
-       pool when there is one GPU family, else the run's pool.
+     - GPU pool for the service. Default: the account's GPU pool when there
+       is one GPU family, else the run's pool.
    * - ``--database`` / ``--schema``
      - Where the model and service go. Pass both. Default
        ``arena.training``.
@@ -715,10 +715,10 @@ The trainer writes ``merged/`` when the ``checkpoint_export`` trigger fires,
 by default at the final save. A run stopped before then has no ``merged/``
 and cannot be published, and ``--step`` takes only a checkpoint with a
 complete ``merged/``. ``publish`` stops before it starts anything when the
-version or the service already exists. The job needs host memory of about the weights' size plus
-4 GiB on one node (bf16 is 2 bytes per parameter, so about 12 GiB for a 4B
-model) and holds it while the service starts, so the pool needs a second node
-unless one node fits both.
+version or the service already exists. The job runs on the head pool, so the
+service can take the whole GPU node. It needs host memory of about the
+weights' size plus 4 GiB on one head node (bf16 is 2 bytes per parameter, so
+about 12 GiB for a 4B model) and holds it while the service starts.
 
 Get the endpoint
 ~~~~~~~~~~~~~~~~

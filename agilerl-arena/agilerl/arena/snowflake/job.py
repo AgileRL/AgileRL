@@ -372,10 +372,12 @@ def trainer_ports(manifest: TrainingManifest, worker_gpus: int) -> TrainerPorts:
     return TrainerPorts(agents=training.pop_size, engines_per_agent=max(1, engines))
 
 
-def manifest_fits(manifest_path: Path, pool: GpuPool, gpus: int) -> bool:
+def manifest_fits(manifest_path: Path, family: str, pool: GpuPool, gpus: int) -> bool:
     """Whether the memory estimator says the manifest fits the run's GPUs.
 
     :param manifest_path: Training manifest.
+    :param family: The pool's GPU family, which names the GPU model the
+        estimator prices the trainer and rollout split on.
     :param pool: The family's pool, for per-GPU memory and GPUs per node.
     :param gpus: GPUs for the whole run, a multiple of ``pool.gpus_per_node``.
         The trainer lays the run out on ``gpus // pool.gpus_per_node`` nodes.
@@ -387,6 +389,7 @@ def manifest_fits(manifest_path: Path, pool: GpuPool, gpus: int) -> bool:
     with redirect_stdout(stdout), redirect_stderr(stderr):
         code = memory_cli.main(
             str(manifest_path),
+            gpu=GPU_FAMILIES[family].gpu,
             device_gb=float(pool.gpu_memory_gib),
             num_gpus=gpus,
             gpus_per_node=pool.gpus_per_node,
@@ -404,7 +407,7 @@ def choose_gpu_family(
     pools: dict[str, GpuPool],
     gpus: int,
     family: str | None,
-    fits: Callable[[GpuPool], bool],
+    fits: Callable[[str, GpuPool], bool],
 ) -> str:
     """Pick a GPU family that divides ``gpus`` and that ``fits`` accepts.
 
@@ -437,7 +440,7 @@ def choose_gpu_family(
         if pool.gpus_per_node < 1 or gpus % pool.gpus_per_node != 0:
             raise ValueError(_gpu_counts_message(gpus, {family: pool}, family))
         try:
-            fitted = fits(pool)
+            fitted = fits(family, pool)
         except ValueError as exc:
             warnings.warn(
                 f"The memory estimator could not size this manifest, so "
@@ -455,7 +458,7 @@ def choose_gpu_family(
     ]
     if not dividing:
         raise ValueError(_gpu_counts_message(gpus, pools, None))
-    holding = [(name, pool) for name, pool in dividing if fits(pool)]
+    holding = [(name, pool) for name, pool in dividing if fits(name, pool)]
     if not holding:
         raise ValueError(_too_small_message(gpus, dividing, None))
     holding.sort(

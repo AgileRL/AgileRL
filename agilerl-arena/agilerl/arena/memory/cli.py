@@ -605,9 +605,16 @@ def _estimate_device(
 def _sized_manifest(source: str | dict[str, Any]) -> TrainingManifest:
     """Validate *source* for sizing, filling an unset rollout rubric path as submit does.
 
+    An environment with a built-in ``reward`` is validated as written, since a
+    rubric path beside it is refused.
+
     :param source: Manifest path or document.
     :return: The validated manifest.
     """
+    document = TrainingManifest.load(source) if isinstance(source, str) else source
+    environment = document.get("environment") if isinstance(document, dict) else None
+    if isinstance(environment, dict) and environment.get("reward") is not None:
+        return TrainingManifest.get_validated(document, mode="python")
     # The rubric never moves memory; bytes fill an unset path with the submit placeholder.
     return TrainingManifest.get_validated(
         with_reward_file_path(source, b""), mode="python"
