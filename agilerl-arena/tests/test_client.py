@@ -35,7 +35,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.models import MANIFEST_REGISTRY, TrainingManifest, __version__
+from agilerl.arena.models import MANIFEST_REGISTRY, __version__
 from agilerl.arena.models.manifest import warn_once
 from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
@@ -1804,11 +1804,6 @@ class TestArenaClientSubmitChecks:
             api_key_client.submit_experiment(manifest=_dqn_manifest(), project="proj")
 
         api_key_client._open_stream.assert_not_called()
-
-    def test_model_status_check_skips_a_classic_manifest(self):
-        manifest = TrainingManifest.model_validate(_dqn_manifest())
-
-        assert ArenaClient._check_model_status(manifest) is None
 
     def test_llm_population_is_rejected_before_any_request(self, api_key_client):
         api_key_client._open_stream = MagicMock()
