@@ -95,10 +95,10 @@ def equation_reward_func(completions, target, nums, **kwargs):
     return rewards
 
 
-def combined_rewards(completion, solution, prompt):
+def combined_rewards(completion, answer, question):
     return (
-        equation_reward_func([completion], [solution], [prompt])[0]
-        + format_reward_func([completion], [solution])[0]
+        equation_reward_func([completion], [answer], [question])[0]
+        + format_reward_func([completion], [answer])[0]
     )
 
 
@@ -160,7 +160,6 @@ def main(init_hp, mut_p):
             r=16,
             lora_alpha=64,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
             bias="none",
         ),
         vllm_config=VLLMConfig(sleep_mode=False, max_num_seqs=4),

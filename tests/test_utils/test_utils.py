@@ -394,7 +394,6 @@ class TestCreatePopulation:
             "MAX_GRAD_NORM": 0.5,
             "UPDATE_EPOCHS": 1,
             "MAX_MODEL_LEN": 100,
-            "GRADIENT_CHECKPOINTING": False,
         }
         device = "cuda" if torch.cuda.is_available() else "cpu"
         population_size = 1
@@ -466,7 +465,6 @@ class TestCreatePopulation:
             "MAX_MODEL_LEN": 96,
             "MAX_OUTPUT_TOKENS": 12,
             "USE_VLLM": True,
-            "GRADIENT_CHECKPOINTING": False,
             "COSINE_lR_SCHEDULER": {"num_steps": 10, "warmup_proportion": 0.1},
         }
         actor = MagicMock(name="actor_network")
@@ -524,7 +522,6 @@ class TestCreatePopulation:
             "UPDATE_EPOCHS": 2,
             "MAX_MODEL_LEN": 80,
             "USE_VLLM": False,
-            "GRADIENT_CHECKPOINTING": False,
             "COSINE_lR_SCHEDULER": {"num_steps": 8, "warmup_proportion": 0.2},
         }
         actor = MagicMock(name="actor_network")
@@ -556,7 +553,6 @@ class TestCreatePopulation:
                 accelerator=None,
                 actor_network=actor,
                 vllm_config=global_vllm_cfg,
-                torch_compiler="inductor",
                 algo_kwargs={
                     "pad_token_id": 999,
                     "pad_token": "<pad>",
@@ -571,7 +567,6 @@ class TestCreatePopulation:
         assert first_kw["actor_network"] is actor
         assert second_kw["actor_network"] is cloned_actor
         assert first_kw["vllm_config"] is local_vllm_cfg
-        assert first_kw["torch_compiler"] == "inductor"
         assert first_kw["lr"] == init_hp["LR"]
         assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
 
@@ -589,7 +584,6 @@ class TestCreatePopulation:
             "MAX_MODEL_LEN": 96,
             "MAX_OUTPUT_TOKENS": 12,
             "USE_VLLM": False,
-            "GRADIENT_CHECKPOINTING": False,
         }
         actor = MagicMock(name="actor_network")
         actor.state_dict.return_value = {"w": torch.tensor([1.0])}
@@ -627,59 +621,45 @@ class TestCreatePopulation:
         not HAS_LLM_DEPENDENCIES,
         reason="agilerl[llm] not installed",
     )
-    @pytest.mark.parametrize(
-        ("algo", "patch_target"),
-        [
-            ("GRPO", "agilerl.utils.utils.GRPO"),
-            ("LLMPPO", "agilerl.utils.utils.LLMPPO"),
-            ("LLMREINFORCE", "agilerl.utils.utils.LLMREINFORCE"),
-        ],
-    )
-    def test_llm_population_threads_liger_and_logprob_flags(
-        self, vector_space, algo, patch_target
-    ):
-        """``USE_LIGER_LOSS`` / ``CAST_LOGPROBS_TO_FP32`` are forwarded from
-        ``INIT_HP`` to the algo constructor for every LLM RL branch in
-        ``create_population`` (GRPO/CISPO/GSPO, LLMPPO, LLMREINFORCE).
-        """
+    def test_omitted_learning_rates_match_constructor_defaults(self, vector_space):
         init_hp = {
             "BATCH_SIZE": 2,
-            "LR": 1e-5,
             "BETA": 0.01,
             "MAX_GRAD_NORM": 0.5,
             "UPDATE_EPOCHS": 1,
-            "MAX_MODEL_LEN": 64,
-            "USE_VLLM": False,
-            "GRADIENT_CHECKPOINTING": False,
-            "USE_LIGER_LOSS": True,
-            "CAST_LOGPROBS_TO_FP32": False,
+            "MAX_MODEL_LEN": 96,
         }
         actor = MagicMock(name="actor_network")
         actor.state_dict.return_value = {"w": torch.tensor([1.0])}
-        mock_agent = MagicMock(name=f"{algo}_agent")
+        common = {
+            "observation_space": vector_space,
+            "action_space": copy.deepcopy(vector_space),
+            "net_config": None,
+            "INIT_HP": init_hp,
+            "hp_config": None,
+            "population_size": 1,
+            "device": "cpu",
+            "actor_network": actor,
+            "algo_kwargs": {"pad_token_id": 999, "pad_token": "<pad>"},
+        }
 
-        with patch(patch_target, return_value=mock_agent) as mock_cls:
-            create_population(
-                algo=algo,
-                observation_space=vector_space,
-                action_space=copy.deepcopy(vector_space),
-                net_config=None,
-                INIT_HP=init_hp,
-                hp_config=None,
-                population_size=1,
-                device="cpu",
-                accelerator=None,
-                actor_network=actor,
-                algo_kwargs={
-                    "pad_token_id": 999,
-                    "pad_token": "<pad>",
-                },
-            )
+        with (
+            patch("agilerl.utils.utils.clone_llm", return_value=MagicMock()),
+            patch("agilerl.utils.utils.LLMPPO") as mock_llmppo,
+            patch("agilerl.utils.utils.LLMREINFORCE") as mock_reinforce,
+        ):
+            create_population(algo="LLMPPO", **common)
+            common["action_space"] = copy.deepcopy(vector_space)
+            create_population(algo="LLMREINFORCE", **common)
 
-        call_kw = mock_cls.call_args.kwargs
-        assert call_kw["use_liger_loss"] is True
-        assert call_kw["cast_logprobs_to_fp32"] is False
+        assert mock_llmppo.call_args.kwargs["lr_actor"] == 1e-5
+        assert mock_llmppo.call_args.kwargs["lr_critic"] == 1e-4
+        assert mock_reinforce.call_args.kwargs["lr"] == 1e-5
 
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="agilerl[llm] not installed",
+    )
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES,
         reason="agilerl[llm] not installed",
@@ -1610,7 +1590,7 @@ class TestPrepareLlmAlgoKwargs:
         assert "use_vllm" not in merged
         assert "vllm_config" not in merged
         assert merged["use_separate_reference_adapter"] is True
-        assert merged["micro_batch_size_per_gpu"] == 8
+        assert "micro_batch_size_per_gpu" not in merged
 
     def test_use_vllm_init_hp_fills_a_default_vllm_config(self):
         from agilerl.utils.algo_utils import VLLMConfig
@@ -1631,7 +1611,7 @@ class TestPrepareLlmAlgoKwargs:
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
 
         merged = _prepare_llm_algo_kwargs(
-            {"model_name": "explicit/model", "micro_batch_size_per_gpu": 1},
+            {"model_name": "explicit/model"},
             tokenizer=None,
             model_name=None,
             lora_config=None,
@@ -1639,7 +1619,6 @@ class TestPrepareLlmAlgoKwargs:
             INIT_HP=self._init_hp(MODEL_NAME="ignored/name"),
         )
         assert merged["model_name"] == "explicit/model"
-        assert merged["micro_batch_size_per_gpu"] == 1
 
     def test_dpo_path_skips_generation_defaults(self):
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
@@ -1656,76 +1635,6 @@ class TestPrepareLlmAlgoKwargs:
         assert "use_vllm" not in merged
         assert "vllm_config" not in merged
         assert merged["use_separate_reference_adapter"] is False
-
-    def test_lora_target_scope_and_chunk_rows_merge_from_init_hp(self):
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        merged = _prepare_llm_algo_kwargs(
-            {},
-            tokenizer=None,
-            model_name="foo/bar",
-            lora_config=None,
-            vllm_config=None,
-            INIT_HP=self._init_hp(LORA_TARGET_SCOPE="all", CHUNK_ROWS=4),
-        )
-
-        assert merged["lora_target_scope"] == "all"
-        assert merged["chunk_rows"] == 4
-
-    def test_attn_implementation_injected_into_model_config(self):
-        """A non-"auto" ATTN_IMPLEMENTATION lands in model_config so the
-        algorithm's create_model treats it as authoritative.
-        """
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        merged = _prepare_llm_algo_kwargs(
-            {},
-            tokenizer=None,
-            model_name="foo",
-            lora_config=None,
-            vllm_config=None,
-            INIT_HP=self._init_hp(ATTN_IMPLEMENTATION="flash_attention_2"),
-        )
-        assert merged["model_config"] == {"attn_implementation": "flash_attention_2"}
-
-    @pytest.mark.parametrize("attn_impl", ["auto", None])
-    def test_attn_implementation_auto_or_absent_leaves_model_config_alone(
-        self, attn_impl
-    ):
-        r"""\"auto\" (or no key) must not create model_config - the algorithm's
-        auto-pick path stays in charge.
-        """
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        init_hp = self._init_hp()
-        if attn_impl is not None:
-            init_hp["ATTN_IMPLEMENTATION"] = attn_impl
-        merged = _prepare_llm_algo_kwargs(
-            {},
-            tokenizer=None,
-            model_name="foo",
-            lora_config=None,
-            vllm_config=None,
-            INIT_HP=init_hp,
-        )
-        assert "model_config" not in merged
-
-    def test_attn_implementation_does_not_override_explicit_model_config(self):
-        """A caller-supplied model_config attn_implementation wins over the
-        INIT_HP value; sibling model_config keys are preserved.
-        """
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        merged = _prepare_llm_algo_kwargs(
-            {"model_config": {"attn_implementation": "sdpa", "use_cache": False}},
-            tokenizer=None,
-            model_name="foo",
-            lora_config=None,
-            vllm_config=None,
-            INIT_HP=self._init_hp(ATTN_IMPLEMENTATION="flash_attention_2"),
-        )
-        assert merged["model_config"]["attn_implementation"] == "sdpa"
-        assert merged["model_config"]["use_cache"] is False
 
     def test_fsdp_true_builds_default_config(self):
         from agilerl.distributed import FSDPConfig
@@ -1941,10 +1850,8 @@ class TestPrepareLlmAlgoKwargsLoraDefaults:
     not HAS_LLM_DEPENDENCIES,
     reason="agilerl[llm] not installed",
 )
-class TestCreatePopulationLlmTorchCompiler:
-    """``create_population`` should forward ``torch_compiler`` into every LLM
-    branch's kwargs (GRPO/CISPO/GSPO, SFT, DPO, LLMPPO, LLMREINFORCE).
-    """
+class TestCreatePopulationGrpoVariants:
+    """``create_population`` builds CISPO and GSPO under the GRPO branch."""
 
     @pytest.fixture
     def actor(self):
@@ -1960,45 +1867,7 @@ class TestCreatePopulationLlmTorchCompiler:
             "UPDATE_EPOCHS": 1,
             "MAX_MODEL_LEN": 64,
             "USE_VLLM": False,
-            "GRADIENT_CHECKPOINTING": False,
         }
-
-    @pytest.mark.parametrize(
-        ("algo", "patch_target"),
-        [
-            ("GRPO", "agilerl.utils.utils.GRPO"),
-            ("CISPO", "agilerl.utils.utils.CISPO"),
-            ("GSPO", "agilerl.utils.utils.GSPO"),
-            ("SFT", "agilerl.utils.utils.SFT"),
-            ("DPO", "agilerl.utils.utils.DPO"),
-            ("LLMPPO", "agilerl.utils.utils.LLMPPO"),
-            ("LLMREINFORCE", "agilerl.utils.utils.LLMREINFORCE"),
-        ],
-    )
-    def test_torch_compiler_threaded_through(
-        self, vector_space, actor, init_hp, algo, patch_target
-    ):
-        mock_agent = MagicMock(name=f"{algo}_agent")
-        with patch(patch_target, return_value=mock_agent) as mock_cls:
-            create_population(
-                algo=algo,
-                observation_space=vector_space,
-                action_space=copy.deepcopy(vector_space),
-                net_config=None,
-                INIT_HP=init_hp,
-                hp_config=None,
-                population_size=1,
-                device="cpu",
-                accelerator=None,
-                actor_network=actor,
-                torch_compiler="inductor",
-                algo_kwargs={
-                    "pad_token_id": 29,
-                    "pad_token": "<pad>",
-                },
-            )
-        call_kw = mock_cls.call_args.kwargs
-        assert call_kw["torch_compiler"] == "inductor"
 
     @pytest.mark.parametrize("algo", ["CISPO", "GSPO"])
     def test_cispo_gspo_drop_loss_type_before_construction(

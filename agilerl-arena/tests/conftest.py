@@ -5,17 +5,67 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import sys
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Snowflake puts each procedure IMPORTS file on the path, so app_code modules
+# import each other by bare name.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "snowflake_app" / "app_code")
+)
 
 from agilerl.arena.auth import ArenaOAuth2
+from agilerl.arena.memory import (
+    estimator,
+    formulas,
+    fsdp_gather,
+    lora_formulas,
+    lora_placement,
+    manifest,
+)
+from agilerl.arena.memory.resolve import batch, engine, fsdp, parallel
+from agilerl.arena.models import model_info
+
+# The Native App modules import Snowpark, which only the snowflake extra installs.
+if (
+    importlib.util.find_spec("snowflake") is None
+    or importlib.util.find_spec("snowflake.snowpark") is None
+):
+    collect_ignore = [
+        "test_snowflake_app_billing.py",
+        "test_snowflake_app_config.py",
+        "test_snowflake_app_keys.py",
+        "test_snowflake_app_manifest.py",
+        "test_snowflake_app_runs.py",
+    ]
+
+# Bounded memo caches of the memory planner. Each assumes the bundled configs,
+# the catalog and module constants stay fixed for the process.
+PLANNER_CACHES = (
+    model_info._pickled_config,
+    batch.catalog_model_spec,
+    engine._engine_model,
+    formulas.param_counts,
+    fsdp_gather.prefetch_window_params,
+    fsdp_gather.fsdp_gather_pool_params,
+    fsdp_gather.fsdp_gathered_params,
+    formulas.layer_block_kinds,
+    lora_formulas.lora_param_count,
+    lora_placement.lora_tensor_placement,
+    lora_formulas._merged_lora_sync_tensor_bytes,
+    estimator._cached_training_breakdown,
+    fsdp._cached_training_memory,
+    parallel._cached_layouts,
+    manifest._catalog_checkpoint_quantized,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +92,45 @@ def _detach_arena_rich_handler() -> None:
 
 
 @pytest.fixture(autouse=True)
+def empty_planner_caches():
+    """Start and end each test with empty planner caches.
+
+    Tests patch bundled configs, catalog entries and module constants, which
+    the cache keys do not cover.
+    """
+    for cache in PLANNER_CACHES:
+        cache.cache_clear()
+    yield
+    for cache in PLANNER_CACHES:
+        cache.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_arena_url_overrides() -> Generator[None, None, None]:
+    """Undo ``configure()`` URL overrides (e.g. a CLI test passing ``--base-url``).
+
+    They are class attributes and take precedence over the env vars, so one test's
+    override would otherwise leak into every later test.
+    """
+    from agilerl.arena.auth import ArenaOAuth2
+    from agilerl.arena.client import ArenaClient
+
+    saved = (
+        ArenaClient.BASE_URL,
+        ArenaClient._BASE_URL_OVERRIDE,
+        ArenaOAuth2.KEYCLOAK_URL,
+        ArenaOAuth2._KEYCLOAK_URL_OVERRIDE,
+    )
+    yield
+    (
+        ArenaClient.BASE_URL,
+        ArenaClient._BASE_URL_OVERRIDE,
+        ArenaOAuth2.KEYCLOAK_URL,
+        ArenaOAuth2._KEYCLOAK_URL_OVERRIDE,
+    ) = saved
+
+
+@pytest.fixture(autouse=True)
 def _isolate_arena_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prevent a developer's real Arena credentials from leaking into tests.
 
@@ -58,6 +147,8 @@ def _isolate_arena_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def arena_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Temporary HOME with ``~/.arena`` created under it."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows expands ``~`` from USERPROFILE, not HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     arena_dir = tmp_path / ".arena"
     arena_dir.mkdir(parents=True, exist_ok=True)
     return tmp_path

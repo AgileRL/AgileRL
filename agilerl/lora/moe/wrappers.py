@@ -11,6 +11,7 @@ from typing import Any
 import torch
 from peft.tuners.lora.layer import ParamWrapper
 
+from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.lora.moe.adapters import (
     adapters_in_routing,
     expert_counts,
@@ -20,7 +21,7 @@ from agilerl.lora.moe.adapters import (
     token_adapter_ids,
     wrapper_chain,
 )
-from agilerl.lora.moe.grouped_gemm import ROUTED_EXPERT_CHUNK_BYTES, group_offsets
+from agilerl.lora.moe.grouped_gemm import group_offsets
 from agilerl.lora.moe.layouts import (
     is_transposed_experts_module,
     routed_projection_names,
@@ -36,7 +37,7 @@ class SortedExpertsLoraWrapper(ParamWrapper):
     token_index: torch.Tensor | None = None
     n_tokens: int | None = None
     # See ``chunk_bytes`` on :func:`split_lora_delta`.
-    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES
+    chunk_bytes: int = DEFAULT_ROUTED_CHUNK_BYTES
 
     def forward(
         self,
@@ -101,7 +102,7 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
     _self_routed_lora = True
     # See ``recompute`` and ``chunk_bytes`` on :func:`routed_experts_local_forward`.
     recompute: bool = True
-    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES
+    chunk_bytes: int = DEFAULT_ROUTED_CHUNK_BYTES
 
     def forward(
         self,
@@ -182,8 +183,6 @@ class TransposedExpertsLoraWrapper(ParamWrapper):
             adapters = {
                 name: resolve_adapters(wrapper) for name, wrapper in chain.items()
             }
-        if not any(adapters.values()):
-            return experts(hidden_states, router_indices, routing_weights)
         if not is_transposed_experts_module(experts):
             return ParamWrapper.forward(
                 self, hidden_states, router_indices, routing_weights

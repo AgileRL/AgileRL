@@ -69,6 +69,8 @@ pip install agilerl               # classic RL + the Arena CLI
 | `agilerl[all]` | Box2D and LLM extras. |
 | `agilerl-arena` | [Arena](https://arena.agilerl.com) SDK and CLI only, no torch. Included with `agilerl`. |
 
+LLM training on CUDA needs FlashAttention 2 for most models. Install it after torch: `pip install flash-attn --no-build-isolation`.
+
 PyPI is the released line. `main` can be ahead.
 
 For the development tip of `main`: `pip install git+https://github.com/AgileRL/AgileRL.git@main`. For development mode: clone the repo and run `pip install -e .`.
@@ -154,7 +156,7 @@ A single AgileRL run with evolutionary HPO against the multiple Optuna runs need
 | Tutorial Type | Description | Tutorials |
 |---------------|-------------|-----------|
 | [LLM Fine-tuning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) | SFT, DPO, single- and multi-turn RL, HPO and remote environments. | [GRPO reasoning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_finetuning.html) <br> [SFT and DPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/sft_dpo_finetuning.html) <br> [GRPO with HPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_hpo.html) <br> [Multi-turn GRPO and PPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/env_grpo_ppo.html) <br> [Remote env server](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/remote_env_server.html) |
-| [Training on Arena](https://docs.agilerl.com/en/latest/tutorials/arena_training/index.html) | Upload and validate custom environments, submit training jobs on managed cloud infrastructure, and deploy trained agents for inference. | [PPO - Acrobot Custom Environment](https://docs.agilerl.com/en/latest/tutorials/arena_training/ppo_custom_env.html) |
+| [Training on Arena](https://docs.agilerl.com/en/latest/tutorials/arena_training/index.html) | Upload and validate custom environments, submit training jobs on managed cloud infrastructure, and deploy trained agents for inference. | [GRPO - GSM8K](https://docs.agilerl.com/en/latest/tutorials/arena_training/grpo_gsm8k.html) |
 | [Single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html) | Train on- and off-policy agents on Gymnasium environments. | [PPO - Acrobot](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_ppo_tutorial.html) <br> [TD3 - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_td3_tutorial.html) <br> [Rainbow DQN - CartPole](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_rainbow_dqn_tutorial.html) <br> [Recurrent PPO - Masked Pendulum](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_recurrent_ppo_tutorial.html)  |
 | [Multi-agent tasks](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html) | PettingZoo environments, including Connect Four with curriculum learning and self-play. | [DQN - Connect Four](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/dqn.html) <br> [MADDPG - Space Invaders](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/maddpg.html) <br> [MATD3 - Speaker Listener](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/matd3.html) |
 | [Hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) | Teach agents skills and combine them to reach an end goal. | [PPO - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) |

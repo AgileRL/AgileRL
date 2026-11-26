@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -16,19 +16,26 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwen3Config
+from transformers.conversion_mapping import (
+    Concatenate,
+    WeightConverter,
+    WeightRenaming,
+    register_checkpoint_conversion_mapping,
+)
 
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.grpo import GRPO
-from agilerl.algorithms.ppo_llm import PPO
-from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.distributed import (
     CPUOffloadOptimizer,
     FSDPConfig,
     materialize_fsdp2_from_cpu_state,
 )
-from agilerl.distributed.expert_parallel import ParallelMesh
+from agilerl.distributed.fsdp import (
+    _load_sharded_weights_from_safetensors,
+    _move_ignored_to_device,
+)
+from agilerl.distributed.mesh import MeshAxisName, ParallelMesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
 cuda_required = pytest.mark.skipif(
@@ -41,16 +48,31 @@ cuda_required = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+def _resolved_fsdp(config: FSDPConfig) -> FSDPConfig:
+    """``config`` with unset memory fields and stride filled, as a launcher sets them."""
+    picks = {
+        "checkpoint_every_n_blocks": 1,
+        "reshard_after_forward": True,
+        "routed_expert_chunk_mib": 64,
+        "optim_cpu_offload": False,
+        "activation_offload": False,
+        "cpu_offload": False,
+    }
+    return replace(
+        config,
+        **{name: pick for name, pick in picks.items() if getattr(config, name) is None},
+    )
+
+
 def _make_wrap_stub(**overrides) -> MagicMock:
     """Minimal agent stub for ``LLMAlgorithm.wrap_models``."""
     agent = MagicMock()
     agent.actor = nn.Linear(2, 2)
     agent.distributed = True
     agent.fsdp_config = FSDPConfig()
-    agent.colocated = False
     agent.ep = 1
     agent.cp = 1
-    agent.gradient_checkpointing = False
+    agent.gradient_checkpointing = True
     agent.cosine_lr_schedule_config = None
     agent.lr = 1e-4
     agent.optimizer = MagicMock()
@@ -60,9 +82,11 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.lr_critic = None
     agent.device = "cpu"
     agent.lr_scheduler = None
+    agent.gradient_checkpointing = True
     agent._resolve_fsdp_config = MethodType(LLMAlgorithm._resolve_fsdp_config, agent)
     for k, v in overrides.items():
         setattr(agent, k, v)
+    agent.fsdp_config = _resolved_fsdp(agent.fsdp_config)
     return agent
 
 
@@ -73,29 +97,16 @@ class TestLLMWrapModelsOffloadValidation:
         # Arrange
         agent = _make_wrap_stub(
             fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=True),
-            colocated=True,
         )
 
         # Act / Assert
         with pytest.raises(ValueError, match="mutually exclusive"):
             LLMAlgorithm.wrap_models(agent)
 
-    def test_wrap_raises_when_cpu_offload_without_vllm(self):
+    def test_wrap_accepts_cpu_offload(self):
         # Arrange
         agent = _make_wrap_stub(
             fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=False),
-            colocated=False,
-        )
-
-        # Act / Assert
-        with pytest.raises(ValueError, match="requires colocated vLLM"):
-            LLMAlgorithm.wrap_models(agent)
-
-    def test_wrap_accepts_cpu_offload_with_vllm(self):
-        # Arrange
-        agent = _make_wrap_stub(
-            fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=False),
-            colocated=True,
         )
 
         # Act
@@ -112,7 +123,6 @@ class TestLLMWrapModelsOffloadValidation:
         # Arrange
         agent = _make_wrap_stub(
             fsdp_config=FSDPConfig(optim_cpu_offload=True),
-            colocated=False,
         )
 
         # Act
@@ -127,9 +137,7 @@ class TestLLMWrapModelsOffloadValidation:
 
     def test_wrap_does_not_wrap_optimizer_when_no_offload(self):
         # Arrange
-        agent = _make_wrap_stub(
-            fsdp_config=FSDPConfig(optim_cpu_offload=False), colocated=False
-        )
+        agent = _make_wrap_stub(fsdp_config=FSDPConfig(optim_cpu_offload=False))
 
         # Act
         with patch(
@@ -145,9 +153,8 @@ class TestLLMWrapModelsOffloadValidation:
 class TestUntiedLmHeadNoReshard:
     """Untied ``lm_head`` is its own FSDP unit and stays gathered after forward."""
 
-    def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
-        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
-
+    @staticmethod
+    def _causal_lm() -> nn.Module:
         class LanguageModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -161,7 +168,12 @@ class TestUntiedLmHeadNoReshard:
                 self.model = LanguageModel()
                 self.lm_head = nn.Linear(2, 4, bias=False)
 
-        model = CausalLM()
+        return CausalLM()
+
+    def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
+        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
+
+        model = self._causal_lm()
         seen: list[tuple[nn.Module, dict]] = []
 
         def _record(module, **kwargs):
@@ -169,9 +181,7 @@ class TestUntiedLmHeadNoReshard:
             return module
 
         with patch("agilerl.distributed.fsdp_blocks.fully_shard", side_effect=_record):
-            _shard_embed_and_lm_head(
-                model, {"reshard_after_forward": True}, persistence_threshold=0
-            )
+            _shard_embed_and_lm_head(model, {"reshard_after_forward": True})
 
         modules = [module for module, _ in seen]
         assert model.lm_head in modules
@@ -179,6 +189,20 @@ class TestUntiedLmHeadNoReshard:
         assert model.model.norm not in modules
         head_kwargs = next(kwargs for module, kwargs in seen if module is model.lm_head)
         assert head_kwargs["reshard_after_forward"] is False
+
+    def test_lm_head_already_ignored_is_not_sharded(self):
+        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
+
+        model = self._causal_lm()
+
+        with patch("agilerl.distributed.fsdp_blocks.fully_shard") as fully_shard:
+            _shard_embed_and_lm_head(
+                model,
+                {"reshard_after_forward": True},
+                extra_ignored=set(model.lm_head.parameters()),
+            )
+
+        assert fully_shard.call_args_list == []
 
 
 # ---------------------------------------------------------------------------
@@ -206,46 +230,31 @@ class TestGatherLayer:
             assert w is weight
             assert b is bias
 
-    def test_materializes_when_fsdp_without_cpu_offload(self):
-        # Arrange — plain tensors: materialize is a no-op identity
+    def test_yields_dense_weights_unchanged_when_fsdp(self):
+        # Arrange
         weight = torch.randn(4, 8)
         bias = torch.randn(4)
         layer = _linear_like(weight, bias)
         runtime = FSDPRuntime(FSDPConfig(cpu_offload=False))
         hidden = torch.randn(2, 8)
-        called = []
-
-        def tracking_materialize(*tensors):
-            called.append(tensors)
-            return _fake_materialize(tensors)
 
         # Act
-        with patch(
-            "agilerl.distributed.runtime.materialize_dtensors",
-            side_effect=tracking_materialize,
-        ):
-            with runtime.gather_layer(layer, device=hidden.device) as (w, b):
-                # Assert
-                assert w is weight
-                assert b is bias
-        assert called == [(weight, bias)]
+        with runtime.gather_layer(layer, device=hidden.device) as (w, b):
+            # Assert
+            assert w is weight
+            assert b is bias
 
-    def test_materializes_and_moves_weight_to_device_under_cpu_offload(self):
-        # Arrange — weight on CPU, target a (possibly same) compute device
-        cpu_weight = torch.randn(4, 8)
-        cpu_bias = torch.randn(4)
-        layer = _linear_like(cpu_weight, cpu_bias)
+    def test_yields_weights_on_device_under_cpu_offload(self):
+        # Arrange
+        layer = _linear_like(torch.randn(4, 8), torch.randn(4))
         runtime = FSDPRuntime(FSDPConfig(cpu_offload=True, optim_cpu_offload=False))
         device = torch.device("cpu")
 
-        # Act — patch materialize_dtensors to yield the plain CPU tensors
-        with patch(
-            "agilerl.distributed.runtime.materialize_dtensors",
-            side_effect=lambda *tensors: _fake_materialize(tensors),
-        ):
-            with runtime.gather_layer(layer, device=device) as (w, b):
-                assert w.device == device
-                assert b.device == device
+        # Act
+        with runtime.gather_layer(layer, device=device) as (w, b):
+            # Assert
+            assert w.device == device
+            assert b.device == device
 
     def test_no_move_when_weight_already_on_device(self):
         # Arrange — weight already on the target device
@@ -263,14 +272,9 @@ class TestGatherLayer:
         device = torch.device("cpu")
 
         # Act
-        with (
-            patch(
-                "agilerl.distributed.runtime.materialize_dtensors",
-                side_effect=lambda *tensors: _fake_materialize(tensors),
-            ),
-            patch("torch.Tensor.to", tracking_to),
-        ):
+        with patch("torch.Tensor.to", tracking_to):
             with runtime.gather_layer(layer, device=device) as (_w, _b):
+                # Assert
                 assert len(move_calls) == 0
 
     def test_handles_none_bias(self):
@@ -281,152 +285,10 @@ class TestGatherLayer:
         device = torch.device("cpu")
 
         # Act
-        with patch(
-            "agilerl.distributed.runtime.materialize_dtensors",
-            side_effect=lambda *tensors: _fake_materialize(tensors),
-        ):
-            with runtime.gather_layer(layer, device=device) as (w, b):
-                assert w.device == device
-                assert b is None
-
-
-def _fake_materialize(tensors):
-    """Context manager simulating ``materialize_dtensors``: yields the
-    input tensors as-is (already plain CPU tensors in tests).
-    """
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _ctx():
-        yield list(tensors)
-
-    return _ctx()
-
-
-# ---------------------------------------------------------------------------
-# 3. actor_device guard in get_action (GRPO / PPO / REINFORCE)
-# ---------------------------------------------------------------------------
-
-
-def _make_actor_agent(shard_runtime=None, device="cuda:0"):
-    """MagicMock agent for ``get_action`` HF-generate path tests.
-
-    ``device`` is set to a CUDA string even on CPU-only hosts so the FSDP2
-    branch (``fallback`` = ``self.device``) and the dense branch
-    (param device = CPU) produce distinguishable devices.
-    ``prepare_prompt_hf_generate`` is patched by the caller to capture the
-    device without actually moving tensors.
-    """
-    agent = MagicMock()
-    agent.colocated = False
-    agent.device = device
-    agent.shard_runtime = shard_runtime or DPRuntime()
-    agent.hf_generate_chunk_size = 1
-    agent.group_size = 1
-    agent.pad_token_id = 0
-    agent.vllm_importance_sampling_correction = False
-    agent.actor = nn.Linear(2, 2)
-    agent.actor.generate = MagicMock(return_value=torch.ones(1, 8, dtype=torch.long))
-    return agent
-
-
-def _dummy_prompts():
-    return [
-        {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-    ]
-
-
-@contextmanager
-def _patch_hf_generate_path(module_path, captured_devices):
-    """Patch the HF-generate helpers to capture ``actor_device``
-    and return dummy data without moving tensors.
-    """
-
-    def capture_prepare(prompt_dict, device, group_size=1):
-        del group_size
-        captured_devices.append(device)
-        return {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-
-    with (
-        patch(f"{module_path}.prepare_prompt_hf_generate", side_effect=capture_prepare),
-        patch(f"{module_path}.hf_turn_generation_config"),
-        patch(f"{module_path}.hf_completion_lengths"),
-        patch(
-            f"{module_path}.build_completion_mask",
-            return_value=torch.ones(1, 8, dtype=torch.bool),
-        ),
-    ):
-        yield
-
-
-class TestGRPOGetActionActorDevice:
-    """``actor_device`` guard: FSDP2 uses ``self.device``, non-FSDP2 probes params."""
-
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange — FSDP2 branch: actor_device = fallback (self.device)
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
-            GRPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert — prompts sent to self.device, not the CPU param device
-        assert captured[0] == torch.device("cuda:0")
-
-    def test_uses_param_device_when_dense_runtime(self):
-        # Arrange — dense branch: actor_device = next(params).device
-        agent = _make_actor_agent(device="cuda:0")
-        captured: list = []
-
-        # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
-            GRPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert — prompts sent to the param device (CPU), not self.device
-        assert captured[0] == torch.device("cpu")
-
-
-class TestPPOGetActionActorDevice:
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
-            PPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert
-        assert captured[0] == torch.device("cuda:0")
-
-
-class TestREINFORCEGetActionActorDevice:
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
-            REINFORCE.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert
-        assert captured[0] == torch.device("cuda:0")
+        with runtime.gather_layer(layer, device=device) as (w, b):
+            # Assert
+            assert w.device == device
+            assert b is None
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +598,13 @@ class TestFsdpResidencyGuards:
     def test_wrap_uses_materialize_helper(self):
         agent = _make_wrap_stub(
             device="cuda:0",
-            fsdp_config=FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True),
+            fsdp_config=FSDPConfig(
+                reshard_after_forward=True,
+                routed_expert_chunk_mib=64,
+                optim_cpu_offload=True,
+                activation_offload=False,
+                cpu_offload=False,
+            ),
         )
         with patch(
             "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
@@ -748,7 +616,7 @@ class TestFsdpResidencyGuards:
             "cuda:0",
             agent.fsdp_config,
             parallel_mesh=None,
-            gradient_checkpointing=False,
+            gradient_checkpointing=True,
         )
 
     def test_fsdp_clone_uses_cpu_state_path(self):
@@ -819,56 +687,6 @@ class TestCloneLlmRejectsFsdp:
 
 
 class TestFsdpSafetensorsShardHelpers:
-    def test_global_shard_slices_match_torch_chunk_divisible(self):
-        from torch.distributed.tensor.placement_types import Shard
-
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        global_shape = (8, 4)
-        placements = (Shard(0),)
-        tensor = torch.arange(32).reshape(8, 4)
-        mesh = MagicMock()
-        mesh.size.return_value = 4
-        for rank in range(4):
-            mesh.get_coordinate.return_value = (rank,)
-            slices = global_shard_slices(global_shape, placements, mesh)
-            expected = torch.chunk(tensor, 4, dim=0)[rank]
-            assert torch.equal(tensor[slices], expected)
-
-    def test_global_shard_slices_match_torch_chunk_remainder(self):
-        from torch.distributed.tensor.placement_types import Shard
-
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        global_shape = (10,)
-        placements = (Shard(0),)
-        tensor = torch.arange(10)
-        mesh = MagicMock()
-        mesh.size.return_value = 3
-        chunks = list(torch.chunk(tensor, 3, dim=0))
-        for rank in range(3):
-            mesh.get_coordinate.return_value = (rank,)
-            slices = global_shard_slices(global_shape, placements, mesh)
-            assert torch.equal(tensor[slices], chunks[rank])
-
-    def test_global_shard_slices_two_dimensional_shard(self):
-        from torch.distributed.tensor.placement_types import Shard
-
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        global_shape = (6, 4)
-        placements = (Shard(0), Shard(1))
-        tensor = torch.arange(24).reshape(6, 4)
-        mesh = MagicMock()
-        mesh.size.return_value = 2
-        for row_rank in range(2):
-            for col_rank in range(2):
-                mesh.get_coordinate.return_value = (row_rank, col_rank)
-                slices = global_shard_slices(global_shape, placements, mesh)
-                row_piece = torch.chunk(tensor, 2, dim=0)[row_rank]
-                expected = torch.chunk(row_piece, 2, dim=1)[col_rank]
-                assert torch.equal(tensor[slices], expected)
-
     def test_copy_safetensors_local_slice_with_dtype_cast(self, tmp_path):
         from safetensors import safe_open
         from safetensors.torch import save_file
@@ -972,7 +790,7 @@ class TestFsdpSafetensorsShardHelpers:
         from safetensors.torch import save_file
         from transformers import GPT2Config, GPT2LMHeadModel
 
-        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+        from agilerl.distributed.fsdp_meta import resolve_checkpoint_source
 
         save_file({"w": torch.zeros(1)}, str(tmp_path / "model.safetensors"))
         causal = GPT2LMHeadModel(
@@ -985,7 +803,7 @@ class TestFsdpSafetensorsShardHelpers:
         shell = nn.Module()
         shell.base_model = causal
 
-        assert _resolve_checkpoint_source(shell) == str(tmp_path)
+        assert resolve_checkpoint_source(shell) == str(tmp_path)
 
     def test_tied_weight_target_missing_from_checkpoint_skips(self, tmp_path):
 
@@ -1160,6 +978,42 @@ class TestMaterializeFsdp2FromCpuState:
         assert out is model
         assert torch.equal(model.weight, expected)
 
+    def test_meta_load_fills_embed_scale_from_scalar(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from agilerl.distributed import materialize_fsdp2_from_cpu_state
+
+        expected = torch.ones(2, 2)
+        save_file({"weight": expected}, str(tmp_path / "model.safetensors"))
+
+        class Tiny(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(2, 2))
+                self.scalar_embed_scale = 5.0
+                self.register_buffer("embed_scale", torch.tensor(0.0), persistent=False)
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        with torch.device("meta"):
+            model = Tiny()
+
+        with (
+            patch(
+                "agilerl.distributed.fsdp.apply_fsdp2",
+                side_effect=lambda module, *_a, **_k: module,
+            ),
+            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+        ):
+            materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
+            )
+
+        assert torch.equal(model.weight, expected)
+        assert float(model.embed_scale) == 5.0
+
     def test_hub_id_resolves_through_cached_file(self, tmp_path):
 
         from safetensors.torch import save_file
@@ -1195,7 +1049,7 @@ class TestMaterializeFsdp2FromCpuState:
 
         with (
             patch(
-                "agilerl.distributed.fsdp.cached_file",
+                "agilerl.distributed.fsdp_meta.cached_file",
                 side_effect=fake_cached_file,
             ),
             patch(
@@ -1266,7 +1120,7 @@ class TestMaterializeFsdp2FromCpuState:
         lora = LoraConfig(r=4, target_modules=["q_proj", "v_proj"])
         model = get_peft_model(meta, lora, adapter_name="actor")
         ids = torch.randint(0, 64, (2, 6))
-        world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
+        dp_shard = init_device_mesh("cpu", (1,), mesh_dim_names=("dp_shard",))
 
         # Act
         materialize_fsdp2_from_cpu_state(
@@ -1276,8 +1130,9 @@ class TestMaterializeFsdp2FromCpuState:
                 param_dtype="float32",
                 reduce_dtype="float32",
                 routed_expert_chunk_mib=64,
+                checkpoint_every_n_blocks=1,
             ),
-            parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
+            parallel_mesh=ParallelMesh(dp_shard=dp_shard),
             gradient_checkpointing=True,
         )
         logits = model(input_ids=ids).logits
@@ -1423,15 +1278,14 @@ class TestLoraConfigsEquivalent:
 
 
 class _CoordMesh:
-    """Device mesh stand-in whose coordinate is unset."""
+    """Device mesh stand-in for rank 0 of a 2-rank mesh."""
 
-    def get_coordinate(self) -> None:
-        return None
+    shape = (2,)
 
-    def size(self, mesh_dim: int) -> int:
-        return 2
+    def _is_current_rank_part_of_mesh(self) -> bool:
+        return True
 
-    def get_local_rank(self, mesh_dim: int) -> int:
+    def _sym_get_coordinate(self, mesh_dim: int) -> int:
         return 0
 
 
@@ -1855,18 +1709,20 @@ class TestSafetensorsShardKeys:
     def test_language_body_alias_uses_backbone_key(self):
         from agilerl.distributed.fsdp import checkpoint_key_candidates
 
-        assert checkpoint_key_candidates("language_model.model.embeddings.weight") == (
+        assert checkpoint_key_candidates(
+            "language_model.model.embeddings.weight", ""
+        ) == (
             "language_model.model.embeddings.weight",
             "language_model.backbone.embeddings.weight",
         )
 
-    def test_shard_slices_when_mesh_coordinate_is_unset(self):
-        from agilerl.distributed.fsdp import global_shard_slices
+    def test_checkpoint_without_base_model_prefix_is_a_candidate(self):
+        from agilerl.distributed.fsdp import checkpoint_key_candidates
 
-        slices = global_shard_slices((4, 2), (Replicate(), Shard(0)), _CoordMesh())
-
-        assert slices[0] == slice(0, 2)
-        assert slices[1] == slice(0, 2)
+        assert checkpoint_key_candidates("model.embed_tokens.weight", "model") == (
+            "model.embed_tokens.weight",
+            "embed_tokens.weight",
+        )
 
     def test_local_dest_of_a_dtensor(self, monkeypatch: pytest.MonkeyPatch):
         from agilerl.distributed import fsdp as fsdp_mod
@@ -1927,7 +1783,7 @@ class TestSafetensorsShardKeys:
     def test_empty_config_path_is_not_a_checkpoint(self):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.fsdp_meta import _checkpoint_source_from_config
 
         assert (
             _checkpoint_source_from_config(PretrainedConfig(tie_word_embeddings=False))
@@ -1937,7 +1793,7 @@ class TestSafetensorsShardKeys:
     def test_index_file_is_a_checkpoint_source(self, tmp_path):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.fsdp_meta import _checkpoint_source_from_config
 
         (tmp_path / "model.safetensors.index.json").write_text(
             '{"weight_map": {}}', encoding="utf-8"
@@ -1950,7 +1806,7 @@ class TestSafetensorsShardKeys:
     def test_missing_weight_files_are_not_a_checkpoint(self, tmp_path):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.fsdp_meta import _checkpoint_source_from_config
 
         (tmp_path / "config.json").write_text("{}", encoding="utf-8")
 
@@ -1962,7 +1818,7 @@ class TestSafetensorsShardKeys:
         )
 
     def test_unwraps_pretrained_base_and_inner_model(self):
-        from agilerl.distributed.fsdp import _next_unwrap_module
+        from agilerl.distributed.fsdp_meta import _next_unwrap_module
 
         inner = nn.Linear(2, 2)
         pretrained = nn.Linear(2, 2)
@@ -1989,13 +1845,13 @@ class TestSafetensorsShardKeys:
         assert _next_unwrap_module(nn.Linear(2, 2)) is None
 
     def test_resolve_raises_without_a_checkpoint(self):
-        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+        from agilerl.distributed.fsdp_meta import resolve_checkpoint_source
 
         with pytest.raises(RuntimeError, match="FSDP shard load requires"):
-            _resolve_checkpoint_source(nn.Linear(2, 2))
+            resolve_checkpoint_source(nn.Linear(2, 2))
 
     def test_index_maps_each_key_to_its_shard(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.fsdp_meta import build_safetensors_key_files
 
         shard = tmp_path / "model-00001-of-00001.safetensors"
         save_file({"weight": torch.ones(2)}, str(shard))
@@ -2004,12 +1860,12 @@ class TestSafetensorsShardKeys:
             encoding="utf-8",
         )
 
-        key_files = _build_safetensors_key_files(str(tmp_path))
+        key_files = build_safetensors_key_files(str(tmp_path))
 
         assert key_files == {"weight": str(shard)}
 
     def test_index_missing_shard_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.fsdp_meta import build_safetensors_key_files
 
         (tmp_path / "model.safetensors.index.json").write_text(
             json.dumps({"weight_map": {"weight": "missing.safetensors"}}),
@@ -2017,13 +1873,13 @@ class TestSafetensorsShardKeys:
         )
 
         with pytest.raises(RuntimeError, match="missing shard"):
-            _build_safetensors_key_files(str(tmp_path))
+            build_safetensors_key_files(str(tmp_path))
 
     def test_directory_without_weights_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.fsdp_meta import build_safetensors_key_files
 
         with pytest.raises(RuntimeError, match=r"model\.safetensors"):
-            _build_safetensors_key_files(str(tmp_path))
+            build_safetensors_key_files(str(tmp_path))
 
     def test_loads_backbone_alias_lora_tied_weight_and_buffer(self, tmp_path):
         from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
@@ -2098,7 +1954,7 @@ class TestSafetensorsShardKeys:
 
         assert torch.equal(model.language_model.weight.detach(), expected)
         assert torch.equal(model.vision_model.weight, torch.ones(2, 2))
-        assert "copied 0 vision_model parameters" in caplog.text
+        assert "copied 0 parameters outside language_model" in caplog.text
         assert "first vision_model.weight" in caplog.text
 
     def test_loads_converted_checkpoint_keys_including_a_split_source(
@@ -2202,7 +2058,52 @@ class TestSafetensorsShardKeys:
         assert torch.equal(qkv.query.weight.detach(), query)
         assert torch.equal(qkv.key.weight.detach(), key)
         assert torch.equal(qkv.value.weight.detach(), value)
-        assert "copied 4 vision_model parameters" in caplog.text
+        assert "copied 4 parameters outside language_model" in caplog.text
+        assert "first none" in caplog.text
+
+    def test_counts_a_fused_parameter_outside_the_language_tower(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # Arrange
+        query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        key = query + 10
+        save_file(
+            {
+                "language_model.weight": torch.zeros(2, 2),
+                "vision_model.q.weight": query,
+                "vision_model.k.weight": key,
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = nn.ModuleDict({"qk": nn.Linear(2, 4, bias=False)})
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        fuse_qk = WeightConverter(
+            source_patterns=["q.weight", "k.weight"],
+            target_patterns="qk.weight",
+            operations=[Concatenate(dim=0)],
+        )
+        monkeypatch.setattr(
+            "agilerl.distributed.fsdp._checkpoint_transform_groups",
+            lambda _model: [("", [fuse_qk])],
+        )
+        model = Root()
+
+        # Act
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        fused = model.vision_model["qk"].weight.detach()
+        assert torch.equal(fused, torch.cat([query, key], dim=0))
+        assert "copied 1 parameters outside language_model" in caplog.text
         assert "first none" in caplog.text
 
     def test_loads_keys_from_a_child_module_conversion(self, tmp_path):
@@ -2363,13 +2264,41 @@ class TestSafetensorsShardKeys:
             model.vision_model.layer_scale1.lambda1.detach(), torch.ones(2)
         )
         assert torch.equal(model.vision_model.extra.detach(), torch.ones(2))
-        assert "copied 0 vision_model parameters" in caplog.text
+        assert "copied 0 parameters outside language_model" in caplog.text
         assert "first vision_model.extra" in caplog.text
 
     def test_plain_module_has_no_weight_transforms(self) -> None:
         from agilerl.distributed.fsdp import _checkpoint_transform_groups
 
         assert _checkpoint_transform_groups(nn.Linear(2, 2)) == []
+
+    def test_descendant_of_a_mapped_model_type_gets_no_scoped_copy(self) -> None:
+        from agilerl.distributed.fsdp import _checkpoint_transform_groups
+
+        # Arrange
+        config = PretrainedConfig()
+        config.model_type = "agilerl_fsdp_shared_type"
+        renaming = WeightRenaming("^old", "new")
+        register_checkpoint_conversion_mapping(
+            "agilerl_fsdp_shared_type", [renaming], overwrite=True
+        )
+
+        class Inner(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.config = config
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Inner()
+                self.config = config
+
+        # Act
+        groups = _checkpoint_transform_groups(Root())
+
+        # Assert
+        assert [prefix for prefix, _ in groups] == [""]
 
     def test_missing_key_raises_without_a_language_tower(self, tmp_path):
         from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
@@ -2504,23 +2433,13 @@ class TestSafetensorsShardKeys:
             _load_sharded_weights_from_safetensors(Root())
 
     def test_stacks_indexed_expert_weights_on_a_dtensor(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, gloo_process_group
     ):
         from agilerl.distributed import fsdp as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
             def to_local(self) -> torch.Tensor:
                 return self.data
-
-        class OneChunkMesh:
-            def get_coordinate(self) -> None:
-                return None
-
-            def size(self, mesh_dim: int) -> int:
-                return 1
-
-            def get_local_rank(self, mesh_dim: int) -> int:
-                return 0
 
         monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
         first = torch.arange(4, dtype=torch.float32).reshape(2, 2)
@@ -2545,7 +2464,7 @@ class TestSafetensorsShardKeys:
 
         model = Root()
         model.block.experts.up_proj.placements = (Shard(0),)
-        model.block.experts.up_proj.device_mesh = OneChunkMesh()
+        model.block.experts.up_proj.device_mesh = init_device_mesh("cpu", (1,))
 
         fsdp_mod._load_sharded_weights_from_safetensors(model)
 
@@ -2553,7 +2472,9 @@ class TestSafetensorsShardKeys:
             model.block.experts.up_proj.data, torch.stack([first, second])
         )
 
-    def test_loads_a_dtensor_shard(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    def test_loads_a_dtensor_shard(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, gloo_process_group
+    ):
         from agilerl.distributed import fsdp as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
@@ -2563,16 +2484,6 @@ class TestSafetensorsShardKeys:
         monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
         full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
         save_file({"weight": full}, str(tmp_path / "model.safetensors"))
-
-        class OneChunkMesh:
-            def get_coordinate(self) -> None:
-                return None
-
-            def size(self, mesh_dim: int) -> int:
-                return 1
-
-            def get_local_rank(self, mesh_dim: int) -> int:
-                return 0
 
         class Tiny(nn.Module):
             def __init__(self) -> None:
@@ -2584,7 +2495,7 @@ class TestSafetensorsShardKeys:
 
         model = Tiny()
         model.weight.placements = (Shard(0),)
-        model.weight.device_mesh = OneChunkMesh()
+        model.weight.device_mesh = init_device_mesh("cpu", (1,))
 
         fsdp_mod._load_sharded_weights_from_safetensors(model)
 
@@ -2798,3 +2709,60 @@ def _make_llm_agent_for_ckpt() -> MagicMock:
     agent.actor = actor
     agent.shard_runtime = FSDPRuntime(FSDPConfig())
     return agent
+
+
+class TestMoveIgnoredToDevice:
+    @cuda_required
+    def test_moves_dense_params_and_buffers_to_cuda(self) -> None:
+        module = nn.Linear(2, 2)
+        module.register_buffer("mask", torch.ones(2))
+
+        _move_ignored_to_device(module, torch.device("cuda"))
+
+        assert all(param.is_cuda for param in module.parameters())
+        assert all(buffer.is_cuda for buffer in module.buffers())
+
+    @cuda_required
+    def test_tied_weights_stay_tied(self) -> None:
+        embed = nn.Embedding(4, 2)
+        head = nn.Linear(2, 4, bias=False)
+        head.weight = embed.weight
+        model = nn.ModuleDict({"embed": embed, "head": head})
+
+        _move_ignored_to_device(model, torch.device("cuda"))
+
+        assert model["head"].weight is model["embed"].weight
+        assert model["embed"].weight.is_cuda
+
+    def test_leaves_dtensors_alone(self) -> None:
+        module = nn.Linear(2, 2)
+        dtensor = MagicMock(spec=DTensor)
+        module._parameters["w"] = dtensor
+
+        _move_ignored_to_device(module, torch.device("cpu"))
+
+        assert module._parameters["w"] is dtensor
+
+    def test_moves_tp_only_dtensor_keeping_identity_and_layout(
+        self, gloo_process_group
+    ) -> None:
+        # Arrange
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=(MeshAxisName.TP,))
+        module = nn.Linear(2, 4, bias=False)
+        module.weight = nn.Parameter(
+            distribute_tensor(module.weight.detach(), mesh, [Shard(0)]),
+            requires_grad=False,
+        )
+        weight = module.weight
+
+        # Act
+        _move_ignored_to_device(module, torch.device("meta"))
+
+        # Assert
+        assert module.weight is weight
+        assert isinstance(weight, DTensor)
+        assert weight.to_local().device == torch.device("meta")
+        assert weight.device_mesh is mesh
+        assert weight.placements == (Shard(0),)
+        assert weight.shape == (4, 2)
+        assert not weight.requires_grad

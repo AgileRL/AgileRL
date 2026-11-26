@@ -1,136 +1,50 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family trainer, vLLM, and patch defaults keyed by Hugging Face ``model_type``."""
+"""Model families and per-``model_type`` runtime lookups."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
-from transformers.configuration_utils import PretrainedConfig
-
-from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
-from agilerl.architectures.nemotron_h.language_tower import (
-    omni_language_tower_hf_override,
-)
-from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
-from agilerl.architectures.qwen3_5 import (
-    QWEN3_5_MODEL_CLASS_OVERRIDES,
-    qwen3_5_language_tower_hf_override,
-)
-from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.runtime import (
-    LanguageTowerRuntimeConfig,
-    MambaPatchConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     ModelRuntimeConfig,
-    PatchRuntimeConfig,
-    TrainerRuntimeConfig,
-    VllmRuntimeConfig,
+    TrainerModelClass,
+    VisionSupport,
+    discover_families,
+    runtime_configs_by_model_type,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
-# Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
-# supports only eager attention.
-NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(attn_implementation="flash_attention_2"),
-    vllm=VllmRuntimeConfig(
-        mamba_cache_mode="align",
-        max_num_batched_tokens=8192,
-        reasoning_parser="nemotron_v3",
-        enable_prefix_caching=True,
-        trust_remote_code=True,
-    ),
-    patch=PatchRuntimeConfig(
-        install=install_mamba_patches,
-        mamba=MambaPatchConfig(
-            mixer="transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer",
-            block="transformers.models.nemotron_h.modeling_nemotron_h.NemotronHBlock",
-        ),
-    ),
-    tensor_parallel_plan=(
-        "agilerl.architectures.nemotron_h.tensor_parallel:"
-        "NEMOTRON_H_TENSOR_PARALLEL_PLAN"
-    ),
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.configuration_utils import PretrainedConfig
+
+# Family declarations import transformers; a core install serves no LLM family.
+FAMILIES = discover_families("agilerl.architectures") if HAS_LLM_DEPENDENCIES else ()
+FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = (
+    runtime_configs_by_model_type(FAMILIES)
 )
 
-NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
-    update={
-        # nemotron_h_omni is not a transformers model type; its config needs checkpoint code.
-        "trainer": TrainerRuntimeConfig(
-            attn_implementation="flash_attention_2",
-            trust_remote_code=True,
-        ),
-        "language_tower": LanguageTowerRuntimeConfig(
-            hf_overrides=omni_language_tower_hf_override,
-            model_class_overrides={
-                "NemotronHOmniLanguageForCausalLM": (
-                    "agilerl.architectures.nemotron_h.omni_language:"
-                    "NemotronHOmniLanguageForCausalLM"
-                ),
-            },
-        ),
-        "multimodal_towers_kept_hf_override": {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        },
-        "tower_connector_lora_targets": frozenset(
-            {
-                "query",
-                "key",
-                "value",
-                "dense",
-                "fc1",
-                "fc2",
-                "patch_projection",
-                "video_patch_projection",
-                "linear1",
-                "linear2",
-            }
-        ),
-    },
-)
 
-GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
-)
+def pretrained_config(model_name_or_path: str) -> dict[str, Any]:
+    """Return ``config.json`` contents from a checkpoint id or local path.
 
-GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
-    update={
-        "language_tower": LanguageTowerRuntimeConfig(
-            hf_overrides=gemma4_language_tower_hf_override,
-        ),
-    },
-)
+    Supported ids read the bundled config instead of the Hub.
 
-GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
-)
-
-# Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
-QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
-    vllm=VllmRuntimeConfig(
-        mamba_cache_mode="align",
-        enable_prefix_caching=True,
-    ),
-    language_tower=LanguageTowerRuntimeConfig(
-        hf_overrides=qwen3_5_language_tower_hf_override,
-        model_class_overrides=QWEN3_5_MODEL_CLASS_OVERRIDES,
-    ),
-    patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
-)
-
-FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
-    "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
-    "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
-    "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma3_text": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma4": GEMMA4_RUNTIME_CONFIG,
-    "gemma4_text": GEMMA4_RUNTIME_CONFIG,
-    "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
-    "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_text": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe_text": QWEN3_5_RUNTIME_CONFIG,
-}
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: The checkpoint's top-level config.
+    :rtype: dict[str, Any]
+    """
+    entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
+    if entry is not None:
+        return entry.config
+    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+    return config_dict
 
 
 def pretrained_model_type(model_name_or_path: str) -> str:
@@ -138,19 +52,89 @@ def pretrained_model_type(model_name_or_path: str) -> str:
 
     Supported ids read the bundled config instead of the Hub.
     """
-    entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
-    if entry is not None:
-        return entry.config["model_type"]
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model_name_or_path,
-        trust_remote_code=True,
-    )
-    return config_dict["model_type"]
+    return pretrained_config(model_name_or_path)["model_type"]
+
+
+def model_type_runtime(model_type: str) -> ModelRuntimeConfig:
+    """Return the family serving a Hugging Face ``model_type``.
+
+    :raises ValueError: If no family serves ``model_type``.
+    """
+    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
+    if runtime is None:
+        msg = f"model_type {model_type!r} has no family in agilerl.architectures"
+        raise ValueError(msg)
+    return runtime
+
+
+def model_type_vision(model_type: str) -> VisionSupport | None:
+    """Return the family's vision settings, or None for a text ``model_type``."""
+    runtime = model_type_runtime(model_type)
+    if model_type not in runtime.model_types.multimodal:
+        return None
+    return runtime.vision
+
+
+def model_type_trainer_class(model_type: str) -> TrainerModelClass:
+    """Return the auto class every trainer load of a ``model_type`` builds.
+
+    Multimodal checkpoints build their full VL class so towers load, frozen.
+    """
+    if model_type in model_type_runtime(model_type).model_types.multimodal:
+        return AutoModelForImageTextToText
+    return AutoModelForCausalLM
 
 
 def family_runtime(model_name_or_path: str) -> ModelRuntimeConfig:
-    """Return catalog runtime for a checkpoint id or local path."""
-    return FAMILY_RUNTIME_CONFIGS.get(
-        pretrained_model_type(model_name_or_path),
-        ModelRuntimeConfig(),
-    )
+    """Return the family serving a checkpoint id or local path."""
+    return model_type_runtime(pretrained_model_type(model_name_or_path))
+
+
+def family_vision(model_name_or_path: str) -> VisionSupport | None:
+    """Return the vision settings of a checkpoint id or local path, or None for a text checkpoint."""
+    return model_type_vision(pretrained_model_type(model_name_or_path))
+
+
+def sm80_attention_backend(model_name_or_path: str) -> str | None:
+    """Return the async engine attention backend for this checkpoint on sm80 GPUs.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: The family's ``sm80_attention_backend``, or ``None`` when unset or
+        the checkpoint has Mamba layers.
+    :rtype: str | None
+    """
+    config = pretrained_config(model_name_or_path)
+    # granitemoehybrid checkpoints range from attention-only to mostly Mamba.
+    if "mamba" in config.get("layer_types", ()):
+        return None
+    return model_type_runtime(config["model_type"]).vllm.sm80_attention_backend
+
+
+def trainer_model_class(model_name_or_path: str) -> TrainerModelClass:
+    """Return the auto class every trainer load of this checkpoint builds.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: ``AutoModelForCausalLM``, or ``AutoModelForImageTextToText`` for VL families.
+    :rtype: TrainerModelClass
+    """
+    return model_type_trainer_class(pretrained_model_type(model_name_or_path))
+
+
+def family_chat_template(model_name_or_path: str) -> str | None:
+    """Return the family chat format's template for a tokenizer that ships none.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: The Jinja template, or ``None`` when the format has none.
+    :rtype: str | None
+    """
+    # Import cycle: agilerl.llm_envs imports agilerl.utils.llm_utils, which
+    # imports this package.
+    from agilerl.llm_envs.chat_formats import CHAT_FORMATS
+
+    chat_format = family_runtime(model_name_or_path).chat_format
+    if chat_format is None:
+        return None
+    return CHAT_FORMATS[chat_format].CHAT_TEMPLATE

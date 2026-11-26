@@ -426,22 +426,24 @@ class TestNDJsonStream:
         assert stream.result is not None
         assert stream.result["accepted"] is True
 
-    def test_result_not_set_for_completed_without_detail(self):
+    def test_result_from_completed_without_detail(self):
         lines = [
             json.dumps(
                 {
                     "kind": "status",
-                    "stage": "upload",
+                    "stage": "submission",
                     "status": "completed",
-                    "message": "Upload done",
+                    "message": "Training job submitted",
                 }
             ),
         ]
         resp = _make_mock_response(lines)
         stream = NDJsonStream(resp)
-        list(stream)
-
-        assert stream.result is None
+        assert stream.collect() == {
+            "stage": "submission",
+            "status": "completed",
+            "message": "Training job submitted",
+        }
 
     def test_collect_returns_result(self):
         lines = [

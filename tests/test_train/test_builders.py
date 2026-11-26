@@ -3,9 +3,11 @@
 
 """The builder layer: how a contract spec becomes a live algorithm."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import (
@@ -13,6 +15,7 @@ from agilerl.algorithms.core import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
+from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
@@ -25,6 +28,9 @@ from agilerl.arena.models.algorithms import (
     SFTSpec,
     SingleAgentAlgorithmSpec,
 )
+from agilerl.arena.models.env import LLMEnvSpec
+from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.model_info import catalog_lora_modules
 from agilerl.arena.models.networks import (
     CosineLRScheduleConfig as CosineLRScheduleSpec,
 )
@@ -34,6 +40,7 @@ from agilerl.arena.models.networks import (
     QNetworkSpec,
     StochasticActorSpec,
 )
+from agilerl.arena.models.networks import VLLMConfig as VLLMConfigSpec
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.builders import (
     AlgorithmBuildRuntime,
@@ -163,23 +170,33 @@ class TestAlgorithmBuildRuntime:
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
 class TestPeftLoraConfig:
-    def test_manifest_lora_becomes_the_peft_object(self):
+    def test_manifest_lora_trains_the_catalog_modules(self):
         from peft import LoraConfig
 
+        # Act
         lora = llm_builder.peft_lora_config(
-            LoraConfigDict(lora_r=8, lora_alpha=16, target_modules=["q_proj"])
+            {"lora_r": 8, "lora_alpha": 16, "target_modules": ["q_proj"]},
+            "Qwen/Qwen3.5-0.8B",
         )
+
+        # Assert
         assert isinstance(lora, LoraConfig)
         assert lora.r == 8
         assert lora.lora_alpha == 16
-        assert set(lora.target_modules) == {"q_proj"}
+        assert set(lora.target_modules) == set(
+            catalog_lora_modules("Qwen/Qwen3.5-0.8B")
+        )
+
+    def test_model_outside_the_catalog_raises(self):
+        with pytest.raises(ValueError, match="not in the Arena model catalog"):
+            llm_builder.peft_lora_config(LoraConfigDict(), "org/custom-model")
 
     def test_already_built_peft_config_is_returned(self):
         from peft import LoraConfig
 
         peft_lora = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
 
-        assert llm_builder.peft_lora_config(peft_lora) is peft_lora
+        assert llm_builder.peft_lora_config(peft_lora, "org/custom-model") is peft_lora
 
 
 class TestCosineLrScheduleConfig:
@@ -198,7 +215,7 @@ class TestCosineLrScheduleConfig:
 def test_peft_lora_config_needs_the_llm_extras(monkeypatch):
     monkeypatch.setattr(llm_builder, "HAS_LLM_DEPENDENCIES", False)
     with pytest.raises(ImportError, match="LLM dependencies are required"):
-        llm_builder.peft_lora_config(LoraConfigDict())
+        llm_builder.peft_lora_config(LoraConfigDict(), "Qwen/Qwen3.5-0.8B")
 
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
@@ -208,7 +225,6 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
 
     spec = GRPOSpec(
         group_size=4,
-        attn_implementation="sdpa",
         quantization="nf4",
         vllm_engine_args={"trust_remote_code": True},
         pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
@@ -217,10 +233,8 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
     kwargs = spec_kwargs(spec, hp_config=None)
     filtered = constructor_kwargs(GRPO, kwargs)
 
-    assert kwargs["attn_implementation"] == "sdpa"
     assert kwargs["quantization"] == "nf4"
     assert kwargs["vllm_engine_args"] == {"trust_remote_code": True}
-    assert "attn_implementation" not in filtered
     assert "quantization" not in filtered
     assert "vllm_engine_args" not in filtered
     assert filtered["group_size"] == 4
@@ -306,7 +320,31 @@ class TestAlgoClassParadigmGuards:
             MultiAgentBuilder.algo_class(DQNSpec())
 
 
-def _build_llm_with_dummy_algo(spec, monkeypatch, *, rollout_mode: str = ""):
+CATALOG_HUB_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+CUDA_CARD_BYTES = 4 * 1024**3
+
+
+def _patch_cuda_card(monkeypatch, total_bytes: int = CUDA_CARD_BYTES) -> None:
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(
+            total_memory=total_bytes,
+            name="NVIDIA L4",
+            major=8,
+            minor=9,
+        ),
+    )
+
+
+def _build_llm_with_dummy_algo(
+    spec,
+    monkeypatch,
+    *,
+    rollout_mode: str = "",
+    device: str = "cpu",
+    environment=None,
+):
     built = {}
 
     class DummyAlgo:
@@ -333,7 +371,13 @@ def _build_llm_with_dummy_algo(spec, monkeypatch, *, rollout_mode: str = ""):
 
     tokenizer = MagicMock()
     tokenizer.pad_token = "<pad>"
-    LLMBuilder.build(spec, tokenizer=tokenizer, rollout_mode=rollout_mode)
+    LLMBuilder.build(
+        spec,
+        tokenizer=tokenizer,
+        runtime=AlgorithmBuildRuntime(device=device),
+        rollout_mode=rollout_mode,
+        environment=environment,
+    )
     return built
 
 
@@ -341,6 +385,15 @@ class TestLLMBuildGuards:
     def test_rejects_a_non_llm_spec(self):
         with pytest.raises(TypeError, match="not an LLMAlgorithmSpec"):
             LLMBuilder.build(DQNSpec(), tokenizer=MagicMock())
+
+    @requires_llm
+    def test_lora_without_a_model_id_names_the_missing_field(self, monkeypatch):
+        spec = GRPOSpec(group_size=2, lora_config={"lora_r": 8})
+
+        with pytest.raises(
+            ValueError, match="GRPOSpec has no pretrained_model_name_or_path"
+        ):
+            _build_llm_with_dummy_algo(spec, monkeypatch)
 
     def test_a_vllm_config_model_is_dumped_for_the_constructor(self, monkeypatch):
         """A manifest ``vllm_config`` section reaches the constructor as VLLMConfig."""
@@ -366,6 +419,35 @@ class TestLLMBuildGuards:
         built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
 
         assert isinstance(built["vllm_config"], VLLMConfig)
+
+    @pytest.mark.parametrize(
+        "vllm_config", [None, VLLMConfigSpec(gpu_memory_utilization=0.6)]
+    )
+    def test_colocated_vllm_sleeps(self, monkeypatch, vllm_config):
+        # Arrange
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            vllm_config=vllm_config,
+        )
+
+        # Act
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
+
+        # Assert
+        assert built["vllm_config"].sleep_mode is True
+
+    def test_colocated_leaves_sampling_logprob_options_to_the_constructor(
+        self, monkeypatch
+    ):
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
+
+        assert "old_logprobs_source" not in built
+        assert "vllm_importance_sampling_correction" not in built
 
     def test_vllm_config_is_dropped_when_the_trainer_does_not_host_vllm(
         self, monkeypatch
@@ -408,7 +490,7 @@ class TestLLMBuildGuards:
 
         assert built["fsdp_config"] == FSDPConfig()
 
-    def test_distributed_splits_batch_size_per_rank(self, monkeypatch):
+    def test_distributed_omitted_micro_batch_is_rank_trajectories(self, monkeypatch):
         monkeypatch.setattr(llm_builder, "is_distributed", lambda: True)
         monkeypatch.setattr(llm_builder, "get_world_size", lambda: 2)
         spec = GRPOSpec(
@@ -418,4 +500,60 @@ class TestLLMBuildGuards:
         )
         built = _build_llm_with_dummy_algo(spec, monkeypatch)
 
-        assert built["micro_batch_size_per_gpu"] == 4
+        assert built["micro_batch_size_per_gpu"] == resolve_micro_batch_size_per_gpu(
+            spec, 2
+        )
+        assert built["micro_batch_size_per_gpu"] == 8
+
+    def test_cpu_omitted_micro_batch_stays_unset(self, monkeypatch):
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            batch_size=8,
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+
+        assert "micro_batch_size_per_gpu" not in built
+
+    def test_cuda_omitted_memory_fields_reach_the_algorithm_unset(self, monkeypatch):
+        # Arrange
+        _patch_cuda_card(monkeypatch)
+        spec = GRPOSpec(
+            group_size=4,
+            batch_size=4,
+            pretrained_model_name_or_path=CATALOG_HUB_ID,
+            max_model_len=1024,
+            fsdp=True,
+        )
+
+        # Act
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
+
+        # Assert
+        assert built["fsdp_config"] == FSDPConfig()
+        assert "gradient_checkpointing" not in built
+        assert "micro_batch_tokens_per_gpu" not in built
+
+
+@requires_llm
+class TestLLMBuilderBuildDerivedEngineSettings:
+    @pytest.mark.parametrize(
+        ("modality", "expected"), [("text", True), ("vision", False), (None, False)]
+    )
+    def test_text_only_env_strips_a_vl_model_towers(
+        self, monkeypatch, modality, expected
+    ):
+        spec = GRPOSpec(
+            group_size=4,
+            batch_size=4,
+            pretrained_model_name_or_path="Qwen/Qwen3.5-2B",
+            max_model_len=128,
+            vllm_config=VLLMConfigSpec(),
+        )
+        environment = LLMEnvSpec(
+            env_type="rollout", env_url="http://env", max_turns=1, modality=modality
+        )
+
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, environment=environment)
+
+        assert built["rollout_strip_multimodal_towers"] is expected

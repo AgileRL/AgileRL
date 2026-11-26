@@ -13,7 +13,11 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from agilerl.lora.moe.adapters import low_rank_delta
-from agilerl.lora.moe.grouped_gemm import grouped_matmul, grouped_operand
+from agilerl.lora.moe.grouped_gemm import (
+    expert_kernels,
+    grouped_matmul,
+    grouped_operand,
+)
 from agilerl.lora.moe.layouts import expert_activation
 
 
@@ -23,6 +27,8 @@ class LoraExpertsConfig:
 
     act_fn: Callable[[torch.Tensor], torch.Tensor]
     gated: bool
+    # The family's own gate on the packed projection, ``None`` for ``act_fn``.
+    apply_gate: Callable[[torch.Tensor], torch.Tensor] | None
     # Rows per chunk of the expert-sorted rows.
     sizes: tuple[int, ...]
     # Mixed-routing row id of each up / down adapter, ``None`` when unrouted.
@@ -114,6 +120,7 @@ class LoraExpertsFunction(torch.autograd.Function):
         up_operand = grouped_operand(up_weight)
         down_operand = grouped_operand(down_weight)
         result = torch.zeros_like(hidden_states, dtype=torch.float32)
+        kernels = expert_kernels(hidden_states)
         chunks = zip(
             token_idx.split(config.sizes),
             routed_weights.split(config.sizes),
@@ -125,14 +132,19 @@ class LoraExpertsFunction(torch.autograd.Function):
             projected = grouped_matmul(rows, up_operand, offs)
             for delta in _adapter_deltas(rows, operands[:n_up], up_masks, chunk, offs):
                 projected.add_(delta)
-            intermediate = expert_activation(projected, config.act_fn, config.gated)
+            intermediate = expert_activation(
+                projected, config.act_fn, config.gated, kernels, config.apply_gate
+            )
             out = grouped_matmul(intermediate, down_operand, offs)
             for delta in _adapter_deltas(
                 intermediate, operands[n_up:], down_masks, chunk, offs
             ):
                 out.add_(delta)
-            out.mul_(weights)
-            result.index_add_(0, index, out.to(torch.float32))
+            if kernels is None:
+                out.mul_(weights)
+                result.index_add_(0, index, out.to(torch.float32))
+            else:
+                kernels.scatter_add(result, index, out, weights)
         ctx.save_for_backward(
             hidden_states,
             token_idx,
@@ -172,6 +184,7 @@ class LoraExpertsFunction(torch.autograd.Function):
         dtype = hidden_states.dtype
         up_masks = _chunk_masks(row_ids, config.up_row_ids, config.sizes, dtype)
         down_masks = _chunk_masks(row_ids, config.down_row_ids, config.sizes, dtype)
+        kernels = expert_kernels(hidden_states)
         up_operand = grouped_operand(up_weight)
         # ``grad_rows @ down[e]`` is the down projection's transpose.
         down_transposed = grouped_operand(down_weight).transpose(-2, -1)
@@ -208,7 +221,13 @@ class LoraExpertsFunction(torch.autograd.Function):
                     rows, leaves[:n_up], up_masks, chunk, offs
                 ):
                     projected.add_(delta)
-                intermediate = expert_activation(projected, config.act_fn, config.gated)
+                intermediate = expert_activation(
+                    projected,
+                    config.act_fn,
+                    config.gated,
+                    kernels,
+                    config.apply_gate,
+                )
                 down_delta = _sum_deltas(
                     _adapter_deltas(
                         intermediate, leaves[n_up:], down_masks, chunk, offs
@@ -253,7 +272,10 @@ class LoraExpertsFunction(torch.autograd.Function):
                     continue
                 if position == 0:
                     assert grad_hidden is not None
-                    grad_hidden.index_add_(0, index, grad.float())
+                    if kernels is None:
+                        grad_hidden.index_add_(0, index, grad.float())
+                    else:
+                        kernels.scatter_add(grad_hidden, index, grad, None)
                     continue
                 target = grad_operands[position - 1]
                 assert target is not None

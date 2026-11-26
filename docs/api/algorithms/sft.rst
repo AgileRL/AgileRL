@@ -54,7 +54,6 @@ Example
     r=16,
     lora_alpha=64,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.05,
     bias="none",
   )
 

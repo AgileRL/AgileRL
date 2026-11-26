@@ -20,6 +20,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 DEFAULT_ROOTS = ("tests", "agilerl-arena/tests")
+# Setup and xdist dispatch cost even when a recorded time rounds to zero;
+# without a floor, thousands of near-zero tests pile onto one shard.
+MIN_TEST_SECONDS = 0.1
 
 
 def prepend_cwd_to_pythonpath(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -60,8 +63,11 @@ def shard_nodeids(
 
     def weight(nodeid: str) -> float:
         if nodeid in weights:
-            return max(weights[nodeid], 0.0)
-        return file_default.get(nodeid.partition("::")[0], global_default)
+            return max(weights[nodeid], MIN_TEST_SECONDS)
+        return max(
+            file_default.get(nodeid.partition("::")[0], global_default),
+            MIN_TEST_SECONDS,
+        )
 
     order = sorted(
         range(count),
@@ -262,8 +268,8 @@ def combine_coverage() -> None:
     )
 
 
-def collect_nodeids(root: Path, pytest_args: list[str]) -> list[str]:
-    """Collect one root with addopts cleared so xdist does not start."""
+def collect_nodeids(targets: list[Path], pytest_args: list[str]) -> list[str]:
+    """Collect test paths with addopts cleared so xdist does not start."""
     cmd = [
         sys.executable,
         "-m",
@@ -277,7 +283,7 @@ def collect_nodeids(root: Path, pytest_args: list[str]) -> list[str]:
         "-o",
         "addopts=",
         *collection_args(pytest_args),
-        str(root),
+        *(str(target) for target in targets),
     ]
     env = os.environ.copy()
     env["PYTHONHASHSEED"] = "0"
@@ -286,7 +292,8 @@ def collect_nodeids(root: Path, pytest_args: list[str]) -> list[str]:
     if result.returncode not in (0, 5):
         sys.stderr.write(result.stderr)
         sys.stderr.write(result.stdout)
-        raise RuntimeError(f"collection failed for {root} ({result.returncode})")
+        names = " ".join(str(target) for target in targets)
+        raise RuntimeError(f"collection failed for {names} ({result.returncode})")
     return [line for line in result.stdout.splitlines() if "::" in line]
 
 
@@ -322,17 +329,39 @@ def exec_nodeids(pytest_args: list[str], nodeid_file: Path) -> int:
     return int(pytest.main([*pytest_args, *nodeids]))
 
 
+def collection_targets(roots: list[Path], select_file: Path | None) -> list[list[Path]]:
+    """Paths to collect per root: the root, or only its selected test files."""
+    if select_file is None:
+        return [[root] for root in roots]
+    selected = [
+        Path(line)
+        for line in select_file.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    ordered = sorted(roots, key=lambda path: len(path.as_posix()), reverse=True)
+    by_root: dict[Path, list[Path]] = {root: [] for root in roots}
+    for path in selected:
+        for root in ordered:
+            if path.is_relative_to(root):
+                by_root[root].append(path)
+                break
+        else:
+            raise RuntimeError(f"{path} matches no root")
+    return [by_root[root] for root in roots if by_root[root]]
+
+
 def run_shard(
     roots: list[Path],
     total_shards: int,
     shard_index: int,
     durations_file: Path | None,
+    select_file: Path | None,
     pytest_args: list[str],
 ) -> int:
-    """Collect every root, keep this shard, and run each root in its own process."""
+    """Collect each root (or its selected files), keep this shard, run each root alone."""
     collected: list[str] = []
-    for root in roots:
-        collected.extend(collect_nodeids(root, pytest_args))
+    for targets in collection_targets(roots, select_file):
+        collected.extend(collect_nodeids(targets, pytest_args))
     selected = shard_nodeids(
         collected,
         total_shards,
@@ -401,6 +430,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run.add_argument("--total-shards", type=int, required=True)
     run.add_argument("--shard-index", type=int, required=True)
     run.add_argument("--durations-file", type=Path)
+    run.add_argument(
+        "--select-file",
+        type=Path,
+        help="newline-separated test files; collect only these",
+    )
     run.add_argument("pytest_args", nargs=argparse.REMAINDER)
 
     merge = sub.add_parser("merge-junit", help="write {node id: seconds} JSON")
@@ -446,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
         args.total_shards,
         args.shard_index,
         args.durations_file,
+        args.select_file,
         pytest_args,
     )
 

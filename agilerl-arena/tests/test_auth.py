@@ -6,21 +6,23 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from keycloak.exceptions import KeycloakError
 
 from agilerl.arena.auth import (
     ArenaOAuth2,
-    is_oauth_access_token_valid,
     load_credentials,
     load_credentials_payload,
     oauth_access_token_expires_at,
+    oauth_token_claims,
+    stored_issuer,
 )
 from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
@@ -97,19 +99,15 @@ class TestOAuthAccessTokenJwt:
     def test_expires_at_decodes_exp(self):
         assert oauth_access_token_expires_at(_jwt_with_exp(1700000000)) == 1700000000.0
 
-    def test_is_valid_true_before_exp_with_skew(self):
-        with patch("agilerl.arena.auth.time.time", return_value=1000.0):
-            assert is_oauth_access_token_valid(_jwt_with_exp(2000), skew_seconds=60)
-
-    def test_is_valid_false_after_exp_skew(self):
-        with patch("agilerl.arena.auth.time.time", return_value=2000.0):
-            assert not is_oauth_access_token_valid(_jwt_with_exp(1000))
-
     def test_expires_at_none_for_jwt_without_exp(self):
         assert oauth_access_token_expires_at(_jwt_payload({})) is None
 
     def test_expires_at_none_for_malformed_jwt(self):
         assert oauth_access_token_expires_at("a.b") is None
+
+    @pytest.mark.parametrize("exp", ["soon", [1700000000]])
+    def test_expires_at_none_for_non_numeric_exp(self, exp):
+        assert oauth_access_token_expires_at(_jwt_payload({"exp": exp})) is None
 
 
 class TestLoadCredentialsPayload:
@@ -168,6 +166,20 @@ class TestArenaOAuth2Configure:
         ArenaOAuth2.configure(keycloak_url=None)
         assert orig_url == ArenaOAuth2.KEYCLOAK_URL
 
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_configured_keycloak_url_beats_env(self, mock_kc_cls, monkeypatch):
+        """``arena --keycloak-url`` must win over an exported ARENA_KEYCLOAK_URL."""
+        monkeypatch.setenv("ARENA_KEYCLOAK_URL", "https://auth.example.com")
+        ArenaOAuth2.configure(keycloak_url="http://localhost:8023")
+        ArenaOAuth2()
+        assert mock_kc_cls.call_args.kwargs["server_url"] == "http://localhost:8023"
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_env_keycloak_url_beats_default(self, mock_kc_cls, monkeypatch):
+        monkeypatch.setenv("ARENA_KEYCLOAK_URL", "https://auth.example.com")
+        ArenaOAuth2()
+        assert mock_kc_cls.call_args.kwargs["server_url"] == "https://auth.example.com"
+
 
 class TestArenaOAuth2Init:
     @patch("agilerl.arena.auth.KeycloakOpenID")
@@ -179,6 +191,85 @@ class TestArenaOAuth2Init:
             client_id=ArenaOAuth2.CLIENT_ID,
         )
         assert auth.kc is mock_kc_cls.return_value
+
+
+class TestArenaOAuth2IssuerAttribute:
+    def test_built_from_keycloak_url_and_realm(self):
+        with (
+            patch("agilerl.arena.auth.KeycloakOpenID"),
+            patch.dict(os.environ, {"ARENA_KEYCLOAK_URL": "https://kc.example.com/"}),
+        ):
+            auth = ArenaOAuth2()
+
+        assert auth.issuer == f"https://kc.example.com/realms/{ArenaOAuth2.REALM}"
+
+
+class TestOauthTokenClaims:
+    def test_decodes_payload(self):
+        assert oauth_token_claims(_jwt_payload({"iss": "https://kc/realms/a"})) == {
+            "iss": "https://kc/realms/a"
+        }
+
+    def test_none_for_opaque_token(self):
+        assert oauth_token_claims("opaque") is None
+
+    def test_none_for_missing_token(self):
+        assert oauth_token_claims(None) is None
+
+
+class TestStoredIssuer:
+    def test_prefers_recorded_issuer(self):
+        creds = {
+            "issuer": "https://dev/realms/arena",
+            "access_token": _jwt_payload({"iss": "https://prod/realms/arena"}),
+        }
+
+        assert stored_issuer(creds) == "https://dev/realms/arena"
+
+    def test_falls_back_to_token_iss(self):
+        creds = {"access_token": _jwt_payload({"iss": "https://prod/realms/arena"})}
+
+        assert stored_issuer(creds) == "https://prod/realms/arena"
+
+    def test_none_when_unknown(self):
+        assert stored_issuer({"access_token": "opaque"}) is None
+
+
+class TestArenaOAuth2EndSession:
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_same_issuer_logs_out_on_own_keycloak(self, mock_kc_cls):
+        auth = ArenaOAuth2()
+
+        auth.end_session("rt", auth.issuer)
+
+        auth.kc.logout.assert_called_once_with("rt")
+        assert mock_kc_cls.call_count == 1
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_other_issuer_logs_out_on_that_keycloak(self, mock_kc_cls):
+        auth = ArenaOAuth2()
+        other_kc = MagicMock()
+        mock_kc_cls.side_effect = [other_kc]
+
+        auth.end_session("rt", "https://dev-auth.example.com/realms/arena-dev")
+
+        mock_kc_cls.assert_called_with(
+            server_url="https://dev-auth.example.com",
+            realm_name="arena-dev",
+            client_id=ArenaOAuth2.CLIENT_ID,
+        )
+        other_kc.logout.assert_called_once_with("rt")
+        auth.kc.logout.assert_not_called()
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_failure_warns_and_does_not_raise(self, mock_kc_cls, caplog):
+        auth = ArenaOAuth2()
+        auth.kc.logout.side_effect = KeycloakError("unreachable")
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.auth"):
+            auth.end_session("rt")
+
+        assert "Could not end the previous Arena session" in caplog.text
 
 
 class TestWriteCredentials:
@@ -270,6 +361,7 @@ class TestDeviceLogin:
         written = mock_write.call_args[0][0]
         assert written["access_token"] == tokens["access_token"]
         assert written["refresh_token"] == tokens["refresh_token"]
+        assert written["issuer"] == auth.issuer
         mock_wb.open.assert_called_once()
         mock_kc.token.assert_called_once()
         call_kw = mock_kc.token.call_args.kwargs

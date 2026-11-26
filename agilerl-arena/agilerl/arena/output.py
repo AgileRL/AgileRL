@@ -9,11 +9,14 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import singledispatch
 from typing import Any
 
 import click
+from pydantic import ValidationError
 from rich.live import Live
 from rich.markup import escape
 from rich.padding import Padding
@@ -22,7 +25,13 @@ from rich.text import Text
 from typing_extensions import Self
 
 from agilerl.arena import console, error_console
-from agilerl.arena.exceptions import ArenaAPIError, ArenaError, resolve_api_error_class
+from agilerl.arena.exceptions import (
+    ArenaAPIError,
+    ArenaClientUpgradeRequiredError,
+    ArenaError,
+    resolve_api_error_class,
+)
+from agilerl.arena.models.verdict import errors as manifest_errors
 from agilerl.arena.stream import (
     CheckEvent,
     ErrorEvent,
@@ -30,6 +39,7 @@ from agilerl.arena.stream import (
     StatusEvent,
     StreamEvent,
 )
+from agilerl.arena.upgrade import offer_upgrade
 
 if sys.platform == "win32":
     import msvcrt  # pragma: no cover
@@ -40,30 +50,86 @@ else:
 
 logger = logging.getLogger(__name__)
 
+# ``ctx.meta`` key set by the root ``--json`` flag.
+JSON_OUTPUT_META_KEY = "agilerl.arena.json_output"
+# Rich's default of 80 columns would truncate table cells when piped.
+PIPED_TABLE_WIDTH = 100_000
+
+
+def json_output_enabled() -> bool:
+    """Whether the running command was asked for JSON with the root ``--json`` flag.
+
+    :returns: ``True`` inside a command run with ``--json`` or ``ARENA_JSON``.
+    :rtype: bool
+    """
+    ctx = click.get_current_context(silent=True)
+    return ctx is not None and bool(ctx.meta.get(JSON_OUTPUT_META_KEY))
+
+
+def emit_json_result(result: object) -> None:
+    """Print *result* as one JSON document on stdout when ``--json`` is on.
+
+    For commands whose human output is a progress stream rather than the result.
+
+    :param result: The result to emit.
+    :type result: object
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(result, default=str))
+
 
 def _print_rich(renderable: object, *, is_error: bool = False) -> None:
-    if is_error:
-        error_console.print(renderable)
+    target = error_console if is_error else console
+    if not target.is_terminal:
+        target.width = PIPED_TABLE_WIDTH
+    target.print(renderable)
+
+
+def emit_result(
+    result: object,
+    is_error: bool = False,
+    columns: list[str] | None = None,
+    display: Callable[[Any], Any] | None = None,
+    empty_message: str = "No results.",
+) -> None:
+    """Emit *result* as JSON under ``--json``, otherwise as a Rich table.
+
+    :param result: The result to emit.
+    :type result: Any
+    :param is_error: Whether to print the result as an error.
+    :type is_error: bool
+    :param columns: The columns to display in the table. If None, all columns will be displayed.
+    :type columns: list[str] | None
+    :param display: Reshapes *result* for the table only; JSON keeps every field.
+    :type display: Callable[[Any], Any] | None
+    :param empty_message: Printed instead of a table when *result* is empty.
+    :type empty_message: str
+    :returns: None
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(result, default=str), err=is_error)
         return
-    console.print(renderable)
+    if isinstance(result, (dict, list)) and not result:
+        target = error_console if is_error else console
+        # The message can hold user-supplied names that are not Rich markup.
+        target.print(empty_message, markup=False, highlight=False, soft_wrap=True)
+        return
+    _emit_table(
+        display(result) if display else result, is_error=is_error, columns=columns
+    )
 
 
 @singledispatch
-def emit_result(
+def _emit_table(
     result: object,
     *,
     is_error: bool = False,
     columns: list[str] | None = None,
 ) -> None:
-    """Emit *result* to the terminal as a Rich table.
+    """Print *result* as a Rich table, dispatching on its runtime type.
 
-    Dispatches on the runtime type of *result*:
-
-    * ``dict`` — key/value table (or environment catalog if the shape matches).
-    * ``list`` — table of dicts or simple value list.
-    * anything else — ``str()`` fallback.
-
-    :param result: The result to emit.
+    :param result: A dict (key/value table or environment catalog), a list
+        (table of dicts or simple value list), or anything else (``str()``).
     :type result: Any
     :param is_error: Whether to print the result as an error.
     :type is_error: bool
@@ -74,7 +140,7 @@ def emit_result(
     _print_rich(str(result), is_error=is_error)
 
 
-@emit_result.register(dict)
+@_emit_table.register(dict)
 def _emit_result_dict(
     result: dict, *, is_error: bool = False, columns: list[str] | None = None
 ) -> None:
@@ -84,7 +150,7 @@ def _emit_result_dict(
     _emit_key_value_table(result, is_error=is_error, columns=columns)
 
 
-@emit_result.register(list)
+@_emit_table.register(list)
 def _emit_result_list(
     result: list, *, is_error: bool = False, columns: list[str] | None = None
 ) -> None:
@@ -266,6 +332,21 @@ def supports_interactive_selection() -> bool:
         return False
 
 
+def stdin_is_a_terminal() -> bool:
+    """Whether stdin can answer a prompt.
+
+    False when stdin is a pipe or closed. Redirected stdout still counts: the
+    prompt is written to stderr.
+
+    :returns: Whether stdin is a terminal.
+    :rtype: bool
+    """
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _read_key_windows() -> str | None:
     char = msvcrt.getwch()
     if char in ("\x00", "\xe0"):
@@ -376,17 +457,43 @@ def select_row(
 
 
 def handle_error(exc: Exception) -> None:
-    """Print an :class:`ArenaError` and exit, or re-raise unknown exceptions.
+    """Print an :class:`ArenaError` or an invalid manifest and exit, or re-raise.
 
     :param exc: The exception to handle.
     :type exc: Exception
     :returns: None
-    :raises click.exceptions.Exit: If the exception is an :class:`ArenaError`.
+    :raises click.exceptions.Exit: If the exception is an :class:`ArenaError` or
+        a pydantic :class:`~pydantic.ValidationError`.
     """
+    if isinstance(exc, ValidationError):
+        _print_invalid_manifest(exc)
+        raise click.exceptions.Exit(1) from exc
+    if isinstance(exc, ArenaClientUpgradeRequiredError):
+        offer_upgrade(exc.detail, snowflake=False)
     if isinstance(exc, ArenaError):
-        error_console.print(f"[red bold]Error:[/red bold] {exc}")
+        if json_output_enabled():
+            error = {"error": str(exc), "type": type(exc).__name__}
+            click.echo(json.dumps(error), err=True)
+        else:
+            error_console.print(f"[red bold]Error:[/red bold] {exc}")
         raise click.exceptions.Exit(1) from exc
     raise exc
+
+
+def _print_invalid_manifest(exc: ValidationError) -> None:
+    """Print one line per pydantic error: the manifest field, then what is wrong with it."""
+    records = manifest_errors(exc)
+    summary = "The manifest is invalid."
+    if json_output_enabled():
+        error = {"error": summary, "type": "ValidationError", "errors": records}
+        click.echo(json.dumps(error), err=True)
+        return
+    error_console.print(f"[red bold]Error:[/red bold] {summary}")
+    for record in records:
+        # pydantic prefixes a validator's message with its error kind.
+        message = record["message"].removeprefix("Value error, ")
+        where = f"{record['path']}: " if record["path"] else ""
+        error_console.print(f"  {escape(where)}{escape(message)}", soft_wrap=True)
 
 
 @dataclass(slots=True)
@@ -406,7 +513,8 @@ class StreamRichRenderer:
         is_error: bool = False,
         error_cls: type[ArenaAPIError] = ArenaAPIError,
     ) -> None:
-        self._console = error_console if is_error else console
+        # stdout stays one JSON document under ``--json``.
+        self._console = error_console if is_error or json_output_enabled() else console
         self._rows: list[StreamRow] = []
         self._live: Live | None = None
         self._error_cls = error_cls
@@ -544,6 +652,40 @@ class StreamRichRenderer:
         for row in self._rows:
             table.add_row(row.name, row.status, row.details)
         return table
+
+
+def emit_log_line(line: dict[str, Any]) -> None:
+    """Print one experiment log line, or its JSON object under ``--json``.
+
+    :param line: ``timestamp`` (Unix microseconds), ``severity`` and ``message``.
+    :type line: dict[str, Any]
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(line))
+        return
+    when = datetime.fromtimestamp(line["timestamp"] / 1_000_000, tz=timezone.utc)
+    click.echo(f"{when:%Y-%m-%d %H:%M:%S} {line['severity']:<7} {line['message']}")
+
+
+def emit_log_summary(page: dict[str, Any], *, printed: int) -> None:
+    """Close ``arena experiments logs`` with the status and any failure reason.
+
+    :param page: The last logs page, carrying ``status`` and ``failure_reason``.
+    :type page: dict[str, Any]
+    :param printed: How many log lines were printed.
+    :type printed: int
+    """
+    if json_output_enabled():
+        summary = {
+            key: page.get(key)
+            for key in ("experiment_name", "status", "failure_reason")
+        }
+        click.echo(json.dumps(summary))
+        return
+    if printed == 0:
+        click.echo(f"No log lines for {page['experiment_name']} yet.", err=True)
+    if page.get("failure_reason"):
+        click.echo(f"{page['status']}: {page['failure_reason']}", err=True)
 
 
 def emit_csv_preview(payload: bytes, *, max_rows: int) -> None:

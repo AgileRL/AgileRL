@@ -13,13 +13,15 @@ BETA = (
     "Weight on the KL penalty holding the policy near the reference "
     "model. 0 disables the penalty entirely."
 )
+REFERENCE_UPDATE_INTERVAL = (
+    "Optimizer steps between copies of the policy onto the reference "
+    "model the KL penalty holds it near. Unset keeps the reference fixed."
+)
 KL_CLAMP = (
     "Per-token bound on the K3 KL penalty. 10 is the policy about 2.6 nats "
     "below the reference on a token; tokens further below get no KL "
     "gradient, so one diverged token cannot set the step's gradient norm. "
-    "Tokens above the reference keep their KL pull. With the fused Liger "
-    "GRPO loss a residual gradient of about beta times one bf16 rounding "
-    "step of the log-prob remains. Unset removes the bound."
+    "Tokens above the reference keep their KL pull. Unset removes the bound."
 )
 MINI_BATCH = (
     "Trajectories one optimizer step covers, per rank. Must be a whole "
@@ -28,7 +30,22 @@ MINI_BATCH = (
 )
 MICRO_BATCH = (
     "Trajectories per backward pass, per GPU. Affects only memory: it "
-    "changes what fits, not what the run learns."
+    "changes what fits, not what the run learns. Picked from the memory "
+    "estimate as the largest that fits; manifests cannot set it."
+)
+MICRO_BATCH_TOKENS = (
+    "Tokens per packed backward pass, per GPU, when the forward packs "
+    "sequences. Rows fill each pass up to this many tokens; a longer row runs "
+    "alone. Affects only memory and speed, not what the run learns. Picked "
+    "from the memory estimate as the fastest budget that fits; manifests "
+    "cannot set it."
+)
+GRADIENT_CHECKPOINTING = (
+    "Recompute block activations during the backward pass instead of "
+    "storing them. Affects only memory and speed, not what the run learns. "
+    "Picked from the memory estimate together with the micro-batch and "
+    "fsdp.checkpoint_every_n_blocks, least recompute that fits; on when the "
+    "run has no estimate. Manifests cannot set it."
 )
 
 TAU = (
@@ -95,8 +112,8 @@ MIN_P = (
 )
 REPETITION_PENALTY = "Penalty applied to tokens already generated, to discourage loops."
 TEMPERATURE = (
-    "Sampling temperature for generation. Higher values diversify rollouts; 0 "
-    "is greedy decoding."
+    "Sampling temperature for generation. Higher values diversify rollouts. "
+    "The trainer divides logits by this, so it has to be above 0."
 )
 MAX_OUTPUT_TOKENS = "Hard cap on tokens generated per completion."
 MAX_ROW_TOKENS = (
@@ -118,11 +135,10 @@ COSINE_LR = (
     "For a constant learning rate, set warmup_proportion 0 and min_lr_ratio 1.0."
 )
 VLLM_CONFIG = "vLLM engine settings for generation."
-IS_CORRECTION = (
-    "Correct for the mismatch between the vLLM sampler's log-probabilities and "
-    "the trainer's recomputed ones."
+IS_CAP = (
+    "Trainer/vLLM ratio at which the sampling-mismatch metrics count a token "
+    "as clipped."
 )
-IS_CAP = "Upper bound applied to the vLLM importance-sampling correction ratio."
 VLLM_MAX_LOGPROB_GAP = (
     "Warn when the mean per-token log-prob gap between vLLM and the trainer "
     "exceeds this, in nats. bf16 engines usually sit near 0.01-0.03."
@@ -142,11 +158,13 @@ ADVANTAGE_GRANULARITY_TOKEN = (
 )
 IS_LEVEL = (
     "Level the importance-sampling ratio is computed at. Coarser levels are "
-    "lower variance but a blunter correction."
+    "lower variance but a blunter correction. Turn-level uses a geometric-mean "
+    "ratio per reply."
 )
-TURN_RATIO_POOLING = (
-    "How per-token ratios combine into a turn ratio: 'sum' in log space "
-    "(the product of ratios) or 'mean'."
+OFF_POLICY_TOKEN_MASK = (
+    "(low, high) band on each token's ratio of the current policy to the "
+    "rollout policy that sampled it. Tokens outside get no policy gradient "
+    "(IcePop). Set null to mask nothing."
 )
 WHITEN_ADVANTAGES = (
     "Normalize advantages to zero mean and unit variance across the batch."

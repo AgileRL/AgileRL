@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import pkgutil
 from importlib.metadata import PackageNotFoundError
 from io import StringIO
@@ -28,14 +29,34 @@ from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.gspo import GSPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
+from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
-from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
-from agilerl.arena.models.fsdp import FSDPConfig
-from agilerl.arena.models.manifest import _resolve_algorithm
-from agilerl.arena.models.networks import VLLMConfig
+from agilerl.arena.models.env import (
+    EnvHostVolume,
+    EnvServiceSpec,
+    GymEnvSpec,
+    JudgeSpec,
+    LLMEnvSpec,
+    LLMEnvType,
+)
+from agilerl.arena.models.fsdp import (
+    PARALLEL_LAYOUT_FIELDS,
+    FSDPConfig,
+    parallel_layout_pins,
+)
+from agilerl.arena.models.manifest import _resolve_algorithm, warn_once
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.networks import TARGET_MODULES_IGNORED, VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
-from agilerl.arena.models.verdict import errors, loc_to_path, read_manifest, verdict
+from agilerl.arena.models.verdict import (
+    ARENA_CHOSEN_MESSAGE,
+    errors,
+    loc_to_path,
+    model_warnings,
+    read_manifest,
+    verdict,
+)
 
 
 def _manifest(**sections) -> dict:
@@ -45,6 +66,39 @@ def _manifest(**sections) -> dict:
     }
     data.update(sections)
     return data
+
+
+class TestJudgeSpec:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"model": "m", "base_url": "http://judge:8000"},
+            {"model": "m", "base_url": "https://judge/"},
+            {"model": "m", "base_url": "https://openrouter.ai/api/v1"},
+            {"model": "m", "api_key_env": "JUDGE_KEY"},
+            {"provider": "anthropic", "model": "m", "api_key_env": "JUDGE_KEY"},
+        ],
+    )
+    def test_accepts_a_reachable_endpoint(self, kwargs: dict[str, str]) -> None:
+        assert JudgeSpec(**kwargs).model == "m"
+
+    def test_a_hosted_api_needs_a_key_variable(self) -> None:
+        with pytest.raises(ValidationError, match="needs api_key_env"):
+            JudgeSpec(model="m")
+
+    @pytest.mark.parametrize("base_url", ["judge:8000", "ftp://judge", "http://"])
+    def test_a_base_url_must_be_an_http_url(self, base_url: str) -> None:
+        with pytest.raises(ValidationError, match="http\\(s\\) URL"):
+            JudgeSpec(model="m", base_url=base_url)
+
+    def test_an_anthropic_judge_rejects_a_temperature(self) -> None:
+        with pytest.raises(ValidationError, match="no temperature"):
+            JudgeSpec(
+                provider="anthropic",
+                model="m",
+                api_key_env="JUDGE_KEY",
+                temperature=0.7,
+            )
 
 
 class TestGymEnvSpec:
@@ -67,6 +121,22 @@ class TestTrainingAndReplayAliases:
 
 
 class TestTrainingSpecValidators:
+    def test_rejects_num_epochs_together_with_max_steps(self) -> None:
+        with pytest.raises(ValueError, match="are both set; set one"):
+            TrainingSpec(max_steps=50, num_epochs=1)
+
+    def test_accepts_num_epochs_without_max_steps(self) -> None:
+        spec = TrainingSpec(num_epochs=3)
+
+        assert spec.num_epochs == 3
+        assert "max_steps" not in spec.model_fields_set
+
+    def test_accepts_max_steps_without_num_epochs(self) -> None:
+        spec = TrainingSpec(max_steps=50)
+
+        assert spec.max_steps == 50
+        assert spec.num_epochs is None
+
     def test_rejects_evo_steps_above_max_steps(self) -> None:
         with pytest.raises(
             ValueError, match=r"evo_steps .* must be less than or equal to max_steps"
@@ -217,6 +287,20 @@ class TestVLLMConfigLimitMmPerPrompt:
             VLLMConfig(limit_mm_per_prompt={"image": -1})
 
 
+class TestVLLMConfigSamplingPenalties:
+    def test_negative_penalties_down_to_minus_two_are_kept(self) -> None:
+        config = VLLMConfig(presence_penalty=-2.0, frequency_penalty=-2.0)
+
+        assert config.presence_penalty == -2.0
+        assert config.frequency_penalty == -2.0
+
+    def test_rejects_a_penalty_outside_minus_two_to_two(self) -> None:
+        with pytest.raises(ValidationError, match="greater than or equal to -2"):
+            VLLMConfig(presence_penalty=-2.1)
+        with pytest.raises(ValidationError, match="less than or equal to 2"):
+            VLLMConfig(frequency_penalty=2.1)
+
+
 class TestLLMEnvType:
     def test_str(self) -> None:
         assert str(LLMEnvType.ROLLOUT) == "rollout"
@@ -306,6 +390,41 @@ class TestGetValidated:
         assert validated.environment.env_type == "bandit"
 
 
+def _server_sft_default(**network: object) -> dict:
+    """The SFT document ``GET /api/cli/v1/experiments/run-spec/default`` returns."""
+    return {
+        "algorithm": {"name": "SFT"},
+        "environment": {
+            "name": "support-tickets-sft",
+            "dataset": "support-tickets-sft",
+            "columns": {"prompt": "instruction", "target": "response"},
+        },
+        "network": {
+            "pretrained_model_name_or_path": "Qwen/Qwen3.5-4B",
+            "max_context_length": 4096,
+            **network,
+        },
+    }
+
+
+class TestTrainingManifestPretrainedNetwork:
+    def test_server_default_validates(self) -> None:
+        manifest = TrainingManifest.get_validated(_server_sft_default(), mode="python")
+
+        assert manifest.network.pretrained_model_name_or_path == "Qwen/Qwen3.5-4B"
+
+    def test_unknown_key_reports_only_the_finetuning_error(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            TrainingManifest.get_validated(
+                _server_sft_default(kind="llm"), mode="python"
+            )
+
+        errors = exc_info.value.errors()
+        assert [(e["loc"], e["type"]) for e in errors] == [
+            (("network", "kind"), "extra_forbidden")
+        ]
+
+
 class TestLLMAlgorithmSpecValidators:
     def test_valid_constrain_answer_pattern_compiles(self) -> None:
         spec = GRPOSpec(
@@ -360,17 +479,23 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="requires max_output_tokens"):
             DPOSpec(thinking_token_budget=8)
 
-    def test_sequence_packing_requires_packed_attention(self) -> None:
-        with pytest.raises(ValidationError, match="use_sequence_packing requires"):
-            GRPOSpec(group_size=2, use_sequence_packing=True)
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("use_sequence_packing", True), ("attn_implementation", "sdpa")],
+    )
+    def test_packing_and_attention_backend_are_not_options(
+        self, field: str, value: object
+    ) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            GRPOSpec.model_validate({"group_size": 2, field: value})
 
-    def test_sequence_packing_with_flash_attention(self) -> None:
-        spec = GRPOSpec(
-            group_size=2,
-            use_sequence_packing=True,
-            attn_implementation="flash_attention_2",
-        )
-        assert spec.use_sequence_packing is True
+    def test_llm_algorithms_support_sequence_packing(self) -> None:
+        from agilerl.arena.models.algorithms.dpo import DPOSpec
+        from agilerl.arena.models.algorithms.sft import SFTSpec
+
+        assert GRPOSpec.supports_sequence_packing is True
+        assert SFTSpec.supports_sequence_packing is True
+        assert DPOSpec.supports_sequence_packing is True
 
     def test_deepspeed_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -401,12 +526,90 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="Unknown fsdp keys"):
             GRPOSpec(group_size=2, fsdp={"not_a_field": True})
 
+    def test_fsdp_parallel_pins_is_not_a_manifest_key(self) -> None:
+        with pytest.raises(
+            ValidationError, match="Unknown fsdp keys \\['parallel_pins'\\]"
+        ):
+            GRPOSpec(group_size=2, fsdp={"parallel_pins": ["tp"]})
+
     def test_fsdp_none_stays_none(self) -> None:
         spec = GRPOSpec(group_size=2, fsdp=None)
         assert spec.fsdp is None
 
+    @pytest.mark.parametrize(
+        ("fsdp", "pinned"),
+        [
+            ({}, frozenset()),
+            (True, frozenset()),
+            ({"tp": 2}, frozenset({"tp"})),
+            ({"ep": 1, "cpu_offload": False}, frozenset({"ep"})),
+            ({"shard_group_size": 4}, frozenset({"shard_group_size"})),
+            ({"cp": 2}, frozenset({"cp"})),
+        ],
+    )
+    def test_a_dumped_fsdp_keeps_its_layout_pins(
+        self, fsdp: object, pinned: frozenset[str]
+    ) -> None:
+        # Arrange
+        spec = GRPOSpec(group_size=2, fsdp=fsdp)
+
+        # Act
+        reloaded = GRPOSpec.model_validate(spec.model_dump(mode="json"))
+
+        # Assert
+        assert reloaded.fsdp is not None
+        assert parallel_layout_pins(reloaded.fsdp) == pinned
+        assert reloaded.fsdp == spec.fsdp
+
+    def test_a_dumped_fsdp_has_no_pin_key(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp={"tp": 2, "cpu_offload": False})
+
+        dumped = spec.model_dump(mode="json")
+
+        assert dumped["fsdp"] == {
+            "reshard_after_forward": None,
+            "cpu_offload": False,
+            "optim_cpu_offload": None,
+            "param_dtype": "bfloat16",
+            "reduce_dtype": "float32",
+            "checkpoint_every_n_blocks": None,
+            "ep_token_blocks": 1,
+            "routed_expert_chunk_mib": None,
+            "activation_offload": None,
+            "tp": 2,
+            "shard_frozen_tp": None,
+            "save_moe_collectives": None,
+            "cp_style": "ulysses",
+        }
+
+    def test_a_deep_copied_spec_keeps_its_layout_pins(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp={"ep": 2})
+
+        copied = spec.model_copy(deep=True)
+
+        assert copied.fsdp is not None
+        assert parallel_layout_pins(copied.fsdp) == frozenset({"ep"})
+
+    def test_a_config_built_in_python_pins_every_layout_field(self) -> None:
+        assert parallel_layout_pins(FSDPConfig(tp=2)) == PARALLEL_LAYOUT_FIELDS
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "prefetch_units",
+            "backward_prefetch_units",
+            "checkpoint_skip_layer_types",
+            "wrap_every_n_blocks",
+            "param_persistence_threshold",
+            "defer_grad_sync",
+        ],
+    )
+    def test_fsdp_tuning_keys_are_rejected(self, field: str) -> None:
+        with pytest.raises(ValidationError, match="Unknown fsdp keys"):
+            GRPOSpec(group_size=2, fsdp={field: 1})
+
     def test_fsdp_config_passes_through(self) -> None:
-        config = FSDPConfig(wrap_every_n_blocks=2)
+        config = FSDPConfig(ep=2)
         spec = GRPOSpec(group_size=2, fsdp=config)
         assert spec.fsdp == config
 
@@ -452,7 +655,7 @@ class TestGRPOClipCoef:
 
 
 class TestGRPOSpecOffPolicyCorrections:
-    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec])
     def test_corrections_and_mean_only_advantages_are_on_by_default(
         self, spec_cls: type[GRPOSpec]
     ) -> None:
@@ -463,6 +666,49 @@ class TestGRPOSpecOffPolicyCorrections:
         assert spec.use_bias_correction_kl is True
         assert spec.adv_norm == "mean_only"
         assert spec.top_p == 1.0
+
+    def test_kl_advantage_shaping_with_positive_beta_is_accepted(self) -> None:
+        spec = GRPOSpec(group_size=2, beta=0.001, use_kl_advantage_shaping=True)
+
+        assert spec.use_kl_advantage_shaping is True
+
+    def test_kl_advantage_shaping_with_zero_beta_raises(self) -> None:
+        with pytest.raises(ValidationError, match="needs beta > 0"):
+            GRPOSpec(group_size=2, beta=0.0, use_kl_advantage_shaping=True)
+
+    def test_gspo_leaves_off_policy_masks_unset(self) -> None:
+        spec = GSPOSpec(group_size=2)
+
+        assert spec.off_policy_token_mask_bounds is None
+        assert spec.off_policy_sequence_mask_threshold is None
+
+        forced = GRPOSpec(group_size=2, loss_type="gspo")
+        assert forced.off_policy_token_mask_bounds is None
+        assert forced.off_policy_sequence_mask_threshold is None
+
+    def test_gspo_rejects_off_policy_masks(self) -> None:
+        with pytest.raises(ValidationError, match="off_policy_token_mask_bounds"):
+            GSPOSpec(group_size=2, off_policy_token_mask_bounds=(0.5, 5.0))
+        with pytest.raises(ValidationError, match="off_policy_sequence_mask_threshold"):
+            GRPOSpec(
+                group_size=2,
+                loss_type="gspo",
+                off_policy_sequence_mask_threshold=0.03,
+            )
+
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("old_logprobs_source", "trainer"),
+            ("vllm_importance_sampling_correction", False),
+        ],
+    )
+    def test_sampling_logprob_options_are_not_fields(
+        self, spec_cls: type[GRPOSpec], field: str, value: object
+    ) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate({"group_size": 2, field: value})
 
     def test_yaml_null_and_false_turn_them_off(self) -> None:
         spec = GRPOSpec.model_validate(
@@ -505,6 +751,44 @@ class TestGRPOSpecOffPolicyCorrections:
 
 @pytest.mark.parametrize(
     ("spec_cls", "required"),
+    [
+        (GRPOSpec, {"group_size": 2}),
+        (CISPOSpec, {"group_size": 2}),
+        (GSPOSpec, {"group_size": 2}),
+        (LLMPPOSpec, {}),
+    ],
+    ids=["grpo", "cispo", "gspo", "llmppo"],
+)
+class TestOffloadTrainerDuringRollout:
+    def test_is_not_a_manifest_field(
+        self, spec_cls: type[BaseModel], required: dict[str, int]
+    ) -> None:
+        assert "offload_trainer_during_rollout" not in spec_cls.model_fields
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate(
+                {**required, "offload_trainer_during_rollout": True}
+            )
+
+
+@pytest.mark.parametrize(
+    "spec_cls",
+    [LLMPPOSpec, LLMREINFORCESpec],
+    ids=["llmppo", "llmreinforce"],
+)
+class TestTurnRatioPooling:
+    def test_is_not_a_manifest_field(self, spec_cls: type[BaseModel]) -> None:
+        assert "turn_ratio_pooling" not in spec_cls.model_fields
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate({"turn_ratio_pooling": "sum"})
+
+
+class TestLLMPPOSpecDefaults:
+    def test_gae_lambda_defaults_to_monte_carlo(self) -> None:
+        assert LLMPPOSpec().gae_lambda == 1.0
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "required"),
     [(GRPOSpec, {"group_size": 2}), (LLMPPOSpec, {})],
     ids=["grpo", "llmppo"],
 )
@@ -539,23 +823,6 @@ class TestKlClampField:
 
 
 class TestDPOSFTAndRainbow:
-    def test_dpo_rejects_sequence_packing(self) -> None:
-        from agilerl.arena.models.algorithms.dpo import DPOSpec
-
-        assert DPOSpec().use_sequence_packing is False
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
-            DPOSpec(use_sequence_packing=True)
-
-    def test_sft_rejects_sequence_packing(self) -> None:
-        from agilerl.arena.models.algorithms.sft import SFTSpec
-
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
-            SFTSpec(use_sequence_packing=True)
-
     def test_sft_rejects_activation_offload(self) -> None:
         from agilerl.arena.models.algorithms.sft import SFTSpec
 
@@ -592,11 +859,211 @@ class TestVerdict:
             document = read_manifest("-")
         assert document["algorithm"]["name"] == "DQN"
 
-    def test_valid_and_invalid_documents(self) -> None:
-        assert verdict(_manifest())["ok"] is True
+    def test_classic_and_invalid_documents(self) -> None:
+        classic = verdict(_manifest())
+        assert classic["ok"] is False
+        assert classic["errors"][0]["kind"] == "classic_rl_unavailable"
         failed = verdict(_manifest(algorithm={"name": "NOPE"}))
         assert failed["ok"] is False
         assert failed["errors"]
+
+    def test_model_warnings_when_the_algorithm_names_no_model(self) -> None:
+        manifest = TrainingManifest.model_construct(
+            algorithm=GRPOSpec.model_construct(pretrained_model_name_or_path=None),
+        )
+
+        assert model_warnings(manifest) == []
+
+    def test_model_warnings_for_a_classic_manifest(self) -> None:
+        manifest = TrainingManifest.model_validate(_manifest())
+
+        assert model_warnings(manifest) == []
+
+
+def _grpo_manifest(**lora_sections) -> dict:
+    """A minimal Qwen3.5 GRPO manifest with optional ``lora_config`` sections."""
+    algorithm = {"name": "GRPO", "group_size": 4, "batch_size": 2}
+    network = {
+        "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+        "max_context_length": 1024,
+    }
+    if "algorithm" in lora_sections:
+        algorithm["lora_config"] = lora_sections["algorithm"]
+    if "network" in lora_sections:
+        network["lora_config"] = lora_sections["network"]
+    return _manifest(
+        algorithm=algorithm,
+        environment={
+            "env_type": "rollout",
+            "dataset": "openai/gsm8k",
+            "reward_file_path": "reward.py",
+            "prompt_template": {"user_0": "{question}"},
+        },
+        network=network,
+        training={"max_steps": 100},
+        replay_buffer={"kind": "llm"},
+    )
+
+
+class TestVerdictIgnoresLoraTargetModules:
+    @pytest.mark.parametrize(
+        "lora_sections",
+        [
+            {"network": {"target_modules": ["q_proj", "v_proj"]}},
+            {"network": {"target_modules": "all-linear"}},
+            {"algorithm": {"target_modules": ["q_proj"]}},
+        ],
+        ids=["network-list", "all-linear", "algorithm-list"],
+    )
+    def test_submit_drops_them_and_warns(self, lora_sections) -> None:
+        # Act
+        result = verdict(_grpo_manifest(**lora_sections), submit=True)
+
+        # Assert
+        assert result["ok"] is True
+        assert TARGET_MODULES_IGNORED in result["warnings"]
+        assert "target_modules" not in result["payload"]["network"]["lora_config"]
+        assert "target_modules" not in result["payload"]["algorithm"].get(
+            "lora_config", {}
+        )
+
+    def test_stored_run_with_the_catalog_list_still_validates(self) -> None:
+        # Arrange
+        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].default_lora_modules
+        document = _grpo_manifest(network={"target_modules": sorted(catalog)})
+
+        # Act
+        result = verdict(document)
+
+        # Assert
+        assert result["ok"] is True
+        assert "target_modules" not in result["payload"]["network"]["lora_config"]
+
+    def test_verdict_reports_them_without_logging(self, caplog) -> None:
+        # Act
+        with caplog.at_level(logging.WARNING):
+            result = verdict(
+                _grpo_manifest(network={"target_modules": ["q_proj"]}), submit=True
+            )
+
+        # Assert
+        assert result["warnings"].count(TARGET_MODULES_IGNORED) == 1
+        assert TARGET_MODULES_IGNORED not in caplog.messages
+
+    def test_get_validated_logs_them_once_per_process(self, caplog) -> None:
+        # Arrange
+        warn_once.cache_clear()
+        document = _grpo_manifest(
+            network={"target_modules": ["q_proj"]},
+            algorithm={"target_modules": ["v_proj"]},
+        )
+
+        # Act: a CLI submit validates for the quote and again for the submit.
+        with caplog.at_level(logging.WARNING):
+            TrainingManifest.get_validated(document, mode="python")
+            TrainingManifest.get_validated(document, mode="python")
+
+        # Assert
+        assert caplog.messages.count(TARGET_MODULES_IGNORED) == 1
+
+    def test_manifest_without_them_has_no_warning(self) -> None:
+        # Act
+        result = verdict(_grpo_manifest(), submit=True)
+
+        # Assert
+        assert result["ok"] is True
+        assert TARGET_MODULES_IGNORED not in result["warnings"]
+        assert "target_modules" not in result["payload"]["network"]["lora_config"]
+
+
+class TestVerdictRejectsArenaChosenFields:
+    def test_submit_rejects_a_version_stamp_arena_did_not_choose(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["training"]["rollout_version_stamp"] = "publish"
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is False
+        assert result["errors"] == [
+            {
+                "path": "training.rollout_version_stamp",
+                "message": ARENA_CHOSEN_MESSAGE,
+                "kind": "arena_chosen_field",
+            }
+        ]
+
+    def test_submit_accepts_a_user_set_env_host_field_with_a_warning(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["environment"] = {
+            "env_type": "rollout",
+            "entrypoint": "tasks:Env",
+            "env_host_resource": "pool=cpu",
+        }
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is True, result
+        assert any(
+            warning.startswith("environment.env_host_resource overrides")
+            for warning in result["warnings"]
+        )
+
+    def test_a_platform_written_env_host_field_is_not_warned_about(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["environment"] = {
+            "env_type": "rollout",
+            "entrypoint": "tasks:Env",
+            "cpus_per_env_host": 7.0,
+        }
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is True, result
+        assert not any("overrides" in warning for warning in result["warnings"])
+
+    def test_a_population_is_reported_once_as_hpo(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["training"]["pop_size"] = 2
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert [e["kind"] for e in result["errors"]] == ["hpo_unavailable"]
+
+    def test_submit_accepts_a_user_set_engine_share(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["algorithm"]["vllm_config"] = {"gpu_memory_utilization": 0.5}
+
+        # Act
+        result = verdict(document, submit=True)
+
+        # Assert
+        assert result["ok"] is True
+        vllm_config = result["payload"]["algorithm"]["vllm_config"]
+        assert vllm_config["gpu_memory_utilization"] == 0.5
+
+    def test_a_stored_run_is_not_checked(self) -> None:
+        # Arrange
+        document = _grpo_manifest()
+        document["training"]["rollout_version_stamp"] = "publish"
+
+        # Act
+        result = verdict(document)
+
+        # Assert
+        assert result["ok"] is True
 
 
 class TestSchemaPackageVersion:
@@ -653,9 +1120,41 @@ class TestTrainingSpec:
             rollout_engines_per_agent="auto",
             training_gpus_per_agent=1,
         )
-        assert spec.weight_sync_backend == "nccl"
-        assert spec.rollout_batch_size == 1
+        assert spec.rollout_batch_size is None  # the driver fills it
         assert spec.weight_sync_interval == 1
+
+    def test_rejects_an_authored_weight_sync(self) -> None:
+        with pytest.raises(ValidationError, match=r"weight_sync\n  Extra inputs"):
+            TrainingSpec.model_validate({"weight_sync": {"transport": "nccl_reshard"}})
+
+    def test_payload_replaces_a_null_lora_with_the_default(self) -> None:
+        manifest = {
+            "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": None,
+            },
+            "training": {"max_steps": 100},
+        }
+
+        payload = TrainingManifest.get_validated(manifest, mode="json")
+
+        assert payload["network"]["lora_config"]["lora_r"] == 16
+        assert "target_modules" not in payload["network"]["lora_config"]
+
+    def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
+        spec = TrainingSpec(rollout_mode="async")
+
+        assert spec.rollout_engines_per_agent == 0
+        assert spec.training_gpus_per_agent == 1
+        assert "rollout_engines_per_agent" not in spec.model_fields_set
 
     def test_async_rollout_rejects_zero_engines(self) -> None:
         with pytest.raises(ValidationError, match="rollout_engines_per_agent"):
@@ -709,6 +1208,81 @@ CLASSIFIEDS_SERVICE = {
         {"name": "web", "image": "classifieds-web:1", "port": 9980},
     ],
 }
+ZIM_VOLUME = {
+    "name": "zim",
+    "host_path": "/var/cache/agilerl-zim",
+    "mount_path": "/data",
+}
+
+
+class TestLLMEnvSpecRolloutSource:
+    @pytest.mark.parametrize("name", ["AgentWorldModel", "VisualWebArena"])
+    def test_built_in_by_name_needs_no_source(self, name: str) -> None:
+        # Act
+        spec = LLMEnvSpec(name=name, env_type="rollout", num_envs=2)
+
+        # Assert
+        assert spec.name == name
+        assert spec.env_image is None
+        assert spec.num_envs == 2
+
+    @pytest.mark.parametrize("name", ["AgentWorldModel", "VisualWebArena"])
+    def test_name_only_built_in_leaves_profile_fields_unset(self, name: str) -> None:
+        # Act
+        spec = LLMEnvSpec(name=name, env_type="rollout")
+
+        # Assert
+        assert spec.name_only_built_in is True
+        assert spec.num_envs is None
+        assert spec.strict_chat_template_boundary is None
+        assert "num_envs" not in spec.model_fields_set
+        assert "strict_chat_template_boundary" not in spec.model_fields_set
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            {"dataset": "rows", "prompt_template": {"user_0": "{question}"}},
+            {"entrypoint": "pkg.mod:Env"},
+            {"env_url": "http://env", "max_turns": 2},
+            {"env_image": "awm:1"},
+        ],
+    )
+    def test_built_in_with_a_source_is_not_name_only(self, source: dict) -> None:
+        spec = LLMEnvSpec(name="AgentWorldModel", env_type="rollout", **source)
+
+        assert spec.name_only_built_in is False
+        assert spec.num_envs == 1
+        assert spec.strict_chat_template_boundary is True
+
+    def test_a_dataset_named_like_a_built_in_is_not_name_only(self) -> None:
+        spec = LLMEnvSpec(
+            name="AgentWorldModel",
+            env_type="dataset",
+            objective="sft",
+            dataset="rows",
+        )
+
+        assert spec.name_only_built_in is False
+
+    def test_another_rollout_name_is_not_name_only(self) -> None:
+        spec = LLMEnvSpec(
+            name="NotABuiltIn", env_type="rollout", entrypoint="pkg.mod:Env"
+        )
+
+        assert spec.name_only_built_in is False
+
+    def test_other_name_without_a_source_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match=r"exactly one source.*Got none"):
+            LLMEnvSpec(name="NotABuiltIn", env_type="rollout")
+
+    def test_built_in_with_two_sources_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Got entrypoint, env_image"):
+            LLMEnvSpec(
+                name="AgentWorldModel",
+                env_type="rollout",
+                entrypoint="pkg.mod:make_env",
+                env_image="awm:1",
+            )
 
 
 class TestLLMEnvSpecEnvPods:
@@ -729,6 +1303,37 @@ class TestLLMEnvSpecEnvPods:
         assert spec.env_services == [EnvServiceSpec.model_validate(CLASSIFIEDS_SERVICE)]
         assert spec.env_services[0].ready_timeout_s == 600.0
         assert spec.env_services[0].containers[0].cpu == "10m"
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            {"cpus_per_env_host": 1.5},
+            {"env_host_memory_bytes": 4 * 1024**3},
+            {"env_host_resource": "env-pool"},
+        ],
+    )
+    def test_entrypoint_with_host_resources_gets_one_host(self, resource: dict) -> None:
+        # Act
+        spec = LLMEnvSpec(env_type="rollout", entrypoint="mod:Env", **resource)
+
+        # Assert
+        assert spec.env_hosts == 1
+
+    def test_bare_entrypoint_runs_in_process(self) -> None:
+        # Act
+        spec = LLMEnvSpec(env_type="rollout", entrypoint="mod:Env")
+
+        # Assert
+        assert spec.env_hosts is None
+
+    def test_entrypoint_keeps_an_authored_host_count(self) -> None:
+        # Act
+        spec = LLMEnvSpec(
+            env_type="rollout", entrypoint="mod:Env", env_hosts=3, cpus_per_env_host=2
+        )
+
+        # Assert
+        assert spec.env_hosts == 3
 
     @pytest.mark.parametrize(
         "field",
@@ -824,6 +1429,29 @@ class TestLLMEnvSpecEnvPods:
                 },
                 "repeats a container name",
             ),
+            (
+                {"host_volumes": [ZIM_VOLUME, {**ZIM_VOLUME, "mount_path": "/other"}]},
+                r"repeats a host volume name: \['zim', 'zim'\]",
+            ),
+            (
+                {"host_volumes": [ZIM_VOLUME, {**ZIM_VOLUME, "name": "copy"}]},
+                "mounts more than one host volume at /data",
+            ),
+            (
+                {
+                    "host_volumes": [ZIM_VOLUME],
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": "a:1",
+                            "port": 80,
+                            "command": ["serve"],
+                            "memory_rootfs": "1Gi",
+                        },
+                    ],
+                },
+                "host_volumes are not visible under memory_rootfs",
+            ),
         ],
     )
     def test_service_spec_errors(self, change: dict, match: str) -> None:
@@ -849,6 +1477,47 @@ class TestLLMEnvSpecEnvPods:
         with pytest.raises(ValidationError, match=match):
             EnvContainerSpec.model_validate({"name": "web", "image": "a:1", **change})
 
+    def test_service_host_volumes_parse(self) -> None:
+        service = EnvServiceSpec.model_validate(
+            {**CLASSIFIEDS_SERVICE, "host_volumes": [ZIM_VOLUME]}
+        )
+
+        assert service.host_volumes == [
+            EnvHostVolume(
+                name="zim", host_path="/var/cache/agilerl-zim", mount_path="/data"
+            )
+        ]
+        assert EnvServiceSpec.model_validate(CLASSIFIEDS_SERVICE).host_volumes == []
+
+    @pytest.mark.parametrize(
+        ("change", "match"),
+        [
+            ({"host_path": "var/cache/agilerl-zim"}, "host_path must be an absolute"),
+            ({"mount_path": "/data/../etc"}, "mount_path must be an absolute path"),
+            ({"host_path": "/var/cache/agilerl-zim/"}, "host_path must be an absolute"),
+            ({"host_path": "/var/cache/agilerl-zim/../../../lib"}, "without '..'"),
+            (
+                {"host_path": "/var/lib/rancher"},
+                "host_path must be under /var/cache/agilerl-",
+            ),
+            ({"mount_path": "/"}, "mount_path must be an absolute path"),
+            ({"mount_path": "/dev/shm"}, "shared-memory mount"),
+            ({"mount_path": "/dev/shm/x"}, "shared-memory mount"),
+            ({"name": "Zim"}, "should match pattern"),
+            ({"read_only": False}, "Extra inputs are not permitted"),
+        ],
+    )
+    def test_host_volume_errors(self, change: dict, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            EnvHostVolume.model_validate({**ZIM_VOLUME, **change})
+
+    def test_host_volume_mounts_beside_dev_shm(self) -> None:
+        volume = EnvHostVolume.model_validate(
+            {**ZIM_VOLUME, "mount_path": "/dev/shmem"}
+        )
+
+        assert volume.mount_path == "/dev/shmem"
+
 
 class TestLLMEnvSpecSurfaces:
     def test_name_from_dataset_and_urls(self) -> None:
@@ -858,7 +1527,7 @@ class TestLLMEnvSpecSurfaces:
             env_type="rollout",
             dataset="rows",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
         assert dataset.name is None
         assert dataset.label == "rows"
@@ -892,7 +1561,7 @@ class TestLLMEnvSpecSurfaces:
             dataset="rows",
             name="countdown",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
         assert named.name == "countdown"
         assert named.label == "countdown"
@@ -905,7 +1574,7 @@ class TestLLMEnvSpecSurfaces:
                 env_type="rollout",
                 dataset="rows",
                 rubric_file_path="rubric.py",
-                prompt_template={"user_0": "{q}"},
+                prompt_template={"user_0": "{question}"},
                 env_hosts=1,
             )
 
@@ -970,7 +1639,7 @@ class TestLLMEnvSpecSurfaces:
             env_type="rollout",
             dataset="rows",
             rubric_file_path="rubric.py",
-            prompt_template={"user_0": "{q}"},
+            prompt_template={"user_0": "{question}"},
         )
         assert rollout.train_test_split == 0.9
         assert rollout.response_column is None
@@ -993,6 +1662,61 @@ class TestLLMEnvSpecSurfaces:
         assert dataset.rubric_name is None
         assert dataset.num_envs is None
         assert dataset.action_field is None
+
+
+class TestLLMEnvSpecPromptPlaceholders:
+    def test_accepts_question_answer_and_literal_braces(self) -> None:
+        # Act
+        env = LLMEnvSpec(
+            env_type="rollout",
+            dataset="gsm8k",
+            rubric_file_path="reward.py",
+            prompt_template={
+                "system_0": 'Reply as JSON like {"answer": 4} or {{name}}.',
+                "user_1": "{question} (reference: {answer})",
+            },
+        )
+
+        # Assert
+        assert env.prompt_template["user_1"] == "{question} (reference: {answer})"
+
+    def test_rejects_a_placeholder_no_column_fills(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=(
+                r"prompt_template\.user_1 uses \{prompt_text\}, which no dataset "
+                r"column fills.*read the dataset's 'problem' and 'answer' columns"
+            ),
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="gsm8k",
+                rubric_file_path="reward.py",
+                columns={"question": "problem"},
+                prompt_template={"system_0": "Solve it.", "user_1": "{prompt_text}"},
+            )
+
+    def test_rejects_a_value_that_is_not_text(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"prompt_template\.user_1 must be text, got list"
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="gsm8k",
+                rubric_file_path="reward.py",
+                prompt_template={"system_0": "Solve it.", "user_1": ["{question}"]},
+            )
+
+    def test_leaves_env_rollout_prompts_alone(self) -> None:
+        # Act
+        env = LLMEnvSpec(
+            env_type="rollout",
+            entrypoint="envs:MyEnv",
+            prompt_template={"user_0": "{observation}"},
+        )
+
+        # Assert
+        assert env.prompt_template == {"user_0": "{observation}"}
 
 
 class TestLLMEnvSpecSegmentPromptTokens:
@@ -1020,6 +1744,30 @@ class TestLLMEnvSpecSegmentPromptTokens:
                 max_turns=10,
                 segment_prompt_tokens=tokens,
             )
+
+
+class TestLLMEnvSpecMaxTurns:
+    def test_an_entrypoint_env_without_max_turns_is_uncapped(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", entrypoint="game:Guess")
+
+        assert spec.max_turns is None
+
+    def test_a_dataset_rollout_is_one_turn(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{question}"},
+        )
+
+        assert spec.max_turns == 1
+
+    @pytest.mark.parametrize(
+        "segment", [{"segment_prompt_tokens": 2000}, {"segment_max_images": 4}]
+    )
+    def test_a_context_restart_needs_max_turns(self, segment: dict[str, int]) -> None:
+        with pytest.raises(ValidationError, match="max_turns is required with segment"):
+            LLMEnvSpec(env_type="rollout", entrypoint="game:Guess", **segment)
 
 
 class TestLLMEnvSpecSegmentMaxImages:
@@ -1135,6 +1883,16 @@ class TestLLMEnvSpecTaskFamilyField:
         assert spec.task_family_field is None
         assert spec.task_family_prior_strength == 1.0
 
+    def test_adaptive_sampling_is_on_by_default(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            task_family_field="template_key",
+        )
+
+        assert spec.adaptive_task_sampling is True
+
     def test_rejects_a_family_field_without_adaptive_sampling(self) -> None:
         with pytest.raises(
             ValidationError,
@@ -1144,6 +1902,7 @@ class TestLLMEnvSpecTaskFamilyField:
                 env_type="rollout",
                 env_url="http://env",
                 max_turns=10,
+                adaptive_task_sampling=False,
                 task_family_field="template_key",
             )
 
@@ -1170,11 +1929,24 @@ class TestLLMEnvSpecImageFields:
         assert spec.screenshot_field == "page"
         assert spec.goal_images_field == "task_images"
 
-    def test_defaults_to_the_browsergym_keys(self) -> None:
+    def test_unset_image_keys_stay_out_of_dump(self) -> None:
         spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
 
-        assert spec.screenshot_field == "screenshot"
-        assert spec.goal_images_field == "goal_images"
+        assert spec.screenshot_field is None
+        assert spec.goal_images_field is None
+        dumped = spec.model_dump(exclude_none=True)
+        assert "screenshot_field" not in dumped
+        assert "goal_images_field" not in dumped
+
+    def test_dataset_backed_rollout_rejects_image_observation_keys(self) -> None:
+        with pytest.raises(ValidationError, match="no such observation"):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="rows",
+                rubric_file_path="rubric.py",
+                prompt_template={"user_0": "{question}"},
+                screenshot_field="screenshot",
+            )
 
 
 class TestLLMEnvSpecActionErrorField:
@@ -1192,6 +1964,23 @@ class TestLLMEnvSpecActionErrorField:
         spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
 
         assert spec.action_error_field == ""
+
+
+class TestLLMEnvSpecRepeatSystemPrompt:
+    def test_accepts_the_setting(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            repeat_system_prompt=True,
+        )
+
+        assert spec.repeat_system_prompt is True
+
+    def test_defaults_off(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.repeat_system_prompt is False
 
 
 class TestLLMEnvSpecRestartOlderObservations:
@@ -1310,12 +2099,11 @@ class TestHpoHelpers:
             resolve_selection_brackets(8, 2, None, 1, 0, 1, 1)
 
     def test_mutation_ceiling(self) -> None:
-        from types import SimpleNamespace
-
         from agilerl.arena.models.hpo import (
             MutationSpec,
             RLHyperparameter,
             mutation_ceiling,
+            no_op_mutation_probabilities,
         )
 
         assert mutation_ceiling(None, "lr", 3) == 3
@@ -1326,7 +2114,11 @@ class TestHpoHelpers:
             }
         )
         assert mutation_ceiling(spec, "learn_step", 3) == 10
-        assert mutation_ceiling(SimpleNamespace(rl_hp_selection="nope"), "lr", 3) == 3
+        assert mutation_ceiling(spec, "learn_step", 16) == 16
+        frozen = spec.model_copy(
+            update={"probabilities": no_op_mutation_probabilities()}
+        )
+        assert mutation_ceiling(frozen, "learn_step", 3) == 3
 
 
 class TestReplayBufferParse:
@@ -1369,11 +2161,31 @@ class TestPydanticModelsForbidExtra:
         import agilerl.arena.inference as inference
         import agilerl.arena.models as models
 
-        # These parse a subset of inference JSON (results, title/created_by, success).
+        # These parse a subset of inference JSON (RL-only flags, results, title/created_by, success).
         wire_subset = {
+            "agilerl.arena.inference.agent.AgentInfo",
             "agilerl.arena.inference.agent.PredictResult",
             "agilerl.arena.inference.agent.SessionDetail",
             "agilerl.arena.inference.agent.SessionInfo",
+        }
+        # The traces dataset spec allows unknown columns and message fields.
+        traces_spec = {
+            f"agilerl.arena.models.traces.{name}"
+            for name in (
+                "ContentPart",
+                "ToolCallFunction",
+                "ToolCall",
+                "_UnweightedMessage",
+                "SystemMessage",
+                "UserMessage",
+                "AssistantMessage",
+                "ToolMessage",
+                "FunctionDefinition",
+                "ToolDefinition",
+                "TraceScore",
+                "TracesRowBase",
+                "TracesSegmentRow",
+            )
         }
         found = (*_base_models(models), *_base_models(inference))
         assert found
@@ -1382,5 +2194,157 @@ class TestPydanticModelsForbidExtra:
         }
         missing = {name for name, extra in extra_by_name.items() if extra != "forbid"}
 
-        assert missing == wire_subset
-        assert all(extra_by_name[name] == "ignore" for name in wire_subset)
+        assert missing == wire_subset | traces_spec
+        assert all(
+            extra_by_name[name] == "ignore" for name in wire_subset | traces_spec
+        )
+
+
+class TestLLMAlgorithmSpecCheckThinkingBudgetParser:
+    @pytest.mark.parametrize(
+        ("model_type", "vllm_engine_args"),
+        [
+            ("gemma4", {}),
+            ("qwen3", {}),
+            ("nemotron_h", {}),
+            ("llama", {"reasoning_parser": "deepseek_r1"}),
+        ],
+    )
+    def test_accepts_a_budget_with_reasoning_tokens(
+        self, model_type: str, vllm_engine_args: dict[str, str]
+    ) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            vllm_engine_args=vllm_engine_args,
+        )
+
+        spec.check_thinking_budget_parser(model_type)
+
+    def test_accepts_no_budget_without_a_parser(self) -> None:
+        GRPOSpec(group_size=2).check_thinking_budget_parser("gpt_oss")
+
+    def test_rejects_a_budget_for_a_model_without_a_parser(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^thinking_token_budget=8 needs a vLLM reasoning parser with "
+                r"reasoning start and end tokens, and Qwen/Qwen2\.5-0\.5B-Instruct "
+                r"has none\. Unset thinking_token_budget, or set "
+                r"algorithm\.vllm_engine_args\.reasoning_parser to one that has "
+                r"them: deepseek_r1, deepseek_v4, gemma4, glm47, mimo, nemotron_v3, "
+                r"qwen3\.$"
+            ),
+        ):
+            spec.check_thinking_budget_parser("qwen2")
+
+    def test_rejects_a_budget_for_gpt_oss_whose_parser_cannot_enforce_it(
+        self,
+    ) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            pretrained_model_name_or_path="openai/gpt-oss-20b",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            spec.check_thinking_budget_parser("gpt_oss")
+
+    def test_rejects_a_manifest_parser_without_reasoning_tokens(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            vllm_engine_args={"reasoning_parser": "openai_gptoss"},
+        )
+
+        with pytest.raises(
+            ValueError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            spec.check_thinking_budget_parser("gpt_oss")
+
+
+class TestLLMEnvSpecSendsReasoningProperty:
+    def test_reward_file_rollout_sends_the_reasoning(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{question}"},
+        )
+
+        assert spec.sends_reasoning is True
+
+    def test_env_url_rollout_sends_only_the_action(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=1)
+
+        assert spec.sends_reasoning is False
+
+    def test_include_reasoning_overrides_the_default(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=1,
+            include_reasoning=True,
+        )
+
+        assert spec.sends_reasoning is True
+
+
+class TestLLMEnvSpecGroupRubric:
+    def test_a_group_rubric_leaves_the_turn_rubric_unset(self) -> None:
+        # Act
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            group_rubric_name="RULER",
+            prompt_template={"user_0": "{question}"},
+        )
+
+        # Assert
+        assert spec.group_rubric_name == "RULER"
+        assert spec.rubric_name is None
+
+    def test_a_group_rubric_keeps_a_named_turn_rubric(self) -> None:
+        # Act
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=1,
+            rubric_file_path="rubric.py",
+            rubric_name="TURN",
+            group_rubric_name="RULER",
+        )
+
+        # Assert
+        assert spec.rubric_name == "TURN"
+
+    def test_a_rubric_name_needs_the_rubric_file(self) -> None:
+        with pytest.raises(ValueError, match="rubric_name names a symbol"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=1,
+                rubric_name="TURN",
+            )
+
+    def test_a_group_rubric_needs_the_rubric_file(self) -> None:
+        with pytest.raises(ValueError, match="group_rubric_name names a symbol"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=1,
+                group_rubric_name="RULER",
+            )

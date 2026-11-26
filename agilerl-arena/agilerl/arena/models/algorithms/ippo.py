@@ -45,21 +45,26 @@ class IPPOSpec(MultiAgentAlgorithmSpec):
         le=1.0,
         description=GAE_LAMBDA,
     )
-    action_std_init: float = Field(default=0.6, description=ACTION_STD_INIT)
+    action_std_init: float = Field(
+        default=0.6, ge=0.0, le=10.0, description=ACTION_STD_INIT
+    )
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     ent_coef: float = Field(default=0.01, ge=0.0, le=1.0, description=ENT_COEF)
     vf_coef: float = Field(default=0.5, ge=0.0, le=1.0, description=VF_COEF)
-    max_grad_norm: float = Field(default=0.5, description=MAX_GRAD_NORM)
-    target_kl: float | None = Field(default=None, description=TARGET_KL)
-    update_epochs: int = Field(default=4, ge=1, description=UPDATE_EPOCHS)
+    max_grad_norm: float = Field(default=0.5, ge=0.0, description=MAX_GRAD_NORM)
+    target_kl: float | None = Field(
+        default=None, ge=0.0, le=10.0, description=TARGET_KL
+    )
+    update_epochs: int = Field(default=4, ge=1, le=100, description=UPDATE_EPOCHS)
     action_batch_size: int | None = Field(
         default=None,
+        ge=1,
         description=(
             "Agents whose actions are computed in one batched forward pass. "
             "Unset does them all at once."
         ),
     )
-    lr: float = Field(default=0.0001, ge=0.0, description=LR)
+    lr: float = Field(default=0.0001, gt=0.0, le=1.0, description=LR)
     net_config: StochasticActorSpec | dict[str, StochasticActorSpec] | None = Field(
         default=None, description=NET_CONFIG_PER_AGENT
     )

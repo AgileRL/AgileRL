@@ -179,27 +179,10 @@ def _prepare_llm_algo_kwargs(
             "use_separate_reference_adapter",
             INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", False),
         )
-    if "micro_batch_size_per_gpu" not in merged:
-        batch_size = INIT_HP.get("BATCH_SIZE", 16)
-        merged["micro_batch_size_per_gpu"] = INIT_HP.get(
-            "MICRO_BATCH_SIZE_PER_GPU",
-            batch_size,
-        )
-    if "activation_offload" not in merged and "ACTIVATION_OFFLOAD" in INIT_HP:
-        merged["activation_offload"] = bool(INIT_HP["ACTIVATION_OFFLOAD"])
-    if "lora_target_scope" not in merged and INIT_HP.get("LORA_TARGET_SCOPE"):
-        merged["lora_target_scope"] = INIT_HP["LORA_TARGET_SCOPE"]
-    if "chunk_rows" not in merged and INIT_HP.get("CHUNK_ROWS"):
-        merged["chunk_rows"] = int(INIT_HP["CHUNK_ROWS"])
     if "quantization_config" not in merged and INIT_HP.get("QUANTIZATION") is not None:
         quant_config = build_bnb_quantization_config(INIT_HP["QUANTIZATION"])
         if quant_config is not None:
             merged["quantization_config"] = quant_config
-    attn_impl = INIT_HP.get("ATTN_IMPLEMENTATION")
-    if attn_impl and attn_impl != "auto":
-        mc = dict(merged.get("model_config") or {})
-        mc.setdefault("attn_implementation", attn_impl)
-        merged["model_config"] = mc
     if "fsdp_config" not in merged and "FSDP" in INIT_HP:
         fsdp_val = INIT_HP["FSDP"]
         if fsdp_val is not None and fsdp_val is not False:
@@ -445,7 +428,7 @@ def create_population(
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param torch_compiler: Torch compiler, defaults to None
+    :param torch_compiler: Torch compiler for the multi-agent algorithms, defaults to None
     :type torch_compiler: Any, optional
     :param tokenizer: Hugging Face tokenizer; used to default ``pad_token_id`` /
         ``pad_token`` for GRPO / DPO / LLMPPO / LLMREINFORCE when not set in ``algo_kwargs``.
@@ -833,15 +816,13 @@ def create_population(
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
                 cosine_lr_schedule_config=cosine_lr,
-                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 # Agents after the first receive a clone_llm copy that already
                 # carries AgileRL's adapters — construct them via the clone
                 # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
-                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_only"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
@@ -862,16 +843,10 @@ def create_population(
                     "ADV_FILTER_EPS",
                     INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
-                vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
-                ),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),
-                use_sequence_packing=INIT_HP.get("USE_SEQUENCE_PACKING", False),
             )
-            if torch_compiler is not None:
-                kw.setdefault("torch_compiler", torch_compiler)
             algo_cls = {"GRPO": GRPO, "CISPO": CISPO, "GSPO": GSPO}[algo]
             if algo in ("CISPO", "GSPO"):
                 kw.pop("loss_type", None)
@@ -918,14 +893,11 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
             )
-            if torch_compiler is not None:
-                kw.setdefault("torch_compiler", torch_compiler)
             agent = SFT(**kw)
             population.append(agent)
     elif algo == "DPO":
@@ -969,14 +941,11 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
             )
-            if torch_compiler is not None:
-                kw.setdefault("torch_compiler", torch_compiler)
             agent = DPO(**kw)
             population.append(agent)
 
@@ -1020,20 +989,17 @@ def create_population(
                 vf_coef=INIT_HP.get("VF_COEF", 0.5),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 1.0),
-                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
                 advantage_granularity=INIT_HP.get(
                     "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
                 ),
                 importance_sampling_level=INIT_HP.get(
                     "IMPORTANCE_SAMPLING_LEVEL", "auto"
                 ),
-                turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
                 turn_level_clip=INIT_HP.get("TURN_LEVEL_CLIP", True),
-                turn_value_reduction=INIT_HP.get("TURN_VALUE_REDUCTION", "final_value"),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", True),
-                chunk_rows=INIT_HP.get("CHUNK_ROWS"),
-                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
-                lr_critic=INIT_HP.get("LR_CRITIC"),
+                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 1e-5)),
+                lr_critic=INIT_HP.get("LR_CRITIC", 1e-4),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
@@ -1045,21 +1011,14 @@ def create_population(
                 ),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 cosine_lr_schedule_config=cosine_lr,
-                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
-                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
-                vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
-                ),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),
             )
-            if torch_compiler is not None:
-                kw.setdefault("torch_compiler", torch_compiler)
             agent = LLMPPO(**kw)
             population.append(agent)
 
@@ -1111,8 +1070,7 @@ def create_population(
                 importance_sampling_level=INIT_HP.get(
                     "IMPORTANCE_SAMPLING_LEVEL", "token"
                 ),
-                turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
-                lr=INIT_HP.get("LR", 5e-7),
+                lr=INIT_HP.get("LR", 1e-5),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
@@ -1124,21 +1082,14 @@ def create_population(
                     "OFFLOAD_TRAINER_DURING_ROLLOUT", True
                 ),
                 cosine_lr_schedule_config=cosine_lr,
-                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
-                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
-                vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
-                ),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),
             )
-            if torch_compiler is not None:
-                kw.setdefault("torch_compiler", torch_compiler)
             agent = LLMREINFORCE(**kw)
             population.append(agent)
     return population

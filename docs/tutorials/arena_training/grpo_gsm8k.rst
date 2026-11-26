@@ -5,12 +5,8 @@ Training GRPO on GSM8K in Arena
 
 This tutorial walks through the full Arena workflow for LLM reasoning: registering a dataset,
 writing a reward function, submitting a training job, monitoring progress, and deploying the
-fine-tuned model. We fine-tune ``Qwen/Qwen2.5-0.5B-Instruct`` with **GRPO** on **GSM8K**, a
+fine-tuned model. We fine-tune ``Qwen/Qwen3.5-0.8B`` with **GRPO** on **GSM8K**, a
 dataset of grade-school math word problems, as our running example.
-
-It is the language-model counterpart to :ref:`tutorial_arena_end_to_end`. Where that tutorial
-validates a custom Gymnasium environment, here we register a Hugging Face dataset and supply a
-reward function instead.
 
 Prerequisites
 -------------
@@ -88,8 +84,8 @@ line holds the solution after a ``####`` marker:
              Altogether she sold 48+24 = 72 clips.
              #### 72
 
-We reward the model for producing the correct final number, and for wrapping its reasoning and
-answer in the format we ask for.
+We ask the model to reason step by step and put its final number in ``<answer></answer>`` tags,
+then reward it for getting that number right and for using the tags.
 
 Register the Dataset
 ~~~~~~~~~~~~~~~~~~~~~
@@ -145,16 +141,20 @@ The Reward Function
 ~~~~~~~~~~~~~~~~~~~
 
 A reasoning job needs a reward function: a Python file that scores each completion the model
-produces. Arena calls a function named ``reward`` with three arguments, ``question``, ``answer``,
-and ``completion``, and expects a single ``float`` back. The higher the reward, the better the
-completion.
+produces. Arena calls a function named ``reward_fn`` with three arguments, ``completion``,
+``answer`` and ``question``, and expects a single ``float`` back. ``completion`` is the model's
+whole turn, so it includes any reasoning the model did before answering.
 
-Our reward has two parts. A **correctness** reward parses the gold answer after ``####``, extracts
-the final number from the model's ``<answer>`` block, and returns ``1.0`` when they match. A
-**format** reward returns ``1.0`` when the completion wraps its reasoning and answer in
-``<think>...</think>`` and ``<answer>...</answer>`` tags. The most a completion can score is
-``2.0``. We never tell the model which answer or format to produce; it discovers both from the
-reward.
+Our reward reads only the text after the last ``</think>``, or the whole completion when the model
+did not think, so a number the model tries while reasoning does not count. It has two parts:
+
+* **Correctness** returns ``1.0`` when the number in the last ``<answer>`` block matches the
+  number after ``####`` in the dataset's answer.
+* **Format** returns ``1.0`` when that text ends with exactly one ``<answer>`` block that holds
+  only a number.
+
+The most a completion can score is ``2.0``. The reward does not require ``<think>`` tags, so it
+scores the same whether the model's thinking mode is on or off.
 
 .. collapse:: reward.py
 
@@ -195,17 +195,37 @@ Submit a Training Job
 ~~~~~~~~~~~~~~~~~~~~~
 
 We define the training configuration in a YAML manifest (``gsm8k_grpo.yaml``). The ``environment``
-section references the dataset by the name we registered it under. The ``network`` section names
-the base model and its LoRA adapter, so training only updates the adapter weights.
+section is a ``rollout`` over the dataset we registered:
+
+* ``name`` and ``dataset`` both give the dataset's registered name.
+* ``rubric_file_path`` names the reward file. It matches the file we pass with ``--reward-file``.
+* ``prompt_template`` turns each row into the chat the model sees: a system message that asks for
+  step-by-step reasoning and an ``<answer>`` tag, then the row's ``question``.
+* ``chat_template_kwargs: {enable_thinking: false}`` keeps Qwen3.5's thinking block closed, so the
+  model reasons in plain text before its answer. ``Qwen/Qwen3.5-0.8B`` already defaults to this;
+  set it to ``true`` to train the model's thinking mode instead. The reward works either way.
+* ``max_reward: 2.0`` counts a completion as solved when it scores full marks.
+
+``replay_buffer: {kind: llm}`` is the buffer GRPO needs, because Arena runs LLM training
+asynchronously: rollout engines generate while the trainer learns. The ``network`` section names
+the base model, ``Qwen/Qwen3.5-0.8B``, and a LoRA adapter, so training only updates the adapter
+weights.
+
+``algorithm.batch_size`` is the number of prompts per step, and GRPO samples ``group_size``
+completions for each. Arena only accepts a ``batch_size`` that is a power of 2 from 1 to 1024, so
+the manifest uses 8.
 
 .. collapse:: gsm8k_grpo.yaml
 
    .. literalinclude:: /_static/examples/gsm8k_grpo.yaml
       :language: yaml
 
-Unlike the :ref:`PPO tutorial <tutorial_arena_end_to_end>`, there is no observation space for Arena
-to infer an encoder from. The model architecture comes entirely from
-``pretrained_model_name_or_path`` and the ``lora_config``.
+Check the manifest before you submit. ``arena manifest validate`` runs the same manifest checks as
+``arena experiments submit``, without sending anything:
+
+.. code-block:: bash
+
+   arena manifest validate gsm8k_grpo.yaml
 
 We submit the manifest together with the reward function. Passing ``--reward-file`` tells Arena
 this is a reasoning job, and it validates the reward function against a sample completion before
@@ -222,8 +242,6 @@ the run starts.
          result = client.submit_experiment(
              manifest="gsm8k_grpo.yaml",
              reward_file="reward.py",
-             resource_id="arena-medium",
-             num_nodes=2,
              project="GSM8K Tutorial",
              experiment_name="gsm8k-grpo-v1",
          )
@@ -235,20 +253,45 @@ the run starts.
 
          arena experiments submit gsm8k_grpo.yaml \
              --reward-file reward.py \
-             --resource-id arena-medium \
-             --num-nodes 2 \
              --project 'GSM8K Tutorial' \
              --experiment-name gsm8k-grpo-v1
 
-.. tip::
+Choosing GPUs
+~~~~~~~~~~~~~
 
-   You can view all of the available resources to train on by running the CLI command ``arena resources list``.
+Leave out ``--gpu-type`` and ``--num-gpus``, as above. Arena then sizes the run with its memory
+estimate and picks the cheapest GPUs that fit. Asynchronous GRPO needs at least two GPUs: one
+trains the adapter and one runs the vLLM rollout engine. A 0.8B model fits on two single-GPU
+nodes, or on one 8-GPU node.
+
+To choose the GPUs yourself, list the GPU types a GRPO run trains on. The ``--num-gpus`` column
+shows the GPU counts each type takes:
+
+.. code-block:: bash
+
+   arena resources list --algorithm GRPO
+
+Then check the fit and pass both flags. A small model such as ``Qwen/Qwen3.5-0.8B`` trains on two
+L4 GPUs:
+
+.. code-block:: bash
+
+   arena memory estimate gsm8k_grpo.yaml --gpu l4 --num-gpus 2
+   arena experiments submit gsm8k_grpo.yaml \
+       --reward-file reward.py \
+       --project 'GSM8K Tutorial' \
+       --experiment-name gsm8k-grpo-v1 \
+       --gpu-type l4 --num-gpus 2
+
+Larger models need more memory per GPU. Run ``arena memory estimate`` with another GPU type from the
+list, such as ``a100-80`` or ``h100-80``, before you submit.
 
 Monitor Training
 ~~~~~~~~~~~~~~~~
 
 You can monitor training progress directly from the Arena dashboard, or download
-metrics programmatically:
+metrics programmatically. ``--overwrite`` (``overwrite=True`` in Python) replaces
+``metrics.csv`` when you download again:
 
 .. tab-set::
    :sync-group: interface
@@ -262,6 +305,7 @@ metrics programmatically:
          client.download_experiment_metrics(
              experiment_name="gsm8k-grpo-v1",
              output_path="metrics.csv",
+             overwrite=True,
          )
 
          # List available checkpoints
@@ -276,7 +320,7 @@ metrics programmatically:
       .. code-block:: bash
 
          # Download metrics
-         arena experiments metrics gsm8k-grpo-v1 --output-file metrics.csv
+         arena experiments metrics gsm8k-grpo-v1 --output-file metrics.csv --overwrite
 
          # List checkpoints
          arena experiments checkpoints gsm8k-grpo-v1
@@ -284,7 +328,7 @@ metrics programmatically:
 Deploy the Trained Model
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Once training is complete, deploy the best checkpoint to an inference endpoint:
+Once training is complete, deploy a checkpoint to an inference endpoint. Without a checkpoint, Arena deploys the one with the most steps:
 
 .. tab-set::
    :sync-group: interface
@@ -294,13 +338,13 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
 
       .. code-block:: python
 
-         # Deploy the best checkpoint
+         # Deploy the checkpoint with the most steps
          client.deploy_agent(experiment_name="gsm8k-grpo-v1")
 
-         # Or deploy a specific checkpoint
+         # Or deploy a specific checkpoint, by its steps from list_checkpoints
          client.deploy_agent(
              experiment_name="gsm8k-grpo-v1",
-             checkpoint="step_500",
+             checkpoint="500",
          )
 
    .. tab-item:: CLI
@@ -308,11 +352,11 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
 
       .. code-block:: bash
 
-         # Deploy the best checkpoint
+         # Deploy the checkpoint with the most steps
          arena agent deploy gsm8k-grpo-v1
 
-         # Deploy a specific checkpoint
-         arena agent deploy gsm8k-grpo-v1 --checkpoint step_500
+         # Deploy a specific checkpoint, by its steps from `arena experiments checkpoints`
+         arena agent deploy gsm8k-grpo-v1 --checkpoint 500
 
 Interact with the Deployed Model
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

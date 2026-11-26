@@ -16,6 +16,7 @@ import math
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
@@ -24,31 +25,65 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, inject_adapter_in_model
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from torch.nn.utils import clip_grad_norm_
+from transformers import (
+    AutoModelForCausalLM,
+    GptOssConfig,
+    GraniteMoeConfig,
+    MellumConfig,
+    MiniMaxConfig,
+    MixtralConfig,
+    OlmoeConfig,
+    PretrainedConfig,
+    Qwen2MoeConfig,
+    Qwen3MoeConfig,
+    Qwen4ExpTextConfig,
+)
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import (
+    DeepseekV4Config,
+)
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    DeepseekV4RotaryEmbedding,
+)
+from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+from transformers.models.gemma4.modeling_gemma4 import (
+    Gemma4ForCausalLM,
+    Gemma4TextRotaryEmbedding,
+)
 from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHForCausalLM
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
+    Qwen3_5MoeTextConfig,
+)
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import (
     CPUOffloadOptimizer,
     FSDPConfig,
+    ParallelMesh,
     aggregate_metrics_across_gpus,
     aggregate_metrics_dict,
     all_ranks,
+    allreduce_max_ints,
     allreduce_minmax_int,
     allreduce_sum_ints,
     any_rank,
     apply_fsdp2,
     barrier,
     broadcast_object_list,
+    build_parallel_mesh,
     distributed_env_present,
     ep_data_parallel_size,
     full_shape_views,
@@ -61,6 +96,7 @@ from agilerl.distributed import (
     is_distributed,
     is_main_process,
     materialize_dtensors,
+    materialize_fsdp2_from_cpu_state,
     packed_expert_counts,
     reference_dispatch_combine,
     resolve_device,
@@ -74,27 +110,31 @@ from agilerl.distributed import fsdp_blocks as bmod
 from agilerl.distributed import process as pmod
 from agilerl.distributed import runtime as rmod
 from agilerl.distributed.fsdp import (
+    canonical_fsdp_param_fqn,
     reshard_fsdp_modules,
     set_full_model_state_dict,
+)
+from agilerl.distributed.fsdp_meta import (
+    init_embed_scale_buffers,
+    init_rope_buffers,
 )
 from agilerl.distributed.runtime import (
     DPRuntime,
     FSDPRuntime,
     OptimizerStep,
+    PrepareResult,
     clip_param_group_grad_norm_,
     clip_param_groups,
 )
+from agilerl.distributed.tensor_parallel import shard_tied_embeddings
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import save_lora_adapters
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.helper_functions import restore_moe_routers
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyMLPPreTrainedModel,
-)
-from tests.test_utils.test_expert_parallel import (
-    _init_gloo,
-    _spawn_ranks,
-    requires_gloo,
 )
 
 cuda_required = pytest.mark.skipif(
@@ -492,6 +532,18 @@ class TestGetRank:
     def test_zero_with_world_size_one(self, world_size_one):
         assert get_rank() == 0
 
+    def test_reads_launcher_rank_before_init(self, monkeypatch):
+        # Arrange
+        monkeypatch.setenv("RANK", "2")
+        monkeypatch.setenv("WORLD_SIZE", "4")
+        monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+        monkeypatch.setenv("MASTER_PORT", "29500")
+
+        # Act / Assert
+        assert is_distributed() is False
+        assert get_rank() == 2
+        assert is_main_process() is False
+
 
 class TestGetLocalRank:
     def test_reads_local_rank_env(self):
@@ -512,6 +564,15 @@ class TestGetWorldSize:
 
     def test_one_with_world_size_one(self, world_size_one):
         assert get_world_size() == 1
+
+    def test_reads_launcher_world_size_before_init(self, monkeypatch):
+        monkeypatch.setenv("RANK", "0")
+        monkeypatch.setenv("WORLD_SIZE", "4")
+        monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+        monkeypatch.setenv("MASTER_PORT", "29500")
+
+        assert is_distributed() is False
+        assert get_world_size() == 4
 
 
 class TestIsMainProcess:
@@ -710,6 +771,29 @@ class TestAllreduceSumInts:
 
         # Assert
         assert sums == [6, 4]
+
+
+class TestAllreduceMaxInts:
+    def test_identity_without_process_group(self):
+        assert allreduce_max_ints([3, 0, 2]) == [3, 0, 2]
+
+    def test_takes_the_max_of_each_value_across_ranks(self):
+        # Arrange — a peer holds [4, 1]
+        def fake_max(t: torch.Tensor, op: object) -> None:
+            assert op == dist.ReduceOp.MAX
+            t.copy_(torch.maximum(t, torch.tensor([4, 1])))
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch("agilerl.distributed.process.dist.all_reduce", side_effect=fake_max),
+        ):
+            maxima = allreduce_max_ints([2, 3])
+
+        # Assert
+        assert maxima == [4, 3]
 
 
 class TestAnyRank:
@@ -957,97 +1041,67 @@ class TestSyncGrads:
         # Assert
         mock_all_reduce.assert_not_called()
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_averages_grads_and_skips_params_with_no_grad_on_every_rank(self):
-        _spawn_ranks(_sync_grads_skips_unused_worker)
+        run_ranks(_sync_grads_skips_unused_worker)
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_leaves_every_grad_none_when_no_rank_has_one(self):
-        _spawn_ranks(_sync_grads_all_unused_worker)
+        run_ranks(_sync_grads_all_unused_worker)
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_raises_on_every_rank_when_ranks_disagree_on_a_grad(self):
-        _spawn_ranks(_sync_grads_mismatch_worker)
+        run_ranks(_sync_grads_mismatch_worker)
 
 
-def _sync_grads_skips_unused_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange — ranks hold grads 1 and 3
-        first = nn.Parameter(torch.zeros(2))
-        first.grad = torch.full((2,), 2.0 * rank + 1)
-        unused = nn.Parameter(torch.zeros(4))
-        second = nn.Parameter(torch.zeros(3))
-        second.grad = torch.full((3,), 2.0 * rank + 1)
-        optimizer = torch.optim.AdamW([first, unused, second], lr=0.1)
+def _sync_grads_skips_unused_worker(rank: int, world_size: int) -> None:
+    # Arrange — ranks hold grads 1 and 3
+    first = nn.Parameter(torch.zeros(2))
+    first.grad = torch.full((2,), 2.0 * rank + 1)
+    unused = nn.Parameter(torch.zeros(4))
+    second = nn.Parameter(torch.zeros(3))
+    second.grad = torch.full((3,), 2.0 * rank + 1)
+    optimizer = torch.optim.AdamW([first, unused, second], lr=0.1)
 
-        # Act
-        sync_grads([first, unused, second])
-        optimizer.step()
+    # Act
+    sync_grads([first, unused, second])
+    optimizer.step()
 
-        # Assert
-        assert torch.equal(first.grad, torch.full((2,), 2.0))
-        assert torch.equal(second.grad, torch.full((3,), 2.0))
-        assert unused.grad is None
-        assert torch.equal(unused.detach(), torch.zeros(4))
-        assert unused not in optimizer.state
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert torch.equal(first.grad, torch.full((2,), 2.0))
+    assert torch.equal(second.grad, torch.full((3,), 2.0))
+    assert unused.grad is None
+    assert torch.equal(unused.detach(), torch.zeros(4))
+    assert unused not in optimizer.state
 
 
-def _sync_grads_all_unused_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange
-        params = [nn.Parameter(torch.zeros(2)), nn.Parameter(torch.zeros(3))]
+def _sync_grads_all_unused_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    params = [nn.Parameter(torch.zeros(2)), nn.Parameter(torch.zeros(3))]
 
-        # Act
-        sync_grads(params)
+    # Act
+    sync_grads(params)
 
-        # Assert
-        assert all(param.grad is None for param in params)
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert all(param.grad is None for param in params)
 
 
-def _sync_grads_mismatch_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange — only rank 0 has a grad for ``partial``
-        shared = nn.Parameter(torch.zeros(2))
-        shared.grad = torch.full((2,), float(rank + 1))
-        partial = nn.Parameter(torch.zeros(2))
-        if rank == 0:
-            partial.grad = torch.ones(2)
+def _sync_grads_mismatch_worker(rank: int, world_size: int) -> None:
+    # Arrange — only rank 0 has a grad for ``partial``
+    shared = nn.Parameter(torch.zeros(2))
+    shared.grad = torch.full((2,), float(rank + 1))
+    partial = nn.Parameter(torch.zeros(2))
+    if rank == 0:
+        partial.grad = torch.ones(2)
 
-        # Act
-        with pytest.raises(
-            RuntimeError, match="1 params have a grad on some ranks but not others"
-        ):
-            sync_grads([shared, partial])
+    # Act
+    with pytest.raises(
+        RuntimeError, match="1 params have a grad on some ranks but not others"
+    ):
+        sync_grads([shared, partial])
 
-        # Assert
-        assert torch.equal(shared.grad, torch.full((2,), float(rank + 1)))
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert torch.equal(shared.grad, torch.full((2,), float(rank + 1)))
 
 
 class TestMaterializeDtensors:
@@ -1331,35 +1385,6 @@ class TestGatherParamsOwnerless:
             assert out[1] is None
 
 
-class TestReplaceConsecutiveBlocks:
-    def test_rejects_empty_blocks(self):
-        with pytest.raises(ValueError, match="non-empty"):
-            bmod._replace_consecutive_blocks(nn.Sequential(nn.Linear(2, 2)), [])
-
-    def test_raises_when_span_not_found(self):
-        model = nn.Sequential(nn.Linear(2, 2))
-
-        with pytest.raises(RuntimeError, match="consecutive ModuleList span"):
-            bmod._replace_consecutive_blocks(model, [nn.Linear(2, 2)])
-
-
-class TestGroupTransformerUnits:
-    def test_single_unit_returns_units_unchanged(self):
-        model = nn.Sequential(nn.Linear(2, 2))
-        units = [nn.Linear(2, 2)]
-
-        assert bmod._group_transformer_units(model, units, 2) == units
-
-    def test_trailing_single_chunk_stays_ungrouped(self):
-        first, second, third = nn.Linear(2, 2), nn.Linear(2, 2), nn.Linear(2, 2)
-        model = nn.Sequential(nn.ModuleList([first, second, third]))
-
-        grouped = bmod._group_transformer_units(model, [first, second, third], 2)
-
-        assert len(grouped) == 2
-        assert grouped[1] is third
-
-
 class TestReplaceChild:
     def test_raises_when_old_not_found(self):
         model = nn.Sequential(nn.Linear(2, 2))
@@ -1470,6 +1495,58 @@ class TestGatherModelState:
         options = get_state.call_args.kwargs["options"]
         assert options.full_state_dict is True
         assert options.cpu_offload is True
+
+    def test_fsdp2_writes_permuted_rows_in_checkpoint_order(self):
+        # Arrange
+        stored = torch.tensor([[2.0, 2.0], [0.0, 0.0], [1.0, 1.0]])
+        runtime = FSDPRuntime(FSDPConfig())
+
+        # Act
+        with (
+            patch(
+                "agilerl.distributed.runtime.get_model_state_dict",
+                return_value={"weight": stored},
+            ),
+            patch(
+                "agilerl.distributed.runtime.tensor_parallel_row_orders",
+                return_value={"weight": torch.tensor([2, 0, 1])},
+            ),
+        ):
+            out = runtime.export_model_state(nn.Linear(2, 3))
+
+        # Assert
+        expected = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+        assert torch.equal(out["weight"], expected)
+
+    def test_fsdp2_skips_reorder_on_ranks_without_state(self):
+        runtime = FSDPRuntime(FSDPConfig())
+
+        with (
+            patch("agilerl.distributed.runtime.get_model_state_dict", return_value={}),
+            patch(
+                "agilerl.distributed.runtime.tensor_parallel_row_orders",
+                return_value={"weight": torch.tensor([1, 0])},
+            ),
+        ):
+            out = runtime.export_model_state(nn.Linear(2, 2))
+
+        assert out == {}
+
+    def test_fsdp2_row_order_without_a_state_key_raises(self):
+        runtime = FSDPRuntime(FSDPConfig())
+
+        with (
+            patch(
+                "agilerl.distributed.runtime.get_model_state_dict",
+                return_value={"weight": torch.zeros(2, 2)},
+            ),
+            patch(
+                "agilerl.distributed.runtime.tensor_parallel_row_orders",
+                return_value={"layers.0.qkv.weight": torch.tensor([1, 0])},
+            ),
+            pytest.raises(KeyError, match=r"layers\.0\.qkv\.weight"),
+        ):
+            runtime.export_model_state(nn.Linear(2, 2))
 
 
 class TestExportOptimizerState:
@@ -1735,6 +1812,74 @@ class TestFSDPRuntimeImportOptimizerState:
             self._import(nn.Linear(2, 2), inner, {})
 
 
+def _gather_layer_grad_worker(rank: int, world_size: int, cp: int) -> np.ndarray:
+    """This rank's head grad after scoring its own input through ``gather_layer``."""
+    mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp_shard_cp",))
+    layer = nn.Linear(2, 4)
+    layer.weight = nn.Parameter(
+        distribute_tensor(torch.arange(8.0).reshape(4, 2), mesh, [Shard(0)])
+    )
+    layer.bias = nn.Parameter(distribute_tensor(torch.zeros(4), mesh, [Shard(0)]))
+    hidden = torch.full((3, 2), float(rank + 1))
+
+    with FSDPRuntime(FSDPConfig(cp=cp)).gather_layer(layer, "cpu") as (w, b):
+        (hidden @ w.T + b).square().sum().backward()
+
+    # Tensors cross the rank pipe as shared fds that close when the rank exits.
+    return layer.weight.grad.full_tensor().numpy()
+
+
+def _dense_head_grad(rank: int) -> torch.Tensor:
+    weight = torch.arange(8.0).reshape(4, 2).requires_grad_()
+    hidden = torch.full((3, 2), float(rank + 1))
+    (hidden @ weight.T).square().sum().backward()
+    return weight.grad
+
+
+class TiedCausalLM(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        torch.manual_seed(0)
+        self.embed_tokens = nn.Embedding(8, 4)
+        self.lm_head = nn.Linear(4, 8, bias=False)
+        self.lm_head.weight = self.embed_tokens.weight
+        self.config = SimpleNamespace(tie_word_embeddings=True)
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.embed_tokens
+
+
+def _tied_tokens() -> torch.Tensor:
+    return torch.randint(0, 8, (9,), generator=torch.Generator().manual_seed(1))
+
+
+def _tied_sequence_loss(
+    model: TiedCausalLM, tokens: torch.Tensor, runtime: FSDPRuntime
+) -> torch.Tensor:
+    """Summed next-token loss of ``tokens``, scored through ``gather_layer``."""
+    hidden = model.embed_tokens(tokens[:-1])
+    with runtime.gather_layer(model.lm_head, "cpu") as (w, _):
+        logits = hidden @ w.T
+    return nn.functional.cross_entropy(logits, tokens[1:], reduction="sum")
+
+
+def _tied_embedding_tp_cp_worker(
+    rank: int, world_size: int
+) -> tuple[float, np.ndarray]:
+    """This rank's loss and synced tied-embedding grad at tp=2, cp=2."""
+    mesh = build_parallel_mesh(world_size=world_size, tp=2, cp=2, device_type="cpu")
+    model = TiedCausalLM()
+    shard_tied_embeddings(model, mesh.tp)
+    shard = mesh.cp.get_local_rank()
+    tokens = _tied_tokens()[shard * 4 : shard * 4 + 5]
+
+    loss = _tied_sequence_loss(model, tokens, FSDPRuntime(FSDPConfig(cp=2)))
+    loss.backward()
+    mesh.sync_grads([model.embed_tokens.weight], torch.float32)
+
+    return loss.item(), model.embed_tokens.weight.grad.full_tensor().numpy()
+
+
 class TestGatherLayer:
     def test_moves_gathered_weights_to_target_device(self):
         layer = nn.Linear(2, 2)
@@ -1743,6 +1888,44 @@ class TestGatherLayer:
             assert w.device.type == "meta"
             assert b is not None
             assert b.device.type == "meta"
+
+    @pytest.mark.multi_rank
+    @pytest.mark.parametrize(("cp", "scale"), [(1, 0.5), (2, 1.0)])
+    def test_sharded_head_grad_sums_over_cp_and_averages_over_data_parallel(
+        self, cp: int, scale: float
+    ):
+        # Arrange: each rank scores a different input.
+        expected = scale * (_dense_head_grad(0) + _dense_head_grad(1))
+
+        # Act
+        grads = run_ranks(_gather_layer_grad_worker, 2, cp)
+
+        # Assert
+        for grad in grads:
+            torch.testing.assert_close(
+                torch.from_numpy(grad), expected, atol=0.0, rtol=0.0
+            )
+
+    @pytest.mark.multi_rank
+    def test_tp_tied_embedding_grad_at_cp2_matches_one_rank(self):
+        # Arrange: CP ranks score one sequence's two halves; TP ranks share tokens.
+        model = TiedCausalLM()
+        reference_loss = _tied_sequence_loss(
+            model, _tied_tokens(), FSDPRuntime(FSDPConfig())
+        )
+        reference_loss.backward()
+
+        # Act
+        reports = run_ranks(_tied_embedding_tp_cp_worker, 4)
+
+        # Assert: fp32 on 8 tokens differs only in summation order, a few ulps.
+        # Both TP ranks of a CP shard report that shard's loss.
+        tp_loss_sum = sum(loss for loss, _ in reports) / 2
+        assert tp_loss_sum == pytest.approx(reference_loss.item(), rel=1e-6)
+        for _, grad in reports:
+            assert torch.allclose(
+                torch.from_numpy(grad), model.embed_tokens.weight.grad, atol=1e-6
+            )
 
 
 class TestCopyAdapterTensors:
@@ -1830,7 +2013,9 @@ class TestFSDPPrepareActorOffload:
         # Arrange
         actor = _LoraActor()
         config = FSDPConfig(
-            cpu_offload=cpu_offload, optim_cpu_offload=optim_cpu_offload
+            reshard_after_forward=True,
+            cpu_offload=cpu_offload,
+            optim_cpu_offload=optim_cpu_offload,
         )
 
         # Act
@@ -1841,7 +2026,6 @@ class TestFSDPPrepareActorOffload:
             result = FSDPRuntime(config).prepare_actor(
                 actor,
                 device=device,
-                colocated=device != "cpu",
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,
@@ -1872,22 +2056,194 @@ class TestFSDPPrepareActorOffload:
             ),
         ):
             with pytest.raises(TypeError, match="already CPU-offloaded"):
-                FSDPRuntime(FSDPConfig(optim_cpu_offload=True)).prepare_actor(
+                FSDPRuntime(
+                    FSDPConfig(reshard_after_forward=True, optim_cpu_offload=True)
+                ).prepare_actor(
                     actor,
                     device="cpu",
-                    colocated=False,
                     cosine_lr_schedule_config=None,
                     lr=1e-4,
                     lr_critic=None,
                     restore_adapter_trainability=MagicMock(),
                 )
 
-    def test_rejects_an_unresolved_optimizer_placement(self):
-        with pytest.raises(ValueError, match="optim_cpu_offload is unset"):
-            FSDPRuntime(FSDPConfig(optim_cpu_offload=None)).prepare_actor(
+    @pytest.mark.parametrize(
+        ("reshard", "optim_cpu_offload", "unset"),
+        [
+            (True, None, "optim_cpu_offload"),
+            (None, False, "reshard_after_forward"),
+        ],
+    )
+    def test_rejects_an_unresolved_memory_field(
+        self, reshard, optim_cpu_offload, unset
+    ):
+        with pytest.raises(ValueError, match=rf"FSDPConfig\.{unset} is unset"):
+            FSDPRuntime(
+                FSDPConfig(
+                    reshard_after_forward=reshard,
+                    optim_cpu_offload=optim_cpu_offload,
+                )
+            ).prepare_actor(
                 nn.Linear(2, 2),
                 device="cpu",
-                colocated=False,
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_rejects_mutually_exclusive_offload_flags(self):
+        # Arrange
+        runtime = FSDPRuntime(
+            FSDPConfig(
+                reshard_after_forward=True, cpu_offload=True, optim_cpu_offload=True
+            )
+        )
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            runtime.prepare_actor(
+                nn.Linear(2, 2),
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_accepts_cpu_offload_without_a_colocated_engine(self):
+        # Arrange
+        runtime = FSDPRuntime(
+            FSDPConfig(
+                reshard_after_forward=True, cpu_offload=True, optim_cpu_offload=False
+            )
+        )
+
+        # Act
+        with patch(
+            "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
+            side_effect=lambda m, _d, _c, **_k: m,
+        ):
+            result = runtime.prepare_actor(
+                nn.Linear(2, 2),
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+        # Assert
+        assert result.optimizer is not None
+
+
+class CausalActor(nn.Module):
+    """Config plus a frozen LM head, the parts CP setup reads off an actor."""
+
+    def __init__(self, config: PretrainedConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.lm_head = nn.Linear(2, 2).requires_grad_(False)
+
+    def get_output_embeddings(self) -> nn.Module:
+        return self.lm_head
+
+
+class TestFSDPPrepareActorContextParallel:
+    @staticmethod
+    def _actor(heads: int, kv_heads: int, backend: str) -> CausalActor:
+        return CausalActor(
+            PretrainedConfig(
+                num_attention_heads=heads,
+                num_key_value_heads=kv_heads,
+                attn_implementation=backend,
+            )
+        )
+
+    @staticmethod
+    def _prepare(actor: nn.Module, tp: int = 1, cp: int = 2) -> None:
+        with patch(
+            "agilerl.distributed.runtime.build_parallel_mesh",
+            side_effect=RuntimeError("validation passed"),
+        ):
+            FSDPRuntime(
+                FSDPConfig(
+                    tp=tp, cp=cp, reshard_after_forward=True, optim_cpu_offload=False
+                )
+            ).prepare_actor(
+                actor,
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_frozen_lm_head_passes_validation(self) -> None:
+        with pytest.raises(RuntimeError, match="validation passed"):
+            self._prepare(self._actor(8, 8, "flash_attention_2"))
+
+    def test_rejects_heads_per_tp_rank_that_do_not_divide_cp(self) -> None:
+        with pytest.raises(ValueError, match="num_attention_heads"):
+            self._prepare(self._actor(24, 8, "flash_attention_2"), tp=4, cp=4)
+
+    def test_heads_per_tp_rank_that_divide_cp_pass(self) -> None:
+        with pytest.raises(RuntimeError, match="validation passed"):
+            self._prepare(self._actor(32, 8, "flash_attention_2"), tp=2, cp=2)
+
+    def test_rejects_kv_heads_per_tp_rank_that_do_not_split_over_cp(self) -> None:
+        # 12 KV heads split over cp=4, but each tp=2 rank holds 6.
+        with pytest.raises(ValueError, match="num_key_value_heads"):
+            self._prepare(self._actor(24, 12, "flash_attention_2"), tp=2, cp=4)
+
+    def test_rejects_non_flash_attention_backend(self) -> None:
+        with pytest.raises(ValueError, match="flash_attention_2"):
+            FSDPRuntime(
+                FSDPConfig(cp=2, reshard_after_forward=True, optim_cpu_offload=False)
+            ).prepare_actor(
+                self._actor(8, 8, "sdpa"),
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_rejects_heads_that_do_not_divide_cp(self) -> None:
+        with pytest.raises(ValueError, match="num_attention_heads"):
+            FSDPRuntime(
+                FSDPConfig(cp=2, reshard_after_forward=True, optim_cpu_offload=False)
+            ).prepare_actor(
+                self._actor(7, 7, "flash_attention_2"),
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_flash_attention_actor_needs_flash_attn_for_ulysses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setitem(sys.modules, "flash_attn", None)
+        actor = self._actor(8, 8, "flash_attention_2")
+        mesh = ParallelMesh(dp_shard=MagicMock(), cp=MagicMock())
+
+        # Act / Assert
+        with (
+            patch("agilerl.distributed.runtime.build_parallel_mesh", return_value=mesh),
+            patch(
+                "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
+                return_value=actor,
+            ),
+            pytest.raises(ImportError, match="Context parallel needs the flash_attn"),
+        ):
+            FSDPRuntime(
+                FSDPConfig(cp=2, reshard_after_forward=True, optim_cpu_offload=False)
+            ).prepare_actor(
+                actor,
+                device="cpu",
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,
@@ -1919,7 +2275,6 @@ def _prepare_dp_actor(
     return DPRuntime().prepare_actor(
         actor,
         device=device,
-        colocated=False,
         cosine_lr_schedule_config=cosine_lr_schedule_config,
         lr=lr,
         lr_critic=None,
@@ -1944,6 +2299,17 @@ class TestDenseWrap:
         ]
         assert actor.actor_lora_A in opt_params
         assert result.lr_scheduler is None
+
+    def test_cpu_optimizer_steps_unfused(self):
+        result = _prepare_dp_actor(_LoraActor())
+
+        assert not result.optimizer.optimizer.defaults["fused"]
+
+    @pytest.mark.gpu
+    def test_cuda_optimizer_steps_fused(self):
+        result = _prepare_dp_actor(_LoraActor(), device="cuda")
+
+        assert result.optimizer.optimizer.defaults["fused"] is True
 
     def test_enables_hf_gradient_checkpointing(self):
         actor = _LoraActor()
@@ -2108,7 +2474,287 @@ class TestBaseRuntimeMicroBatchesUntilStep:
         assert remaining == [3, 2, 1, 3, 2]
 
 
+class VisionBlock(nn.Module):
+    """Frozen base projection plus an actor LoRA projection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Linear(8, 8)
+        self.actor_lora = nn.Linear(8, 8, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.proj(x) + self.actor_lora(x))
+
+
+class DecoderBlock(nn.Module):
+    """Frozen base projection plus a trainable actor LoRA projection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.base = nn.Linear(8, 8)
+        self.actor_lora = nn.Linear(8, 8, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.base(x) + self.actor_lora(x))
+
+
+class VisionLanguageActor(nn.Module):
+    """Runs the vision blocks only when ``use_vision`` is set, like a VLM batch without images."""
+
+    _no_split_modules: ClassVar[list[str]] = ["VisionBlock", "DecoderBlock"]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.visual = nn.ModuleList([VisionBlock() for _ in range(2)])
+        self.layers = nn.ModuleList([DecoderBlock() for _ in range(2)])
+
+    def forward(self, x: torch.Tensor, use_vision: bool = False) -> torch.Tensor:
+        if use_vision:
+            for block in self.visual:
+                x = block(x)
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+def _vision_language_actor(train_vision: bool = True) -> VisionLanguageActor:
+    torch.manual_seed(0)
+    actor = VisionLanguageActor()
+    for name, param in actor.named_parameters():
+        trainable = "actor_lora" in name and (
+            train_vision or not name.startswith("visual.")
+        )
+        param.requires_grad_(trainable)
+    return actor
+
+
+def _prepare_fsdp_actor(
+    actor: nn.Module,
+    gradient_checkpointing: bool = False,
+    param_dtype: str = "bfloat16",
+    persistence_threshold: int = 0,
+) -> tuple[FSDPRuntime, PrepareResult]:
+    # A reduce dtype distinct from the param dtype makes post-backward upcast
+    # deferred grads, which reads each param's unsharded copy.
+    runtime = FSDPRuntime(
+        FSDPConfig(
+            reshard_after_forward=True,
+            param_dtype=param_dtype,
+            reduce_dtype="float32",
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=False,
+            checkpoint_every_n_blocks=1,
+        )
+    )
+    # FSDP's default mesh uses the process accelerator (MPS on macOS).
+    world = init_device_mesh(
+        "cpu",
+        (1, dist.get_world_size()),
+        mesh_dim_names=("dp_replicate", "dp_shard"),
+    )
+    with (
+        patch(
+            "agilerl.distributed.runtime.build_parallel_mesh",
+            return_value=ParallelMesh(dp_shard=world["dp_shard"]),
+        ),
+        patch(
+            "agilerl.distributed.fsdp_blocks.PARAM_PERSISTENCE_THRESHOLD",
+            persistence_threshold,
+        ),
+    ):
+        result = runtime.prepare_actor(
+            actor,
+            device="cpu",
+            cosine_lr_schedule_config=None,
+            lr=1e-2,
+            lr_critic=None,
+            restore_adapter_trainability=lambda _: None,
+            gradient_checkpointing=gradient_checkpointing,
+        )
+    return runtime, result
+
+
+def _accumulated_step(
+    deferred: bool,
+    micro_batches: list[torch.Tensor],
+    use_vision: list[bool],
+    train_vision: bool = True,
+) -> tuple[list[OptimizerStep | None], dict[str, torch.Tensor]]:
+    """Backward each micro-batch of one window; full grads the optimizer stepped on.
+
+    :param deferred: Reduce-scatter on the last micro-batch only; False
+        reduce-scatters every micro-batch.
+    """
+    runtime, result = _prepare_fsdp_actor(_vision_language_actor(train_vision))
+    names = {param: name for name, param in result.actor.named_parameters()}
+    stepped: dict[str, torch.Tensor] = {}
+
+    def capture_grads(optimizer, _args, _kwargs):
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                if param.grad is not None:
+                    stepped[names[param]] = full_grad(param).clone()
+
+    result.optimizer._single_optimizer().register_step_pre_hook(capture_grads)
+    sync_every_micro_batch = (
+        nullcontext()
+        if deferred
+        else patch.object(result.actor, "set_requires_gradient_sync")
+    )
+    with sync_every_micro_batch:
+        steps = [
+            runtime.backward(
+                result.actor(x, vision).sum(),
+                result.optimizer,
+                len(micro_batches),
+                result.actor,
+            )
+            for x, vision in zip(micro_batches, use_vision, strict=True)
+        ]
+    return steps, stepped
+
+
+def _deferred_and_synced_grads_worker(
+    rank: int, world_size: int, use_vision: list[bool]
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    torch.manual_seed(1 + rank)
+    micro_batches = [torch.randn(4, 8) for _ in use_vision]
+    _, deferred = _accumulated_step(True, micro_batches, use_vision)
+    _, synced = _accumulated_step(False, micro_batches, use_vision)
+    # NumPy arrays: a torch tensor sent to the parent shares memory that dies
+    # with this process before the parent reads it.
+    return (
+        {name: grad.numpy() for name, grad in deferred.items()},
+        {name: grad.numpy() for name, grad in synced.items()},
+    )
+
+
+DECODER_LORA = {"layers.0.actor_lora.weight", "layers.1.actor_lora.weight"}
+VISION_LORA = {"visual.0.actor_lora.weight", "visual.1.actor_lora.weight"}
+
+
+class TestUnforwardedFSDPUnits:
+    def test_tracks_every_unit_after_wrap(self, world_size_one):
+        # Arrange
+        actor = _vision_language_actor()
+
+        # Act
+        runtime, _ = _prepare_fsdp_actor(actor)
+
+        # Assert
+        assert list(runtime.unforwarded_units) == [
+            actor,
+            *actor.visual,
+            *actor.layers,
+        ]
+
+    def test_drops_units_that_ran_forward(self, world_size_one):
+        # Arrange
+        actor = _vision_language_actor()
+        runtime, result = _prepare_fsdp_actor(actor)
+
+        # Act
+        result.actor(torch.randn(4, 8))
+
+        # Assert
+        assert list(runtime.unforwarded_units) == list(actor.visual)
+
+    def test_empty_after_every_unit_ran_forward(self, world_size_one):
+        # Arrange
+        runtime, result = _prepare_fsdp_actor(_vision_language_actor())
+
+        # Act
+        result.actor(torch.randn(4, 8), True)
+        result.actor(torch.randn(4, 8), True)
+
+        # Assert
+        assert list(runtime.unforwarded_units) == []
+
+
 class TestFSDPRuntimeBackward:
+    @pytest.mark.parametrize("train_vision", [False, True])
+    def test_deferred_sync_with_unit_skipping_forward_matches_synced_grads(
+        self, world_size_one, train_vision
+    ):
+        # Arrange
+        torch.manual_seed(1)
+        micro_batches = [torch.randn(4, 8) for _ in range(2)]
+        _, expected = _accumulated_step(
+            False, micro_batches, [False, False], train_vision
+        )
+
+        # Act
+        steps, stepped = _accumulated_step(
+            True, micro_batches, [False, False], train_vision
+        )
+
+        # Assert
+        assert steps[0] is None
+        assert isinstance(steps[1], OptimizerStep)
+        assert expected.keys() == DECODER_LORA
+        assert stepped.keys() == expected.keys()
+        for name, grad in expected.items():
+            assert torch.equal(stepped[name], grad), name
+
+    def test_deferred_sync_with_unit_first_running_mid_window_matches_synced_grads(
+        self, world_size_one
+    ):
+        # Arrange
+        torch.manual_seed(1)
+        micro_batches = [torch.randn(4, 8) for _ in range(3)]
+        use_vision = [False, True, True]
+        _, expected = _accumulated_step(False, micro_batches, use_vision)
+
+        # Act
+        steps, stepped = _accumulated_step(True, micro_batches, use_vision)
+
+        # Assert
+        assert steps[:2] == [None, None]
+        assert isinstance(steps[2], OptimizerStep)
+        assert expected.keys() == DECODER_LORA | VISION_LORA
+        assert stepped.keys() == expected.keys()
+        for name, grad in expected.items():
+            assert torch.equal(stepped[name], grad), name
+
+    @pytest.mark.multi_rank
+    @pytest.mark.parametrize(
+        "use_vision",
+        [[False, False], [False, True]],
+        ids=["never_forwarded", "first_forward_on_second_micro_batch"],
+    )
+    def test_deferred_sync_across_ranks_matches_synced_grads(self, use_vision):
+        # Arrange
+        expected_names = DECODER_LORA | (VISION_LORA if any(use_vision) else set())
+
+        # Act
+        results = run_ranks(
+            _deferred_and_synced_grads_worker, 2, use_vision, timeout=120.0
+        )
+
+        # Assert
+        for deferred, synced in results:
+            assert synced.keys() == expected_names
+            assert deferred.keys() == synced.keys()
+            for name, grad in synced.items():
+                assert np.array_equal(deferred[name], grad), name
+        for name, grad in results[0][1].items():
+            assert np.array_equal(results[1][1][name], grad), name
+
+    def test_deferred_sync_holds_trainable_grads_until_step_boundary(
+        self, world_size_one
+    ):
+        # Arrange
+        runtime, result = _prepare_fsdp_actor(_vision_language_actor())
+        trainable = [p for p in result.actor.parameters() if p.requires_grad]
+        x = torch.randn(4, 8)
+
+        # Act
+        runtime.backward(result.actor(x, True).sum(), result.optimizer, 3, result.actor)
+
+        # Assert
+        assert len(trainable) == 4
+        assert all(param.grad is None for param in trainable)
+
     def test_syncs_replicated_grads_not_dtensors(self, monkeypatch):
         class FakeDTensor(nn.Parameter):
             pass
@@ -2122,16 +2768,16 @@ class TestFSDPRuntimeBackward:
         optimizer._single_optimizer.return_value.param_groups = [
             {"params": [replicated, sharded]}
         ]
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
         synced: list[list[nn.Parameter]] = []
 
-        def capture(params):
-            synced.append(list(params))
+        def capture(params, cp):
+            synced.append((list(params), cp))
 
         monkeypatch.setattr("agilerl.distributed.runtime.sync_grads", capture)
-        runtime.backward(MagicMock(), optimizer, 1, actor=MagicMock())
+        runtime.backward(MagicMock(), optimizer, 1, actor=MagicMock(spec=FSDPModule))
 
-        assert synced == [[replicated]]
+        assert synced == [([replicated], 1)]
         optimizer.step.assert_called_once()
 
     def test_does_not_sync_before_step_boundary(self, monkeypatch):
@@ -2139,20 +2785,20 @@ class TestFSDPRuntimeBackward:
         param.grad = torch.ones(2)
         optimizer = MagicMock()
         optimizer.optimizer.param_groups = [{"params": [param]}]
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
         synced: list[object] = []
         monkeypatch.setattr(
             "agilerl.distributed.runtime.sync_grads",
             lambda params: synced.append(list(params)),
         )
 
-        runtime.backward(MagicMock(), optimizer, 2, actor=MagicMock())
+        runtime.backward(MagicMock(), optimizer, 2, actor=MagicMock(spec=FSDPModule))
 
         assert synced == []
         optimizer.step.assert_not_called()
 
-    def test_rejects_defer_without_sharded_actor(self):
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=True))
+    def test_rejects_unsharded_actor(self):
+        runtime = FSDPRuntime(FSDPConfig())
 
         with pytest.raises(TypeError, match="FSDP2-sharded actor"):
             runtime.backward(MagicMock(), MagicMock(), 1, actor=nn.Linear(2, 2))
@@ -2164,13 +2810,13 @@ class TestFSDPRuntimeBackward:
         inner.param_groups = [{"params": [param]}]
         optimizer = MagicMock()
         optimizer._single_optimizer.return_value = inner
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
 
         step = runtime.backward(
             MagicMock(),
             optimizer,
             1,
-            actor=MagicMock(),
+            actor=MagicMock(spec=FSDPModule),
             max_grad_norm=1.0,
         )
 
@@ -2193,14 +2839,14 @@ class TestFSDPRuntimeBackward:
         ]
         optimizer = MagicMock()
         optimizer._single_optimizer.return_value = inner
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
 
         # Act
         step = runtime.backward(
             MagicMock(),
             optimizer,
             1,
-            actor=MagicMock(),
+            actor=MagicMock(spec=FSDPModule),
             max_grad_norm=1.0,
             clip_groups=ACTOR_CRITIC_CLIP_GROUPS,
         )
@@ -2212,12 +2858,201 @@ class TestFSDPRuntimeBackward:
         assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
 
 
-class TestDeferGradSync:
-    def test_fsdp_config_defaults_on(self):
-        assert FSDPConfig().defer_grad_sync is True
+def _full_params(model: nn.Module) -> dict[str, np.ndarray]:
+    return {
+        canonical_fsdp_param_fqn(name): (
+            param.full_tensor() if isinstance(param, DTensor) else param
+        )
+        .detach()
+        .float()
+        .numpy()
+        .copy()
+        for name, param in model.named_parameters()
+    }
 
+
+def _prepare_ddp_actor(actor: nn.Module) -> tuple[DPRuntime, PrepareResult]:
+    runtime = DPRuntime()
+    result = runtime.prepare_actor(
+        actor,
+        device="cpu",
+        cosine_lr_schedule_config=None,
+        lr=1e-2,
+        lr_critic=None,
+        restore_adapter_trainability=lambda _: None,
+    )
+    return runtime, result
+
+
+def _step_and_capture(
+    runtime: DPRuntime | FSDPRuntime,
+    result: PrepareResult,
+    micro_batches: list[torch.Tensor],
+) -> dict[str, Any]:
+    """One accumulated step; the stepped grads, full params, and trainable dtypes."""
+    actor = result.actor
+    optimizer = result.optimizer._single_optimizer()
+    names = {
+        param: canonical_fsdp_param_fqn(name)
+        for name, param in actor.named_parameters()
+    }
+    stepped: dict[str, np.ndarray] = {}
+    grad_dtypes: set[str] = set()
+
+    def capture_grads(opt, _args, _kwargs):
+        for group in opt.param_groups:
+            for param in group["params"]:
+                if param.grad is not None:
+                    grad_dtypes.add(str(param.grad.dtype))
+                    stepped[names[param]] = full_grad(param).numpy().copy()
+
+    optimizer.register_step_pre_hook(capture_grads)
+    for x in micro_batches:
+        runtime.backward(
+            actor(x, True).float().sum(), result.optimizer, len(micro_batches), actor
+        )
+    trainable = [param for param in actor.parameters() if param.requires_grad]
+    return {
+        "grads": stepped,
+        "params": _full_params(actor),
+        "dtypes": {
+            "params": {str(param.dtype) for param in trainable},
+            "grads": grad_dtypes,
+            "adam": {
+                str(state.dtype)
+                for param in trainable
+                for key, state in optimizer.state[param].items()
+                if key != "step"
+            },
+            "frozen": {
+                str(param.dtype)
+                for param in actor.parameters()
+                if not param.requires_grad
+            },
+        },
+    }
+
+
+def _ddp_and_fsdp_step_worker(rank: int, world_size: int) -> dict[str, Any]:
+    """One accumulated step per runtime on this rank's batch, and the unsynced local grads."""
+    torch.manual_seed(1 + rank)
+    micro_batches = [torch.randn(4, 8) for _ in range(2)]
+    local = _vision_language_actor()
+    for x in micro_batches:
+        (local(x, True).sum() / len(micro_batches)).backward()
+    ddp, ddp_result = _prepare_ddp_actor(_vision_language_actor())
+    fsdp, fsdp_result = _prepare_fsdp_actor(
+        _vision_language_actor(), param_dtype="float32"
+    )
+    return {
+        "local": {
+            name: param.grad.numpy().copy()
+            for name, param in local.named_parameters()
+            if param.grad is not None
+        },
+        "ddp": _step_and_capture(ddp, ddp_result, micro_batches),
+        "fsdp": _step_and_capture(fsdp, fsdp_result, micro_batches),
+    }
+
+
+def _lora_over_bf16_base() -> VisionLanguageActor:
+    """PEFT LoRA in fp32 on every block projection; the rest frozen in bf16."""
+    torch.manual_seed(0)
+    actor = VisionLanguageActor()
+    # The optimizer trains every parameter named for actor LoRA.
+    for block in (*actor.visual, *actor.layers):
+        block.actor_lora = nn.Identity()
+    actor = inject_adapter_in_model(
+        LoraConfig(r=4, target_modules=["base", "proj"], init_lora_weights=False),
+        actor,
+        adapter_name="actor",
+    )
+    for name, param in actor.named_parameters():
+        trainable = ".lora_" in name
+        param.requires_grad_(trainable)
+        if not trainable:
+            param.data = param.data.to(torch.bfloat16)
+    return actor
+
+
+def _mixed_precision_step_worker(rank: int, world_size: int) -> dict[str, Any]:
+    """DDP and bf16-compute FSDP steps of fp32 LoRA over a bf16 base."""
+    torch.manual_seed(1 + rank)
+    micro_batches = [torch.randn(4, 8, dtype=torch.bfloat16) for _ in range(2)]
+    ddp, ddp_result = _prepare_ddp_actor(_lora_over_bf16_base())
+    fsdp, fsdp_result = _prepare_fsdp_actor(
+        _lora_over_bf16_base(),
+        param_dtype="bfloat16",
+        persistence_threshold=bmod.PARAM_PERSISTENCE_THRESHOLD,
+    )
+    return {
+        "ddp": _step_and_capture(ddp, ddp_result, micro_batches),
+        "fsdp": _step_and_capture(fsdp, fsdp_result, micro_batches),
+    }
+
+
+FP32_TRAINABLE_DTYPES = {
+    "params": {"torch.float32"},
+    "grads": {"torch.float32"},
+    "adam": {"torch.float32"},
+}
+
+
+class TestDataParallelMatchesFsdpGradients:
+    @pytest.mark.multi_rank
+    def test_ddp_and_fsdp_step_on_the_rank_mean_gradient(self):
+        # Act
+        results = run_ranks(_ddp_and_fsdp_step_worker, 2, timeout=120.0)
+
+        # Assert: fp32 on CPU, and halving a two-rank sum is exact.
+        lora = DECODER_LORA | VISION_LORA
+        expected = {
+            name: (results[0]["local"][name] + results[1]["local"][name]) / 2
+            for name in lora
+        }
+        for result in results:
+            for mode in ("ddp", "fsdp"):
+                grads = result[mode]["grads"]
+                assert grads.keys() == lora, mode
+                for name, grad in expected.items():
+                    assert np.array_equal(grads[name], grad), (mode, name)
+                dtypes = result[mode]["dtypes"]
+                assert {key: dtypes[key] for key in FP32_TRAINABLE_DTYPES} == (
+                    FP32_TRAINABLE_DTYPES
+                ), mode
+        for name, value in results[0]["ddp"]["params"].items():
+            assert np.array_equal(results[1]["ddp"]["params"][name], value), name
+            assert np.array_equal(results[0]["fsdp"]["params"][name], value), name
+
+    @pytest.mark.multi_rank
+    def test_fp32_lora_over_a_bf16_base_trains_in_fp32_on_both_paths(self):
+        # Act
+        results = run_ranks(_mixed_precision_step_worker, 2, timeout=120.0)
+
+        # Assert: FSDP runs LoRA in bf16 and DDP in fp32 from bf16 inputs.
+        # bf16 rounds each op to ~4e-3 relative; through four blocks the
+        # first vision block's grad measures 1.1e-2 off in norm.
+        for result in results:
+            ddp = result["ddp"]
+            fsdp = result["fsdp"]
+            for mode in ("ddp", "fsdp"):
+                dtypes = result[mode]["dtypes"]
+                assert {key: dtypes[key] for key in FP32_TRAINABLE_DTYPES} == (
+                    FP32_TRAINABLE_DTYPES
+                ), mode
+                assert dtypes["frozen"] == {"torch.bfloat16"}, mode
+            assert fsdp["grads"].keys() == ddp["grads"].keys()
+            assert len(ddp["grads"]) == 8
+            for name, grad in ddp["grads"].items():
+                diff = fsdp["grads"][name] - grad
+                assert np.linalg.norm(diff) / np.linalg.norm(grad) < 2e-2, name
+        for name, grad in results[0]["fsdp"]["grads"].items():
+            assert np.array_equal(results[1]["fsdp"]["grads"][name], grad), name
+
+
+class TestFSDPRuntimeBackwardGradSync:
     def test_toggles_sync_across_accumulation_window(self):
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=True))
+        runtime = FSDPRuntime(FSDPConfig())
         optimizer = MagicMock()
         loss = MagicMock()
         model = MagicMock(spec=FSDPModule)
@@ -2228,17 +3063,6 @@ class TestDeferGradSync:
         model.set_requires_gradient_sync.assert_called_with(True, recurse=True)
         assert model.set_requires_gradient_sync.call_count == 2
 
-        optimizer.step.assert_called_once()
-
-    def test_disabled_does_not_toggle(self):
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
-        optimizer = MagicMock()
-        loss = MagicMock()
-        model = MagicMock()
-
-        runtime.backward(loss, optimizer, 1, actor=model)
-
-        model.set_requires_gradient_sync.assert_not_called()
         optimizer.step.assert_called_once()
 
 
@@ -2354,38 +3178,6 @@ class TestResolveDevice:
             assert resolve_device("cpu") == "cpu"
 
 
-class TestFSDPBlockGroup:
-    def test_dispatches_dict_masks_by_inner_block_type(self):
-        class Block(nn.Module):
-            def __init__(self, block_type: str):
-                super().__init__()
-                self.block_type = block_type
-                self.lin = nn.Linear(2, 2)
-                self.seen: list[object] = []
-
-            def forward(self, hidden_states, attention_mask=None, **_kwargs):
-                self.seen.append(attention_mask)
-                return self.lin(hidden_states)
-
-        mamba = Block("linear_attention")
-        moe = Block("moe")
-        group = bmod.FSDPBlockGroup([mamba, moe])
-        hidden = torch.zeros(1, 2)
-
-        out = group(
-            hidden,
-            attention_mask={
-                "linear_attention": "linear",
-                "full_attention": "causal",
-            },
-        )
-
-        assert out.shape == hidden.shape
-        assert mamba.seen == ["linear"]
-        assert moe.seen == [None]
-        assert group.block_type == "linear_attention"
-
-
 class PrefetchUnit(nn.Module):
     """Stand-in FSDP unit that records the prefetch lists it is given."""
 
@@ -2465,23 +3257,29 @@ class TestSetPrefetch:
         assert vision_blocks[1].backward_prefetch == [vision_blocks[0]]
         assert model.lm_head.backward_prefetch == [language_blocks[1]]
 
-    def test_forward_and_backward_depths_are_independent(self):
+    def test_chains_ple_between_embed_and_language_blocks(self):
         # Arrange
         model = PrefetchVisionLM()
         del model.vision
-        model.model.layers = nn.ModuleList([PrefetchUnit() for _ in range(3)])
+        model.model.embed_tokens_per_layer = PrefetchUnit()
         embed = model.model.embed_tokens
-        blocks = list(model.model.layers)
+        ple = model.model.embed_tokens_per_layer
+        first, second = model.model.layers
+        head = model.lm_head
 
         # Act
         with patch.object(bmod, "FSDPModule", PrefetchUnit):
-            bmod._set_prefetch(model, blocks, forward_units=2, backward_units=1)
+            bmod._set_prefetch(model, [first, second])
 
         # Assert
-        assert embed.forward_prefetch == [blocks[0], blocks[1]]
-        assert blocks[1].forward_prefetch == [blocks[2], model.lm_head]
-        assert blocks[2].backward_prefetch == [blocks[1]]
-        assert model.lm_head.backward_prefetch == [blocks[2]]
+        assert embed.forward_prefetch == [ple]
+        assert ple.forward_prefetch == [first]
+        assert first.forward_prefetch == [second]
+        assert second.forward_prefetch == [head]
+        assert ple.backward_prefetch == [embed]
+        assert first.backward_prefetch == [ple]
+        assert second.backward_prefetch == [first]
+        assert head.backward_prefetch == [second]
 
 
 class TypedBlock(nn.Module):
@@ -2493,14 +3291,8 @@ class TypedBlock(nn.Module):
         self.lin = nn.Linear(2, 2)
 
 
-class PlainBlock(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.lin = nn.Linear(2, 2)
-
-
 class HybridStack(nn.Module):
-    _no_split_modules: ClassVar = ["TypedBlock", "PlainBlock"]
+    _no_split_modules: ClassVar = ["TypedBlock"]
 
     def __init__(self, block_types: list[str]):
         super().__init__()
@@ -2510,7 +3302,7 @@ class HybridStack(nn.Module):
 def checkpointed_kinds(body: nn.Module) -> list[str]:
     """``block_type`` of each checkpoint-wrapped entry in ``body.layers``."""
     return [
-        bmod._unwrap_checkpoint(layer).block_type
+        layer._checkpoint_wrapped_module.block_type
         for layer in body.layers
         if isinstance(layer, CheckpointWrapper)
     ]
@@ -2546,13 +3338,140 @@ def tiny_hybrid_lm() -> NemotronHForCausalLM:
     return NemotronHForCausalLM(config).float()
 
 
+def tiny_dense_lm() -> Qwen3ForCausalLM:
+    """fp32 Qwen3 with four decoder layers."""
+    config = Qwen3Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        use_cache=False,
+    )
+    return Qwen3ForCausalLM(config)
+
+
+def tiny_gated_delta_lm() -> Qwen3_5MoeForCausalLM:
+    """fp32 Qwen3.5-MoE alternating GDN and full-attention layers."""
+    config = Qwen3_5MoeTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        linear_conv_kernel_dim=2,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["linear_attention", "full_attention"] * 2,
+        use_cache=False,
+    )
+    return Qwen3_5MoeForCausalLM(config)
+
+
+def cpu_parallel_mesh() -> ParallelMesh:
+    # FSDP's default mesh uses the process accelerator (MPS on macOS).
+    world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("dp_replicate", "dp_shard"))
+    return ParallelMesh(dp_shard=world["dp_shard"])
+
+
 def full_grad(param: torch.Tensor) -> torch.Tensor:
     grad = param.grad
     return grad.full_tensor() if isinstance(grad, DTensor) else grad
 
 
+class TestMaterializeFsdp2FromCpuStateBlocks:
+    config = FSDPConfig(
+        param_dtype="float32",
+        reduce_dtype="float32",
+        routed_expert_chunk_mib=64,
+        checkpoint_every_n_blocks=1,
+    )
+
+    @pytest.mark.parametrize(
+        "build", [tiny_dense_lm, tiny_gated_delta_lm, tiny_hybrid_lm]
+    )
+    def test_dense_model_keeps_checkpoint_names_and_weights(
+        self, world_size_one, build
+    ):
+        # Arrange
+        torch.manual_seed(0)
+        reference = build()
+        model = copy.deepcopy(reference)
+        ids = torch.randint(0, 64, (1, 9))
+        with torch.no_grad():
+            expected = reference(input_ids=ids).logits
+
+        # Act
+        materialize_fsdp2_from_cpu_state(
+            model, "cpu", self.config, parallel_mesh=cpu_parallel_mesh()
+        )
+
+        # Assert
+        assert list(model.state_dict()) == list(reference.state_dict())
+        with torch.no_grad():
+            assert torch.equal(model(input_ids=ids).logits, expected)
+
+    def test_meta_model_loads_blocks_from_safetensors(self, world_size_one, tmp_path):
+        # Arrange
+        torch.manual_seed(0)
+        reference = tiny_dense_lm()
+        reference.save_pretrained(tmp_path)
+        with torch.device("meta"):
+            model = Qwen3ForCausalLM(Qwen3Config.from_pretrained(tmp_path))
+        model.config.name_or_path = str(tmp_path)
+        ids = torch.randint(0, 64, (1, 9))
+        with torch.no_grad():
+            expected = reference(input_ids=ids).logits
+
+        # Act
+        materialize_fsdp2_from_cpu_state(
+            model, "cpu", self.config, parallel_mesh=cpu_parallel_mesh()
+        )
+
+        # Assert
+        with torch.no_grad():
+            assert torch.equal(model(input_ids=ids).logits, expected)
+
+    def test_checkpointed_blocks_match_reference_grads(self, world_size_one):
+        # Arrange
+        torch.manual_seed(0)
+        reference = tiny_hybrid_lm()
+        model = copy.deepcopy(reference)
+        ids = torch.randint(0, 64, (1, 9))
+        reference(input_ids=ids, labels=ids).loss.backward()
+        materialize_fsdp2_from_cpu_state(
+            model,
+            "cpu",
+            self.config,
+            parallel_mesh=cpu_parallel_mesh(),
+            gradient_checkpointing=True,
+        )
+
+        # Act
+        model(input_ids=ids, labels=ids).loss.backward()
+
+        # Assert
+        grads = {
+            dmod.canonical_fsdp_param_fqn(name): full_grad(param)
+            for name, param in model.named_parameters()
+        }
+        assert any(isinstance(layer, CheckpointWrapper) for layer in model.model.layers)
+        for name, param in reference.named_parameters():
+            # fp32 recompute of the same ops; tolerance covers reduction order.
+            torch.testing.assert_close(grads[name], param.grad, rtol=0, atol=1e-6)
+
+
 class TestApplyFsdp2:
-    per_block = FSDPConfig(wrap_every_n_blocks=1)
+    per_block = FSDPConfig(reshard_after_forward=True, checkpoint_every_n_blocks=1)
 
     def test_shards_transformer_blocks_and_root(self, world_size_one):
         class Block(nn.Module):
@@ -2656,10 +3575,127 @@ class TestApplyFsdp2:
         )
         assert tied.lm_head.weight in shard_kwargs[id(tied)]["ignored_params"]
 
-    def test_checkpoint_wraps_blocks_then_shards_the_wrapper(self, world_size_one):
-        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-            CheckpointWrapper,
+    def test_shards_per_layer_embeddings_as_their_own_unit(self, world_size_one):
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(2, 2)
+
+        class LanguageModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(4, 2)
+                self.embed_tokens_per_layer = nn.Embedding(4, 6)
+                self.layers = nn.ModuleList([Block(), Block()])
+                self.norm = nn.LayerNorm(2)
+
+        class CausalLM(nn.Module):
+            _no_split_modules: ClassVar = ["Block"]
+
+            def __init__(self):
+                super().__init__()
+                self.config = type("Cfg", (), {"tie_word_embeddings": True})()
+                self.model = LanguageModel()
+                self.lm_head = nn.Linear(2, 4, bias=False)
+
+        # Arrange
+        model = CausalLM()
+        sharded: list[nn.Module] = []
+        shard_kwargs: dict[int, dict] = {}
+
+        def _record(module, **kwargs):
+            sharded.append(module)
+            shard_kwargs[id(module)] = kwargs
+            return module
+
+        # Act
+        with patch.object(bmod, "fully_shard", side_effect=_record):
+            apply_fsdp2(model, self.per_block)
+
+        # Assert — token embeddings stay replicated; PLE is its own unit
+        ple = model.model.embed_tokens_per_layer
+        assert model.model.embed_tokens not in sharded
+        assert ple in sharded
+        assert model.lm_head not in sharded
+        assert sharded[-1] is model
+        assert set(sharded) == {
+            model.model.layers[0],
+            model.model.layers[1],
+            ple,
+            model,
+        }
+        assert shard_kwargs[id(ple)]["reshard_after_forward"] is True
+        assert (
+            model.model.embed_tokens.weight in shard_kwargs[id(model)]["ignored_params"]
         )
+
+    def test_layer0_lora_stays_finite_after_fsdp_train_forward(self, world_size_one):
+        torch.manual_seed(0)
+        config = Gemma4TextConfig(
+            vocab_size=64,
+            vocab_size_per_layer_input=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            global_head_dim=8,
+            hidden_size_per_layer_input=8,
+            max_position_embeddings=32,
+            sliding_window=16,
+            pad_token_id=0,
+            tie_word_embeddings=True,
+            layer_types=["sliding_attention", "full_attention"],
+            num_kv_shared_layers=0,
+        )
+        model = get_peft_model(
+            Gemma4ForCausalLM(config),
+            LoraConfig(
+                r=4,
+                target_modules=["q_proj", "v_proj"],
+                lora_alpha=8,
+                lora_dropout=0.0,
+            ),
+            adapter_name="actor",
+        )
+        # FSDP's default mesh uses the process accelerator (MPS on macOS).
+        world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
+
+        with patch.object(bmod, "PARAM_PERSISTENCE_THRESHOLD", 0):
+            materialize_fsdp2_from_cpu_state(
+                model,
+                "cpu",
+                FSDPConfig(
+                    param_dtype="bfloat16",
+                    reduce_dtype="float32",
+                    routed_expert_chunk_mib=64,
+                ),
+                parallel_mesh=ParallelMesh(dp_shard=world["shard"]),
+            )
+
+        language = model.get_base_model().model
+        assert isinstance(language.embed_tokens_per_layer, FSDPModule)
+        layer0 = language.layers[0].self_attn.q_proj.lora_A["actor"]
+        seen: dict[str, bool] = {}
+
+        def _hook(module, _args, _output):
+            weight = module.weight.detach()
+            if hasattr(weight, "full_tensor"):
+                weight = weight.full_tensor()
+            seen["finite"] = bool(torch.isfinite(weight).all())
+
+        handle = layer0.register_forward_hook(_hook)
+        ids = torch.randint(1, 64, (2, 8))
+        with torch.enable_grad():
+            logits = model(input_ids=ids).logits
+            logits.mean().backward()
+        handle.remove()
+
+        assert seen["finite"] is True
+        assert bool(torch.isfinite(logits).all())
+
+    def test_checkpoint_wraps_blocks_then_shards_the_wrapper(self, world_size_one):
 
         class Block(nn.Module):
             def __init__(self):
@@ -2682,7 +3718,7 @@ class TestApplyFsdp2:
             sharded.append(module)
             return module
 
-        def _capture(_model, block_units, _forward_units, _backward_units):
+        def _capture(_model, block_units):
             captured_blocks.extend(block_units)
 
         with (
@@ -2701,35 +3737,10 @@ class TestApplyFsdp2:
         assert sharded[1] is model.layers[1]
         assert captured_blocks == [model.layers[0], model.layers[1]]
 
-    def test_checkpoint_skips_listed_block_kinds(self, world_size_one):
-        # Arrange
-        model = HybridStack(["mamba", "attention", "moe", "attention"])
-
-        # Act
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(
-                model,
-                FSDPConfig(checkpoint_skip_layer_types=["attention"]),
-                gradient_checkpointing=True,
-            )
-
-        # Assert
-        assert checkpointed_kinds(model) == ["mamba", "moe"]
-        assert [
-            bmod._unwrap_checkpoint(layer).block_type for layer in model.layers
-        ] == [
-            "mamba",
-            "attention",
-            "moe",
-            "attention",
-        ]
-
-    def test_checkpoint_every_n_counts_only_eligible_blocks(self, world_size_one):
+    def test_checkpoint_every_n_wraps_every_nth_block(self, world_size_one):
         # Arrange
         model = HybridStack(["mamba", "attention", "moe", "mamba", "moe"])
-        config = FSDPConfig(
-            checkpoint_skip_layer_types=("attention",), checkpoint_every_n_blocks=2
-        )
+        config = FSDPConfig(checkpoint_every_n_blocks=2)
 
         # Act
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
@@ -2737,72 +3748,155 @@ class TestApplyFsdp2:
 
         # Assert
         wrapped = [isinstance(layer, CheckpointWrapper) for layer in model.layers]
-        assert wrapped == [True, False, False, True, False]
+        assert wrapped == [True, False, True, False, True]
 
-    def test_checkpoint_kind_falls_back_to_class_name(self, world_size_one):
+    def test_unset_checkpoint_stride_raises(self, world_size_one):
+        model = HybridStack(["mamba", "attention", "moe"])
+
+        with (
+            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
+            pytest.raises(ValueError, match="checkpoint_every_n_blocks is unset"),
+        ):
+            apply_fsdp2(model, FSDPConfig(), gradient_checkpointing=True)
+
+    def test_checkpoint_wraps_every_block_kind(self, world_size_one):
         # Arrange
-        model = HybridStack(["moe"])
-        model.layers.append(PlainBlock())
+        model = HybridStack(["mamba", "attention", "moe"])
 
         # Act
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(
                 model,
-                FSDPConfig(checkpoint_skip_layer_types=("PlainBlock",)),
+                FSDPConfig(checkpoint_every_n_blocks=1),
                 gradient_checkpointing=True,
             )
 
         # Assert
-        assert isinstance(model.layers[0], CheckpointWrapper)
-        assert isinstance(model.layers[1], PlainBlock)
+        assert checkpointed_kinds(model) == ["mamba", "attention", "moe"]
 
-    def test_checkpoint_policy_ignored_without_gradient_checkpointing(
+    def test_no_block_is_checkpointed_without_gradient_checkpointing(
         self, world_size_one
     ):
         model = HybridStack(["mamba", "moe"])
 
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(model, FSDPConfig(checkpoint_skip_layer_types=("moe",)))
+            apply_fsdp2(model, FSDPConfig())
 
         assert checkpointed_kinds(model) == []
 
-    def test_checkpoint_skip_of_unknown_kind_raises(self, world_size_one):
-        model = HybridStack(["mamba", "moe"])
+    def test_qwen_expert_decoder_checkpoints_whole_block(self, world_size_one):
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            CheckpointWrapper,
+        )
 
-        with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
-            pytest.raises(ValueError, match=r"\['attention'\] match no transformer"),
-        ):
+        class PackedExperts(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_up_proj = nn.Parameter(torch.randn(2, 4, 2))
+                self.down_proj = nn.Parameter(torch.randn(2, 2, 2))
+                self.act_fn = nn.SiLU()
+
+            def forward(self, hidden_states, top_k_index, top_k_weights):
+                return hidden_states
+
+        class Moe(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.experts = PackedExperts()
+
+        class Decoder(nn.Module):
+            def __init__(self, block_type: str, **children: nn.Module):
+                super().__init__()
+                self.block_type = block_type
+                for name, child in children.items():
+                    setattr(self, name, child)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Decoder"]
+
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(model_type="qwen3_5")
+                self.layers = nn.ModuleList(
+                    [
+                        Decoder(
+                            "linear_attention",
+                            linear_attn=nn.Linear(2, 2),
+                            mlp=Moe(),
+                        ),
+                        Decoder(
+                            "full_attention",
+                            self_attn=nn.Linear(2, 2),
+                            mlp=Moe(),
+                        ),
+                    ]
+                )
+
+        model = Model()
+
+        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(
                 model,
-                FSDPConfig(checkpoint_skip_layer_types=("attention",)),
+                FSDPConfig(checkpoint_every_n_blocks=1),
                 gradient_checkpointing=True,
             )
 
-    def test_selective_checkpoint_keeps_hybrid_model_gradients(self, world_size_one):
+        linear, full = model.layers
+        assert isinstance(linear, CheckpointWrapper)
+        assert not isinstance(linear.linear_attn, CheckpointWrapper)
+        assert not isinstance(linear.mlp, CheckpointWrapper)
+        assert isinstance(full, CheckpointWrapper)
+        assert not isinstance(full.self_attn, CheckpointWrapper)
+        assert not isinstance(full.mlp, CheckpointWrapper)
+
+    def test_qwen_catalog_checkpoints_dense_decoder_whole(self, world_size_one):
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            CheckpointWrapper,
+        )
+
+        class Decoder(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear_attn = nn.Linear(2, 2)
+                self.mlp = nn.Linear(2, 2)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Decoder"]
+
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(model_type="qwen3_5")
+                self.layers = nn.ModuleList([Decoder()])
+
+        model = Model()
+
+        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+            apply_fsdp2(
+                model,
+                FSDPConfig(checkpoint_every_n_blocks=1),
+                gradient_checkpointing=True,
+            )
+
+        (layer,) = model.layers
+        assert isinstance(layer, CheckpointWrapper)
+        assert not isinstance(layer.linear_attn, CheckpointWrapper)
+        assert not isinstance(layer.mlp, CheckpointWrapper)
+
+    def test_checkpoint_keeps_hybrid_model_gradients(self, world_size_one):
         # Arrange
         torch.manual_seed(0)
         reference = tiny_hybrid_lm()
         input_ids = torch.randint(0, reference.config.vocab_size, (2, 8))
-        fp32 = FSDPConfig(param_dtype="float32", wrap_every_n_blocks=1)
-        selective = FSDPConfig(
-            param_dtype="float32",
-            wrap_every_n_blocks=1,
-            checkpoint_skip_layer_types=("full_attention", "mlp"),
-        )
+        fp32 = FSDPConfig(param_dtype="float32", checkpoint_every_n_blocks=1)
         mesh = init_device_mesh("cpu", (1,))
-        runs = {
-            "none": (fp32, False),
-            "full": (fp32, True),
-            "selective": (selective, True),
-        }
+        runs = {"none": False, "full": True}
 
         # Act
         grads: dict[str, dict[str, torch.Tensor]] = {}
         wrapped: dict[str, list[str]] = {}
-        for name, (config, checkpointing) in runs.items():
+        for name, checkpointing in runs.items():
             model = copy.deepcopy(reference)
-            apply_fsdp2(model, config, mesh=mesh, gradient_checkpointing=checkpointing)
+            apply_fsdp2(model, fp32, mesh=mesh, gradient_checkpointing=checkpointing)
             model(input_ids=input_ids, labels=input_ids).loss.backward()
             wrapped[name] = checkpointed_kinds(model.model)
             grads[name] = {
@@ -2815,16 +3909,12 @@ class TestApplyFsdp2:
         assert wrapped == {
             "none": [],
             "full": ["linear_attention", "full_attention", "moe", "mlp"],
-            "selective": ["linear_attention", "moe"],
         }
         assert len(grads["none"]) > 0
-        assert grads["none"].keys() == grads["full"].keys() == grads["selective"].keys()
+        assert grads["none"].keys() == grads["full"].keys()
         for key, expected in grads["none"].items():
             # fp32 on CPU; recompute replays the same kernels, so drift stays at rounding.
             assert torch.allclose(grads["full"][key], expected, atol=1e-6, rtol=1e-5)
-            assert torch.allclose(
-                grads["selective"][key], expected, atol=1e-6, rtol=1e-5
-            )
 
     def test_sets_forward_prefetch_on_consecutive_blocks(self, world_size_one):
         class PrefetchBlock(nn.Module):
@@ -2867,54 +3957,6 @@ class TestApplyFsdp2:
             [],
             [[blocks[0]]],
             [[blocks[1]]],
-        ]
-
-    def test_prefetch_depth_two_prefetches_two_neighbours(self, world_size_one):
-        class PrefetchBlock(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lin = nn.Linear(2, 2)
-                self.prefetch: list[list[nn.Module]] = []
-                self.backward_prefetch: list[list[nn.Module]] = []
-
-            def set_modules_to_forward_prefetch(self, modules):
-                self.prefetch.append(list(modules))
-
-            def set_modules_to_backward_prefetch(self, modules):
-                self.backward_prefetch.append(list(modules))
-
-        class Model(nn.Module):
-            _no_split_modules: ClassVar = ["PrefetchBlock"]
-
-            def __init__(self):
-                super().__init__()
-                self.layers = nn.ModuleList(
-                    [PrefetchBlock(), PrefetchBlock(), PrefetchBlock()]
-                )
-
-        model = Model()
-        blocks = list(model.layers)
-
-        with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
-            patch.object(bmod, "FSDPModule", PrefetchBlock),
-        ):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    prefetch_units=2, backward_prefetch_units=2, wrap_every_n_blocks=1
-                ),
-            )
-
-        assert [block.prefetch for block in blocks] == [
-            [[blocks[1], blocks[2]]],
-            [[blocks[2]]],
-            [],
-        ]
-        assert [block.backward_prefetch for block in blocks] == [
-            [],
-            [[blocks[0]]],
-            [[blocks[1], blocks[0]]],
         ]
 
     def test_forwards_mesh_to_fully_shard(self, world_size_one):
@@ -2960,12 +4002,13 @@ class TestApplyFsdp2:
         assert model.layers[0] not in sharded
         assert model in sharded
 
-    def test_persists_params_below_threshold(self, world_size_one):
+    def test_persists_frozen_params_below_threshold(self, world_size_one):
+        # Arrange
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.lin = nn.Linear(64, 64)
-                self.norm = nn.LayerNorm(64)
+                self.lin = nn.Linear(512, 256)
+                self.norm = nn.LayerNorm(512)
 
         class Model(nn.Module):
             _no_split_modules: ClassVar = ["Block"]
@@ -2974,35 +4017,34 @@ class TestApplyFsdp2:
                 super().__init__()
                 self.layers = nn.ModuleList([Block()])
 
-        model = Model()
+        model = Model().requires_grad_(False)
         block = model.layers[0]
+        block.lin.bias.requires_grad_(True)
         seen: dict[int, dict] = {}
 
         def _record(module, **kwargs):
             seen[id(module)] = kwargs
             return module
 
+        # Act
         with patch.object(bmod, "fully_shard", side_effect=_record):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    wrap_every_n_blocks=1,
-                    param_persistence_threshold=200,
-                ),
-            )
+            apply_fsdp2(model, FSDPConfig())
 
+        # Assert: small trainable parameters shard like large ones.
         ignored = seen[id(block)]["ignored_params"]
         assert block.norm.weight in ignored
         assert block.norm.bias in ignored
-        assert block.lin.bias in ignored
+        assert block.lin.bias not in ignored
         assert block.lin.weight not in ignored
 
-    def test_casts_persisted_params_to_mixed_precision_dtype(self, world_size_one):
+    def test_casts_persisted_frozen_params_to_mixed_precision_dtype(
+        self, world_size_one
+    ):
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.lin = nn.Linear(64, 64)
-                self.norm = nn.LayerNorm(64)
+                self.lin = nn.Linear(512, 256)
+                self.norm = nn.LayerNorm(512)
 
         class Model(nn.Module):
             _no_split_modules: ClassVar = ["Block"]
@@ -3011,37 +4053,18 @@ class TestApplyFsdp2:
                 super().__init__()
                 self.layers = nn.ModuleList([Block()])
 
-        model = Model()
+        model = Model().requires_grad_(False)
         block = model.layers[0]
+        block.lin.bias.requires_grad_(True)
         assert block.norm.weight.dtype == torch.float32
 
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    wrap_every_n_blocks=1,
-                    param_persistence_threshold=200,
-                ),
-            )
+            apply_fsdp2(model, FSDPConfig())
 
         assert block.norm.weight.dtype == torch.bfloat16
         assert block.norm.bias.dtype == torch.bfloat16
-        assert block.lin.bias.dtype == torch.bfloat16
+        assert block.lin.bias.dtype == torch.float32
         assert block.lin.weight.dtype == torch.float32
-
-    def test_threshold_zero_shards_every_parameter(self, world_size_one):
-        model = nn.Linear(2, 2)
-        seen_kwargs: list[dict] = []
-
-        with patch.object(
-            bmod,
-            "fully_shard",
-            side_effect=lambda m, **kw: seen_kwargs.append(kw) or m,
-        ):
-            apply_fsdp2(model, FSDPConfig(param_persistence_threshold=0))
-
-        assert seen_kwargs
-        assert "ignored_params" not in seen_kwargs[-1]
 
     def test_shards_root_only_without_no_split_metadata(self, world_size_one):
         # Arrange
@@ -3213,164 +4236,7 @@ class TestApplyFsdp2:
         assert model.layers[0].inner not in sharded
         assert model.layers[1].inner not in sharded
 
-    def test_grouped_forward_routes_mixed_block_type_masks(
-        self, world_size_one, monkeypatch
-    ):
-        class TypedBlock(nn.Module):
-            def __init__(self, block_type: str):
-                super().__init__()
-                self.block_type = block_type
-                self.lin = nn.Linear(2, 2)
-                self.seen: list[object] = []
-
-            def forward(self, hidden_states, attention_mask=None, **_kwargs):
-                self.seen.append(attention_mask)
-                return self.lin(hidden_states)
-
-        class Language(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.embeddings = nn.Embedding(4, 2)
-                self.layers = nn.ModuleList(
-                    [TypedBlock("linear_attention"), TypedBlock("moe")]
-                )
-
-            def forward(
-                self,
-                input_ids=None,
-                inputs_embeds=None,
-                attention_mask=None,
-                **_kwargs,
-            ):
-                if (input_ids is None) ^ (inputs_embeds is not None):
-                    msg = "You must specify exactly one of input_ids or inputs_embeds"
-                    raise ValueError(msg)
-                hidden = (
-                    inputs_embeds
-                    if inputs_embeds is not None
-                    else self.embeddings(input_ids)
-                )
-                mapping = attention_mask if isinstance(attention_mask, dict) else {}
-                for layer in self.layers:
-                    hidden = layer(
-                        hidden,
-                        attention_mask=mapping.get(layer.block_type),
-                    )
-                return hidden
-
-        class Model(nn.Module):
-            _no_split_modules: ClassVar = ["TypedBlock"]
-
-            def __init__(self):
-                super().__init__()
-                self.model = Language()
-
-            def forward(self, *args, **kwargs):
-                return self.model(*args, **kwargs)
-
-        def fake_mapping(_module, **kwargs):
-            return (
-                {"full_attention": "causal", "linear_attention": "linear"},
-                kwargs.get("position_ids"),
-            )
-
-        monkeypatch.setattr(bmod, "block_type_mask_mapping", fake_mapping)
-        model = Model()
-        mamba = model.model.layers[0]
-        moe = model.model.layers[1]
-
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
-
-        hidden = model.model(input_ids=torch.zeros(1, 2, dtype=torch.long))
-        group = model.model.layers[0]
-
-        assert isinstance(group, bmod.FSDPBlockGroup)
-        assert hidden.shape == (1, 2, 2)
-        assert mamba.seen == ["linear"]
-        assert moe.seen == [None]
-        assert group.block_type == "linear_attention"
-
-    def test_uniform_groups_do_not_wrap_language_forward(self, world_size_one):
-        class TypedBlock(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.block_type = "moe"
-                self.lin = nn.Linear(2, 2)
-
-        class Language(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.embeddings = nn.Embedding(4, 2)
-                self.layers = nn.ModuleList([TypedBlock(), TypedBlock()])
-
-            def forward(self, hidden_states=None, **_kwargs):
-                return hidden_states
-
-        class Model(nn.Module):
-            _no_split_modules: ClassVar = ["TypedBlock"]
-
-            def __init__(self):
-                super().__init__()
-                self.model = Language()
-
-        model = Model()
-        original = type(model.model).forward
-
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
-
-        assert type(model.model).forward is original
-
-    def test_grouped_mask_forward_is_idempotent(self):
-        class Language(nn.Module):
-            def forward(self, **kwargs):
-                return kwargs
-
-        language = Language()
-        bmod._install_grouped_mask_forward(language)
-        first = type(language).forward
-        bmod._install_grouped_mask_forward(language)
-
-        assert type(language).forward is first
-
-    def test_groups_every_n_transformer_blocks(self, world_size_one):
-        class Block(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lin = nn.Linear(2, 2)
-
-            def forward(self, hidden_states):
-                return self.lin(hidden_states)
-
-        class Model(nn.Module):
-            _no_split_modules: ClassVar = ["Block"]
-
-            def __init__(self):
-                super().__init__()
-                self.layers = nn.ModuleList([Block() for _ in range(4)])
-
-        model = Model()
-        raw = list(model.layers)
-        sharded: list[nn.Module] = []
-
-        with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
-        ):
-            apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
-
-        assert len(model.layers) == 2
-        assert isinstance(model.layers[0], bmod.FSDPBlockGroup)
-        assert isinstance(model.layers[1], bmod.FSDPBlockGroup)
-        assert list(model.layers[0].blocks) == raw[:2]
-        assert list(model.layers[1].blocks) == raw[2:]
-        assert sharded[0] is model.layers[0]
-        assert sharded[1] is model.layers[1]
-        assert raw[0] not in sharded
-        hidden = torch.zeros(1, 2, dtype=torch.bfloat16)
-        assert model.layers[0](hidden).shape == hidden.shape
-
-    def test_default_wrap_keeps_one_unit_per_block(self, world_size_one):
+    def test_wraps_one_unit_per_block(self, world_size_one):
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -3402,6 +4268,164 @@ class TestApplyFsdp2:
             apply_fsdp2(nn.Linear(2, 2), FSDPConfig())
 
 
+MOE_COMMON: dict[str, Any] = {
+    "hidden_size": 32,
+    "intermediate_size": 32,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 8,
+    "vocab_size": 64,
+    "max_position_embeddings": 64,
+    "num_hidden_layers": 2,
+    "use_cache": False,
+    "experts_implementation": "eager",
+}
+
+MOE_CONFIGS = {
+    "qwen3_moe": lambda: Qwen3MoeConfig(
+        **MOE_COMMON,
+        moe_intermediate_size=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        norm_topk_prob=True,
+    ),
+    "qwen3_5_moe_text": lambda: Qwen3_5MoeTextConfig(
+        **MOE_COMMON,
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["full_attention", "full_attention"],
+    ),
+    "gemma4_text": lambda: Gemma4TextConfig(
+        **MOE_COMMON,
+        enable_moe_block=True,
+        num_experts=4,
+        top_k_experts=2,
+        moe_intermediate_size=16,
+        layer_types=["sliding_attention", "sliding_attention"],
+        hidden_size_per_layer_input=0,
+        num_kv_shared_layers=0,
+    ),
+    "granitemoe": lambda: GraniteMoeConfig(
+        **MOE_COMMON, num_local_experts=4, num_experts_per_tok=2
+    ),
+    "nemotron_h": lambda: NemotronHConfig(
+        **MOE_COMMON,
+        layers_block_type=["attention", "moe"],
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=16,
+        moe_shared_expert_intermediate_size=16,
+        n_group=1,
+        topk_group=1,
+        norm_topk_prob=True,
+    ),
+    "gpt_oss": lambda: GptOssConfig(
+        **MOE_COMMON,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["full_attention", "full_attention"],
+    ),
+    "qwen2_moe": lambda: Qwen2MoeConfig(
+        **MOE_COMMON,
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        norm_topk_prob=True,
+    ),
+    "olmoe": lambda: OlmoeConfig(
+        **MOE_COMMON, num_experts=4, num_experts_per_tok=2, norm_topk_prob=True
+    ),
+    "mellum": lambda: MellumConfig(
+        **MOE_COMMON,
+        moe_intermediate_size=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        norm_topk_prob=True,
+    ),
+    "qwen4_exp_text": lambda: Qwen4ExpTextConfig(
+        **MOE_COMMON,
+        moe_intermediate_size=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        norm_topk_prob=True,
+    ),
+    "mixtral": lambda: MixtralConfig(
+        **MOE_COMMON, num_local_experts=4, num_experts_per_tok=2
+    ),
+    "minimax": lambda: MiniMaxConfig(
+        **MOE_COMMON, num_local_experts=4, num_experts_per_tok=2
+    ),
+}
+
+
+def tiny_moe_lm(model_type: str, dtype: torch.dtype) -> nn.Module:
+    """Two-block causal LM of ``model_type`` with seeded, non-trivial weights."""
+    torch.manual_seed(0)
+    model = AutoModelForCausalLM.from_config(MOE_CONFIGS[model_type]())
+    for param in model.parameters():
+        nn.init.normal_(param, std=0.05)
+    return model.to(dtype)
+
+
+def loss_and_full_grads(
+    model: nn.Module, input_ids: torch.Tensor
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Loss and full gradients keyed by canonical parameter name."""
+    loss = model(input_ids=input_ids, labels=input_ids).loss
+    loss.backward()
+    grads = {
+        dmod.canonical_fsdp_param_fqn(key): full_grad(param)
+        for key, param in model.named_parameters()
+        if param.grad is not None
+    }
+    return loss.detach(), grads
+
+
+class TestApplyFsdp2GradientCheckpointing:
+    @pytest.fixture(autouse=True)
+    def pristine_moe_routers(self):
+        with restore_moe_routers():
+            yield
+
+    @pytest.mark.parametrize(
+        "dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"]
+    )
+    @pytest.mark.parametrize("model_type", list(MOE_CONFIGS))
+    def test_moe_loss_and_grads_match_uncheckpointed(
+        self, world_size_one, model_type, dtype
+    ):
+        # Arrange
+        reference = tiny_moe_lm(model_type, dtype)
+        model = copy.deepcopy(reference)
+        input_ids = torch.randint(
+            0, 64, (2, 12), generator=torch.Generator().manual_seed(1)
+        )
+        # Before apply_fsdp2, so the reference runs the unpatched routers.
+        expected_loss, expected_grads = loss_and_full_grads(reference, input_ids)
+        dtype_name = str(dtype).removeprefix("torch.")
+        config = FSDPConfig(
+            param_dtype=dtype_name, reduce_dtype=dtype_name, checkpoint_every_n_blocks=1
+        )
+        apply_fsdp2(
+            model,
+            config,
+            mesh=init_device_mesh("cpu", (1,)),
+            gradient_checkpointing=True,
+        )
+
+        # Act
+        loss, grads = loss_and_full_grads(model, input_ids)
+
+        # Assert
+        assert torch.equal(loss, expected_loss)
+        assert grads.keys() == expected_grads.keys()
+        for key, expected in expected_grads.items():
+            assert torch.equal(grads[key], expected), key
+
+
 class TestRestoreNonpersistentBuffers:
     def test_restores_via_canonical_name(self):
         class Tiny(nn.Module):
@@ -3429,6 +4453,228 @@ class TestRestoreNonpersistentBuffers:
 
         assert restored == 0
         assert torch.equal(model.running, torch.zeros(2))
+
+
+class TestInitRopeBuffers:
+    def test_fills_inv_freq_and_original_inv_freq(self):
+        class RotaryEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.rope_type = "default"
+                self.config = SimpleNamespace()
+                self.register_buffer("inv_freq", torch.zeros(4))
+                self.register_buffer("original_inv_freq", torch.zeros(4))
+
+            @staticmethod
+            def compute_default_rope_parameters(_config, device=None):
+                return torch.arange(4, dtype=torch.float32, device=device), 1.0
+
+        module = RotaryEmbedding()
+        root = nn.Sequential(module)
+
+        init_rope_buffers(root)
+
+        expected = torch.arange(4, dtype=torch.float32)
+        assert torch.equal(module.inv_freq, expected)
+        assert torch.equal(module.original_inv_freq, expected)
+
+    def test_fills_buffers_when_rope_takes_config_only(self):
+        class RotaryEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.rope_type = "default"
+                self.config = SimpleNamespace()
+                self.register_buffer("inv_freq", torch.zeros(4))
+                self.register_buffer("original_inv_freq", torch.zeros(4))
+
+            @staticmethod
+            def compute_default_rope_parameters(_config, **_kwargs):
+                return torch.arange(4, dtype=torch.float32), 1.0
+
+        module = RotaryEmbedding()
+        root = nn.Sequential(module)
+
+        init_rope_buffers(root)
+
+        expected = torch.arange(4, dtype=torch.float32)
+        assert torch.equal(module.inv_freq, expected)
+        assert torch.equal(module.original_inv_freq, expected)
+
+    def test_fills_axial_vision_rope(self):
+        # Arrange
+        modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+        config_module = pytest.importorskip(
+            "transformers.models.qwen3_5.configuration_qwen3_5"
+        )
+        module = modeling.Qwen3_5VisionRotaryEmbedding(
+            config_module.Qwen3_5VisionConfig()
+        )
+        expected = module.inv_freq.clone()
+        module.inv_freq.zero_()
+        module.original_inv_freq.zero_()
+
+        # Act
+        init_rope_buffers(nn.Sequential(module))
+
+        # Assert
+        assert module.rope_type == "axial"
+        assert torch.equal(module.inv_freq, expected)
+        assert torch.equal(module.original_inv_freq, expected)
+
+    def test_fills_per_layer_type_inv_freq_with_each_type_head_dim(self):
+        # Arrange
+        # As in a checkpoint's config.json: hidden_size / heads is neither head dim.
+        config = Gemma4TextConfig.from_dict(
+            {
+                "hidden_size": 64,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "global_head_dim": 32,
+                "intermediate_size": 32,
+                "vocab_size": 64,
+                "num_hidden_layers": 2,
+                "layer_types": ["sliding_attention", "full_attention"],
+                "hidden_size_per_layer_input": 0,
+                "num_kv_shared_layers": 0,
+            }
+        )
+        module = Gemma4TextRotaryEmbedding(config)
+        names = [
+            f"{layer_type}_{kind}"
+            for layer_type in ("sliding_attention", "full_attention")
+            for kind in ("inv_freq", "original_inv_freq")
+        ]
+        expected = {name: getattr(module, name).clone() for name in names}
+        for name in names:
+            getattr(module, name).zero_()
+
+        # Act
+        init_rope_buffers(nn.Sequential(module))
+
+        # Assert
+        assert expected["full_attention_inv_freq"].shape == (16,)
+        for name in names:
+            assert torch.equal(getattr(module, name), expected[name]), name
+
+    def test_fills_per_rope_type_inv_freq(self):
+        # Arrange
+        config = DeepseekV4Config(
+            hidden_size=64,
+            num_attention_heads=4,
+            head_dim=32,
+            qk_rope_head_dim=8,
+            num_hidden_layers=3,
+            compress_ratios=[0, 4, 128],
+        )
+        module = DeepseekV4RotaryEmbedding(config)
+        names = [
+            f"{rope_type}_{kind}"
+            for rope_type in ("main", "compress")
+            for kind in ("inv_freq", "original_inv_freq")
+        ]
+        expected = {name: getattr(module, name).clone() for name in names}
+        for name in names:
+            getattr(module, name).zero_()
+
+        # Act
+        init_rope_buffers(nn.Sequential(module))
+
+        # Assert
+        assert not torch.equal(expected["main_inv_freq"], expected["compress_inv_freq"])
+        for name in names:
+            assert torch.equal(getattr(module, name), expected[name]), name
+
+
+class TestInitEmbedScaleBuffers:
+    def test_fills_embed_scale_from_scalar(self):
+        class ScaledWordEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scalar_embed_scale = 3.5
+                self.register_buffer("embed_scale", torch.tensor(0.0), persistent=False)
+
+        module = ScaledWordEmbedding()
+
+        init_embed_scale_buffers(module)
+
+        assert float(module.embed_scale) == 3.5
+
+    def test_skips_meta_embed_scale(self):
+        class ScaledWordEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scalar_embed_scale = 3.5
+                self.register_buffer(
+                    "embed_scale",
+                    torch.empty((), device="meta"),
+                    persistent=False,
+                )
+
+        module = ScaledWordEmbedding()
+
+        init_embed_scale_buffers(module)
+
+        assert module.embed_scale.is_meta
+
+
+class TestDeferredSplitPassReduceDtype:
+    """Two backward passes over different params of one FSDP unit with deferred sync.
+
+    A split actor/critic learn holds the policy pass's gradients while the
+    value pass runs. Held gradients wait in ``reduce_dtype``; the step
+    boundary then collects them next to the fresh value gradients and
+    reduce-scatter requires one dtype across the unit.
+    """
+
+    def _split_pass_model(self) -> nn.Module:
+        model = nn.Sequential(nn.Linear(8, 8), nn.Linear(8, 8)).to(torch.bfloat16)
+        for param in model.parameters():
+            param.requires_grad_(True)
+        return model
+
+    def _shard_single_unit(self, model: nn.Module, reduce_dtype: str) -> None:
+        # A CPU mesh keeps the test off the default device (MPS on macOS).
+        mesh = DeviceMesh("cpu", [0])
+        with patch.object(bmod, "PARAM_PERSISTENCE_THRESHOLD", 0):
+            apply_fsdp2(model, FSDPConfig(reduce_dtype=reduce_dtype), mesh=mesh)
+
+    def _run_split_passes(self, model: nn.Module) -> None:
+        # PEFT adapter switching enables one adapter's gradients per pass;
+        # toggling requires_grad reproduces that attribution.
+        inputs = torch.randn(2, 8, dtype=torch.bfloat16)
+        model[1].weight.requires_grad_(False)
+        model[1].bias.requires_grad_(False)
+        model.set_requires_gradient_sync(False, recurse=True)
+        model(inputs).pow(2).mean().backward()
+        model[0].weight.requires_grad_(False)
+        model[0].bias.requires_grad_(False)
+        model[1].weight.requires_grad_(True)
+        model[1].bias.requires_grad_(True)
+        model.set_requires_gradient_sync(True, recurse=True)
+        model(inputs).pow(2).mean().backward()
+
+    def test_split_passes_mix_held_and_fresh_gradients(self, world_size_one):
+        # Arrange
+        model = self._split_pass_model()
+        self._shard_single_unit(model, reduce_dtype="float32")
+
+        # Act / Assert
+        with pytest.raises(AssertionError, match="uniform gradient dtype"):
+            self._run_split_passes(model)
+
+    def test_param_dtype_reduce_keeps_split_passes_uniform(self, world_size_one):
+        # Arrange
+        model = self._split_pass_model()
+        self._shard_single_unit(model, reduce_dtype="bfloat16")
+
+        # Act
+        self._run_split_passes(model)
+
+        # Assert
+        grads = [param.grad for param in model.parameters()]
+        assert all(grad is not None for grad in grads)
+        assert {grad.dtype for grad in grads} == {torch.bfloat16}
 
 
 class TestShareFsdpCommStreams:
@@ -3962,6 +5208,16 @@ class TestValidateActorEp:
         with pytest.raises(ValueError, match="expert count 3 is not divisible"):
             validate_actor_ep(model, 2, world_size=4)
 
+    def test_accepts_gpt_oss_as_model_info_reports(self) -> None:
+        # Arrange: transposed, biased experts with an even expert count.
+        model = AutoModelForCausalLM.from_config(MOE_CONFIGS["gpt_oss"]())
+
+        # Act
+        validate_actor_ep(model, 2, world_size=2)
+
+        # Assert
+        assert SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].supports_expert_parallel
+
 
 class TestValidateEpDegree:
     @pytest.mark.parametrize("ep", [1, 2, 8])
@@ -4039,10 +5295,11 @@ class TestFSDPPrepareActorExpertParallel:
             ),
             patch("agilerl.utils.llm_utils.make_llm_scheduler", return_value=None),
         ):
-            FSDPRuntime(FSDPConfig(ep=2, optim_cpu_offload=False)).prepare_actor(
+            FSDPRuntime(
+                FSDPConfig(reshard_after_forward=True, ep=2, optim_cpu_offload=False)
+            ).prepare_actor(
                 actor,
                 device="cpu",
-                colocated=False,
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,

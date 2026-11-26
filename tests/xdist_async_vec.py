@@ -32,6 +32,4 @@ def nodeid_spawns_async_vector_env(nodeid: str) -> bool:
     """
     if any(part in nodeid for part in ASYNC_VEC_NODEID_PARTS):
         return True
-    return "test_train/test_trainer.py" in nodeid and (
-        "from_manifest" in nodeid or "test_deferred_encoder" in nodeid
-    )
+    return "test_train/test_trainer.py" in nodeid and "from_manifest" in nodeid

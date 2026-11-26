@@ -21,6 +21,7 @@ from agilerl.algorithms.core.base import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
+from agilerl.architectures import family_chat_template
 from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
 from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
@@ -53,6 +54,7 @@ from agilerl.models.env import (
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
+    group_rubric_from_spec,
     make_bandit_env,
     make_gym_env,
     make_llm_env,
@@ -545,6 +547,7 @@ class LocalTrainer(Trainer):
             hp_config=self.hp_config,
             networks=self.networks,
             rollout_mode=self.training_spec.rollout_mode,
+            env_spec=self.env_spec,
         )
         # Classic RL algorithms keep Accelerate; LLM training uses torch.distributed.
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
@@ -614,6 +617,23 @@ class LocalTrainer(Trainer):
             max_output_tokens=max_output_tokens,
             seed=self.algorithm_spec.seed,
         )
+
+    def _rollout_train_kwargs(self, spec: LLMEnvSpec) -> dict[str, Any]:
+        """Arguments only the rollout training loop takes.
+
+        :param spec: The rollout env spec.
+        :type spec: LLMEnvSpec
+        :return: Its env factory, group rubric, turn budget and wall-time limit.
+        :rtype: dict[str, Any]
+        """
+        kwargs: dict[str, Any] = {
+            "env_factory": self.env_factory,
+            "group_rubric": group_rubric_from_spec(spec),
+            "max_turns": self.rollout_max_turns,
+        }
+        if self.training_spec.max_wall_seconds is not None:
+            kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
+        return kwargs
 
     @property
     def _rollout(self) -> bool:
@@ -814,6 +834,7 @@ class LocalTrainer(Trainer):
         :returns: The tokenizer.
         :rtype: PreTrainedTokenizerBase
         :raises ImportError: If the LLM dependencies are not installed.
+        :raises ValueError: If the spec names no pretrained model.
         """
         if AutoTokenizer is None:
             msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
@@ -822,19 +843,21 @@ class LocalTrainer(Trainer):
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
             msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
             raise TypeError(msg)
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.algorithm_spec.pretrained_model_name_or_path
-        )
+        model_path = self.algorithm_spec.load_path
+        if model_path is None:
+            msg = f"{type(self.algorithm_spec).__name__} has no pretrained_model_name_or_path."
+            raise ValueError(msg)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
         if tokenizer is None:
             msg = "AutoTokenizer.from_pretrained returned None."
             raise TypeError(msg)
 
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+            tokenizer.chat_template = (
+                family_chat_template(model_path) or DEFAULT_CHAT_TEMPLATE
+            )
 
-        model_config, generation_config = load_pad_token_configs(
-            self.algorithm_spec.pretrained_model_name_or_path
-        )
+        model_config, generation_config = load_pad_token_configs(model_path)
         pad_token_id, pad_source = resolve_pad_token_id(
             tokenizer,
             model_config=model_config,
@@ -987,10 +1010,14 @@ class LocalTrainer(Trainer):
             else self.algorithm_spec.default_evo_steps
         )
         max_steps = self.training_spec.max_steps
+        # Unset keeps the million-step default; a dataset run reads that as one pass.
         if (
             isinstance(self.algorithm_spec, LLMAlgorithmSpec)
             and getattr(self.algorithm_spec, "env_type", None) == LLMEnvType.DATASET
-            and self.training_spec.num_epochs is not None
+            and (
+                "max_steps" not in self.training_spec.model_fields_set
+                or self.training_spec.num_epochs is not None
+            )
         ):
             max_steps = None
         kwargs: dict[str, Any] = {
@@ -1011,11 +1038,8 @@ class LocalTrainer(Trainer):
         }
 
         if self._rollout_env_spec is not None:
-            kwargs["env_factory"] = self.env_factory
-            kwargs["max_turns"] = self.rollout_max_turns
+            kwargs.update(self._rollout_train_kwargs(self._rollout_env_spec))
             manifest["env_name"] = self._rollout_env_spec.label
-            if self.training_spec.max_wall_seconds is not None:
-                kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
         else:
             kwargs["env"] = self.env
             if self.training_spec.max_wall_seconds is not None:
@@ -1231,8 +1255,8 @@ class ArenaTrainer(Trainer):
 
     def train(
         self,
-        resource_id: str | int | None = None,
-        num_nodes: int | None = None,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
         project: str | None = None,
         experiment_name: str | None = None,
         reward_file: str | Path | bytes | None = None,
@@ -1240,10 +1264,11 @@ class ArenaTrainer(Trainer):
     ) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
-        :param resource_id: Arena cluster type or resource id for the job.
-        :type resource_id: str | int | None
-        :param num_nodes: The number of nodes to use for training.
-        :type num_nodes: int | None
+        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes that
+            fit the run's memory estimate.
+        :type num_gpus: int | None
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
+        :type gpu_type: str | None
         :param project: The project to submit the experiment to.
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
@@ -1257,8 +1282,8 @@ class ArenaTrainer(Trainer):
         """
         return self._client.submit_experiment(
             self.to_manifest(),
-            resource_id=resource_id,
-            num_nodes=num_nodes,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
             project=project,
             experiment_name=experiment_name,
             reward_file=reward_file,

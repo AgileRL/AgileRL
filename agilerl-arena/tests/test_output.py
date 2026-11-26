@@ -6,22 +6,28 @@
 from __future__ import annotations
 
 import contextlib
+import io
+import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from pydantic import ValidationError
 from rich.console import Console
 
 from agilerl.arena import output as output_module
 from agilerl.arena.exceptions import (
     ArenaAPIError,
+    ArenaError,
     ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.models import TrainingManifest
 from agilerl.arena.output import (
     CANCEL,
     DOWN,
@@ -34,6 +40,7 @@ from agilerl.arena.output import (
     emit_session_transcript,
     handle_error,
     select_row,
+    stdin_is_a_terminal,
     supports_interactive_selection,
 )
 from agilerl.arena.stream import CheckEvent, ErrorEvent, LogEvent, StatusEvent
@@ -404,6 +411,88 @@ class TestLooksLikeEnvironmentCatalog:
 # ---------------------------------------------------------------------------
 # emit_result dispatch
 # ---------------------------------------------------------------------------
+class TestEmitResultJson:
+    def _run(self, *emit_args, **emit_kwargs):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+        with ctx:
+            emit_result(*emit_args, **emit_kwargs)
+
+    def test_prints_the_raw_result_and_skips_display(self, capsys):
+        self._run([{"a": 1}], display=lambda _rows: pytest.fail("not for JSON"))
+
+        assert capsys.readouterr().out == '[{"a": 1}]\n'
+
+    def test_empty_result_stays_json(self, capsys):
+        self._run({}, empty_message="nothing")
+
+        assert capsys.readouterr().out == "{}\n"
+
+    def test_handle_error_writes_json_to_stderr(self, capsys):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+
+        with ctx, pytest.raises(click.exceptions.Exit):
+            handle_error(ArenaError("boom"))
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert json.loads(captured.err) == {"error": "boom", "type": "ArenaError"}
+
+    def test_stream_renderer_keeps_stdout_clean(self):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+
+        with ctx:
+            renderer = output_module.StreamRichRenderer()
+
+        assert renderer._console is output_module.error_console
+
+
+class TestEmitResultEmpty:
+    @pytest.mark.parametrize("empty", [[], {}])
+    def test_default_message_replaces_the_header_only_table(self, empty, monkeypatch):
+        console = Console(record=True, file=io.StringIO())
+        monkeypatch.setattr(output_module, "console", console)
+
+        emit_result(empty, columns=["Name"])
+
+        assert console.export_text().strip() == "No results."
+
+    def test_message_is_not_markup_and_does_not_wrap(self, monkeypatch):
+        console = Console(record=True, file=io.StringIO(), width=20)
+        monkeypatch.setattr(output_module, "console", console)
+        message = "No checkpoints for a-long-name[abc]."
+
+        emit_result([], empty_message=message)
+
+        assert console.export_text().strip() == message
+
+
+class TestPipedTables:
+    def test_cells_are_not_truncated_when_piped(self, monkeypatch):
+        console = Console(record=True, file=io.StringIO(), width=80)
+        monkeypatch.setattr(output_module, "console", console)
+        long_value = "x" * 300
+
+        emit_result([{"name": long_value}])
+
+        assert long_value in console.export_text()
+
+    def test_logs_go_to_stderr(self):
+        code = (
+            "import logging, agilerl.arena._console; "
+            "logging.getLogger('agilerl.arena').warning('hello')"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+
+        assert result.stdout == ""
+        assert "hello" in result.stderr
+
+
 class TestEmitResult:
     @patch("agilerl.arena.output._print_rich")
     def test_dict_renders_key_value_table(self, mock_print):
@@ -486,6 +575,82 @@ class TestHandleError:
         err = RuntimeError("unexpected")
         with pytest.raises(RuntimeError, match="unexpected"):
             handle_error(err)
+
+    def test_invalid_manifest_prints_each_field_and_exits_1(self, capsys):
+        # Arrange
+        err = _invalid_manifest_error()
+
+        # Act
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            handle_error(err)
+
+        # Assert
+        assert exc_info.value.exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "Error: The manifest is invalid." in stderr
+        assert (
+            "algorithm.lr: Input should be a valid number, unable to parse string "
+            "as a number" in stderr
+        )
+        assert "Traceback" not in stderr
+
+    def test_invalid_manifest_drops_the_value_error_prefix(self, capsys):
+        err = _validation_error(
+            {
+                "algorithm": {"name": "GRPO"},
+                "environment": {"env_type": "rollout"},
+                "network": {"pretrained_model_name_or_path": "org/model"},
+                "training": {"max_steps": 10},
+            }
+        )
+
+        with pytest.raises(click.exceptions.Exit):
+            handle_error(err)
+
+        stderr = capsys.readouterr().err
+        assert (
+            "environment.rollout: A rollout environment needs exactly one source"
+            in (" ".join(stderr.split()))
+        )
+        assert "Value error," not in stderr
+
+    def test_invalid_manifest_json_keeps_every_pydantic_error(self, capsys):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+
+        with ctx, pytest.raises(click.exceptions.Exit):
+            handle_error(_invalid_manifest_error())
+
+        assert json.loads(capsys.readouterr().err) == {
+            "error": "The manifest is invalid.",
+            "type": "ValidationError",
+            "errors": [
+                {
+                    "path": "algorithm.lr",
+                    "message": "Input should be a valid number, unable to parse "
+                    "string as a number",
+                    "kind": "float_parsing",
+                }
+            ],
+        }
+
+
+def _validation_error(document: dict) -> ValidationError:
+    """The pydantic error :class:`TrainingManifest` raises for *document*."""
+    with pytest.raises(ValidationError) as caught:
+        TrainingManifest.model_validate(document)
+    return caught.value
+
+
+def _invalid_manifest_error() -> ValidationError:
+    """A pydantic error for a DQN manifest whose learning rate is not a number."""
+    return _validation_error(
+        {
+            "algorithm": {"name": "DQN", "lr": "fast"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 10},
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +812,34 @@ class TestSelectRow:
         assert list(first.columns[0]._cells).index("[cyan]▸[/cyan]") == 0
         second = _last_rendered([DOWN, DOWN, ENTER])
         assert list(second.columns[0]._cells).index("[cyan]▸[/cyan]") == 2
+
+
+class TestStdinIsATerminal:
+    @patch("agilerl.arena.output.sys")
+    def test_true_for_a_terminal(self, mock_sys):
+        mock_sys.stdin.isatty.return_value = True
+        assert stdin_is_a_terminal() is True
+
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_stdin_is_piped(self, mock_sys):
+        mock_sys.stdin.isatty.return_value = False
+        assert stdin_is_a_terminal() is False
+
+    @patch("agilerl.arena.output.console")
+    @patch("agilerl.arena.output.sys")
+    def test_true_when_stdout_is_redirected(self, mock_sys, mock_console):
+        mock_sys.stdin.isatty.return_value = True
+        mock_console.is_terminal = False
+        assert stdin_is_a_terminal() is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [ValueError("I/O operation on closed file"), AttributeError("isatty")],
+    )
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_stdin_cannot_be_checked(self, mock_sys, error):
+        mock_sys.stdin.isatty.side_effect = error
+        assert stdin_is_a_terminal() is False
 
 
 class TestSupportsInteractiveSelection:

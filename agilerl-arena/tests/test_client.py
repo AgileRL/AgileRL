@@ -8,8 +8,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -17,6 +20,11 @@ import pytest
 
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import EXTERNAL_USER_ID_HEADER, ArenaClient, _TokenStore
+from agilerl.arena.client_version import (
+    CLIENT_UPDATE_HEADER,
+    CLIENT_VERSION_HEADER,
+    announce_update,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -26,7 +34,12 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.models.model_info import STATUS_PREVIEW, SUPPORTED_MODEL_INFO
+from agilerl.arena.models import MANIFEST_REGISTRY, TrainingManifest, __version__
+from agilerl.arena.models.model_info import (
+    STATUS_PREVIEW,
+    SUPPORTED_MODEL_INFO,
+    ModelInfo,
+)
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream
 
@@ -63,9 +76,10 @@ def _grpo_manifest(hub_id: str) -> dict:
         },
         "network": {
             "pretrained_model_name_or_path": hub_id,
-            "max_context_length": 512,
+            "max_context_length": 1024,
         },
         "training": {"max_steps": 100},
+        "replay_buffer": {"kind": "llm"},
     }
 
 
@@ -202,9 +216,22 @@ class TestArenaClientInit:
 class TestArenaClientConfigure:
     def setup_method(self):
         self._orig_url = ArenaClient.BASE_URL
+        self._orig_override = ArenaClient._BASE_URL_OVERRIDE
 
     def teardown_method(self):
         ArenaClient.BASE_URL = self._orig_url
+        ArenaClient._BASE_URL_OVERRIDE = self._orig_override
+
+    @patch("agilerl.arena.auth.ArenaOAuth2.configure")
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_configured_base_url_beats_env(self, mock_keycloak, mock_oauth_cfg):
+        """``arena --base-url`` must win over an exported ARENA_BASE_URL."""
+        ArenaClient.configure(base_url="http://localhost:3011/")
+        with patch.dict(
+            os.environ, {"ARENA_BASE_URL": "https://arena-dev.example.com"}
+        ):
+            client = ArenaClient(api_key="k")
+        assert client._base_url == "http://localhost:3011"
 
     @patch("agilerl.arena.auth.ArenaOAuth2.configure")
     def test_overrides_base_url(self, mock_oauth_cfg):
@@ -232,6 +259,19 @@ class TestArenaClientConfigure:
         assert orig == ArenaClient.BASE_URL
 
 
+DEV_ISSUER = "https://arena-dev-auth.example.com/realms/arena"
+
+
+def _jwt(claims: dict) -> str:
+    import base64
+
+    def seg(obj: dict) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg(claims)}.x"
+
+
 class TestArenaClientLogin:
     def test_login_stores_tokens(self, unauthenticated_client):
         client = unauthenticated_client
@@ -243,54 +283,98 @@ class TestArenaClientLogin:
         assert client._tokens.refresh_token == "rt"
         client._auth.device_login.assert_called_once_with(timeout=60)
 
-    def test_login_skips_device_when_jwt_still_valid(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
-        client._tokens.refresh_token = "rt"
-        client._auth.device_login = MagicMock()
-        client.login()
-        client._auth.device_login.assert_not_called()
-
-    def test_login_refreshes_when_jwt_expired(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
-        client._tokens.refresh_token = "rt"
-        client._auth.device_login = MagicMock()
-        client._auth.refresh_access_token = MagicMock(
-            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
-        )
-        client.login()
-        client._auth.device_login.assert_not_called()
-        client._auth.refresh_access_token.assert_called_once_with("rt")
-        assert client._tokens.access_token == "new_at"
-        assert client._tokens.refresh_token == "new_rt"
-
-    def test_login_falls_back_to_device_when_refresh_fails(
+    def test_login_signs_in_even_when_saved_login_is_valid(
         self, unauthenticated_client
     ):
         client = unauthenticated_client
-        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
-        client._tokens.refresh_token = "rt"
-        client._auth.refresh_access_token = MagicMock(side_effect=ArenaAuthError("bad"))
-        client._auth.device_login = MagicMock(
-            return_value={"access_token": "dev_at", "refresh_token": "dev_rt"}
-        )
-        client.login()
-        client._auth.device_login.assert_called_once()
-
-    def test_login_force_runs_device_even_when_valid(self, unauthenticated_client):
-        client = unauthenticated_client
         client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
-        tokens = {"access_token": "from_dev", "refresh_token": "rt2"}
-        client._auth.device_login = MagicMock(return_value=tokens)
-        client.login(force=True)
-        client._auth.device_login.assert_called_once()
+        client._tokens.refresh_token = "rt"
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
 
-    def test_login_noop_with_api_key(self, api_key_client):
-        client = api_key_client
-        client._auth.device_login = MagicMock()
         client.login()
-        client._auth.device_login.assert_not_called()
+
+        assert client._tokens.access_token == "new_at"
+        assert client._tokens.refresh_token == "new_rt"
+
+    def test_login_ends_saved_session_at_its_own_keycloak(
+        self, unauthenticated_client, credentials_path
+    ):
+        # Arrange
+        client = unauthenticated_client
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "access_token": "old_at",
+                    "refresh_token": "old_rt",
+                    "issuer": DEV_ISSUER,
+                }
+            ),
+            encoding="utf-8",
+        )
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+        client._auth.end_session = MagicMock()
+
+        # Act
+        client.login()
+
+        # Assert
+        client._auth.end_session.assert_called_once_with("old_rt", DEV_ISSUER)
+        assert client._tokens.refresh_token == "new_rt"
+
+    def test_login_reports_signed_in_user(self, unauthenticated_client, caplog):
+        client = unauthenticated_client
+        client._auth.device_login = MagicMock(
+            return_value={
+                "access_token": _jwt({"email": "a@example.com"}),
+                "refresh_token": "rt",
+            }
+        )
+
+        with caplog.at_level(logging.INFO, logger="agilerl.arena.client"):
+            client.login()
+
+        assert "Logged in to Arena as a@example.com" in caplog.text
+
+    def test_login_with_api_key_warns_and_signs_in(self, api_key_client, caplog):
+        client = api_key_client
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
+            client.login()
+
+        assert client._api_key is None
+        assert client._tokens.access_token == "new_at"
+        assert "An API key is set" in caplog.text
+
+    def test_login_keeps_api_key_when_sign_in_fails(self, api_key_client):
+        client = api_key_client
+        client._saved_login_issuer = DEV_ISSUER
+        client._auth.device_login = MagicMock(side_effect=ArenaAuthError("timed out"))
+
+        with pytest.raises(ArenaAuthError, match="timed out"):
+            client.login()
+
+        assert client._api_key == "test-key"
+        assert client._saved_login_issuer == DEV_ISSUER
+        assert client._tokens.access_token is None
+
+    def test_login_clears_saved_issuer(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._saved_login_issuer = DEV_ISSUER
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+
+        client.login()
+
+        assert client._saved_login_issuer is None
+        assert client._tokens.access_token == "new_at"
 
     def test_login_noop_with_org_key(self):
         with patch("agilerl.arena.auth.KeycloakOpenID"):
@@ -299,7 +383,7 @@ class TestArenaClientLogin:
                 external_user_id="partner-user-1",
             )
         client._auth.device_login = MagicMock()
-        client.login(force=True)
+        client.login()
         client._auth.device_login.assert_not_called()
 
     @patch("agilerl.arena.client.load_credentials")
@@ -357,15 +441,136 @@ class TestArenaClientLogin:
         client._auth.refresh_access_token.assert_not_called()
 
 
+class TestArenaClientRestoreSession:
+    def _client(self) -> ArenaClient:
+        with patch.dict(os.environ, _env_without_arena_secrets(), clear=True):
+            with patch("agilerl.arena.auth.KeycloakOpenID"):
+                return ArenaClient()
+
+    def test_loads_saved_login_for_this_keycloak(self, credentials_path):
+        issuer = ArenaOAuth2().issuer
+        credentials_path.write_text(
+            json.dumps({"access_token": "at", "refresh_token": "rt", "issuer": issuer}),
+            encoding="utf-8",
+        )
+
+        client = self._client()
+
+        assert client._tokens.refresh_token == "rt"
+
+    def test_ignores_saved_login_for_other_keycloak(self, credentials_path):
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+
+        client = self._client()
+
+        assert client._tokens.access_token is None
+        assert client._tokens.refresh_token is None
+
+    def test_request_names_the_other_keycloak(self, credentials_path):
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+        client = self._client()
+
+        with pytest.raises(
+            ArenaAuthError, match=f"saved Arena login is for {re.escape(DEV_ISSUER)}"
+        ):
+            client._send("GET", "/api/cli/v1/me")
+
+    def test_api_key_leaves_other_keycloak_login_unloaded(self, credentials_path):
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+
+        assert client._api_key == "test-key"
+        assert client._tokens.access_token is None
+        assert client._tokens.refresh_token is None
+        assert client._saved_login_issuer == DEV_ISSUER
+
+    def test_api_key_loads_login_for_this_keycloak(self, credentials_path):
+        issuer = ArenaOAuth2().issuer
+        credentials_path.write_text(
+            json.dumps({"access_token": "at", "refresh_token": "rt", "issuer": issuer}),
+            encoding="utf-8",
+        )
+
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+
+        assert client._api_key == "test-key"
+        assert client._tokens.refresh_token == "rt"
+        assert client._saved_login_issuer is None
+
+    def test_rejected_api_key_does_not_send_other_keycloak_token(
+        self, credentials_path
+    ):
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "access_token": "dev_at",
+                    "refresh_token": "dev_rt",
+                    "issuer": DEV_ISSUER,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+        client._auth.refresh_access_token = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.is_success = False
+        mock_resp.text = "Unauthorized"
+        client._http.request = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(ArenaAuthError, match="Invalid API key"):
+            client._request("GET", "/api/test")
+
+        assert client._http.request.call_count == 1
+        client._auth.refresh_access_token.assert_not_called()
+        assert client._api_key == "test-key"
+        assert client._tokens.refresh_token is None
+
+
 class TestArenaClientLogout:
     def test_logout_revokes_and_clears(self, token_client):
         client = token_client
         client._auth.revoke = MagicMock()
 
         client.logout()
-        client._auth.revoke.assert_called_once_with("tok_refresh")
+        client._auth.revoke.assert_called_once_with("tok_refresh", None)
         assert client._tokens.access_token is None
         assert client._tokens.refresh_token is None
+
+    def test_logout_revokes_saved_login_for_other_keycloak(
+        self, unauthenticated_client, credentials_path
+    ):
+        client = unauthenticated_client
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+        client._auth.revoke = MagicMock()
+
+        client.logout()
+
+        client._auth.revoke.assert_called_once_with("rt", DEV_ISSUER)
 
     def test_logout_without_refresh_token(self, unauthenticated_client):
         client = unauthenticated_client
@@ -375,6 +580,25 @@ class TestArenaClientLogout:
         client.logout()
         client._auth.revoke.assert_not_called()
         assert client._tokens.access_token is None
+
+    def test_logout_clears_saved_issuer(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._saved_login_issuer = DEV_ISSUER
+        client._tokens.refresh_token = "rt"
+        client._auth.revoke = MagicMock()
+
+        client.logout()
+
+        assert client._saved_login_issuer is None
+        assert client._tokens.refresh_token is None
+
+    def test_logout_clears_saved_issuer_without_a_session(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._saved_login_issuer = DEV_ISSUER
+
+        client.logout()
+
+        assert client._saved_login_issuer is None
 
 
 class TestIsAuthenticated:
@@ -404,6 +628,20 @@ class TestUserMethods:
     def test_get_user_credits(self, api_key_client):
         api_key_client._request = MagicMock(return_value=100)
         assert api_key_client.get_user_credits() == 100
+
+    def test_get_credit_balance(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"balance": 5})
+        assert api_key_client.get_credit_balance() == {"balance": 5}
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/credit-usages/balance"
+        )
+
+    def test_get_credit_ledger_sends_only_set_filters(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[])
+        assert api_key_client.get_credit_ledger(deployment_id=329) == []
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/credit-usages/ledger", params={"deployment_id": 329}
+        )
 
 
 class TestSetStreamHandler:
@@ -545,6 +783,47 @@ class TestRequest:
         assert result == {"ok": True}
         assert token_client._tokens.access_token == "new_at"
         assert token_client._http.request.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("retry_after", "expected_wait"),
+        [("2", 2), ("0", 1), ("120", 60)],
+    )
+    def test_429_retries_after_the_server_delay(
+        self, api_key_client, monkeypatch, retry_after: str, expected_wait: int
+    ):
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.is_success = False
+        limited.headers = {"Retry-After": retry_after}
+        limited.text = "Rate limit exceeded"
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.is_success = True
+        ok.headers = {"content-type": "application/json"}
+        ok.json.return_value = {"ok": True}
+        api_key_client._http.request = MagicMock(side_effect=[limited, ok])
+        slept: list[int] = []
+        monkeypatch.setattr("agilerl.arena.client.time.sleep", slept.append)
+
+        result = api_key_client._request("GET", "/api/test")
+
+        assert result == {"ok": True}
+        assert slept == [expected_wait]
+
+    def test_429_raises_when_the_limit_persists(self, api_key_client, monkeypatch):
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.is_success = False
+        limited.headers = {}
+        limited.text = "Rate limit exceeded"
+        api_key_client._http.request = MagicMock(return_value=limited)
+        monkeypatch.setattr("agilerl.arena.client.time.sleep", lambda _seconds: None)
+
+        with pytest.raises(ArenaAPIError, match="Rate limit exceeded") as exc_info:
+            api_key_client._request("GET", "/api/test")
+
+        assert exc_info.value.status_code == 429
+        assert api_key_client._http.request.call_count == 6
 
     def test_default_timeout_defers_to_client_default(self, api_key_client):
         """timeout=None must not disable timeouts (httpx semantics)."""
@@ -998,7 +1277,29 @@ class TestResolveProject:
 class TestStopExperiment:
     def test_posts_cli_stop_by_name(self, api_key_client):
         api_key_client._request = MagicMock(return_value="Ok")
-        api_key_client.stop_experiment("my-exp")
+        with patch.object(api_key_client, "get_default_project", return_value=None):
+            api_key_client.stop_experiment("my-exp")
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": "my-exp"},
+        )
+
+    def test_sends_explicit_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="Ok")
+        api_key_client.stop_experiment("my-exp", project="proj")
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": "my-exp", "project": "proj"},
+        )
+
+    def test_unique_name_ignores_the_default_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="Ok")
+        with patch.object(
+            api_key_client, "get_default_project", return_value="stale-default"
+        ):
+            api_key_client.stop_experiment("my-exp")
         api_key_client._request.assert_called_once_with(
             "POST",
             "/api/cli/v1/experiments/jobs/stop",
@@ -1098,45 +1399,22 @@ class TestValidateEnvironmentParams:
         assert payload["version"] == "v2"
         assert payload["entrypoint"] == "my_env:make"
 
-    def test_create_forwards_multi_agent(self, api_key_client, tmp_path):
+    def test_create_sends_a_single_agent_language_based_env(
+        self, api_key_client, tmp_path
+    ):
+        # Arrange
         archive = tmp_path / "env.tar.gz"
         archive.write_bytes(b"fake")
-        cfg = tmp_path / "env_config.yaml"
-        cfg.write_text("key: val")
-        reqs = tmp_path / "requirements.txt"
-        reqs.write_text("numpy")
-
         mock_stream = _mock_ndjson_stream()
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.validate_environment(
-            name="MyEnv",
-            source=archive,
-            env_config=cfg,
-            requirements=reqs,
-            multi_agent=True,
-        )
-        call_kwargs = api_key_client._open_stream.call_args[1]
-        assert call_kwargs["data"]["multi_agent"] == "true"
 
-    def test_create_forwards_language_based(self, api_key_client, tmp_path):
-        archive = tmp_path / "env.tar.gz"
-        archive.write_bytes(b"fake")
-        cfg = tmp_path / "env_config.yaml"
-        cfg.write_text("key: val")
-        reqs = tmp_path / "requirements.txt"
-        reqs.write_text("numpy")
+        # Act
+        api_key_client.validate_environment(name="MyEnv", source=archive)
 
-        mock_stream = _mock_ndjson_stream()
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.validate_environment(
-            name="MyEnv",
-            source=archive,
-            env_config=cfg,
-            requirements=reqs,
-            language_based=True,
-        )
-        call_kwargs = api_key_client._open_stream.call_args[1]
-        assert call_kwargs["data"]["language_based"] == "true"
+        # Assert
+        data = api_key_client._open_stream.call_args[1]["data"]
+        assert data["language_based"] == "true"
+        assert data["multi_agent"] == "false"
 
     def test_create_forwards_entrypoint(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
@@ -1193,17 +1471,6 @@ class TestValidateEnvironmentParams:
 
 
 class TestCliV1EndpointPaths:
-    def test_profile_environment_uses_cli_v1_path(self, api_key_client):
-        mock_stream = _mock_ndjson_stream()
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.profile_environment(name="MyEnv", version="v1")
-        api_key_client._open_stream.assert_called_once_with(
-            "POST",
-            "/api/cli/v1/environments/profile",
-            json={"name": "MyEnv", "version": "v1"},
-            timeout=api_key_client._upload_timeout,
-        )
-
     @patch("builtins.input", return_value="y")
     def test_delete_environment_uses_cli_v1_path(self, mock_input, api_key_client):
         api_key_client.list_environments = MagicMock(
@@ -1386,21 +1653,6 @@ class TestSendStreaming:
         assert "Network error" in exc_info.value.detail
 
 
-class TestLoginForceWithApiKey:
-    def test_force_clears_api_key_and_runs_device_login(self, api_key_client):
-        client = api_key_client
-        assert client._api_key == "test-key"
-        tokens = {"access_token": "new_at", "refresh_token": "new_rt"}
-        client._auth.device_login = MagicMock(return_value=tokens)
-
-        client.login(force=True)
-
-        assert client._api_key is None
-        client._auth.device_login.assert_called_once()
-        assert client._tokens.access_token == "new_at"
-        assert client._tokens.refresh_token == "new_rt"
-
-
 class TestDeleteEnvironmentMultiVersion:
     def test_delete_no_versions_found(self, api_key_client):
         api_key_client.list_environments = MagicMock(return_value={"MyEnv": {}})
@@ -1439,14 +1691,14 @@ class TestDeleteEnvironmentMultiVersion:
         api_key_client.list_environments = MagicMock(
             return_value={"MyEnv": {"v1": {"validated": True}}}
         )
-        api_key_client._request = MagicMock(return_value={"deleted": True})
+        api_key_client._request = MagicMock(return_value={"versions": ["v1"]})
         result = api_key_client.delete_environment(name="MyEnv", version="v1")
         api_key_client._request.assert_called_once_with(
             "DELETE",
             "/api/cli/v1/environments/delete",
             json={"name": "MyEnv", "version": "v1"},
         )
-        assert result == {"deleted": True}
+        assert result == {"versions": ["v1"]}
 
 
 class TestDuplicateEnvironmentVersion:
@@ -1471,6 +1723,270 @@ class TestDuplicateEnvironmentVersion:
         assert payload["version"] is None
 
 
+def _dqn_manifest() -> dict:
+    return {
+        "algorithm": {"name": "DQN", "lr": 0.001},
+        "environment": {"name": "LunarLander-v3", "num_envs": 8},
+        "training": {"max_steps": 1000},
+    }
+
+
+def _hpo_manifest() -> dict:
+    manifest = _grpo_manifest("Qwen/Qwen3.5-4B")
+    manifest["training"] = {"max_steps": 100, "hpo": True}
+    manifest["mutation"] = {"probabilities": {"no_mut": 0.5, "rl_hp_mut": 0.5}}
+    return manifest
+
+
+class TestArenaClientSubmitChecks:
+    def test_manifest_without_hpo_is_submitted(self, api_key_client):
+        manifest = _hpo_manifest()
+        manifest["training"]["hpo"] = False
+        del manifest["mutation"]
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 2})
+        )
+
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        assert result == {"job_id": 2}
+
+    def test_hpo_manifest_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"training\.hpo, mutation: HPO and populations aren't available",
+        ):
+            api_key_client.submit_experiment(manifest=_hpo_manifest(), project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_each_arena_failure_keeps_its_own_message(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _hpo_manifest()
+        manifest["algorithm"]["batch_size"] = 3
+
+        # Act
+        with pytest.raises(ArenaValidationError) as raised:
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        message = str(raised.value)
+        assert "training.hpo, mutation: HPO and populations aren't available" in message
+        assert "algorithm.batch_size: must be a power of 2" in message
+        api_key_client._open_stream.assert_not_called()
+
+    def test_arena_chosen_field_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        manifest = _hpo_manifest()
+        manifest["training"] = {"max_steps": 100, "rollout_version_stamp": "publish"}
+        del manifest["mutation"]
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"training\.rollout_version_stamp: Arena chooses this field",
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_classic_rl_manifest_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"algorithm\.name: Classic RL is no longer supported in Arena",
+        ):
+            api_key_client.submit_experiment(manifest=_dqn_manifest(), project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_model_status_check_skips_a_classic_manifest(self):
+        manifest = TrainingManifest.model_validate(_dqn_manifest())
+
+        assert ArenaClient._check_model_status(manifest) is None
+
+    def test_llm_population_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        manifest = {
+            "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 1024,
+            },
+            "training": {"max_steps": 100, "pop_size": 2},
+        }
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"training\.pop_size: HPO and populations aren't available",
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+
+QUOTE = {
+    "resource_id": "h100-80-8x",
+    "resource_name": "NVIDIA H100 80GB x8",
+    "gpu_type": "h100-80",
+    "num_gpus": 8,
+    "num_nodes": 1,
+    "hourly_cost": 25.6,
+    "max_steps": 1000,
+    "step_seconds": 36.0,
+    "estimated_hours": 11.25,
+    "estimated_cost": 288.0,
+}
+
+
+def _quote_transport(
+    client: ArenaClient, handler: Callable[[httpx.Request], httpx.Response]
+) -> None:
+    """Send *client*'s requests to *handler* instead of the network."""
+    client._http = httpx.Client(
+        base_url=client._base_url, transport=httpx.MockTransport(handler)
+    )
+
+
+def _ndjson(*events: dict) -> str:
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _validated_grpo(mock_validated: MagicMock) -> None:
+    mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+    mock_validated.return_value.training.hpo = False
+    mock_validated.return_value.mutation = None
+    mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+    mock_validated.return_value.training.pop_size = 1
+
+
+@patch("agilerl.arena.client.TrainingManifest.get_validated")
+class TestArenaClientQuoteExperiment:
+    def test_returns_the_quote_the_server_completes_with(
+        self, mock_validated, api_key_client
+    ):
+        # Arrange
+        _validated_grpo(mock_validated)
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            body = _ndjson(
+                {
+                    "kind": "status",
+                    "stage": "submission",
+                    "status": "running",
+                    "message": "Estimated cost: $25.60 per hour",
+                },
+                {
+                    "kind": "status",
+                    "stage": "quote",
+                    "status": "completed",
+                    "message": "Priced the run",
+                    "detail": QUOTE,
+                },
+            )
+            return httpx.Response(200, text=body)
+
+        _quote_transport(api_key_client, handler)
+
+        # Act
+        quote = api_key_client.quote_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=8,
+            gpu_type="h100-80",
+            project="proj",
+        )
+
+        # Assert
+        assert quote == QUOTE
+        assert requests[0].url.path == "/api/cli/v1/experiments/jobs/quote"
+        assert json.loads(requests[0].content) == {
+            "manifest": {"algorithm": "GRPO"},
+            "project": "proj",
+            "num_gpus": 8,
+            "gpu_type": "h100-80",
+        }
+        assert "idempotency-key" not in requests[0].headers
+
+    def test_server_without_quotes_raises_404(self, mock_validated, api_key_client):
+        _validated_grpo(mock_validated)
+        _quote_transport(api_key_client, lambda _: httpx.Response(404, text=""))
+
+        with pytest.raises(ArenaAPIError) as raised:
+            api_key_client.quote_experiment(
+                manifest={"algorithm": "GRPO"}, project="proj"
+            )
+
+        assert raised.value.status_code == 404
+
+    def test_a_failed_check_raises_a_training_error(
+        self, mock_validated, api_key_client
+    ):
+        _validated_grpo(mock_validated)
+        failed = _ndjson(
+            {
+                "kind": "status",
+                "stage": "submission",
+                "status": "failed",
+                "message": "No resource class has enough GPU memory for this run.",
+            }
+        )
+        _quote_transport(api_key_client, lambda _: httpx.Response(200, text=failed))
+
+        with pytest.raises(ArenaTrainingError, match="enough GPU memory"):
+            api_key_client.quote_experiment(
+                manifest={"algorithm": "GRPO"}, project="proj"
+            )
+
+
+class TestArenaClientQuoteResume:
+    def test_returns_the_quote_for_the_resume_body(self, api_key_client):
+        # Arrange
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=QUOTE)
+
+        _quote_transport(api_key_client, handler)
+
+        # Act
+        quote = api_key_client.quote_resume(
+            "exp1", max_steps=1000, checkpoint="best", project="proj"
+        )
+
+        # Assert
+        assert quote == QUOTE
+        assert requests[0].url.path == "/api/cli/v1/experiments/jobs/resume/quote"
+        assert json.loads(requests[0].content) == {
+            "experiment_name": "exp1",
+            "max_steps": 1000,
+            "checkpoint": "best",
+            "project": "proj",
+        }
+
+    def test_server_without_resume_quotes_raises_404(self, api_key_client):
+        _quote_transport(
+            api_key_client,
+            lambda _: httpx.Response(404, json={"error": "not_found"}),
+        )
+
+        with pytest.raises(ArenaAPIError) as raised:
+            api_key_client.quote_resume("exp1", max_steps=1000)
+
+        assert raised.value.status_code == 404
+
+
 class TestExperimentMethods:
     def test_list_experiments(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"name": "exp1"}])
@@ -1482,14 +1998,16 @@ class TestExperimentMethods:
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment(self, mock_validated, api_key_client):
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         mock_stream = _mock_ndjson_stream({"job_id": 1})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
         result = api_key_client.submit_experiment(
-            manifest={"algorithm": "PPO"},
-            resource_id=2,
-            num_nodes=1,
+            manifest={"algorithm": "SFT"},
             project="proj",
             experiment_name="exp1",
         )
@@ -1497,9 +2015,100 @@ class TestExperimentMethods:
         assert result == {"job_id": 1}
         mock_validated.assert_called_once()
         call_kwargs = api_key_client._open_stream.call_args[1]
-        assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
-        assert call_kwargs["json"]["project"] == "proj"
+        assert call_kwargs["json"] == {
+            "manifest": {"algorithm": "SFT"},
+            "project": "proj",
+            "experiment_name": "exp1",
+        }
         assert "files" not in call_kwargs
+
+    @pytest.mark.parametrize("removed", ["resource_id", "num_nodes"])
+    def test_submit_experiment_has_no_resource_class_choice(
+        self, api_key_client, removed
+    ):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(TypeError, match=removed):
+            api_key_client.submit_experiment(
+                manifest={"algorithm": "SFT"}, project="proj", **{removed: 2}
+            )
+        api_key_client._open_stream.assert_not_called()
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_omits_unset_optional_fields(
+        self, mock_validated, api_key_client
+    ):
+        # The server rejects explicit nulls; unset optionals must be absent.
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 3})
+        )
+
+        api_key_client.submit_experiment(manifest={"algorithm": "SFT"}, project="proj")
+
+        payload = api_key_client._open_stream.call_args[1]["json"]
+        assert payload == {"manifest": {"algorithm": "SFT"}, "project": "proj"}
+        assert api_key_client._open_stream.call_args[1]["headers"] == {}
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_sends_gpu_request(self, mock_validated, api_key_client):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=8,
+            gpu_type="h100-80",
+            project="proj",
+        )
+
+        payload = api_key_client._open_stream.call_args[1]["json"]
+        assert payload == {
+            "manifest": {"algorithm": "GRPO"},
+            "project": "proj",
+            "num_gpus": 8,
+            "gpu_type": "h100-80",
+        }
+
+    def test_submit_experiment_rejects_zero_gpus(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ArenaValidationError, match="num_gpus must be at least 1"):
+            api_key_client.submit_experiment(
+                manifest={"algorithm": "GRPO"},
+                gpu_type="h100-80",
+                num_gpus=0,
+                project="proj",
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_requires_project(self, mock_validated, api_key_client):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
+        api_key_client._open_stream = MagicMock()
+
+        with (
+            patch.object(api_key_client, "get_default_project", return_value=None),
+            pytest.raises(ArenaConfigError, match="No project specified"),
+        ):
+            api_key_client.submit_experiment(manifest={"algorithm": "SFT"})
+
+        api_key_client._open_stream.assert_not_called()
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_with_reward_file(
@@ -1510,6 +2119,10 @@ class TestExperimentMethods:
             "environment": {"name": "ds", "num_envs": 16},
         }
         mock_validated.return_value.to_payload.return_value = payload
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
         reward_path = tmp_path / "reward.py"
         reward_path.write_text(
             "def reward(question, answer, completion):\n    return 1.0\n",
@@ -1519,8 +2132,6 @@ class TestExperimentMethods:
 
         result = api_key_client.submit_experiment(
             manifest={"algorithm": {"name": "GRPO"}},
-            resource_id="arena-medium",
-            num_nodes=2,
             project="proj",
             experiment_name="exp-reasoning",
             reward_file=reward_path,
@@ -1530,36 +2141,111 @@ class TestExperimentMethods:
         assert result == {"job_id": 2}
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert "json" not in call_kwargs
-        files = call_kwargs["files"]
+        files = dict(call_kwargs["files"])
         assert json.loads(files["manifest"][1]) == payload
         assert files["project"] == (None, "proj")
-        assert files["resource_id"] == (None, "arena-medium")
-        assert files["num_nodes"] == (None, "2")
+        assert "resource_id" not in files
+        assert "num_nodes" not in files
+        assert "num_gpus" not in files
+        assert "gpu_type" not in files
         assert files["experiment_name"] == (None, "exp-reasoning")
         assert files["completion"] == (None, "wrong answer")
         assert files["reward_file"][0] == "reward.py"
 
-    @pytest.mark.parametrize(
-        ("hub_id", "warned"),
-        [
-            ("Qwen/Qwen3-4B", False),
-            ("Qwen/Qwen2.5-0.5B-Instruct", True),
-        ],
-    )
-    def test_submit_experiment_warns_on_deprecated_model(
-        self, api_key_client, caplog, hub_id, warned
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_with_reward_file_sends_gpu_request(
+        self, mock_validated, api_key_client
     ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=4,
+            gpu_type="b200",
+            project="proj",
+            reward_file=b"def reward(q, a, c):\n    return 1.0\n",
+        )
+
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        assert files["num_gpus"] == (None, "4")
+        assert files["gpu_type"] == (None, "b200")
+        assert "resource_id" not in files
+        assert "num_nodes" not in files
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_sends_idempotency_key(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "SFT"},
+            project="proj",
+            idempotency_key=" user-1:run ",
+        )
+
+        assert api_key_client._open_stream.call_args[1]["headers"] == {
+            "Idempotency-Key": "user-1:run"
+        }
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_omits_a_blank_idempotency_key(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "SFT"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
+        mock_validated.return_value.algorithm = MANIFEST_REGISTRY.create("SFT")
+        mock_validated.return_value.training.pop_size = 1
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "SFT"},
+            project="proj",
+            idempotency_key="  ",
+        )
+
+        assert api_key_client._open_stream.call_args[1]["headers"] == {}
+
+    def test_submit_experiment_accepts_live_model(self, api_key_client):
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 3})
         )
 
-        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
-            result = api_key_client.submit_experiment(
-                manifest=_grpo_manifest(hub_id), project="proj"
-            )
+        result = api_key_client.submit_experiment(
+            manifest=_grpo_manifest("Qwen/Qwen3.5-4B"), project="proj"
+        )
 
         assert result == {"job_id": 3}
-        assert (f"Model {hub_id} is deprecated" in caplog.text) is warned
+
+    @pytest.mark.parametrize("hub_id", ["Qwen/Qwen3-4B", "Qwen/Qwen2.5-0.5B-Instruct"])
+    def test_submit_experiment_rejects_deprecated_model(self, api_key_client, hub_id):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=f"Model {re.escape(hub_id)} is deprecated and can no longer be submitted",
+        ):
+            api_key_client.submit_experiment(
+                manifest=_grpo_manifest(hub_id), project="proj"
+            )
+        api_key_client._open_stream.assert_not_called()
 
     def test_submit_experiment_rejects_preview_model(self, api_key_client, monkeypatch):
         api_key_client._open_stream = MagicMock()
@@ -1590,6 +2276,188 @@ class TestExperimentMethods:
         assert result == {"job_id": 3}
         assert "is deprecated" not in caplog.text
 
+    def test_submit_experiment_rejects_colocated_rollout(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-4B")
+        manifest["training"]["rollout_mode"] = "colocated"
+
+        with pytest.raises(ArenaValidationError, match="rollout_mode: colocated"):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_rejects_a_batch_size_that_is_not_a_power_of_2(
+        self, api_key_client
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["algorithm"]["batch_size"] = 6
+
+        # Act / Assert
+        with pytest.raises(
+            ArenaValidationError,
+            match=re.escape(
+                "algorithm.batch_size: must be a power of 2 between 1 and 1024."
+            ),
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_rejects_a_classic_replay_buffer(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["replay_buffer"] = {"kind": "classic"}
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=r"replay_buffer\.kind: llm"):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_drops_a_lora_module_list(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["lora_config"] = {
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
+        }
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        sent = api_key_client._open_stream.call_args.kwargs["json"]["manifest"]
+        assert "target_modules" not in sent["network"]["lora_config"]
+        assert result == {"job_id": 5}
+
+    @pytest.mark.parametrize(
+        ("hub_id", "context_length"),
+        [
+            ("Qwen/Qwen3.5-0.8B", 1024),
+            ("Qwen/Qwen3.5-0.8B", 262144),
+            ("org/untracked-model", 512),
+        ],
+    )
+    def test_submit_experiment_accepts_an_arena_context_length(
+        self, api_key_client, hub_id, context_length
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        manifest = _grpo_manifest(hub_id)
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 5}
+
+    @pytest.mark.parametrize(
+        ("hub_id", "context_length", "message"),
+        [
+            (
+                "Qwen/Qwen3.5-0.8B",
+                512,
+                (
+                    "network.max_context_length: must be a power of 2 between 1024 "
+                    "and 262144. Allowed: 1024, 2048, 4096, 8192, 16384, 32768, "
+                    "65536, 131072, 262144"
+                ),
+            ),
+            (
+                "Qwen/Qwen3.5-0.8B",
+                3000,
+                (
+                    "network.max_context_length: must be a power of 2 between 1024 "
+                    "and 262144. Allowed: 1024,"
+                ),
+            ),
+        ],
+    )
+    def test_submit_experiment_rejects_a_context_length_arena_does_not_offer(
+        self, api_key_client, hub_id, context_length, message
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest(hub_id)
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=re.escape(message)):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    @pytest.mark.parametrize("context_length", [32768, 40960])
+    def test_submit_experiment_accepts_a_window_that_is_not_a_power_of_2(
+        self, api_key_client, monkeypatch, context_length
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        monkeypatch.setattr(ModelInfo, "max_context_length", 40960)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 5}
+
+    def test_submit_experiment_rejects_above_a_window_that_is_not_a_power_of_2(
+        self, api_key_client, monkeypatch
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        monkeypatch.setattr(ModelInfo, "max_context_length", 40960)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = 65536
+        message = (
+            "network.max_context_length: must be a power of 2 between 1024 "
+            "and 40960, or 40960. Allowed: 1024, 2048, 4096, 8192, 16384, "
+            "32768, 40960"
+        )
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=re.escape(message)):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_requires_the_window_when_it_is_below_1024(
+        self, api_key_client, monkeypatch
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        monkeypatch.setattr(ModelInfo, "max_context_length", 512)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = 256
+
+        # Act / Assert
+        with pytest.raises(
+            ArenaValidationError,
+            match=re.escape("network.max_context_length: must be 512. Allowed: 512"),
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_rejects_pinned_cpu_offload(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-4B")
+        manifest["algorithm"]["fsdp"] = {"cpu_offload": True}
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match=r"algorithm\.fsdp\.cpu_offload cannot be set"
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
     def test_resume_experiment(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"resumed": True})
         result = api_key_client.resume_experiment("exp1", max_steps=1000)
@@ -1600,6 +2468,38 @@ class TestExperimentMethods:
         )
         assert result == {"resumed": True}
 
+    def test_resume_experiment_sends_optional_fields(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"resumed": True})
+        api_key_client.resume_experiment(
+            "exp1",
+            max_steps=1000,
+            checkpoint="500",
+            new_name="exp1-again",
+            project="proj",
+        )
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume",
+            json={
+                "experiment_name": "exp1",
+                "max_steps": 1000,
+                "checkpoint": "500",
+                "new_name": "exp1-again",
+                "project": "proj",
+            },
+        )
+
+    def test_list_checkpoints_sends_the_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[])
+
+        api_key_client.list_checkpoints("exp1", project="proj")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/jobs/checkpoints",
+            params={"experiment_name": "exp1", "project": "proj"},
+        )
+
     def test_list_checkpoints(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"step": 100}])
         result = api_key_client.list_checkpoints("exp1")
@@ -1609,6 +2509,265 @@ class TestExperimentMethods:
             params={"experiment_name": "exp1"},
         )
         assert result == [{"step": 100}]
+
+
+def _rubric_rollout_manifest() -> dict:
+    """A GSM8K rollout naming ``RUBRIC`` but no rubric file."""
+    manifest = _grpo_manifest("org/untracked-model")
+    manifest["environment"] = {
+        "env_type": "rollout",
+        "dataset": "gsm8k",
+        "rubric_name": "RUBRIC",
+        "prompt_template": {
+            "system_0": "You are a helpful assistant.",
+            "user_1": "{question}",
+        },
+    }
+    return manifest
+
+
+class TestArenaClientSubmitExperimentRewardFile:
+    def test_fills_rubric_path_from_reward_file(self, api_key_client, tmp_path):
+        # Arrange
+        reward_path = tmp_path / "gsm8k_rubric.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 7})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        # Assert
+        assert result == {"job_id": 7}
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "gsm8k_rubric.py"
+        assert environment["rubric_name"] == "RUBRIC"
+        assert files["reward_file"][0] == "gsm8k_rubric.py"
+        assert "rubric_file_path" not in manifest["environment"]
+
+    def test_fills_placeholder_for_reward_bytes(self, api_key_client):
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 8})
+        )
+
+        api_key_client.submit_experiment(
+            manifest=_rubric_rollout_manifest(),
+            project="proj",
+            reward_file=b"RUBRIC = None\n",
+        )
+
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "reward.py"
+        assert files["reward_file"][0] == "reward.py"
+
+    def test_keeps_manifest_path_for_reward_bytes(self, api_key_client):
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["rubric_file_path"] = "rubrics/gsm8k.py"
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 9})
+        )
+
+        api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=b"RUBRIC = None\n"
+        )
+
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "rubrics/gsm8k.py"
+
+    def test_accepts_matching_basename(self, api_key_client, tmp_path):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["reward_file_path"] = "./local/reward.py"
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 10})
+        )
+
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        assert result == {"job_id": 10}
+
+    def test_rejects_mismatched_basename(self, api_key_client, tmp_path):
+        reward_path = tmp_path / "other.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["rubric_file_path"] = "reward.py"
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"rubric_file_path names 'reward.py' but the reward file is 'other.py'",
+        ):
+            api_key_client.submit_experiment(
+                manifest=manifest, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "error"),
+        [
+            (
+                (
+                    "def RUBRIC(completion: str, answer: str, question: str) -> float:\n"
+                    "    return undefined_name + 1.0\n"
+                ),
+                r"reward\.py, line 2: NameError: name 'undefined_name' is not defined",
+            ),
+            (
+                (
+                    "def RUBRIC(completion: str, answer: str, question: str) -> float:\n"
+                    "    return 'high'\n"
+                ),
+                r"reward\.py, line 1: RUBRIC returned str 'high'; a reward must return a float",
+            ),
+        ],
+    )
+    def test_broken_reward_stops_the_quote_before_any_request(
+        self, api_key_client, tmp_path, source, error
+    ):
+        # Arrange
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text(source)
+        requests: list[httpx.Request] = []
+        _quote_transport(api_key_client, requests.append)
+
+        # Act
+        with pytest.raises(ArenaValidationError, match=error):
+            api_key_client.quote_experiment(
+                manifest=_rubric_rollout_manifest(),
+                project="proj",
+                reward_file=reward_path,
+            )
+
+        # Assert
+        assert requests == []
+
+    def test_without_reward_file_still_requires_rubric_path(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ValueError, match="rubric_name names a symbol"):
+            api_key_client.submit_experiment(
+                manifest=_rubric_rollout_manifest(), project="proj"
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_fills_rubric_path_when_grpo_omits_env_type(self, api_key_client, tmp_path):
+        # Arrange
+        reward_path = tmp_path / "gsm8k_rubric.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        del manifest["environment"]["env_type"]
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 11})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        # Assert
+        assert result == {"job_id": 11}
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "gsm8k_rubric.py"
+        assert "env_type" not in manifest["environment"]
+
+    @pytest.mark.parametrize("env_type", [None, "dataset"])
+    def test_does_not_fill_rubric_path_for_sft(
+        self, api_key_client, tmp_path, env_type
+    ):
+        # Arrange
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        environment = {"dataset": "openai/gsm8k"}
+        if env_type is not None:
+            environment["env_type"] = env_type
+            environment["objective"] = "sft"
+        manifest = {
+            "algorithm": {"name": "SFT"},
+            "environment": environment,
+            "network": {
+                "pretrained_model_name_or_path": "org/untracked-model",
+                "max_context_length": 1024,
+            },
+            "training": {"max_steps": 100},
+        }
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 12})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        # Assert
+        assert result == {"job_id": 12}
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        sent = json.loads(files["manifest"][1])["environment"]
+        assert "rubric_file_path" not in sent
+
+    def test_unknown_algorithm_without_env_type_is_validation_error(
+        self, api_key_client, tmp_path
+    ):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        del manifest["environment"]["env_type"]
+        manifest["algorithm"]["name"] = "NOPE"
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ValueError, match="not a registered algorithm"):
+            api_key_client.submit_experiment(
+                manifest=manifest, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_missing_algorithm_without_env_type_is_validation_error(
+        self, api_key_client, tmp_path
+    ):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        del manifest["environment"]["env_type"]
+        del manifest["algorithm"]
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ValueError, match="algorithm"):
+            api_key_client.submit_experiment(
+                manifest=manifest, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_non_mapping_manifest_is_validation_error(self, api_key_client, tmp_path):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest_path = tmp_path / "manifest.yaml"
+        manifest_path.write_text("- algorithm\n- environment\n")
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError, match="The manifest must be a mapping, not list"
+        ):
+            api_key_client.submit_experiment(
+                manifest=manifest_path, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
 
 
 class TestPreviewExperimentMetricsCsv:
@@ -1643,7 +2802,9 @@ class TestPreviewExperimentMetricsCsv:
 
 class TestListExperimentMetricNames:
     def test_basic_call(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=["loss", "reward"])
+        api_key_client._request = MagicMock(
+            return_value=[{"display_name": "loss", "category": "training"}]
+        )
         with patch.object(api_key_client, "get_default_project", return_value=None):
             result = api_key_client.list_experiment_metric_names("exp1")
         api_key_client._request.assert_called_once_with(
@@ -1651,11 +2812,11 @@ class TestListExperimentMetricNames:
             "/api/cli/v1/experiments/metrics",
             params={"experiment_name": "exp1"},
         )
-        assert result == ["loss", "reward"]
+        assert result == [{"display_name": "loss", "category": "training"}]
 
     def test_with_project_and_details(self, api_key_client):
         api_key_client._request = MagicMock(
-            return_value={"experiment_id": "123", "metrics": ["a"]}
+            return_value={"metrics": [{"display_name": "a", "category": "training"}]}
         )
         result = api_key_client.list_experiment_metric_names(
             "exp1", project="proj1", details=True
@@ -1666,17 +2827,29 @@ class TestListExperimentMetricNames:
             "project": "proj1",
             "details": True,
         }
-        assert result == {"experiment_id": "123", "metrics": ["a"]}
+        assert result == {"metrics": [{"display_name": "a", "category": "training"}]}
 
 
 class TestListResources:
     def test_calls_correct_endpoint(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"tiers": []})
+        body = {"gpuTypes": [{"gpuType": "l4", "gpusPerNode": [1], "devOnly": False}]}
+        api_key_client._request = MagicMock(return_value=body)
+
         result = api_key_client.list_resources()
+
         api_key_client._request.assert_called_once_with(
-            "GET", "/api/cli/v1/resources/list"
+            "GET", "/api/cli/v1/resources/list", params=None
         )
-        assert result == {"tiers": []}
+        assert result == body
+
+    def test_sends_the_algorithm(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"gpuTypes": []})
+
+        api_key_client.list_resources(algorithm="SUPERVISED")
+
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/resources/list", params={"algorithm": "SUPERVISED"}
+        )
 
 
 class TestDownloadExperimentMetrics:
@@ -1689,7 +2862,7 @@ class TestDownloadExperimentMetrics:
         assert result == Path("exp1_metrics.csv")
         assert result.read_bytes() == b"csv-data"
         api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
-            "exp1", preview_rows=50_000, metrics=None
+            "exp1", preview_rows=50_000, metrics=None, project=None
         )
 
     def test_output_path_as_directory(self, api_key_client, tmp_path):
@@ -1724,6 +2897,60 @@ class TestDownloadExperimentMetrics:
             api_key_client.download_experiment_metrics("exp1")
         api_key_client.preview_experiment_metrics_csv.assert_not_called()
         assert existing.read_text() == "old"
+
+    def test_error_for_existing_file_names_the_overwrite_flag(
+        self, api_key_client, tmp_path
+    ):
+        target = tmp_path / "metrics.csv"
+        target.write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+
+        with pytest.raises(FileExistsError, match="--overwrite"):
+            api_key_client.download_experiment_metrics("exp1", output_path=target)
+
+    def test_overwrite_replaces_existing_file(self, api_key_client, tmp_path):
+        target = tmp_path / "metrics.csv"
+        target.write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+
+        result = api_key_client.download_experiment_metrics(
+            "exp1", output_path=target, overwrite=True
+        )
+
+        assert result == target
+        assert target.read_bytes() == b"new"
+
+    def test_overwrite_replaces_resolved_directory_target(
+        self, api_key_client, tmp_path
+    ):
+        (tmp_path / "custom.csv").write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", 'attachment; filename="custom.csv"')
+        )
+
+        result = api_key_client.download_experiment_metrics(
+            "exp1", output_path=tmp_path, overwrite=True
+        )
+
+        assert result == tmp_path / "custom.csv"
+        assert result.read_bytes() == b"new"
+
+    def test_overwrite_refuses_a_directory_at_the_resolved_path(
+        self, api_key_client, tmp_path
+    ):
+        (tmp_path / "custom.csv").mkdir()
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", 'attachment; filename="custom.csv"')
+        )
+
+        with pytest.raises(FileExistsError, match="a directory of that name"):
+            api_key_client.download_experiment_metrics(
+                "exp1", output_path=tmp_path, overwrite=True
+            )
 
     def test_creates_parent_directory_if_missing(self, api_key_client, tmp_path):
         api_key_client.preview_experiment_metrics_csv = MagicMock(
@@ -1761,7 +2988,19 @@ class TestDownloadExperimentMetrics:
         )
         api_key_client.download_experiment_metrics("exp1", metrics=["loss"])
         api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
-            "exp1", preview_rows=50_000, metrics=["loss"]
+            "exp1", preview_rows=50_000, metrics=["loss"], project=None
+        )
+
+    def test_project_forwarded(self, api_key_client, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"data", "text/csv", None)
+        )
+
+        api_key_client.download_experiment_metrics("exp1", project="llm-work")
+
+        api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
+            "exp1", preview_rows=50_000, metrics=None, project="llm-work"
         )
 
     def test_rejects_non_csv_response(self, api_key_client, tmp_path, monkeypatch):
@@ -1842,6 +3081,99 @@ class TestInferenceDeployments:
         api_key_client._request = MagicMock(return_value={"deployed": True})
         api_key_client.deploy_agent("exp1")
         assert "memoryScope" not in api_key_client._request.call_args[1]["json"]
+
+    def test_update_inference_deployment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-2"})
+        result = api_key_client.update_inference_deployment(
+            "agent-1",
+            new_name="agent-2",
+            enabled=False,
+            experiment_name="exp1",
+        )
+        assert result == {"name": "agent-2"}
+        api_key_client._request.assert_called_once_with(
+            "PATCH",
+            "/api/cli/v1/inference/deployments",
+            json={
+                "name": "agent-1",
+                "experimentName": "exp1",
+                "new_name": "agent-2",
+                "enabled": False,
+            },
+        )
+
+    def test_update_inference_deployment_sends_description(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-1"})
+
+        result = api_key_client.update_inference_deployment(
+            "agent-1", description="serving"
+        )
+
+        assert result == {"name": "agent-1"}
+        assert api_key_client._request.call_args.kwargs["json"]["description"] == (
+            "serving"
+        )
+
+    def test_update_inference_deployment_requires_a_name(self, api_key_client):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client.update_inference_deployment("  ", new_name="agent-2")
+
+        api_key_client._request.assert_not_called()
+
+    def test_delete_inference_deployment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"success": True})
+        result = api_key_client.delete_inference_deployment(
+            "agent-1", project_name="proj"
+        )
+        assert result == {"success": True}
+        api_key_client._request.assert_called_once_with(
+            "DELETE",
+            "/api/cli/v1/inference/deployments",
+            params={"name": "agent-1", "projectName": "proj"},
+        )
+
+    def test_delete_inference_deployment_requires_a_name(self, api_key_client):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client.delete_inference_deployment("  ")
+
+        api_key_client._request.assert_not_called()
+
+    def test_deploy_agent_sends_gpu_request(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1", num_gpus=4, gpu_type="h100-80")
+
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/inference/deploy",
+            json={
+                "experiment_name": "exp1",
+                "checkpoint": None,
+                "numGpus": 4,
+                "gpuType": "h100-80",
+            },
+        )
+
+    def test_deploy_agent_omits_unset_gpu_request(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1")
+
+        payload = api_key_client._request.call_args[1]["json"]
+        assert "numGpus" not in payload
+        assert "gpuType" not in payload
+
+    def test_deploy_agent_rejects_zero_gpus(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        with pytest.raises(ArenaValidationError, match="num_gpus must be at least 1"):
+            api_key_client.deploy_agent("exp1", num_gpus=0)
+
+        api_key_client._request.assert_not_called()
 
     def test_deploy_agent_rejects_unknown_memory_scope(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"deployed": True})
@@ -2156,6 +3488,13 @@ class TestGetCliCapabilities:
             with patch.object(api_key_client._http, "request", return_value=resp):
                 assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
+    @pytest.mark.parametrize("status_code", [401, 403])
+    def test_returns_none_on_unauthorized(self, api_key_client, status_code: int):
+        resp = _capabilities_response(status_code=status_code, is_success=False)
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(api_key_client._http, "request", return_value=resp):
+                assert api_key_client._get_cli_capabilities(force_refresh=True) is None
+
     def test_raises_on_other_error_status(self, api_key_client):
         resp = _capabilities_response(status_code=500, is_success=False)
         with patch.object(api_key_client, "_auth_headers", return_value={}):
@@ -2175,10 +3514,23 @@ class TestGetCliCapabilities:
             with patch.object(api_key_client._http, "request", return_value=resp):
                 assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
+    def test_returns_none_when_auth_headers_fail(self, api_key_client):
+        api_key_client._cli_capabilities_cache = {"stale": True}
+
+        with patch.object(
+            api_key_client,
+            "_auth_headers",
+            side_effect=ArenaAuthError("not signed in"),
+        ):
+            result = api_key_client._get_cli_capabilities(force_refresh=True)
+
+        assert result is None
+        assert api_key_client._cli_capabilities_cache is None
+
 
 class TestValidateManifestInvoke:
     def test_rejects_non_string_path(self, api_key_client):
-        with pytest.raises(ArenaValidationError, match="invalid on-prem command"):
+        with pytest.raises(ArenaValidationError, match="invalid BYOC command"):
             api_key_client._validate_manifest_invoke(
                 {"path": 123, "method": "GET", "responseKind": "json"}
             )
@@ -2411,22 +3763,24 @@ class TestGetDefaultRunSpec:
         )
         assert result == spec
 
-    def test_gym_query_params(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"algorithm": {"name": "PPO"}})
+    def test_env_query_params(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"algorithm": {}})
 
         api_key_client.get_default_run_spec(
-            "PPO",
-            gym_env="Space Invaders",
-            gym_env_entrypoint="python3",
+            "LLMPPO",
+            env_name="ticket-sim",
+            env_version="v1",
+            env_entrypoint="ticket_sim:TicketEnv",
         )
 
         api_key_client._request.assert_called_once_with(
             "GET",
             "/api/cli/v1/experiments/run-spec/default",
             params={
-                "algorithm": "PPO",
-                "gymEnv": "Space Invaders",
-                "gymEnvEntrypoint": "python3",
+                "algorithm": "LLMPPO",
+                "gymEnv": "ticket-sim",
+                "gymEnvVersion": "v1",
+                "gymEnvEntrypoint": "ticket_sim:TicketEnv",
             },
         )
 
@@ -2461,3 +3815,290 @@ class TestGetDefaultRunSpec:
                 "pretrainedModelNameOrPath": "ibm-granite/granite-3.3-2b-instruct",
             },
         )
+
+    @pytest.mark.parametrize("algorithm", ["PPO", "Recurrent PPO", "MATD3"])
+    def test_classic_rl_is_refused_before_any_request(self, api_key_client, algorithm):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError, match="Classic RL is no longer supported in Arena"
+        ):
+            api_key_client.get_default_run_spec(algorithm, env_name="my-gym-env")
+
+        api_key_client._request.assert_not_called()
+
+    def test_an_unregistered_algorithm_is_left_to_the_server(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={})
+
+        api_key_client.get_default_run_spec("Supervised", dataset_name="tabular")
+
+        api_key_client._request.assert_called_once()
+
+
+class TestArenaClientVersionSignals:
+    @pytest.fixture(autouse=True)
+    def fresh_process(self) -> None:
+        announce_update.cache_clear()
+
+    @staticmethod
+    def _client(
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response],
+    ) -> ArenaClient:
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            "agilerl.arena.client.httpx.Client",
+            lambda **kwargs: real_client(
+                transport=httpx.MockTransport(handler), **kwargs
+            ),
+        )
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            return ArenaClient(api_key="test-key")
+
+    def test_every_request_sends_the_client_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True, "data": []})
+
+        client = self._client(monkeypatch, handler)
+
+        # Act
+        client.list_models()
+
+        # Assert
+        assert seen[0].headers[CLIENT_VERSION_HEADER] == __version__
+        assert seen[0].headers["Authorization"] == "Bearer test-key"
+
+    UPGRADE_DESCRIPTION = (
+        "agilerl-arena 0.9.0 is older than 1.0.0, the oldest version this Arena "
+        'supports. Update with: pip install -U "agilerl-arena>=1.0.0"'
+    )
+
+    def _upgrade_required(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            426,
+            json={
+                "error": "client_upgrade_required",
+                "description": self.UPGRADE_DESCRIPTION,
+            },
+        )
+
+    def test_upgrade_required_shows_the_server_description_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        client = self._client(monkeypatch, self._upgrade_required)
+
+        # Act
+        with pytest.raises(ArenaAPIError) as raised:
+            client.list_models()
+
+        # Assert
+        assert raised.value.status_code == 426
+        assert raised.value.detail == self.UPGRADE_DESCRIPTION
+        assert raised.value.extras == {}
+        assert str(raised.value).count("pip install") == 1
+
+    def test_upgrade_required_on_the_capabilities_fetch_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(monkeypatch, self._upgrade_required)
+
+        with pytest.raises(ArenaAPIError) as raised:
+            client._get_cli_capabilities(force_refresh=True)
+
+        assert raised.value.status_code == 426
+        assert str(raised.value) == f"API error (426): {self.UPGRADE_DESCRIPTION}"
+
+    def test_an_update_header_prints_one_notice(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Arrange
+        client = self._client(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200,
+                json={"ok": True, "data": []},
+                headers={CLIENT_UPDATE_HEADER: "9.9.9"},
+            ),
+        )
+
+        # Act
+        client.list_models()
+        client.list_models()
+
+        # Assert
+        assert capsys.readouterr().err == (
+            f"agilerl-arena 9.9.9 is available (you have {__version__}). "
+            "Run: pip install -U agilerl-arena\n"
+        )
+
+
+def _logs_page(
+    lines: list[dict[str, Any]],
+    *,
+    status: str = "Running",
+    next_after: int | None = None,
+    has_more: bool = False,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "experiment_name": "exp1",
+        "status": status,
+        "failure_reason": failure_reason,
+        "last_modified": "2026-11-23T10:00:00+00:00",
+        "lines": lines,
+        "next_after": next_after,
+        "has_more": has_more,
+    }
+
+
+def _log_line(timestamp: int, message: str) -> dict[str, Any]:
+    return {"timestamp": timestamp, "severity": "INFO", "message": message}
+
+
+class TestArenaClientExperimentStatusAndLogs:
+    def test_status_sends_the_name_and_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"status": "Failed"})
+
+        result = api_key_client.get_experiment_status("exp1", project="proj")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/status",
+            params={"experiment_name": "exp1", "project": "proj"},
+        )
+        assert result == {"status": "Failed"}
+
+    def test_logs_sends_only_the_paging_options_given(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=_logs_page([]))
+        api_key_client._resolve_project = MagicMock(return_value=None)
+
+        api_key_client.get_experiment_logs("exp1", tail=20, level="warning")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/logs",
+            params={"experiment_name": "exp1", "tail": 20, "level": "warning"},
+        )
+
+    def test_iter_pages_forward_until_the_server_has_no_more(self, api_key_client):
+        api_key_client._resolve_project = MagicMock(return_value=None)
+        api_key_client._request = MagicMock(
+            side_effect=[
+                _logs_page([_log_line(1, "a")], next_after=1, has_more=True),
+                _logs_page([_log_line(2, "b")], next_after=2),
+            ]
+        )
+
+        pages = list(api_key_client.iter_experiment_logs("exp1"))
+
+        assert [line["message"] for page in pages for line in page["lines"]] == [
+            "a",
+            "b",
+        ]
+        second_call = api_key_client._request.call_args_list[1]
+        assert second_call.kwargs["params"]["after"] == 1
+
+    def test_follow_polls_until_the_run_ends_and_a_poll_is_empty(self, api_key_client):
+        api_key_client._resolve_project = MagicMock(return_value=None)
+        api_key_client._request = MagicMock(
+            side_effect=[
+                _logs_page([_log_line(1, "a")], next_after=1),
+                _logs_page([], next_after=1),
+                _logs_page([_log_line(2, "b")], status="Failed", next_after=2),
+                _logs_page(
+                    [],
+                    status="Failed",
+                    next_after=2,
+                    failure_reason="Out of GPU memory.",
+                ),
+            ]
+        )
+
+        with patch("agilerl.arena.client.time.sleep") as sleep:
+            pages = list(
+                api_key_client.iter_experiment_logs("exp1", tail=50, follow=True)
+            )
+
+        assert len(pages) == 4
+        assert pages[-1]["failure_reason"] == "Out of GPU memory."
+        assert sleep.call_count == 3
+        first_call = api_key_client._request.call_args_list[0]
+        assert first_call.kwargs["params"]["tail"] == 50
+
+    def test_without_follow_a_running_experiment_stops_after_the_last_page(
+        self, api_key_client
+    ):
+        api_key_client._resolve_project = MagicMock(return_value=None)
+        api_key_client._request = MagicMock(
+            return_value=_logs_page([], next_after=None)
+        )
+
+        pages = list(api_key_client.iter_experiment_logs("exp1"))
+
+        assert len(pages) == 1
+
+
+class TestArenaClientByExperimentName:
+    def test_unique_name_sends_no_project(self, api_key_client):
+        # Arrange
+        api_key_client._request = MagicMock(return_value={"status": "Running"})
+        api_key_client.get_default_project = MagicMock(return_value="stale-default")
+
+        # Act
+        result = api_key_client.get_experiment_status("exp1")
+
+        # Assert
+        assert result == {"status": "Running"}
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/status",
+            params={"experiment_name": "exp1"},
+        )
+
+    def test_ambiguous_name_retries_in_the_default_project(self, api_key_client):
+        # Arrange
+        ambiguous = ArenaAPIError(
+            "ambiguous: 2 experiments named 'exp1'; pass project or projectName",
+            status_code=400,
+        )
+        api_key_client._request = MagicMock(
+            side_effect=[ambiguous, {"status": "Running"}]
+        )
+        api_key_client.get_default_project = MagicMock(return_value="my-default")
+
+        # Act
+        result = api_key_client.get_experiment_status("exp1")
+
+        # Assert
+        assert result == {"status": "Running"}
+        assert api_key_client._request.call_args.kwargs["params"] == {
+            "experiment_name": "exp1",
+            "project": "my-default",
+        }
+
+    def test_ambiguous_name_without_a_default_raises(self, api_key_client):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("ambiguous: 2 experiments", status_code=400)
+        )
+        api_key_client.get_default_project = MagicMock(return_value=None)
+
+        with pytest.raises(ArenaAPIError, match="ambiguous"):
+            api_key_client.get_experiment_status("exp1")
+
+    def test_other_errors_do_not_retry(self, api_key_client):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("Not found", status_code=404)
+        )
+        api_key_client.get_default_project = MagicMock(return_value="my-default")
+
+        with pytest.raises(ArenaAPIError, match="Not found"):
+            api_key_client.get_experiment_status("exp1")
+
+        assert api_key_client._request.call_count == 1

@@ -29,7 +29,11 @@ class TestHasLlmDependencies:
         llm_extra = agilerl.get_extra_dependencies("agilerl", "llm")
 
         assert "vllm" not in agilerl.LLM_PACKAGES
-        assert set(agilerl.LLM_PACKAGES) == set(llm_extra) - {"vllm"}
+        assert "flash-linear-attention" not in agilerl.LLM_PACKAGES
+        assert set(agilerl.LLM_PACKAGES) == set(llm_extra) - {
+            "vllm",
+            "flash-linear-attention",
+        }
         assert all(
             agilerl._is_distribution_installed(pkg) for pkg in agilerl.LLM_PACKAGES
         )

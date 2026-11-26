@@ -93,22 +93,24 @@ class RolloutPrompt(TypedDict):
 
 
 class PreferencePrompts(TypedDict):
-    prompt: list[str]
-    prompt_lengths: list[int]
-    chosen: list[str]
-    rejected: list[str]
+    # Each row's field as given: a string, or chat messages.
+    prompt: list[str | list[dict[str, Any]]]
+    chosen: list[str | list[dict[str, Any]]]
+    rejected: list[str | list[dict[str, Any]]]
     chosen_input_ids: torch.Tensor
     chosen_attention_mask: torch.Tensor
+    # True at the tokens the loss trains on.
+    chosen_loss_mask: torch.Tensor
     rejected_input_ids: torch.Tensor
     rejected_attention_mask: torch.Tensor
+    rejected_loss_mask: torch.Tensor
 
 
 class SFTPrompts(TypedDict):
-    prompt: list[str]
-    prompt_lengths: list[int]
-    response: list[str]
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
+    # True at the tokens the loss trains on.
+    loss_mask: torch.Tensor
 
 
 class CheckpointInfo(TypedDict):
@@ -498,9 +500,12 @@ class ActionResult(NamedTuple):
     ``action_masks`` is what marks the generated span within it.
     ``sampling_logps`` holds the per-completion vLLM sampling logprobs captured
     for the sampling-mismatch correction, or ``None`` when not captured (HF
-    generation, evaluation, or correction disabled).
+    generation, evaluation, or correction disabled). ``sampling_supports``
+    holds each completion's ``(n, K)`` token ids vLLM could sample at each
+    generated token, or ``None`` when the engine does not record them.
     """
 
     token_ids: list[torch.Tensor]
     action_masks: list[torch.Tensor]
     sampling_logps: list[torch.Tensor | None] | None = None
+    sampling_supports: list[torch.Tensor | None] | None = None

@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import uuid
 from types import MethodType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR = "chat_template_default_kwargs"
 CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR = "chat_template_apply_orig"
@@ -96,3 +100,75 @@ def ensure_chat_template_kwargs_injected(tokenizer: Any) -> Any:  # noqa: ANN401
     if not defaults:
         return tokenizer
     return inject_chat_template_kwargs(tokenizer, defaults)
+
+
+def special_token_ids(tokenizer: PreTrainedTokenizerBase) -> set[int]:
+    """Ids of the tokenizer's special tokens, added special tokens included.
+
+    Harmony-format tokenizers (gpt-oss) register their turn markers as special
+    added tokens without listing them in ``all_special_ids``.
+
+    :param tokenizer: Tokenizer to read.
+    :return: Special token ids.
+    """
+    return set(tokenizer.all_special_ids) | {
+        token_id
+        for token_id, token in tokenizer.added_tokens_decoder.items()
+        if token.special
+    }
+
+
+def feedback_frame_parts(
+    tokenizer: PreTrainedTokenizerBase,
+    roles: tuple[str, ...],
+    chat_template_kwargs: dict[str, Any],
+) -> tuple[str, ...] | None:
+    """Text the chat template puts around the messages that follow an assistant turn.
+
+    One part before each message plus a closing suffix that ends in the
+    generation prompt: ``(prefix, suffix)`` for one message. Sliced at uuid4
+    placeholders (render verbatim, can't collide); the dummy user message
+    satisfies strict-alternation templates.
+
+    :param tokenizer: Tokenizer whose chat template renders the frame.
+    :param roles: Chat role of each message after the assistant turn.
+    :param chat_template_kwargs: Render kwargs, ``tools`` included.
+    :return: The frame parts, or ``None`` when the template cannot render them.
+    """
+    assistant_ph = uuid.uuid4().hex
+    feedback_phs = [uuid.uuid4().hex for _ in roles]
+    messages = [
+        {"role": "user", "content": "."},
+        {"role": "assistant", "content": assistant_ph},
+        *(
+            {"role": role, "content": placeholder}
+            for role, placeholder in zip(roles, feedback_phs, strict=True)
+        ),
+    ]
+    try:
+        rendered = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+    except Exception:
+        return None
+    if not isinstance(rendered, str):
+        return None
+
+    cursor = rendered.rfind(assistant_ph)
+    if cursor < 0:
+        return None
+    cursor += len(assistant_ph)
+    parts: list[str] = []
+    for placeholder in feedback_phs:
+        start = rendered.find(placeholder, cursor)
+        if start < 0:
+            return None
+        parts.append(rendered[cursor:start])
+        cursor = start + len(placeholder)
+    parts.append(rendered[cursor:])
+    if not parts[0] or not parts[-1]:
+        return None
+    return tuple(parts)

@@ -19,12 +19,11 @@ DEBUG:
     log_interval: 1
     max_context_length: 128
     max_output_tokens: 1
-    micro_batch_size_per_gpu: 8
     min_output_tokens: 1
     num_train_steps: 200
     tolerance: 0.15
     lora:
         r: 8
         lora_alpha: 16
-        target_modules: [c_attn, c_proj, c_fc]
+        target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
         modules_to_save: [summary]

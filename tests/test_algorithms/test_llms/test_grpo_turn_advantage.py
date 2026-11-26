@@ -50,6 +50,7 @@ class _AdvStub:
     _trajectory_advantages = GRPO._trajectory_advantages
     _resolve_advantage_granularity = GRPO._resolve_advantage_granularity
     _calculate_advantages = GRPO._calculate_advantages
+    _whiten_advantages = GRPO._whiten_advantages
 
 
 def _mask_stub(adv_norm: str = "mean_std", group_size: int = 4) -> _AdvStub:
@@ -418,9 +419,7 @@ def _cpu_grpo(**kwargs):
         "max_output_tokens": 4,
         "max_model_len": 12,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return GRPO(**defaults)
@@ -545,3 +544,100 @@ class TestGRPOAdvantageGranularityContract:
             grpo = _cpu_grpo()
         grpo.clean_up()
         assert not any("completion-level ratio" in str(w.message) for w in caught)
+
+
+# Float32 group means of these ties round off the shared reward.
+TIED_GROUPS = pytest.mark.parametrize(
+    ("group_size", "reward"), [(6, 0.3), (6, 0.6), (7, 0.1)]
+)
+
+
+class TestGRPOTiedGroupAdvantage:
+    """A group whose members all score the same gets advantage exactly zero."""
+
+    @TIED_GROUPS
+    @pytest.mark.parametrize("adv_norm", ["mean_only", "mean_std"])
+    def test_a_tied_group_has_zero_advantage(self, group_size, reward, adv_norm):
+        # Arrange
+        stub = _AdvStub(group_size=group_size, adv_norm=adv_norm)
+        varied = torch.arange(group_size, dtype=torch.float32) / 10
+        rewards = torch.cat([torch.full((group_size,), reward), varied])
+
+        # Act
+        advantages = stub._calculate_advantage(rewards).reshape(2, group_size)
+
+        # Assert
+        centered = varied - varied.mean()
+        expected = centered if adv_norm == "mean_only" else centered / varied.std()
+        assert torch.equal(advantages[0], torch.zeros(group_size))
+        assert torch.allclose(advantages[1], expected, atol=1e-6)
+
+    @TIED_GROUPS
+    def test_a_tied_turn_has_zero_advantage(self, group_size, reward):
+        # Arrange: turn 0 ties; on turn 1 one member stopped early.
+        stub = _AdvStub(group_size=group_size)
+        rewards = torch.stack(
+            [
+                torch.full((group_size,), reward),
+                torch.full((group_size,), reward),
+            ],
+            dim=1,
+        )
+        rewards[0, 1] = 0.0
+        turn_mask = torch.ones(group_size, 2, dtype=torch.bool)
+        turn_mask[0, 1] = False
+
+        # Act
+        unmasked = stub._calculate_turn_advantage(rewards[:, :1])
+        masked = stub._calculate_turn_advantage(rewards, turn_mask=turn_mask)
+
+        # Assert
+        assert torch.equal(unmasked, torch.zeros(group_size, 1))
+        assert torch.equal(masked, torch.zeros(group_size, 2))
+
+    def test_whitening_leaves_a_tied_group_at_zero(self):
+        # Arrange
+        stub = _AdvStub(group_size=6)
+        stub.advantage_granularity = "trajectory"
+        stub.whiten_advantages = True
+        rewards = torch.cat(
+            [torch.full((6,), 0.3), torch.tensor([0.0, 0.1, 0.2, 0.3, 0.4, 0.9])]
+        )
+
+        # Act
+        advantages, _ = stub._calculate_advantages(
+            rewards, torch.zeros(12, 4, dtype=torch.long), torch.ones(12, 3), None
+        )
+
+        # Assert
+        whitened = advantages.reshape(2, 6)
+        assert torch.equal(whitened[0], torch.zeros(6))
+        assert whitened[1].mean().item() == pytest.approx(0.0, abs=1e-6)
+        assert whitened[1].std().item() == pytest.approx(1.0, abs=1e-4)
+
+    def test_whitening_leaves_a_tied_turn_at_zero(self):
+        # Arrange: every member ties on turn 0. Turn 1 differs, with more
+        # tokens on the rows that scored higher, so its token mean is not zero.
+        stub = _AdvStub(group_size=4)
+        stub.advantage_granularity = "turn"
+        stub.whiten_advantages = True
+        rewards = torch.tensor([[0.3, 0.0], [0.3, 0.2], [0.3, 0.6], [0.3, 1.0]])
+        turn_ids = torch.tensor(
+            [
+                [0, 0, 1, -1, -1],
+                [0, 0, 1, 1, -1],
+                [0, 0, 1, 1, 1],
+                [0, 0, 1, 1, 1],
+            ]
+        )
+        action_masks = turn_ids >= 0
+
+        # Act
+        advantages, _ = stub._calculate_advantages(
+            rewards, torch.zeros(4, 6, dtype=torch.long), action_masks, turn_ids
+        )
+
+        # Assert
+        turn_one = advantages[turn_ids == 1]
+        assert torch.equal(advantages[turn_ids == 0], torch.zeros(8))
+        assert turn_one.mean().item() == pytest.approx(0.0, abs=1e-6)

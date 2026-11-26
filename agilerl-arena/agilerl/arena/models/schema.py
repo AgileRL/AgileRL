@@ -15,7 +15,6 @@ from pydantic import AliasChoices, BaseModel
 
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
-    GRPOSpec,
     LLMAlgorithmSpec,
     MultiAgentAlgorithmSpec,
     RolloutLLMSpec,
@@ -24,8 +23,15 @@ from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.sft import SFTSpec
 from agilerl.arena.models.env import ENV_POD_DEFAULT_CPUS, LLMEnvType
+from agilerl.arena.models.hpo import require_mutation_range_inside_field
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
+from agilerl.arena.models.manifest_rules import async_rollout_algorithm
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.arena.models.training import (
+    LLM_EVALUATION_INTERVAL,
+    LLM_REPORTING_INTERVAL,
+    ROLLOUT_LLM_MAX_STEPS,
+)
 
 SCHEMA_ID = "https://schemas.agilerl.com/training-manifest/v1.json"
 
@@ -133,13 +139,13 @@ def environment_without_generative_source_if() -> dict[str, Any]:
     }
 
 
-def dataset_backed_grpo_rollout_if() -> dict[str, Any]:
-    def grpo_family(spec: type[AlgoSpec]) -> bool:
-        return issubclass(spec, GRPOSpec)
+def dataset_backed_rollout_if() -> dict[str, Any]:
+    def rollout_llm(spec: type[AlgoSpec]) -> bool:
+        return issubclass(spec, RolloutLLMSpec)
 
     return {
         "allOf": [
-            algorithm_name_if(registered_algorithm_names(grpo_family)),
+            algorithm_name_if(registered_algorithm_names(rollout_llm)),
             environment_rollout_type_if(),
             environment_dataset_identity_if(),
             environment_without_generative_source_if(),
@@ -195,20 +201,7 @@ def network_encoder_arch_if(archs: tuple[str, ...]) -> dict[str, Any]:
 
 
 def async_llm_rollout_if() -> dict[str, Any]:
-    return {
-        "allOf": [
-            algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            {
-                "properties": {
-                    "training": {
-                        "properties": {"rollout_mode": {"const": "async"}},
-                        "required": ["rollout_mode"],
-                    }
-                },
-                "required": ["training"],
-            },
-        ]
-    }
+    return algorithm_name_if(registered_algorithm_names(async_rollout_algorithm))
 
 
 def training_schema_conditionals() -> list[dict[str, Any]]:
@@ -250,7 +243,9 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            "then": training_then({"reporting_interval": {"default": 1}}),
+            "then": training_then(
+                {"reporting_interval": {"default": LLM_REPORTING_INTERVAL}}
+            ),
         },
         {
             "if": algorithm_name_if(classic_names),
@@ -271,15 +266,13 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            "then": training_then({"evaluation_interval": {"default": 10}}),
+            "then": training_then(
+                {"evaluation_interval": {"default": LLM_EVALUATION_INTERVAL}}
+            ),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(rollout_llm)),
-            "then": training_then({"max_steps": {"default": 200}}),
-        },
-        {
-            "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
-            "then": training_then({"num_epochs": {"default": 1}}),
+            "then": training_then({"max_steps": {"default": ROLLOUT_LLM_MAX_STEPS}}),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
@@ -294,8 +287,12 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             "then": training_then({"experience_sharing": {"default": True}}),
         },
         {
-            "if": dataset_backed_grpo_rollout_if(),
-            "then": training_then({"num_epochs": {"default": 1}}),
+            "if": dataset_backed_rollout_if(),
+            "then": training_then(
+                {
+                    "max_steps": {"default": None},
+                }
+            ),
         },
         {
             "if": environment_env_image_if(),
@@ -325,15 +322,6 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         {
             "if": environment_dataset_identity_if(),
             "then": environment_then({"train_test_split": {"default": 0.9}}),
-        },
-        {
-            "if": {
-                "allOf": [
-                    environment_dataset_identity_if(),
-                    environment_rollout_type_if(),
-                ]
-            },
-            "then": environment_then({"rubric_name": {"default": "reward_fn"}}),
         },
         {
             "if": environment_dataset_type_if(),
@@ -408,6 +396,15 @@ def _attach_ou_schema_dependencies(
     """Gate OU theta / dt / mean_noise on O_U_noise in the served schema."""
     if "O_U_noise" not in spec_cls.model_fields:
         return
+    properties = schema["properties"]
+    # The form reads this branch when noise is on, so the bounds travel with it.
+    bound_keys = (
+        "default",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+    )
     schema.setdefault("allOf", []).append(
         {
             "if": {
@@ -416,11 +413,12 @@ def _attach_ou_schema_dependencies(
             },
             "then": {
                 "properties": {
-                    "theta": {"default": spec_cls.model_fields["theta"].default},
-                    "dt": {"default": spec_cls.model_fields["dt"].default},
-                    "mean_noise": {
-                        "default": spec_cls.model_fields["mean_noise"].default
-                    },
+                    name: {
+                        key: properties[name][key]
+                        for key in bound_keys
+                        if key in properties[name]
+                    }
+                    for name in ("theta", "dt", "mean_noise")
                 }
             },
         }
@@ -436,13 +434,9 @@ def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
     :returns: The section schema and the definitions it references.
     :rtype: tuple[dict[str, Any], dict[str, Any]]
     """
-    names_by_class: dict[type[AlgoSpec], list[str]] = {}
-    for name, spec_cls in MANIFEST_REGISTRY.items():
-        names_by_class.setdefault(spec_cls, []).append(name)
-
     variants: list[dict[str, Any]] = []
     defs: dict[str, Any] = {}
-    for spec_cls, names in names_by_class.items():
+    for spec_cls, names in MANIFEST_REGISTRY.names_by_class().items():
         schema = _algorithm_variant_schema(spec_cls, names)
         variant_defs = schema.pop("$defs", {})
         defs.update(variant_defs)
@@ -516,19 +510,25 @@ def _add_alias_spellings(schema: dict[str, Any], model: type[BaseModel]) -> None
 
 
 def _add_hpo_ranges(schema: dict[str, Any], model: type[AlgoSpec]) -> None:
-    """Declare the bounds HPO may mutate this algorithm's hyperparameters between.
+    """Declare mutation bounds that sit inside each hyperparameter's limits.
 
     :param schema: The variant's schema, modified in place.
     :type schema: dict[str, Any]
     :param model: The spec class the variant was built from.
     :type model: type[AlgoSpec]
+    :raises ValueError: If a default window leaves the field.
     """
-    applicable = {
-        name: bounds.model_dump()
-        for name, bounds in model.hpo_ranges.items()
-        if name in model.model_fields
-        and _is_numeric(model.model_fields[name].annotation)
-    }
+    applicable = {}
+    for name, bounds in model.hpo_ranges.items():
+        field = model.model_fields.get(name)
+        if field is None or not _is_numeric(field.annotation):
+            continue
+        try:
+            require_mutation_range_inside_field(bounds, field)
+        except ValueError as exc:
+            msg = f"{model.__name__}.{name}: {exc}"
+            raise ValueError(msg) from exc
+        applicable[name] = bounds.model_dump()
     if applicable:
         schema["x-hpo-ranges"] = applicable
 
@@ -584,6 +584,8 @@ LLM_ENV_SCHEMA_DEFAULT_FIELDS = (
     "strict_chat_template_boundary",
     "num_envs",
     "action_field",
+    "screenshot_field",
+    "goal_images_field",
 )
 
 LLM_ONLY_TRAINING_SCHEMA_FIELDS = ("training_gpus_per_agent",)

@@ -17,7 +17,7 @@ import torch
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.llm_envs import RolloutCollector
 from agilerl.llm_envs.task_assigner import TASK_OUTCOME_DECAY, _mix_seed
-from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
+from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin, RolloutHarnessDouble
 
 
 class _FakeRemoteClient:
@@ -384,6 +384,80 @@ class TestRolloutCollectorGetTrajectories:
             collector.close()
 
 
+class TwoTurnHarness(RolloutHarnessDouble):
+    max_turns = 2
+
+
+class TestRolloutCollectorSamplingSupports:
+    def test_concatenates_each_env_supports_across_turns(self) -> None:
+        # Arrange
+        collector = RolloutCollector(
+            env_factory=TwoTurnHarness, batch_size=1, group_size=2
+        )
+        try:
+            prompts = collector.reset(seed=0)
+            assert prompts is not None
+            first = torch.tensor([[7, 1], [8, -1]], dtype=torch.int32)
+            second = torch.tensor([[9, 3, 4]], dtype=torch.int32)
+
+            # Act
+            prompts = collector.step(
+                [
+                    torch.cat([p["input_ids"], torch.tensor([[7, 8]])], 1)
+                    for p in prompts
+                ],
+                sampling_supports=[first, None],
+            )
+            assert prompts is not None
+            collector.step(
+                [torch.cat([p["input_ids"], torch.tensor([[9]])], 1) for p in prompts],
+                sampling_supports=[second, None],
+            )
+            *_parts, supports = collector.get_trajectories()
+
+            # Assert
+            assert supports is not None
+            assert supports[0].tolist() == [[7, 1, -1], [8, -1, -1], [9, 3, 4]]
+            assert supports[1] is None
+        finally:
+            collector.close()
+
+    def test_reset_drops_the_previous_episode_supports(self) -> None:
+        collector = RolloutCollector(
+            env_factory=TwoTurnHarness, batch_size=1, group_size=1
+        )
+        try:
+            prompts = collector.reset(seed=0)
+            assert prompts is not None
+            collector.step(
+                [torch.cat([prompts[0]["input_ids"], torch.tensor([[7]])], 1)],
+                sampling_supports=[torch.tensor([[7, 1]], dtype=torch.int32)],
+            )
+
+            collector.reset(seed=1)
+            *_parts, supports = collector.get_trajectories()
+
+            assert supports is None
+        finally:
+            collector.close()
+
+    def test_rejects_supports_for_a_different_env_count(self) -> None:
+        collector = RolloutCollector(
+            env_factory=TwoTurnHarness, batch_size=1, group_size=2
+        )
+        try:
+            prompts = collector.reset(seed=0)
+            assert prompts is not None
+
+            with pytest.raises(RuntimeError, match="Number of sampling supports"):
+                collector.step(
+                    [p["input_ids"] for p in prompts],
+                    sampling_supports=[None],
+                )
+        finally:
+            collector.close()
+
+
 class TestRolloutCollectorGetEpisodeData:
     def test_returns_the_segment_layout_and_releases_the_slot(self) -> None:
         # Arrange
@@ -456,7 +530,7 @@ def _start_group(collector: RolloutCollector, group_seed: int) -> list[str]:
 
 
 class TestRolloutCollectorAssignGroupTask:
-    def test_overlapping_groups_cover_every_row_once_per_cycle(self) -> None:
+    def test_epoch_shuffle_covers_every_row_once_per_cycle(self) -> None:
         # Arrange
         resets: list[int | None] = []
         collector = RolloutCollector(
@@ -464,6 +538,7 @@ class TestRolloutCollectorAssignGroupTask:
             batch_size=8,
             group_size=2,
             base_seed=3,
+            adaptive_task_sampling=False,
         )
         try:
             # Act: each group starts while every earlier group is still live.
@@ -486,7 +561,7 @@ class TestRolloutCollectorAssignGroupTask:
         finally:
             collector.close()
 
-    def test_adaptive_sampling_favours_rows_whose_groups_were_informative(
+    def test_default_sampling_favours_rows_whose_groups_were_informative(
         self,
     ) -> None:
         # Arrange
@@ -496,7 +571,6 @@ class TestRolloutCollectorAssignGroupTask:
             batch_size=8,
             group_size=2,
             base_seed=3,
-            adaptive_task_sampling=True,
         )
         try:
             for seed in range(8):

@@ -69,21 +69,19 @@ class TestApplyLigerKernelToNemotronH:
             def __init__(self) -> None:
                 relu_calls.append(self)
 
+        casting_modes: list = []
+
         def fake_patch_rms_norm(module, **kwargs) -> None:
             patched_norms.append(module)
+            casting_modes.append(kwargs.get("casting_mode"))
 
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
         monkeypatch.setattr(
             liger_nemotron_h,
-            "LigerRMSNorm",
-            MagicMock(name="LigerRMSNorm"),
+            "LigerNemotronHRMSNorm",
+            MagicMock(name="LigerNemotronHRMSNorm"),
         )
         monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", FakeReLUSquared)
-        monkeypatch.setattr(
-            liger_nemotron_h,
-            "liger_rotary_pos_emb",
-            MagicMock(name="rope"),
-        )
         monkeypatch.setattr(liger_nemotron_h, "LigerCrossEntropyLoss", MagicMock())
         monkeypatch.setattr(
             liger_nemotron_h,
@@ -95,7 +93,6 @@ class TestApplyLigerKernelToNemotronH:
         modeling = SimpleNamespace(
             ACT2FN=act2fn,
             NemotronHRMSNorm=object(),
-            apply_rotary_pos_emb=object(),
             NemotronHForCausalLM=SimpleNamespace(forward=object()),
             CrossEntropyLoss=None,
         )
@@ -132,15 +129,14 @@ class TestApplyLigerKernelToNemotronH:
 
         liger_nemotron_h.apply_liger_kernel_to_nemotron_h(
             rms_norm=True,
-            rope=True,
             relu_squared=True,
             cross_entropy=False,
             fused_linear_cross_entropy=True,
             model=model,
         )
 
-        assert modeling.NemotronHRMSNorm is liger_nemotron_h.LigerRMSNorm
-        assert modeling.apply_rotary_pos_emb is liger_nemotron_h.liger_rotary_pos_emb
+        assert modeling.NemotronHRMSNorm is liger_nemotron_h.LigerNemotronHRMSNorm
+        assert casting_modes == ["gemma"] * (1 + len(layers))
         assert act2fn["relu2"] is FakeReLUSquared
         assert model.forward.__func__ is liger_nemotron_h.lce_forward
         assert patched_norms[0] is base.norm_f
@@ -160,11 +156,10 @@ class TestApplyLigerKernelToNemotronH:
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
         monkeypatch.setattr(
             liger_nemotron_h,
-            "LigerRMSNorm",
-            MagicMock(name="LigerRMSNorm"),
+            "LigerNemotronHRMSNorm",
+            MagicMock(name="LigerNemotronHRMSNorm"),
         )
         monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
-        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
         monkeypatch.setattr(
             liger_nemotron_h,
             "_patch_rms_norm_module",
@@ -176,7 +171,6 @@ class TestApplyLigerKernelToNemotronH:
             SimpleNamespace(
                 ACT2FN={"relu2": object()},
                 NemotronHRMSNorm=object(),
-                apply_rotary_pos_emb=object(),
                 NemotronHForCausalLM=SimpleNamespace(forward=object()),
             ),
         )
@@ -203,9 +197,8 @@ class TestApplyLigerKernelToNemotronH:
             patched_norms.append(module)
 
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
-        monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "LigerNemotronHRMSNorm", MagicMock())
         monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
-        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
         monkeypatch.setattr(
             liger_nemotron_h,
             "_patch_rms_norm_module",
@@ -217,7 +210,6 @@ class TestApplyLigerKernelToNemotronH:
             SimpleNamespace(
                 ACT2FN={"relu2": object()},
                 NemotronHRMSNorm=object(),
-                apply_rotary_pos_emb=object(),
                 NemotronHForCausalLM=SimpleNamespace(forward=object()),
             ),
         )
@@ -253,9 +245,8 @@ class TestApplyLigerKernelToNemotronH:
 
     def test_default_does_not_replace_causal_lm_forward(self, monkeypatch) -> None:
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
-        monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "LigerNemotronHRMSNorm", MagicMock())
         monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
-        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
         monkeypatch.setattr(
             liger_nemotron_h,
             "_patch_rms_norm_module",
@@ -268,7 +259,6 @@ class TestApplyLigerKernelToNemotronH:
         modeling = SimpleNamespace(
             ACT2FN={"relu2": object()},
             NemotronHRMSNorm=object(),
-            apply_rotary_pos_emb=object(),
             NemotronHForCausalLM=causal_lm,
         )
         monkeypatch.setattr(liger_nemotron_h, "modeling_nemotron_h", modeling)
@@ -286,9 +276,8 @@ class TestApplyLigerKernelToNemotronH:
 
     def test_class_level_lce_when_model_is_none(self, monkeypatch) -> None:
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
-        monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "LigerNemotronHRMSNorm", MagicMock())
         monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
-        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
         monkeypatch.setattr(
             liger_nemotron_h,
             "_patch_rms_norm_module",
@@ -299,7 +288,6 @@ class TestApplyLigerKernelToNemotronH:
         modeling = SimpleNamespace(
             ACT2FN={"relu2": object()},
             NemotronHRMSNorm=object(),
-            apply_rotary_pos_emb=object(),
             NemotronHForCausalLM=causal_lm,
         )
         monkeypatch.setattr(liger_nemotron_h, "modeling_nemotron_h", modeling)
@@ -336,14 +324,12 @@ class TestApplyLigerKernelToNemotronH:
         ce_cls = object()
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
         monkeypatch.setattr(liger_nemotron_h, "LigerCrossEntropyLoss", ce_cls)
-        monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "LigerNemotronHRMSNorm", MagicMock())
         monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
-        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
         causal_lm = SimpleNamespace(forward=object())
         modeling = SimpleNamespace(
             ACT2FN={"relu2": object()},
             NemotronHRMSNorm=object(),
-            apply_rotary_pos_emb=object(),
             NemotronHForCausalLM=causal_lm,
             CrossEntropyLoss=None,
         )
@@ -352,13 +338,33 @@ class TestApplyLigerKernelToNemotronH:
         liger_nemotron_h.apply_liger_kernel_to_nemotron_h(
             cross_entropy=True,
             fused_linear_cross_entropy=False,
-            rope=False,
             rms_norm=False,
             relu_squared=False,
         )
 
         assert modeling.CrossEntropyLoss is ce_cls
         assert causal_lm.forward is not liger_nemotron_h.lce_forward
+
+
+@pytest.mark.skipif(
+    not liger_nemotron_h.HAS_LIGER,
+    reason="liger-kernel is required to build the norm",
+)
+class TestLigerNemotronHRMSNorm:
+    def test_defaults_match_nemotron_h_rms_norm(self) -> None:
+        norm = liger_nemotron_h.LigerNemotronHRMSNorm(16)
+
+        assert isinstance(norm, liger_nemotron_h.LigerRMSNorm)
+        assert torch.equal(norm.weight, torch.ones(16))
+        assert norm.variance_epsilon == pytest.approx(1e-6)
+        assert norm.offset == 0.0
+        assert norm.casting_mode == "gemma"
+
+    def test_eps_override_reaches_liger(self) -> None:
+        norm = liger_nemotron_h.LigerNemotronHRMSNorm(8, eps=1e-5)
+
+        assert norm.weight.shape == (8,)
+        assert norm.variance_epsilon == pytest.approx(1e-5)
 
 
 class TestRegisterNemotronHLigerWhenModelingMissing:
@@ -565,8 +571,8 @@ class TestImportFallbacks:
             for name in (
                 "_patch_rms_norm_module",
                 "LigerRMSNorm",
+                "LigerNemotronHRMSNorm",
                 "LigerReLUSquared",
-                "liger_rotary_pos_emb",
                 "LigerCrossEntropyLoss",
                 "lce_maybe_trainable_lm_head",
                 "unpack_cross_entropy_result",

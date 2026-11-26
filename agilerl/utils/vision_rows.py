@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections import deque
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 
 import numpy as np
 import numpy.typing as npt
@@ -48,24 +50,6 @@ class VisionRows:
             image_counts=self.image_counts,
         )
 
-    def keys_for_minibatch(
-        self, minibatch_idxs: npt.NDArray[np.intp], sample_rows: int
-    ) -> torch.Tensor | None:
-        """Vision feature cache keys of the vision rows :meth:`for_minibatch` returns.
-
-        :param minibatch_idxs: Sample rows included in the minibatch.
-        :param sample_rows: Local batch size (``token_ids.shape[0]``).
-        :return: ``(N,)`` keys, or ``None`` without :attr:`image_keys`.
-        """
-        if self.image_keys is None:
-            return None
-        return pixel_values_for_minibatch(
-            self.image_keys,
-            minibatch_idxs,
-            sample_rows=sample_rows,
-            image_counts=self.image_counts,
-        )
-
 
 def pixel_values_for_minibatch(
     pixel_values: torch.Tensor,
@@ -77,7 +61,9 @@ def pixel_values_for_minibatch(
 
     Dim 0 is the sample axis when it equals ``sample_rows``. Several images
     for one sample sit in one contiguous block when the leading dimension
-    divides ``sample_rows``. A single sample keeps its whole tensor.
+    divides ``sample_rows``. A single sample keeps its whole tensor. Rows
+    whose vision rows are one contiguous block get a view of
+    ``pixel_values``; any other selection is a copy.
 
     :param pixel_values: Vision tensor for the local batch.
     :param minibatch_idxs: Sample rows included in the minibatch.
@@ -90,35 +76,122 @@ def pixel_values_for_minibatch(
     leading = int(pixel_values.shape[0])
     rows = int(sample_rows)
     if image_counts is not None:
-        offset = 0
-        spans: list[tuple[int, int]] = []
-        for count in image_counts:
-            spans.append((offset, offset + int(count)))
-            offset += int(count)
-        if offset != leading:
+        offsets = np.cumsum([0, *image_counts]).tolist()
+        if offsets[-1] != leading:
             msg = (
                 f"pixel_values leading dim {leading} does not match "
-                f"image counts summing to {offset}"
+                f"image counts summing to {offsets[-1]}"
             )
             raise ValueError(msg)
-        blocks = [
-            pixel_values[spans[int(idx)][0] : spans[int(idx)][1]]
-            for idx in minibatch_idxs
-        ]
-        return torch.cat(blocks, dim=0)
-    if leading == rows:
-        return pixel_values[minibatch_idxs]
-    if rows == 1:
+        spans = [(offsets[int(idx)], offsets[int(idx) + 1]) for idx in minibatch_idxs]
+    elif leading == rows:
+        spans = [(int(idx), int(idx) + 1) for idx in minibatch_idxs]
+    elif rows == 1:
         return pixel_values
-    if rows > 0 and leading % rows == 0:
+    elif rows > 0 and leading % rows == 0:
         images_per_row = leading // rows
-        blocks = [
-            pixel_values[int(idx) * images_per_row : (int(idx) + 1) * images_per_row]
+        spans = [
+            (int(idx) * images_per_row, (int(idx) + 1) * images_per_row)
             for idx in minibatch_idxs
         ]
-        return torch.cat(blocks, dim=0)
-    msg = f"pixel_values leading dim {leading} does not match the {rows} sample rows"
-    raise ValueError(msg)
+    else:
+        msg = (
+            f"pixel_values leading dim {leading} does not match the {rows} sample rows"
+        )
+        raise ValueError(msg)
+    if not spans:
+        return pixel_values[:0]
+    if all(end == start for (_, end), (start, _) in pairwise(spans)):
+        return pixel_values[spans[0][0] : spans[-1][1]]
+    return torch.cat([pixel_values[start:end] for start, end in spans])
+
+
+class PinnedStaging:
+    """Two page-locked host buffers that host chunks pass through on their way to a CUDA device.
+
+    Each buffer grows to the largest chunk it has held and is kept across
+    calls, so steady-state copies allocate no host memory. Chunks take the
+    buffers in turn, and a buffer is refilled only after the device copy out
+    of it is done.
+    """
+
+    def __init__(self) -> None:
+        self.buffers = [torch.empty(0, dtype=torch.uint8) for _ in range(2)]
+        self.copies: list[torch.cuda.Event | None] = [None, None]
+        self.slot = 0
+
+    def copy_to(
+        self, chunk: torch.Tensor, device: torch.device, stream: torch.cuda.Stream
+    ) -> tuple[torch.Tensor, torch.cuda.Event]:
+        """Start an asynchronous copy of ``chunk`` to ``device`` on ``stream`` through the next buffer.
+
+        :param chunk: Host tensor.
+        :param device: CUDA device of the copy.
+        :param stream: Stream the copy runs on.
+        :return: The device copy, and an event recorded when it is done.
+        """
+        slot = self.slot
+        self.slot = 1 - slot
+        previous = self.copies[slot]
+        if previous is not None:
+            previous.synchronize()
+        num_bytes = chunk.numel() * chunk.element_size()
+        if self.buffers[slot].numel() < num_bytes:
+            self.buffers[slot] = torch.empty(
+                num_bytes, dtype=torch.uint8, pin_memory=True
+            )
+        staged = self.buffers[slot][:num_bytes].view(chunk.dtype).view(chunk.shape)
+        staged.copy_(chunk)
+        with torch.cuda.stream(stream):
+            copy = staged.to(device, non_blocking=True)
+        done = torch.cuda.Event()
+        done.record(stream)
+        self.copies[slot] = done
+        return copy, done
+
+
+def prefetch_to_device(
+    chunks: Iterable[torch.Tensor],
+    device: str | torch.device,
+    staging: PinnedStaging,
+    ahead: int = 1,
+) -> Iterator[torch.Tensor]:
+    """Copies of ``chunks`` on ``device`` in order, each copy started ``ahead`` chunks before it is returned.
+
+    A host chunk bound for CUDA goes through ``staging`` and is copied on a
+    side stream, so its copy overlaps the device work already queued. The
+    iterator holds the ``ahead`` copies it has started but not returned.
+
+    :param chunks: Tensors in the order the caller reads them; read lazily.
+    :param device: Device the copies live on.
+    :param staging: Pinned buffers of a CUDA copy; unused for any other device.
+    :param ahead: Chunks copied before the caller asks for them, 0 or 1.
+    :return: Iterator over the device copies.
+    """
+    device = torch.device(device)
+    stream = torch.cuda.Stream(device) if device.type == "cuda" else None
+    pending: deque[tuple[torch.Tensor, torch.cuda.Event | None]] = deque()
+    for chunk in chunks:
+        if stream is None or chunk.is_cuda:
+            pending.append((chunk.to(device), None))
+        else:
+            pending.append(staging.copy_to(chunk, device, stream))
+        # ``to`` returns ``chunk`` itself on its own device; hold no returned copy.
+        del chunk
+        if len(pending) > ahead:
+            yield _finish_copy(*pending.popleft())
+    while pending:
+        yield _finish_copy(*pending.popleft())
+
+
+def _finish_copy(copy: torch.Tensor, ready: torch.cuda.Event | None) -> torch.Tensor:
+    """``copy``, with the current stream waiting on its side-stream copy."""
+    if ready is not None:
+        current = torch.cuda.current_stream(copy.device)
+        current.wait_event(ready)
+        # The side stream allocated ``copy``; keep it until the current stream is done.
+        copy.record_stream(current)
+    return copy
 
 
 def vision_filler_row(

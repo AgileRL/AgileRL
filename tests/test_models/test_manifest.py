@@ -1144,10 +1144,15 @@ class TestManifestBatchSizing:
             },
         )
 
-    def test_both_batch_fields_survive_the_manifest(self):
+    def test_mini_batch_size_survives_the_manifest(self):
         manifest = TrainingManifest.get_validated(
-            self._manifest(micro_batch_size_per_gpu=2, mini_batch_size=4),
-            mode="python",
+            self._manifest(mini_batch_size=4), mode="python"
+        )
+        assert manifest.algorithm.mini_batch_size == 4
+
+    def test_a_resolved_micro_batch_survives_model_validation(self):
+        manifest = TrainingManifest.model_validate(
+            self._manifest(micro_batch_size_per_gpu=2, mini_batch_size=4)
         )
         assert manifest.algorithm.micro_batch_size_per_gpu == 2
         assert manifest.algorithm.mini_batch_size == 4
@@ -1609,25 +1614,21 @@ class TestFromConfigFiles:
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(
-        ("rel_path", "expected_chunk_rows"),
+        "rel_path",
         [
-            ("llm_finetuning/cispo_quant_bench.yaml", 128),
-            ("llm_finetuning/cispo_quant_bench_qwen.yaml", 64),
+            "llm_finetuning/cispo_quant_bench.yaml",
+            "llm_finetuning/cispo_quant_bench_qwen.yaml",
         ],
         ids=["cispo-gemma", "cispo-qwen"],
     )
-    def test_llm_quant_bench_configs_validate_strictly(
-        self, rel_path, expected_chunk_rows
-    ):
-        """Shipped configs pass strict manifest validation, and ``chunk_rows``
-        survives the round trip as a spec field.
-        """
+    def test_llm_quant_bench_configs_validate_strictly(self, rel_path):
+        """Shipped quant-bench configs pass strict manifest validation."""
         config_path = CONFIGS_DIR / rel_path
         if not config_path.exists():
             pytest.skip(f"Config not found: {config_path}")
 
         out = TrainingManifest.get_validated(config_path)
-        assert out["algorithm"]["chunk_rows"] == expected_chunk_rows
+        assert out["algorithm"]["name"] == "CISPO"
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(
