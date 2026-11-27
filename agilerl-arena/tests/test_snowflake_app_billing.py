@@ -57,6 +57,7 @@ from tests.test_snowflake_billing import (
     RUN_ID,
     Result,
     hour_at,
+    trained,
     unknown,
 )
 from tests.test_snowflake_billing import (
@@ -615,7 +616,7 @@ class TestMeterDeployments:
 
         # Act
         summary = meter_deployments(session, arena.calls(), NOW)
-        billed = reconcile(session, unknown, NOW_MS)
+        billed = reconcile(session, unknown, trained, NOW_MS)
 
         # Assert
         assert "opened: 0" in summary
@@ -1121,6 +1122,26 @@ class TestReconcileUsageBillingTask:
             "ALTER TASK app_state.reconcile_usage_task SUSPEND"
         )
 
+    def test_a_run_that_failed_before_training_is_not_billed(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS, trained=False)
+        arena.replies = [closed_usage(252)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "items: 1, settled: 1, events: 0" in summary
+        assert "untrained: 1" in summary
+        assert session.events == []
+        assert session.items[0]["unbilled_reason"] == (
+            "The run ended before training started."
+        )
+        assert session.task == "suspended"
+
     def test_an_open_run_keeps_the_task_started(self, arena: Arena) -> None:
         session = BillingSession()
         session.add_item(RUN_ID, HOUR_13_MS)
@@ -1144,7 +1165,7 @@ class TestReconcileUsageBillingTask:
 
         summary = reconcile_usage(session)
 
-        assert summary.endswith("unconfirmed: 0")
+        assert summary.endswith("unconfirmed: 0, waiting: 0, untrained: 0")
         assert session.task == "started"
 
     def test_a_run_arena_never_saw_does_not_keep_the_task_started(

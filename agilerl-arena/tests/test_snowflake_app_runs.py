@@ -554,6 +554,34 @@ class TestSubmit:
         assert session.statements == []
         assert session.file.puts == {}
 
+    def test_refuses_an_invalid_manifest_in_plain_words(self) -> None:
+        document = yaml.safe_load(grpo_manifest("Qwen/Qwen3.5-0.8B"))
+        document["environment"]["reward"] = {"type": "llm_judge"}
+        session = submit_session()
+
+        with pytest.raises(ValueError, match="Nothing was started") as exc:
+            submit(
+                session,
+                yaml.safe_dump(document),
+                1,
+                "SOURCE_VIEW",
+                "gsm8k",
+                None,
+                None,
+                None,
+                None,
+            )
+
+        message = str(exc.value)
+        assert message.splitlines()[1].startswith(
+            "environment.reward.type is 'llm_judge', which is not one of the options."
+        )
+        assert message.endswith("Nothing was started.")
+        assert "validation error" not in message
+        assert "pydantic" not in message
+        assert session.statements == []
+        assert session.file.puts == {}
+
     def test_refuses_a_rubric_file_in_the_manifest(self) -> None:
         document = yaml.safe_load(grpo_manifest("Qwen/Qwen3.5-0.8B"))
         del document["environment"]["reward"]

@@ -18,6 +18,7 @@ from agilerl.arena.snowflake.billing import (
     billable_hour,
     event_batches,
     reconcile,
+    training_started,
 )
 from agilerl.arena.snowflake.license import (
     SnowflakeLicenseError,
@@ -49,6 +50,11 @@ MERGE_ITEM = re.compile(
 MERGE_VALUES = re.compile(r"FROM VALUES (.*?)\) AS s ")
 MERGE_OWNER = re.compile(r"ON t\.kind = '([^']*)' AND t\.usage_id = '([^']*)'")
 MERGE_CLAIM = re.compile(r"SET claim_id = '([^']*)'")
+STEPPED = re.compile(
+    r"^SELECT 1 AS STEPPED FROM app_state\.arena_metrics, LATERAL FLATTEN\(input => "
+    r"METRICS\) WHERE RUN_ID = '([^']*)' AND ENDSWITH\(KEY, '/steps'\) AND "
+    r"TRY_TO_DOUBLE\(TO_VARCHAR\(VALUE\)\) > 0 LIMIT 1$"
+)
 
 
 def hour(start: str, cents: int) -> dict[str, object]:
@@ -61,6 +67,14 @@ def hour_at(index: int, cents: int) -> dict[str, object]:
 
 def unknown(kind: str, usage_id: str) -> SnowflakeUsage:
     raise UnknownUsageError(usage_id)
+
+
+def trained(run_id: str) -> bool:
+    return True
+
+
+def untrained(run_id: str) -> bool:
+    return False
 
 
 def matches(row: dict[str, object], where: str) -> bool:
@@ -113,6 +127,7 @@ class BillingSession:
         self.served: list[dict[str, object]] = []
         self.grants: list[str] = []
         self.functions: list[str] = []
+        self.stepped: set[str] = set()
 
     def add_item(
         self,
@@ -122,7 +137,10 @@ class BillingSession:
         checked_ms: int | None = None,
         first_404_ms: int | None = None,
         service_name: str | None = None,
+        trained: bool = True,
     ) -> dict[str, object]:
+        if trained:
+            self.stepped.add(usage_id)
         item: dict[str, object] = {
             "kind": kind,
             "usage_id": usage_id,
@@ -135,6 +153,7 @@ class BillingSession:
             "closed_at": None,
             "last_error": None,
             "last_error_at": None,
+            "unbilled_reason": None,
         }
         self.items.append(item)
         return item
@@ -170,6 +189,9 @@ class BillingSession:
         if statement.startswith("MERGE INTO app_state.billed_hours "):
             self._merge(statement)
             return Result([])
+        if stepped := STEPPED.match(statement):
+            run_id = stepped.group(1)
+            return Result([Row(STEPPED=1)] if run_id in self.stepped else [])
         if statement == "SHOW SERVICES IN SCHEMA app_state":
             return Result(
                 [
@@ -660,12 +682,12 @@ class TestReconcile:
         }
 
         # Act
-        summary = reconcile(session, lambda kind, uid: usage[uid], NOW_MS)
+        summary = reconcile(session, lambda kind, uid: usage[uid], trained, NOW_MS)
 
         # Assert
         assert summary == (
             "items: 2, settled: 1, events: 2, failed: 0, missing: 0, skipped: 0, stale: 0, "
-            "unconfirmed: 0"
+            "unconfirmed: 0, waiting: 0, untrained: 0"
         )
         assert [item["settled_at"] for item in session.items] == [NOW_MS, None]
         assert [item["first_seen_at"] for item in session.items] == [NOW_MS] * 2
@@ -676,12 +698,12 @@ class TestReconcile:
         session = BillingSession()
         session.add_item(RUN_ID, HOUR_13_MS)
         closed = SnowflakeUsage("closed", [hour_at(0, 10)])
-        reconcile(session, lambda kind, uid: closed, NOW_MS)
+        reconcile(session, lambda kind, uid: closed, trained, NOW_MS)
         reads: list[str] = []
 
         # Act
         summary = reconcile(
-            session, lambda kind, uid: reads.append(uid) or closed, NOW_MS
+            session, lambda kind, uid: reads.append(uid) or closed, trained, NOW_MS
         )
 
         # Assert
@@ -699,7 +721,9 @@ class TestReconcile:
         open_usage = SnowflakeUsage("open", [])
 
         # Act
-        reconcile(session, lambda kind, uid: reads.append(uid) or open_usage, NOW_MS)
+        reconcile(
+            session, lambda kind, uid: reads.append(uid) or open_usage, trained, NOW_MS
+        )
 
         # Assert
         assert reads == ["arena-new", "arena-old", "arena-recent"]
@@ -722,13 +746,13 @@ class TestReconcile:
             return SnowflakeUsage("open", [])
 
         # Act
-        first = reconcile(session, down_once, NOW_MS)
-        reconcile(session, down_once, NOW_MS + HOUR_MS)
+        first = reconcile(session, down_once, trained, NOW_MS)
+        reconcile(session, down_once, trained, NOW_MS + HOUR_MS)
 
         # Assert
         assert first == (
             "items: 2, settled: 0, events: 0, failed: 1, missing: 0, skipped: 0, stale: 0, "
-            "unconfirmed: 0"
+            "unconfirmed: 0, waiting: 0, untrained: 0"
         )
         assert reads == ["arena-down", RUN_ID, "arena-down"]
         assert session.items[0]["settled_at"] is None
@@ -756,7 +780,7 @@ class TestReconcile:
             return SnowflakeUsage("open", [])
 
         # Act
-        summary = reconcile(session, first_missing, NOW_MS)
+        summary = reconcile(session, first_missing, trained, NOW_MS)
 
         # Assert
         assert reads == ["arena-missing", RUN_ID]
@@ -770,12 +794,12 @@ class TestReconcile:
         session.add_item(RUN_ID, NOW_MS - 2 * DAY_MS)
 
         # Act
-        summary = reconcile(session, unknown, NOW_MS)
+        summary = reconcile(session, unknown, trained, NOW_MS)
 
         # Assert
         assert summary == (
             "items: 1, settled: 0, events: 0, failed: 0, missing: 1, skipped: 0, stale: 0, "
-            "unconfirmed: 0"
+            "unconfirmed: 0, waiting: 0, untrained: 0"
         )
         [item] = session.items
         assert item["settled_at"] is None
@@ -796,9 +820,9 @@ class TestReconcile:
             raise UnknownUsageError(usage_id)
 
         # Act
-        within_a_day = reconcile(session, counted, NOW_MS)
+        within_a_day = reconcile(session, counted, trained, NOW_MS)
         reads_within_a_day = len(reads)
-        reconcile(session, counted, checked_ms + DAY_MS)
+        reconcile(session, counted, trained, checked_ms + DAY_MS)
 
         # Assert
         assert reads_within_a_day == 0
@@ -827,7 +851,7 @@ class TestReconcile:
         )
 
         # Act
-        reconcile(session, unknown, NOW_MS)
+        reconcile(session, unknown, trained, NOW_MS)
 
         # Assert
         assert session.items[0]["settled_at"] == settled_at
@@ -840,12 +864,14 @@ class TestReconcile:
         # Arrange
         session = BillingSession()
         session.add_item(RUN_ID, HOUR_13_MS)
-        reconcile(session, lambda kind, uid: SnowflakeUsage("open", []), NOW_MS)
+        reconcile(
+            session, lambda kind, uid: SnowflakeUsage("open", []), trained, NOW_MS
+        )
         later_ms = NOW_MS + 31 * DAY_MS
-        reconcile(session, unknown, NOW_MS + HOUR_MS)
+        reconcile(session, unknown, trained, NOW_MS + HOUR_MS)
 
         # Act
-        summary = reconcile(session, unknown, later_ms)
+        summary = reconcile(session, unknown, trained, later_ms)
 
         # Assert
         assert "settled: 0" in summary
@@ -873,7 +899,7 @@ class TestReconcile:
             raise UnknownUsageError(usage_id)
 
         # Act
-        reconcile(session, counted, NOW_MS)
+        reconcile(session, counted, trained, NOW_MS)
 
         # Assert
         assert reads == [RUN_ID]
@@ -889,7 +915,7 @@ class TestReconcile:
         open_usage = SnowflakeUsage("open", [])
 
         # Act
-        summary = reconcile(session, lambda kind, uid: open_usage, NOW_MS)
+        summary = reconcile(session, lambda kind, uid: open_usage, trained, NOW_MS)
 
         # Assert
         assert "stale: 1" in summary
@@ -903,19 +929,21 @@ class TestReconcile:
         session = BillingSession([SqlError("Connection reset by peer")])
         session.add_item(RUN_ID, HOUR_13_MS)
         closed = SnowflakeUsage("closed", [hour_at(0, 10)])
-        first = reconcile(session, lambda kind, uid: closed, NOW_MS)
+        first = reconcile(session, lambda kind, uid: closed, trained, NOW_MS)
 
         # Act
-        later = reconcile(session, lambda kind, uid: closed, NOW_MS + HOUR_MS + 1)
+        later = reconcile(
+            session, lambda kind, uid: closed, trained, NOW_MS + HOUR_MS + 1
+        )
 
         # Assert
         assert first == (
             "items: 1, settled: 0, events: 0, failed: 1, missing: 0, skipped: 0, stale: 0, "
-            "unconfirmed: 0"
+            "unconfirmed: 0, waiting: 0, untrained: 0"
         )
         assert later == (
             "items: 1, settled: 1, events: 0, failed: 0, missing: 0, skipped: 0, stale: 0, "
-            "unconfirmed: 1"
+            "unconfirmed: 1, waiting: 0, untrained: 0"
         )
         assert session.events == []
         assert session.items[0]["settled_at"] == NOW_MS + HOUR_MS + 1
@@ -933,12 +961,12 @@ class TestReconcile:
         usage = SnowflakeUsage("closed", [hour_at(0, 10)])
 
         # Act
-        summary = reconcile(session, lambda kind, uid: usage, NOW_MS)
+        summary = reconcile(session, lambda kind, uid: usage, trained, NOW_MS)
 
         # Assert
         assert summary == (
             "items: 2, settled: 1, events: 1, failed: 1, missing: 0, skipped: 0, stale: 0, "
-            "unconfirmed: 0"
+            "unconfirmed: 0, waiting: 0, untrained: 0"
         )
         assert json.loads(session.events[0]["objects"]) == [RUN_ID]
         bad, good = session.items
@@ -946,6 +974,128 @@ class TestReconcile:
             "Billing failed: Snowflake answered 'Something new' to 1 billing events."
         )
         assert good["last_error"] is None
+
+
+class TestRunsThatNeverTrained:
+    def test_closed_run_with_no_training_step_settles_unbilled_with_the_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        closed = SnowflakeUsage("closed", [hour_at(0, 252)])
+
+        # Act
+        with caplog.at_level("INFO"):
+            summary = reconcile(session, lambda kind, uid: closed, untrained, NOW_MS)
+
+        # Assert
+        assert summary == (
+            "items: 1, settled: 1, events: 0, failed: 0, missing: 0, skipped: 0, stale: 0, "
+            "unconfirmed: 0, waiting: 0, untrained: 1"
+        )
+        assert session.events == []
+        assert session.billed == []
+        [item] = session.items
+        assert item["settled_at"] == NOW_MS
+        assert item["unbilled_reason"] == "The run ended before training started."
+        assert f"Run {RUN_ID} ended before training started" in caplog.text
+
+    def test_open_run_waits_unbilled_until_its_first_training_step(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        usage = SnowflakeUsage("open", [hour_at(0, 100)])
+        steps: list[bool] = []
+
+        def trains_on_second_read(run_id: str) -> bool:
+            steps.append(run_id == RUN_ID)
+            return len(steps) > 1
+
+        # Act
+        first = reconcile(
+            session, lambda kind, uid: usage, trains_on_second_read, NOW_MS
+        )
+        events_while_setting_up = list(session.events)
+        second = reconcile(
+            session, lambda kind, uid: usage, trains_on_second_read, NOW_MS + HOUR_MS
+        )
+
+        # Assert
+        assert first.endswith("waiting: 1, untrained: 0")
+        assert events_while_setting_up == []
+        assert session.items[0]["settled_at"] is None
+        assert second.endswith("waiting: 0, untrained: 0")
+        assert [event["start_timestamp"] for event in session.events] == [HOUR_13_MS]
+
+    def test_run_that_trained_is_billed_up_to_its_end_including_setup(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        closed = SnowflakeUsage("closed", [hour_at(0, 100), hour_at(1, 40)])
+
+        # Act
+        summary = reconcile(session, lambda kind, uid: closed, trained, NOW_MS)
+
+        # Assert
+        assert "settled: 1, events: 2" in summary
+        assert [event["base_charge"] for event in session.events] == [1.0, 0.4]
+        assert session.items[0]["unbilled_reason"] is None
+
+    def test_run_billed_before_keeps_billing_without_a_training_check(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        session.add_billed(HOUR_13_MS)
+        checked: list[str] = []
+        closed = SnowflakeUsage("closed", [hour_at(0, 10), hour_at(1, 20)])
+
+        # Act
+        reconcile(
+            session,
+            lambda kind, uid: closed,
+            lambda run_id: checked.append(run_id) or False,
+            NOW_MS,
+        )
+
+        # Assert
+        assert checked == []
+        assert [event["start_timestamp"] for event in session.events] == [
+            HOUR_13_MS,
+            HOUR_13_MS + HOUR_MS,
+        ]
+        assert session.items[0]["settled_at"] == NOW_MS
+
+    def test_deployments_are_billed_without_a_training_check(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item("dep-a", HOUR_13_MS, "deployment", service_name="A")
+        closed = SnowflakeUsage("closed", [hour_at(0, 19)])
+
+        # Act
+        summary = reconcile(session, lambda kind, uid: closed, untrained, NOW_MS)
+
+        # Assert
+        assert "settled: 1, events: 1" in summary
+        assert summary.endswith("untrained: 0")
+
+
+class TestTrainingStarted:
+    @pytest.mark.parametrize(("stepped", "started"), [(set(), False), ({RUN_ID}, True)])
+    def test_reads_a_step_count_above_zero_from_the_metrics_table(
+        self, stepped: set[str], started: bool
+    ) -> None:
+        session = BillingSession()
+        session.stepped = stepped
+
+        assert training_started(session, "app_state.arena_metrics", RUN_ID) is started
+        assert session.statements == [
+            (
+                "SELECT 1 AS STEPPED FROM app_state.arena_metrics, LATERAL FLATTEN(input "
+                f"=> METRICS) WHERE RUN_ID = '{RUN_ID}' AND ENDSWITH(KEY, '/steps') AND "
+                "TRY_TO_DOUBLE(TO_VARCHAR(VALUE)) > 0 LIMIT 1"
+            )
+        ]
 
 
 class TestEventBatches:

@@ -789,6 +789,9 @@ def cpu_memory_gib(family: str) -> int:
 def container_env(run_id: str) -> dict[str, str]:
     """Container environment Ray passes from each raylet to its actors.
 
+    ``AGILERL_DEBUG=none`` keeps every trainer logger at INFO, since the
+    consumer reads these logs.
+
     :param run_id: Run id. It sets ``ARENA_RUN_ID`` and ``JOB_ID``.
     :return: Variable name to value.
     """
@@ -796,6 +799,7 @@ def container_env(run_id: str) -> dict[str, str]:
     return {
         "APP_TOPIC_PREFIX": topic_prefix,
         "AGILERL_ROLLOUT_TOPIC_ROUTE": rollout_topic_route(topic_prefix),
+        "AGILERL_DEBUG": "none",
         "ARENA_RUN_ID": run_id,
         "JOB_ID": str(job_id_from_run_id(run_id)),
     }

@@ -166,6 +166,8 @@ ALTER TABLE app_state.usage_items ADD COLUMN IF NOT EXISTS service_name STRING;
 ALTER TABLE app_state.usage_items ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP_TZ;
 ALTER TABLE app_state.usage_items ADD COLUMN IF NOT EXISTS last_error STRING;
 ALTER TABLE app_state.usage_items ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMP_TZ;
+-- Why a run settled without billing, such as ending before training started.
+ALTER TABLE app_state.usage_items ADD COLUMN IF NOT EXISTS unbilled_reason STRING;
 
 -- What each service app_code.publish started serves, recorded before the service exists.
 CREATE TABLE IF NOT EXISTS app_state.served_models (
