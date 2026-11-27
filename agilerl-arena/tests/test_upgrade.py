@@ -20,12 +20,8 @@ from agilerl.arena import upgrade
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaAPIError, ArenaClientUpgradeRequiredError
 from agilerl.arena.output import handle_error
-from agilerl.arena.snowflake.cli import snowflake_errors
-from agilerl.arena.snowflake.license import SnowflakeUpgradeRequiredError
-from agilerl.arena.snowflake.setup_cli import cli_errors
 from agilerl.arena.upgrade import (
     AUTO_UPGRADE_ENV,
-    SNOWFLAKE_SETUP_NOTE,
     UPGRADE_RETRIED_ENV,
     installed_extras,
     offer_upgrade,
@@ -110,7 +106,7 @@ class TestOfferUpgrade:
 
         # Act
         with pytest.raises(Execed):
-            offer_upgrade(DESCRIPTION, snowflake=False)
+            offer_upgrade(DESCRIPTION)
 
         # Assert
         assert host.pip_args == [
@@ -130,7 +126,6 @@ class TestOfferUpgrade:
         err = capsys.readouterr().err
         assert DESCRIPTION in err
         assert "Upgrade agilerl-arena now? [Y/n]" in err
-        assert SNOWFLAKE_SETUP_NOTE not in err
 
     def test_an_empty_answer_means_yes(
         self, host: Host, tty: Callable[[str], None], monkeypatch: pytest.MonkeyPatch
@@ -138,7 +133,7 @@ class TestOfferUpgrade:
         tty("\n")
 
         with pytest.raises(Execed):
-            offer_upgrade(DESCRIPTION, snowflake=False)
+            offer_upgrade(DESCRIPTION)
 
         assert host.execv_args is not None
 
@@ -150,7 +145,7 @@ class TestOfferUpgrade:
 
         # Act
         with pytest.raises(click.exceptions.Exit) as raised:
-            offer_upgrade(DESCRIPTION, snowflake=False)
+            offer_upgrade(DESCRIPTION)
 
         # Assert
         assert raised.value.exit_code == 1
@@ -169,7 +164,7 @@ class TestOfferUpgrade:
 
         # Act
         with pytest.raises(click.exceptions.Exit) as raised:
-            offer_upgrade(DESCRIPTION, snowflake=False)
+            offer_upgrade(DESCRIPTION)
 
         # Assert
         assert raised.value.exit_code == 1
@@ -183,7 +178,7 @@ class TestOfferUpgrade:
         self, host: Host, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # Act
-        offer_upgrade(DESCRIPTION, snowflake=False)
+        offer_upgrade(DESCRIPTION)
 
         # Assert
         assert host.pip_args is None
@@ -198,7 +193,7 @@ class TestOfferUpgrade:
         monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
 
         # Act
-        offer_upgrade(DESCRIPTION, snowflake=False)
+        offer_upgrade(DESCRIPTION)
 
         # Assert
         assert host.pip_args is None
@@ -218,7 +213,7 @@ class TestOfferUpgrade:
 
         # Act
         with pytest.raises(SystemExit) as raised:
-            offer_upgrade(DESCRIPTION, snowflake=False)
+            offer_upgrade(DESCRIPTION)
 
         # Assert
         assert raised.value.code == 4
@@ -243,7 +238,7 @@ class TestOfferUpgrade:
 
         # Act
         with pytest.raises(Execed):
-            offer_upgrade(DESCRIPTION, snowflake=False)
+            offer_upgrade(DESCRIPTION)
 
         # Assert
         assert host.pip_args is not None
@@ -261,51 +256,32 @@ class TestOfferUpgrade:
         tty("y\n")
 
         # Act
-        offer_upgrade(DESCRIPTION, snowflake=False)
+        offer_upgrade(DESCRIPTION)
 
         # Assert
         assert host.pip_args is None
         assert host.execv_args is None
-
-    def test_snowflake_installs_the_extra_and_names_setup(
-        self,
-        host: Host,
-        tty: Callable[[str], None],
-        capsys: pytest.CaptureFixture[str],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Arrange
-        tty("y\n")
-
-        # Act
-        with pytest.raises(Execed):
-            offer_upgrade(SNOWFLAKE_DESCRIPTION, snowflake=True)
-
-        # Assert
-        assert host.pip_args is not None
-        assert host.pip_args[-1] == "agilerl-arena[snowflake]"
-        assert capsys.readouterr().err.endswith(SNOWFLAKE_SETUP_NOTE + "\n")
 
 
 class TestUpgradeRequirement:
     def test_keeps_installed_extras(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(upgrade, "installed_extras", lambda: ["hub"])
 
-        assert upgrade_requirement(DESCRIPTION, False) == "agilerl-arena[hub]"
+        assert upgrade_requirement(DESCRIPTION) == "agilerl-arena[hub]"
 
     def test_adds_extras_named_in_the_description(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(upgrade, "installed_extras", lambda: ["hub"])
 
-        assert upgrade_requirement(SNOWFLAKE_DESCRIPTION, False) == (
+        assert upgrade_requirement(SNOWFLAKE_DESCRIPTION) == (
             "agilerl-arena[hub,snowflake]"
         )
 
     def test_no_extras_is_the_bare_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(upgrade, "installed_extras", list)
 
-        assert upgrade_requirement(DESCRIPTION, False) == "agilerl-arena"
+        assert upgrade_requirement(DESCRIPTION) == "agilerl-arena"
 
 
 class FakeDistribution:
@@ -421,52 +397,3 @@ class TestUpgradeAtTheCliErrorBoundary:
         # Assert
         assert exited.value.exit_code == 1
         assert host.pip_args is None
-
-    def test_a_snowflake_command_upgrades_with_the_snowflake_extra(
-        self,
-        host: Host,
-        tty: Callable[[str], None],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Arrange
-        tty("y\n")
-
-        # Act
-        with pytest.raises(Execed), snowflake_errors():
-            raise SnowflakeUpgradeRequiredError(SNOWFLAKE_DESCRIPTION)
-
-        # Assert
-        assert host.pip_args is not None
-        assert host.pip_args[-1] == "agilerl-arena[snowflake]"
-
-
-class TestSnowflakeErrorBoundaries:
-    @pytest.mark.parametrize(
-        "boundary",
-        [snowflake_errors, lambda: cli_errors(None)],
-        ids=["snowflake_errors", "cli_errors"],
-    )
-    def test_without_a_tty_the_description_is_the_click_error(
-        self, host: Host, boundary: Callable[[], object]
-    ) -> None:
-        # Act
-        with pytest.raises(click.ClickException) as raised, boundary():
-            raise SnowflakeUpgradeRequiredError(SNOWFLAKE_DESCRIPTION)
-
-        # Assert
-        assert raised.value.message == SNOWFLAKE_DESCRIPTION
-        assert host.pip_args is None
-
-    def test_setup_upgrades_with_the_snowflake_extra(
-        self, host: Host, tty: Callable[[str], None]
-    ) -> None:
-        # Arrange
-        tty("y\n")
-
-        # Act
-        with pytest.raises(Execed), cli_errors(None):
-            raise SnowflakeUpgradeRequiredError(SNOWFLAKE_DESCRIPTION)
-
-        # Assert
-        assert host.pip_args is not None
-        assert host.pip_args[-1] == "agilerl-arena[snowflake]"

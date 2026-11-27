@@ -48,7 +48,6 @@ from agilerl.arena.output import (
     select_row,
     supports_interactive_selection,
 )
-from agilerl.arena.snowflake.cli import snowflake_group
 from agilerl.arena.submit_quote import (
     confirm_resume_price,
     confirm_submit_price,
@@ -1468,7 +1467,6 @@ main.add_command(datasets_group)
 main.add_command(memory_group)
 main.add_command(secrets_group)
 main.add_command(user_group)
-main.add_command(snowflake_group)
 
 if __name__ == "__main__":
     # Plugins import agilerl.arena.cli, a second copy of this module under
