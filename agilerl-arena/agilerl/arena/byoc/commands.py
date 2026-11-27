@@ -9,7 +9,7 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from http import HTTPStatus
@@ -41,7 +41,10 @@ from agilerl.arena.byoc.cluster_register import (
     run_cluster_register,
 )
 from agilerl.arena.byoc.cluster_smoke import run_cluster_smoke
-from agilerl.arena.byoc.cluster_token import run_cluster_rotate_token
+from agilerl.arena.byoc.cluster_token import (
+    run_cluster_revoke_token,
+    run_cluster_rotate_token,
+)
 from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
 from agilerl.arena.byoc.kube_target import (
     ClickDecorated,
@@ -1507,67 +1510,56 @@ def build_cluster_unregister_command() -> click.Command:
     return unregister_cmd
 
 
-def build_cluster_rotate_token_command() -> click.Command:
-    """Build ``arena cluster rotate-token``."""
+def _credential_command(
+    command_name: str,
+    help_text: str,
+    question: str,
+    run: Callable[..., object],
+) -> click.Command:
+    """Build a cluster credential command that names a cluster and confirms."""
 
-    @click.command("rotate-token")
+    @click.command(command_name, help=help_text)
     @click.option("--name", required=True, help="Registered cluster name.")
-    @kube_target_options
-    @click.option(
-        "--agent-namespace",
-        default=None,
-        help=(
-            "Kubernetes namespace for the agent Helm release. "
-            "Defaults to the namespace Helm reports for arena-byoc-agent."
-        ),
-    )
-    @click.option(
-        "--secret-name",
-        default=None,
-        help="Cluster-token Secret name. Defaults to the Helm agent Secret.",
-    )
-    @click.option(
-        "--yes",
-        is_flag=True,
-        default=False,
-        help="Rotate without prompting.",
-    )
+    @click.option("--yes", is_flag=True, default=False, help="Do not ask first.")
     @_platform_option
     @click.pass_obj
-    def rotate_token_cmd(
-        config: CommandConfig,
-        name: str,
-        kubeconfig: Path | None,
-        kube_context: str | None,
-        agent_namespace: str | None,
-        secret_name: str | None,
-        yes: bool,
-        platform: bool,
+    def credential_cmd(
+        config: CommandConfig, name: str, yes: bool, platform: bool
     ) -> None:
-        """Rotate the Arena cluster token and update the agent Secret."""
         cluster_name = name.strip()
         if not cluster_name:
             msg = "--name is required."
             raise click.ClickException(msg)
-        if not yes and not click.confirm(
-            f"Rotate the cluster token for {cluster_name!r} and update the "
-            "agent Secret?",
-            default=False,
-        ):
+        if not yes and not click.confirm(question.format(name=cluster_name)):
             click.echo("Aborted.")
             return
         with arena_client(config) as client:
-            run_cluster_rotate_token(
-                client,
-                name=cluster_name,
-                kubeconfig=kubeconfig,
-                context=kube_context,
-                secret_name=secret_name,
-                namespace=agent_namespace,
-                platform=platform,
-            )
+            run(client, name=cluster_name, platform=platform)
 
-    return rotate_token_cmd
+    return credential_cmd
+
+
+def build_cluster_rotate_token_command() -> click.Command:
+    """Build ``arena cluster rotate-token``."""
+    return _credential_command(
+        "rotate-token",
+        "Ask the cluster's agent to renew its credential. The current one keeps "
+        "working until the agent uses the new one.",
+        "Ask the agent on {name!r} to renew its credential?",
+        run_cluster_rotate_token,
+    )
+
+
+def build_cluster_revoke_token_command() -> click.Command:
+    """Build ``arena cluster revoke-token``."""
+    return _credential_command(
+        "revoke-token",
+        "Revoke every credential of the cluster now, for a leaked one. The agent "
+        "is refused until you run `arena cluster connect` again.",
+        "Revoke every credential of {name!r} now? Its agent is cut off until you "
+        "connect the cluster again.",
+        run_cluster_revoke_token,
+    )
 
 
 def build_cluster_upgrade_command() -> click.Command:

@@ -256,11 +256,15 @@ removes a cluster whose agent is offline and prints a command that deletes
 what the agent left. Bundled MinIO (`arena-byoc-storage`) stays unless you pass
 `--uninstall-storage`.
 
-`arena cluster rotate-token --name my-cluster` rotates the Arena cluster token
-and writes it into the in-cluster Secret, then restarts the agent Deployment
-Helm found for that cluster. The Secret name comes from
-`existingClusterTokenSecret` in the agent Helm values, and is `cluster-token`
-otherwise. Pass `--agent-namespace` when Helm lists more than one agent install.
+`arena cluster rotate-token --name my-cluster` asks the cluster's agent to
+renew its credential. The agent picks the new one up on its next poll and the
+current one keeps working until then, so nothing in the cluster changes and no
+kubeconfig is needed.
+
+`arena cluster revoke-token --name my-cluster` revokes every credential of the
+cluster now, for one you think leaked. The agent is refused from its next call
+until you run `arena cluster connect` again, which issues a new enrollment
+token and installs it.
 
 `arena cluster smoke --name my-cluster` checks that the cluster can run jobs.
 The agent installs a small training release with its own ServiceAccount, waits
@@ -281,7 +285,7 @@ publishes the agent chart to a private registry.
 
 Every command that talks to Kubernetes (`preflight`, `connect`,
 `register --install`, `register --install-storage`, `unregister`,
-`rotate-token`, `upgrade`, `smoke`) takes
+`upgrade`, `smoke`) takes
 `--kubeconfig` and `--context`. Without `--context` it uses the current context
 of `--kubeconfig`, of `./arena-cluster-<name>/kubeconfig`, or of kubectl's own
 default (`KUBECONFIG`, `~/.kube/config`). That last one is used only after you
@@ -293,11 +297,11 @@ falling back to `arena-byoc-agent`.
 Arena records each cluster's identity, the UID of its `kube-system` namespace.
 Registering with `--install` sends it, and the agent reports it on every
 heartbeat. A cluster registered before Arena kept identities takes the first one
-reported. After that, `connect`, `rotate-token`, `upgrade` and `unregister`
+reported. After that, `connect`, `upgrade` and `unregister`
 stop before they change anything when the context points at a different
 Kubernetes cluster, and `smoke` starts nothing.
 
-`unregister`, `rotate-token`, `upgrade`, `manifest` and `smoke` look the cluster up in your active
+`unregister`, `rotate-token`, `revoke-token`, `upgrade`, `manifest` and `smoke` look the cluster up in your active
 org. `--platform` targets AgileRL's own platform clusters instead, which needs
 AgileRL staff access. Register, `register-classes` and `destroy` take the
 scope from `--byoc-scope` or the spec's `byoc_scope`.

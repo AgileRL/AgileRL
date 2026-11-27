@@ -368,7 +368,6 @@ class ArenaClient:
     _MANIFEST_LONG_REQUEST_PATHS: ClassVar[frozenset[str]] = frozenset(
         {
             "/api/cli/v1/byoc/clusters/register",
-            "/api/cli/v1/byoc/clusters/rotate-token",
             "/api/cli/v1/byoc/clusters/install-package",
             "/api/cli/v1/byoc/classes/deployment-setup",
         }
