@@ -80,43 +80,68 @@ def gpu_counts_message(gpus: int, pools: dict[str, GpuPool], family: str | None)
     return "\n".join(lines)
 
 
-def rollout_bundle_gpus(manifest: TrainingManifest) -> int:
-    """GPUs one rollout engine and its teacher engine take together on one node.
+def one_node_gpus(manifest: TrainingManifest) -> int | None:
+    """Fewest GPUs a reinforcement learning run needs on its one node.
 
     :param manifest: Validated training manifest.
-    :return: The pinned engine width (1 when the run resolves it) plus the teacher's GPUs.
+    :return: One training GPU, the pinned engine width (1 when the run resolves
+        it) and the teacher's GPUs; ``None`` for a run without rollout engines.
     """
     spec = manifest.algorithm
+    if not isinstance(spec, RolloutLLMSpec):
+        return None
     width = 1
-    if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
+    if spec.vllm_config is not None:
         width = spec.vllm_config.tensor_parallel_size or 1
-    return width + teacher_engine_gpus(spec)
+    return 1 + width + teacher_engine_gpus(spec)
 
 
-def check_rollout_bundle(
-    manifest: TrainingManifest, family: str, pool: GpuPool
-) -> None:
-    """Refuse a family whose node cannot hold a rollout engine beside its teacher.
-
-    The run packs each engine and its teacher onto one node, so a smaller
-    node never schedules it, whatever the GPU count.
+def one_node_refusal(
+    manifest: TrainingManifest, family: str, pool: GpuPool, gpus: int, needed: int
+) -> str:
+    """Refusal for a reinforcement learning run that would not fit on one node.
 
     :param manifest: Validated training manifest.
     :param family: The pool's GPU family.
     :param pool: The family's pool.
-    :raises GpuShortfallError: The bundle is wider than one node.
+    :param gpus: Requested GPU count.
+    :param needed: GPUs the run needs on its one node.
+    :return: The message, ending ``Nothing was started.``
     """
-    bundle = rollout_bundle_gpus(manifest)
-    if bundle <= pool.gpus_per_node:
-        return
-    msg = (
-        f"{manifest.algorithm.name} with a separate teacher model runs each rollout "
-        f"engine and its teacher on one node, {bundle} GPUs, but {family} has "
-        f"{pool.gpus_per_node} GPU(s) per node.\n"
-        f"Use a GPU family with at least {bundle} GPUs per node.\n"
-        "Nothing was started."
+    per_node = pool.gpus_per_node
+    if needed > per_node:
+        detail = (
+            f"{family} has {per_node} GPU(s) per node, and {manifest.algorithm.name} "
+            f"needs at least {needed} on one node.\n"
+            f"Use a GPU family with at least {needed} GPUs per node, and ask for at "
+            "most its GPUs per node."
+        )
+    else:
+        detail = (
+            f"{family} has {per_node} GPUs per node, so {gpus} GPUs would span "
+            f"{math.ceil(gpus / per_node)} nodes.\nAsk for {per_node} GPUs."
+        )
+    return (
+        "On Snowflake, reinforcement learning runs on one GPU node so the trainer "
+        f"can share weights with the rollout engines.\n{detail}\nNothing was started."
     )
-    raise GpuShortfallError(msg)
+
+
+def check_one_node(
+    manifest: TrainingManifest, family: str, pool: GpuPool, gpus: int
+) -> None:
+    """Refuse a reinforcement learning run whose trainer and engines would not share one node.
+
+    :param manifest: Validated training manifest.
+    :param family: The pool's GPU family.
+    :param pool: The family's pool.
+    :param gpus: Requested GPU count.
+    :raises GpuShortfallError: The node is too small, or ``gpus`` spans nodes.
+    """
+    needed = one_node_gpus(manifest)
+    if needed is None or (needed <= pool.gpus_per_node and gpus <= pool.gpus_per_node):
+        return
+    raise GpuShortfallError(one_node_refusal(manifest, family, pool, gpus, needed))
 
 
 def shortfall_needed(detail: str) -> int | None:
@@ -134,12 +159,16 @@ def shortfall_refusal(
 ) -> str:
     """Refusal for a run the estimator says needs ``needed`` GPUs, with the counts to ask for.
 
+    A reinforcement learning run gets :func:`one_node_refusal` instead.
+
     :param manifest: Validated training manifest.
     :param family: The pool's GPU family.
     :param pool: The family's pool.
     :param needed: GPUs the job lays out on.
     :return: The message, ending ``Nothing was started.``
     """
+    if one_node_gpus(manifest) is not None:
+        return one_node_refusal(manifest, family, pool, needed, needed)
     smallest = math.ceil(needed / pool.gpus_per_node) * pool.gpus_per_node
     lines = [
         (

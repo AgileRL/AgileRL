@@ -468,7 +468,7 @@ def handle_error(exc: Exception) -> None:
         _print_invalid_manifest(exc)
         raise click.exceptions.Exit(1) from exc
     if isinstance(exc, ArenaClientUpgradeRequiredError):
-        offer_upgrade(exc.detail)
+        offer_upgrade(exc.detail, snowflake=False)
     if isinstance(exc, ArenaError):
         if json_output_enabled():
             error = {"error": str(exc), "type": type(exc).__name__}

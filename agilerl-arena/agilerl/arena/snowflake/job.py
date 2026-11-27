@@ -28,7 +28,7 @@ from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
 from agilerl.arena.snowflake.gpu_fit import (
     GpuShortfallError,
-    check_rollout_bundle,
+    check_one_node,
     fitting_pools,
     gpu_counts_message,
     shortfall_needed,
@@ -48,6 +48,7 @@ from agilerl.arena.snowflake.profile import (
     GpuPool,
 )
 from agilerl.arena.snowflake.rewards import check_reward_file
+from agilerl.arena.snowflake.session import node_limit_reached
 from agilerl.arena.snowflake.source import (
     QuerySource,
     SnowflakeRow,
@@ -57,6 +58,8 @@ from agilerl.arena.snowflake.source import (
 
 RUN_ID_RE = re.compile(r"^arena-(\d{14})-([0-9a-f]{6})$")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+TABLE_PART = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")+")'
+QUALIFIED_TABLE = re.compile(rf"^{TABLE_PART}\.{TABLE_PART}\.{TABLE_PART}$")
 UPLOADED_MARKER = re.compile(r"^checkpoint_(\d+)/\.uploaded$")
 # COPY FILES between internal stages rejects larger files.
 COPY_FILES_MAX_BYTES = 5 * 10**9
@@ -109,6 +112,10 @@ class JobDocument(TypedDict):
     workers_service: str
 
 
+class ServiceLeftRunningError(RuntimeError):
+    """A run's start failed and one of the services it started could not be dropped."""
+
+
 @dataclass(frozen=True)
 class NodeResources:
     """GPUs and host memory of one compute pool node."""
@@ -128,7 +135,7 @@ class RunServices:
 
 @dataclass(frozen=True)
 class SubmitSettings:
-    """What one ``app_code.submit`` sends with the manifest."""
+    """What one ``arena snowflake submit`` sends with the manifest."""
 
     image: str
     warehouse: str
@@ -253,14 +260,14 @@ def write_job_manifest(
 
     The trainer replaces the dataset and rubric with the exported rows and
     ``reward.py``. An LLM environment that names no env gets ``dataset`` from
-    ``source`` and, for a rollout, ``rubric_file_path`` from the reward file,
+    ``source`` and, for a rollout, ``rubric_file_path`` from ``--reward-file``,
     so the manifest does not need placeholders. A manifest without
     ``training.checkpoint_export`` gets ``format: merged``, which ``publish``
     reads. Fields the manifest sets stay.
 
     :param manifest_path: The user's manifest.
-    :param source: The table or query the run reads, or ``None``.
-    :param has_reward_file: Whether a reward file was passed.
+    :param source: ``--source-table`` or ``--source-query``, or ``None``.
+    :param has_reward_file: Whether ``--reward-file`` was passed.
     :param directory: Where the copy is written.
     :return: ``directory / "manifest.yaml"``.
     """
@@ -300,8 +307,8 @@ def validate_manifest(
     """Reject manifests a job service cannot run or publish.
 
     :param manifest: Parsed training manifest.
-    :param has_reward_file: Whether a reward file was passed.
-    :param has_source: Whether a source table or query was passed.
+    :param has_reward_file: Whether ``--reward-file`` was passed.
+    :param has_source: Whether ``--source-table`` or ``--source-query`` was passed.
     :return: Whether the job exports the source. An env-backed rollout does not.
     :raises ValueError: The manifest is not an LLM run, starts an env image,
         has no env to roll out against, needs a source that was not passed,
@@ -337,7 +344,7 @@ def validate_manifest(
             stacklevel=2,
         )
     if exports_source and not has_source:
-        msg = "This manifest trains on rows. Pass a source table or view."
+        msg = "This manifest trains on rows. Pass --source-table or --source-query."
         raise ValueError(msg)
     export = manifest.training.effective_checkpoint_export()
     if export.format != "merged":
@@ -355,7 +362,7 @@ def validate_manifest(
     if environment.env_url is not None:
         warnings.warn(
             "env_url must be reachable from the job. A host outside the "
-            "account needs an External Access Integration on the job. "
+            "account needs an External Access Integration passed with --eai. "
             "An SPCS service in the same account needs none.",
             stacklevel=2,
         )
@@ -389,10 +396,12 @@ def manifest_fits(manifest_path: Path, family: str, pool: GpuPool, gpus: int) ->
     :param gpus: GPUs for the whole run, a multiple of ``pool.gpus_per_node``.
         The trainer lays the run out on ``gpus // pool.gpus_per_node`` nodes.
     :return: Whether both phases fit with the underprediction buffer.
-    :raises GpuShortfallError: The run needs more GPUs, or a node larger
-        than the family's, for its rollout engines.
+    :raises GpuShortfallError: The run needs more GPUs, or a reinforcement
+        learning run's trainer and rollout engines would not share one node.
     :raises ValueError: The estimator cannot size the manifest.
     """
+    manifest = load_manifest(manifest_path)
+    check_one_node(manifest, family, pool, gpus)
     stdout = StringIO()
     stderr = StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -405,13 +414,10 @@ def manifest_fits(manifest_path: Path, family: str, pool: GpuPool, gpus: int) ->
             as_json=True,
         )
     if code in {memory_cli.EXIT_OK, memory_cli.EXIT_OVER_BUDGET}:
-        check_rollout_bundle(load_manifest(manifest_path), family, pool)
         return code == memory_cli.EXIT_OK
     detail = stderr.getvalue().strip() or stdout.getvalue().strip()
     needed = shortfall_needed(detail)
     if needed is not None:
-        manifest = load_manifest(manifest_path)
-        check_rollout_bundle(manifest, family, pool)
         raise GpuShortfallError(shortfall_refusal(manifest, family, pool, needed))
     raise ValueError(detail or "the memory estimator could not size this manifest")
 
@@ -430,7 +436,7 @@ def choose_gpu_family(
 
     :param pools: Families the account profile enabled.
     :param gpus: Requested GPU count.
-    :param family: The requested GPU family, or ``None`` to pick one.
+    :param family: ``--gpu-family``, or ``None`` to pick one.
     :param fits: Whether the manifest fits that family's GPU memory. Raises
         ``ValueError`` when the estimator cannot size the manifest.
     :return: The family name.
@@ -440,10 +446,7 @@ def choose_gpu_family(
         size it for an omitted family.
     """
     if not pools:
-        msg = (
-            "This app has no GPU pool.\n"
-            "Run CALL <app>.app_code.set_pools(['<gpu family>']) first."
-        )
+        msg = "This account profile has no GPU pool.\nRun arena snowflake setup again."
         raise ValueError(msg)
     if family is not None:
         pool = pools.get(family)
@@ -501,8 +504,9 @@ def submit_job(
     :param run_id: Run id to use. ``None`` generates one.
     :return: ``(run_id, services)``.
     :raises ValueError: A pool family is unknown, the worker pool's
-        ``MAX_NODES`` is below the worker count, or the run to resume has no
-        checkpoint that can be copied.
+        ``MAX_NODES`` is below the worker count, the run to resume has no
+        checkpoint that can be copied, or the account's node limit is reached.
+        Services already started are dropped.
     """
     manifest = load_manifest(manifest_path)
     exports_source = validate_manifest(
@@ -798,6 +802,11 @@ def container_env(run_id: str) -> dict[str, str]:
         "AGILERL_ROLLOUT_TOPIC_ROUTE": rollout_topic_route(topic_prefix),
         "ARENA_RUN_ID": run_id,
         "JOB_ID": str(job_id_from_run_id(run_id)),
+        # SPCS never answers UCX's netlink route dump, which TCP reachability
+        # checks run for any device but loopback. NIXL needs TCP for its peer
+        # failure handling, so it runs on one node over lo.
+        "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
+        "UCX_NET_DEVICES": "lo",
     }
 
 
@@ -1159,6 +1168,20 @@ def job_state(service_statuses: set[str]) -> str:
     return "running"
 
 
+def qualified_table(name: str) -> str:
+    """Validate a ``database.schema.table`` name. Parts may be double-quoted.
+
+    :param name: ``--source-table`` value.
+    :return: The name with surrounding space removed.
+    :raises ValueError: The name is not three dot-separated identifiers.
+    """
+    text = name.strip()
+    if QUALIFIED_TABLE.fullmatch(text) is None:
+        msg = f"--source-table must be database.schema.table, got {name!r}"
+        raise ValueError(msg)
+    return text
+
+
 def log_text(rows: list[SnowflakeRow]) -> str:
     """First column of the first logs result row.
 
@@ -1272,7 +1295,7 @@ def _reject_worker_capacity(
         return
     msg = (
         f"{workers} workers is above MAX_NODES {max_nodes} on {settings.gpu_pool}.\n"
-        f"Run CALL <app>.app_code.set_pools(['{settings.gpu_family}'], {settings.gpus})."
+        f"arena snowflake pools set {settings.gpu_family} --max-gpus {settings.gpus}"
     )
     raise ValueError(msg)
 
@@ -1285,9 +1308,20 @@ def _execute_services(
         for name, statement in statements:
             session.sql(statement).collect()
             started.append(name)
-    except Exception:
-        for name in reversed(started):
-            session.sql(drop_service_sql(name)).collect()
+    except Exception as exc:
+        dropping = ""
+        try:
+            for dropping in reversed(started):
+                session.sql(drop_service_sql(dropping)).collect()
+        except Exception as drop_error:
+            msg = f"Service {dropping} started but could not be dropped after: {exc}"
+            raise ServiceLeftRunningError(msg) from drop_error
+        if node_limit_reached(exc):
+            msg = (
+                "Your Snowflake account's node limit is reached; wait for running "
+                "jobs or ask Snowflake to raise it.\nNothing was started."
+            )
+            raise ValueError(msg) from exc
         raise
 
 

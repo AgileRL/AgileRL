@@ -135,7 +135,7 @@ ALTER APPLICATION SET SPECIFICATION arena_access
   DESCRIPTION = 'Checks the Arena license and reports run start, heartbeat and end'
   HOST_PORTS = ('arena.agilerl.com:443');
 
--- Run stage, metrics table, and file format the job services write to.
+-- Run stage, metrics table, and file format: same definitions as arena snowflake setup.
 CREATE STAGE IF NOT EXISTS app_state.runs
   ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
 

@@ -85,9 +85,9 @@ class PublishDocument(TypedDict):
 
 @dataclass(frozen=True)
 class PublishSettings:
-    """What one ``app_code.publish`` call asks for.
+    """What one ``arena snowflake publish`` asks for.
 
-    :param run_id: Run id from ``app_code.submit``.
+    :param run_id: Run id from ``arena snowflake submit``.
     :param runs_stage: Stage that holds the run directory.
     :param model_name: Model Registry model name.
     :param version_name: Registry version. ``None`` uses the checkpoint directory name.
@@ -283,10 +283,44 @@ def publish_timeout_message(job: PublishJob, status: str, timeout_s: float) -> s
     ]
     if document["service_name"] is not None:
         lines.append(
-            "Endpoint, once the job is done: CALL <app>.app_code.endpoint("
-            f"'{document['model_name']}', '{document['version_name']}')"
+            "Endpoint, once the job is done: arena snowflake endpoint "
+            f"{document['model_name']} --version {document['version_name']} "
+            f"--database {document['database']} --schema {document['schema']}"
         )
     return "\n".join(lines)
+
+
+def service_endpoint(session: SnowflakeSession, document: PublishDocument) -> str:
+    """Ingress URL of the service a publish started.
+
+    :param session: Snowpark session.
+    :param document: Request of a finished publish job that started a service.
+    :return: The URL, or Snowflake's provisioning message while ingress starts.
+    :raises ValueError: The request started no service, or it has no ``inference`` endpoint.
+    """
+    service = document["service_name"]
+    if service is None:
+        msg = "This publish started no service"
+        raise ValueError(msg)
+    return ingress_url(
+        session, f"{document['database']}.{document['schema']}.{service}"
+    )
+
+
+def ingress_url(session: SnowflakeSession, service: str) -> str:
+    """Ingress URL of a service's ``inference`` endpoint.
+
+    :param session: Snowpark session.
+    :param service: Fully qualified service name.
+    :return: The URL, or Snowflake's provisioning message while ingress starts.
+    :raises ValueError: The service has no ``inference`` endpoint.
+    """
+    for row in session.sql(f"SHOW ENDPOINTS IN SERVICE {service}").collect():
+        values = lowered(row)
+        if values.get("name") == "inference":
+            return str(values.get("ingress_url"))
+    msg = f"Service {service} has no inference endpoint"
+    raise ValueError(msg)
 
 
 @dataclass(frozen=True)
@@ -345,7 +379,7 @@ def served_version(
         if len(served) > 1:
             msg = (
                 f"Model {model} has services on versions {', '.join(served)}. "
-                "Pass version_name."
+                "Pass --version."
             )
             raise ValueError(msg)
         chosen = served[0]
@@ -362,6 +396,17 @@ def served_version(
         is_default=bool(row["is_default_version"]),
         only_version=len(rows) == 1,
     )
+
+
+def version_endpoint(session: SnowflakeSession, served: ServedVersion) -> str:
+    """Ingress URL of the version's one inference service.
+
+    :param session: Snowpark session.
+    :param served: Version from :func:`served_version`.
+    :return: The URL, or Snowflake's provisioning message while ingress starts.
+    :raises ValueError: The version has no service or several.
+    """
+    return ingress_url(session, version_service(served))
 
 
 def version_service(served: ServedVersion) -> str:
@@ -473,7 +518,7 @@ def unpublish(
     if not served.services and not drop_version:
         msg = (
             f"Version {served.version_name} of {served.model} has no inference "
-            "service. Pass drop_version => TRUE to drop the version."
+            "service. Pass --drop-version to drop the version."
         )
         raise ValueError(msg)
     if drop_version and served.is_default and not served.only_version:
@@ -563,13 +608,13 @@ def registry_schema(
     """Database and schema that hold the model and the service.
 
     :param session: Snowpark session.
-    :param database: Registry database, or ``None`` for the session's.
-    :param schema: Registry schema, or ``None`` for the session's.
+    :param database: ``--database``.
+    :param schema: ``--schema``.
     :return: Both names, from the arguments or the session's current ones.
     :raises ValueError: Only one is set, a name is unsafe, or the session has none.
     """
     if (database is None) != (schema is None):
-        msg = "Pass both the database and the schema, or neither."
+        msg = "Pass both --database and --schema, or neither."
         raise ValueError(msg)
     if database is None or schema is None:
         values = lowered(
@@ -579,7 +624,7 @@ def registry_schema(
             ).collect()[0]
         )
         if values["database_name"] is None or values["schema_name"] is None:
-            msg = "The session has no current database or schema."
+            msg = "The session has no current schema. Pass --database and --schema."
             raise ValueError(msg)
         database = str(values["database_name"])
         schema = str(values["schema_name"])
@@ -613,7 +658,7 @@ def reject_existing_version(
     if has_name(versions, version_name):
         msg = (
             f"Model {database}.{schema}.{model_name} already has version "
-            f"{version_name}. Pass another version_name."
+            f"{version_name}. Pass another --version."
         )
         raise ValueError(msg)
 
@@ -635,7 +680,7 @@ def reject_existing_service(
     if has_name(services, service_name):
         msg = (
             f"Service {database}.{schema}.{service_name} already exists. "
-            "Drop it or pass another service_name."
+            "Drop it or pass another --service-name."
         )
         raise ValueError(msg)
 
@@ -670,7 +715,7 @@ def resolve_service_name(
     gpus = node_resources(describe_instance_family(session, compute_pool)).gpus
     if settings.gpu_count > gpus:
         msg = (
-            f"gpu_count {settings.gpu_count} is more than the "
+            f"--gpu-count {settings.gpu_count} is more than the "
             f"{gpus} GPUs on a {compute_pool} node"
         )
         raise ValueError(msg)

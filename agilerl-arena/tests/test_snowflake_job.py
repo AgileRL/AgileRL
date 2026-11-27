@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agilerl.arena.snowflake.gpu_fit import GpuShortfallError
+from agilerl.arena.snowflake.gpu_fit import GpuShortfallError, shortfall_refusal
 from agilerl.arena.snowflake.job import (
     BROKER_COMMAND,
     CONTAINER_ARGS,
@@ -41,6 +41,7 @@ from agilerl.arena.snowflake.job import (
     manifest_fits,
     new_run_id,
     node_resources,
+    qualified_table,
     render_broker_spec,
     render_head_spec,
     render_workers_spec,
@@ -535,6 +536,8 @@ class TestContainerEnv:
             "AGILERL_ROLLOUT_TOPIC_ROUTE": "persistent://arena/run/llm-rollout",
             "ARENA_RUN_ID": RUN_ID,
             "JOB_ID": str(int("abc123", 16)),
+            "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
+            "UCX_NET_DEVICES": "lo",
         }
         assert "APP_PULSAR_URL" not in env
 
@@ -892,6 +895,27 @@ class TestRunState:
         assert run_state({"broker": broker, "head": head, "worker": worker}) == state
 
 
+class TestQualifiedTable:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "arena.training.prompts",
+            ' db."My Schema".T$1 ',
+            '"db"."s.x"."t""q"',
+        ],
+    )
+    def test_three_part_names_pass(self, name: str) -> None:
+        assert qualified_table(name) == name.strip()
+
+    @pytest.mark.parametrize(
+        "name",
+        ["prompts", "training.prompts", "a.b.c.d", "a..b", "db.s.t; drop", 'db.s."t'],
+    )
+    def test_other_names_are_rejected(self, name: str) -> None:
+        with pytest.raises(ValueError, match=r"must be database\.schema\.table"):
+            qualified_table(name)
+
+
 class TestDescribeInstanceFamily:
     def test_reads_the_family(self) -> None:
         session = Session(rows=[Row(INSTANCE_FAMILY="GPU_NV_S")])
@@ -997,7 +1021,7 @@ class TestSubmitJob:
     ) -> None:
         session = Session()
 
-        with pytest.raises(ValueError, match="Pass a source table or view"):
+        with pytest.raises(ValueError, match="Pass --source-table or --source-query"):
             submit_job(session, _write(tmp_path, document), _settings(None), RUN_ID)
 
         assert session.events == []
@@ -1006,7 +1030,7 @@ class TestSubmitJob:
         reward = tmp_path / "reward.py"
         reward.write_text("", encoding="utf-8")
 
-        with pytest.raises(ValueError, match="Pass a source table or view"):
+        with pytest.raises(ValueError, match="Pass --source-table or --source-query"):
             submit_job(
                 Session(),
                 _write(tmp_path, _dataset_rl()),
@@ -1040,7 +1064,7 @@ class TestSubmitJob:
     ) -> None:
         session = Session()
 
-        with pytest.raises(ValueError, match=r"needs environment\.reward"):
+        with pytest.raises(ValueError, match="needs --reward-file"):
             submit_job(session, _write(tmp_path, _dataset_rl()), _settings(), RUN_ID)
 
         assert session.events == []
@@ -1632,7 +1656,58 @@ class TestChooseGpuFamily:
         with pytest.raises(ValueError, match="no GPU pool") as raised:
             choose_gpu_family({}, 2, None, _rejects)
 
-        assert "app_code.set_pools" in str(raised.value)
+        assert "Run arena snowflake setup again." in str(raised.value)
+
+
+class TestChooseGpuFamilyForRl:
+    def test_omitted_family_skips_families_that_cannot_hold_the_run_on_one_node(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        manifest = _write(tmp_path, _grpo())
+        pools = {
+            "GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 4),
+            "GPU_NV_M": _gpu("GPU_NV_M", 4, 24, 4),
+        }
+
+        # Act
+        family = choose_gpu_family(
+            pools, 4, None, lambda name, pool: manifest_fits(manifest, name, pool, 4)
+        )
+
+        # Assert
+        assert family == "GPU_NV_M"
+
+    def test_no_family_that_holds_the_run_on_one_node_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = _write(tmp_path, _grpo())
+        pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 4)}
+
+        with pytest.raises(ValueError, match="runs on one GPU node"):
+            choose_gpu_family(
+                pools,
+                4,
+                None,
+                lambda name, pool: manifest_fits(manifest, name, pool, 4),
+            )
+
+
+class TestShortfallRefusal:
+    def test_a_shortfall_past_the_pool_says_to_raise_its_maximum(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = load_manifest(_write(tmp_path, _sft()))
+
+        message = shortfall_refusal(manifest, "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 1), 2)
+
+        assert message == (
+            "SFT needs at least 2 GPUs on GPU_NV_S: training and rollout "
+            "generation run on separate GPUs.\n"
+            "Ask for 2 GPUs or more.\n"
+            "The GPU_NV_S pool holds 1 GPUs, so raise its maximum GPUs first.\n"
+            "Nothing was started."
+        )
 
 
 class TestManifestFits:
@@ -1687,45 +1762,44 @@ class TestManifestFits:
         # Assert
         assert fits is True
 
-    def test_an_rl_run_on_too_few_gpus_is_refused_with_the_count_to_ask_for(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_rl_run_on_one_gpu_nodes_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(GpuShortfallError) as raised:
             manifest_fits(
                 _write(tmp_path, _grpo()), "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 8), 1
             )
 
         assert str(raised.value) == (
-            "GRPO needs at least 2 GPUs on GPU_NV_S: training and rollout "
-            "generation run on separate GPUs.\n"
-            "Ask for 2 GPUs or more.\n"
+            "On Snowflake, reinforcement learning runs on one GPU node so the "
+            "trainer can share weights with the rollout engines.\n"
+            "GPU_NV_S has 1 GPU(s) per node, and GRPO needs at least 2 on one node.\n"
+            "Use a GPU family with at least 2 GPUs per node, and ask for at most "
+            "its GPUs per node.\n"
             "Nothing was started."
         )
 
-    def test_a_shortfall_past_the_pool_says_to_raise_its_maximum(
-        self, tmp_path: Path
-    ) -> None:
-        with pytest.raises(GpuShortfallError, match="holds 1 GPUs, so raise"):
+    def test_an_rl_run_spanning_nodes_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(GpuShortfallError) as raised:
             manifest_fits(
-                _write(tmp_path, _grpo()), "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 1), 1
+                _write(tmp_path, _grpo()), "GPU_NV_M", _gpu("GPU_NV_M", 4, 24, 8), 8
             )
 
-    def test_a_teacher_run_on_one_gpu_nodes_is_refused_at_any_count(
+        assert str(raised.value) == (
+            "On Snowflake, reinforcement learning runs on one GPU node so the "
+            "trainer can share weights with the rollout engines.\n"
+            "GPU_NV_M has 4 GPUs per node, so 8 GPUs would span 2 nodes.\n"
+            "Ask for 4 GPUs.\n"
+            "Nothing was started."
+        )
+
+    def test_a_teacher_run_needs_trainer_engine_and_teacher_on_one_node(
         self, tmp_path: Path
     ) -> None:
-        # Arrange
-        path = _write(tmp_path, _opd_teacher())
-        pool = _gpu("GPU_NV_S", 1, 24, 8)
-
-        # Act / Assert
-        for gpus in (1, 3):
-            with pytest.raises(GpuShortfallError) as raised:
-                manifest_fits(path, "GPU_NV_S", pool, gpus)
-            assert str(raised.value) == (
-                "OPD with a separate teacher model runs each rollout engine and its "
-                "teacher on one node, 2 GPUs, but GPU_NV_S has 1 GPU(s) per node.\n"
-                "Use a GPU family with at least 2 GPUs per node.\n"
-                "Nothing was started."
+        with pytest.raises(GpuShortfallError, match="OPD needs at least 3 on one node"):
+            manifest_fits(
+                _write(tmp_path, _opd_teacher()),
+                "GPU_NV_2M",
+                _gpu("GPU_NV_2M", 2, 24, 2),
+                2,
             )
 
     def test_a_teacher_run_fits_a_node_that_holds_the_bundle(
@@ -1735,13 +1809,11 @@ class TestManifestFits:
 
         assert manifest_fits(_write(tmp_path, _opd_teacher()), "GPU_NV_M", pool, 4)
 
-    def test_an_invalid_manifest_raises_the_estimator_message(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_invalid_manifest_raises_a_value_error(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.yaml"
-        path.write_text("algorithm: [\n", encoding="utf-8")
+        path.write_text("algorithm:\n  name: NOPE\n", encoding="utf-8")
 
-        with pytest.raises(ValueError, match="could not validate"):
+        with pytest.raises(ValueError, match="not a registered algorithm"):
             manifest_fits(path, "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 8), 1)
 
 
@@ -1837,7 +1909,7 @@ class TestSubmitServices:
         )
 
         with pytest.raises(
-            ValueError, match=r"set_pools\(\['GPU_NV_M'\], 8\)"
+            ValueError, match="pools set GPU_NV_M --max-gpus 8"
         ) as raised:
             submit_job(session, _write(tmp_path, _sft()), settings, RUN_ID)
 

@@ -105,7 +105,7 @@ OUTDATED_BODY = {"error": "client_upgrade_required", "description": OUTDATED}
 HEAD_OUTDATED = (
     "agilerl-arena 0.9.0 is older than 1.0.0, the oldest version this Arena "
     'supports. Update with: pip install -U "agilerl-arena[snowflake]>=1.0.0", '
-    "then upgrade the Arena app: ALTER APPLICATION <app> UPGRADE."
+    "then run arena snowflake setup to update the trainer image."
 )
 NOT_ARENA = (
     "which is not the Arena API; the Arena URL must be reachable from the "

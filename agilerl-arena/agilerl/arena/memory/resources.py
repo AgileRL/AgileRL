@@ -160,16 +160,19 @@ def gpus_required(manifest: TrainingManifest, tensor_parallel_size: int = 1) -> 
     return training.pop_size * per_member
 
 
-def tier_sync_link(num_gpus: int, gpus_per_node: int | None) -> SyncLink | None:
-    """Link a tier's engines read synced weights over: CUDA IPC on one node, else unknown.
+def tier_sync_link(num_gpus: int, device: DeviceSpec) -> SyncLink | None:
+    """Link a tier's engines read synced weights over on one node, else unknown.
 
     :param num_gpus: GPUs in the allocation.
-    :param gpus_per_node: GPUs on one node; ``None`` puts all ``num_gpus`` on one node.
-    :return: ``cuda_ipc``, or ``None`` when the allocation spans nodes.
+    :param device: One of those GPUs; ``gpus_per_node`` ``None`` puts all
+        ``num_gpus`` on one node.
+    :return: ``cuda_ipc`` on one node with P2P, ``tcp`` on one node without
+        it (UCX stages through host memory), ``None`` when the allocation
+        spans nodes.
     """
-    if gpus_per_node is None or num_gpus <= gpus_per_node:
-        return "cuda_ipc"
-    return None
+    if device.gpus_per_node is not None and num_gpus > device.gpus_per_node:
+        return None
+    return "cuda_ipc" if device.peer_to_peer else "tcp"
 
 
 def engine_width(
@@ -560,7 +563,7 @@ def _weight_sync_plan(
     :param placed: ``manifest`` at ``layout``.
     :param row_tokens: The SFT or DPO dataset's row lengths, or ``None``.
     """
-    sync_link = tier_sync_link(allocation, device.gpus_per_node)
+    sync_link = tier_sync_link(allocation, device)
     plan_model = training_plan_model(placed, model)
     split_reason = None
     split_failure = None

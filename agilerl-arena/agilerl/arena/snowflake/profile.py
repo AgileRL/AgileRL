@@ -1,23 +1,40 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Account profile in ``setup.json``, its pools, and the Snowflake object names."""
+"""Account profile, login files, and the service-user key."""
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+from agilerl.arena.snowflake import session as snowflake_session
 from agilerl.arena.snowflake.source import SnowflakeSession
 
+ROLE = "arena_trainer"
+SERVICE_USER = "arena_job_user"
+WAREHOUSE = "arena_wh"
+RESOURCE_MONITOR = "arena_monitor"
+BROKER_POOL = "arena_pulsar_pool"
+HEAD_POOL = "arena_head_pool"
 DATABASE = "arena"
 SCHEMA = "training"
+BUDGET = "arena_gpu_budget"
+IMAGE_REPOSITORY = "images"
 RUNS_STAGE = "runs"
 FILE_FORMAT = "arena_json"
 METRICS_TABLE = "arena_metrics"
+HF_RULE = "hf_egress"
+HF_INTEGRATION = "arena_hf_eai"
 ARENA_ORG_KEY_SECRET = "arena_org_key"
 ARENA_EXTERNAL_USER_SECRET = "arena_external_user_id"
 ARENA_BASE_URL_SECRET = "arena_base_url"
@@ -25,16 +42,31 @@ ARENA_BASE_URL_SECRET = "arena_base_url"
 ARENA_CLAIM_SECRET = "arena_claim_secret"
 ARENA_API_RULE = "arena_api_egress"
 ARENA_API_INTEGRATION = "arena_api_eai"
+ENV_RULE = "arena_env_egress"
+ENV_INTEGRATION = "arena_env_eai"
+ADMIN_AUTHENTICATOR = "OAUTH_AUTHORIZATION_CODE"
+JOB_CONNECTION = "arena"
+ADMIN_CONNECTION = "arena-admin"
 SETUP_PREFIX = "@arena.training.runs/_arena"
 SETUP_JSON = "@arena.training.runs/_arena/setup.json"
+QUALIFIED_STAGE = "arena.training.runs"
+QUALIFIED_METRICS = "arena.training.arena_metrics"
+DEFAULT_BROKER_FAMILY = "CPU_X64_L"
+DEFAULT_HEAD_FAMILY = "CPU_X64_SL"
 CPU_POOL_MIN_NODES = 1
 CPU_POOL_MAX_NODES = 4
 POOL_SUSPEND_SECS = 300
 DEFAULT_GPU_NODES = 2
+DEFAULT_WAREHOUSE_CREDITS = 100
+DEFAULT_GPU_CREDITS = 500
+PRIVATE_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
 
+NO_IMAGE = (
+    "No trainer image is saved for this account yet.\n"
+    "Run arena snowflake setup again. It copies the image."
+)
 NO_POOLS = (
-    "This app's setup.json has no compute pools.\n"
-    "Run CALL <app>.app_code.set_pools(['<gpu family>']) first."
+    "This account's setup.json has no compute pools.\nRun arena snowflake setup again."
 )
 
 
@@ -150,6 +182,214 @@ class AccountProfile:
         }
 
 
+def default_key_path() -> Path:
+    """PKCS#8 key setup creates for ``arena_job_user``, beside ``connections.toml``."""
+    return snowflake_session.connections_file().parent / "arena_job_user.p8"
+
+
+def gpu_pool_name(family: str) -> str:
+    """Compute pool that holds one GPU instance family.
+
+    :param family: Instance family, for example ``GPU_NV_S``.
+    :return: ``arena_gpu_<family>``.
+    """
+    return f"arena_gpu_{family}"
+
+
+def trainer_image_path(tag: str) -> str:
+    """In-account image path submit stores after a tag is in the repository.
+
+    :param tag: Image tag, without a host.
+    :return: ``/arena/training/images/snowflake-job:<tag>``.
+    """
+    return f"/{DATABASE}/{SCHEMA}/{IMAGE_REPOSITORY}/snowflake-job:{tag}"
+
+
+def write_private_text(path: Path, text: str) -> None:
+    """Write ``text`` and leave ``path`` readable only by its owner.
+
+    :param path: Destination file. Parent directories are created.
+    :param text: File contents.
+    :raises ValueError: The disk is read-only or out of space.
+    """
+    _write_private(path, text.encode("utf-8"))
+
+
+def write_private_bytes(path: Path, payload: bytes) -> None:
+    """Write ``payload`` and leave ``path`` readable only by its owner.
+
+    :param path: Destination file.
+    :param payload: File bytes.
+    :raises ValueError: The disk is read-only or out of space.
+    """
+    _write_private(path, payload)
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.chmod(path, PRIVATE_FILE_MODE)
+    except OSError as exc:
+        message = _disk_message(exc, path)
+        if message is None:
+            raise
+        raise ValueError(message) from exc
+
+
+def _disk_message(exc: OSError, path: Path) -> str | None:
+    if exc.errno == errno.ENOSPC:
+        return f"The disk is out of space, so {path} was not written."
+    if exc.errno == errno.EROFS:
+        return f"The disk is read-only, so {path} was not written."
+    return None
+
+
+def generate_private_key(path: Path) -> None:
+    """Write a 2048-bit PKCS#8 key with no passphrase. Mode ``0600``.
+
+    :param path: Destination. An existing file is not replaced by the caller.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    write_private_bytes(path, pem)
+
+
+def public_key_body(path: Path) -> str:
+    """SubjectPublicKeyInfo body, one line, with the PEM header and footer removed.
+
+    :param path: PKCS#8 private key.
+    :return: The public key body Snowflake stores on the user.
+    """
+    pem = path.read_bytes()
+    key = serialization.load_pem_private_key(pem, password=None)
+    public = key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    lines = [
+        line
+        for line in public.decode("ascii").splitlines()
+        if not line.startswith("-----")
+    ]
+    return "".join(lines)
+
+
+def restrict_private_key(path: Path) -> None:
+    """Leave an existing key readable only by its owner.
+
+    :param path: Key file that already exists.
+    :raises ValueError: The disk is read-only or out of space.
+    """
+    try:
+        os.chmod(path, PRIVATE_FILE_MODE)
+    except OSError as exc:
+        message = _disk_message(exc, path)
+        if message is None:
+            raise
+        raise ValueError(message) from exc
+
+
+def write_connection(name: str, fields: dict[str, str]) -> None:
+    """Add or replace one connections.toml section. The file mode is ``0600``.
+
+    :param name: Section name.
+    :param fields: Connection fields. No password is written.
+    """
+    # Deferred optional extra: snowflake. tomlkit ships with the connector.
+    import tomlkit
+
+    path = snowflake_session.connections_file()
+    if path.is_file():
+        document = tomlkit.parse(path.read_text(encoding="utf-8"))
+    else:
+        document = tomlkit.document()
+    table = tomlkit.table()
+    for key, value in fields.items():
+        table.add(key, value)
+    document[name] = table
+    write_private_text(path, tomlkit.dumps(document))
+
+
+def remove_connection(name: str) -> bool:
+    """Delete one connections.toml section. Other sections stay.
+
+    :param name: Section name.
+    :return: True when the section was there.
+    """
+    # Deferred optional extra: snowflake. tomlkit ships with the connector.
+    import tomlkit
+
+    path = snowflake_session.connections_file()
+    if not path.is_file():
+        return False
+    document = tomlkit.parse(path.read_text(encoding="utf-8"))
+    if name not in document:
+        return False
+    del document[name]
+    write_private_text(path, tomlkit.dumps(document))
+    return True
+
+
+def replaced_connection(name: str, fields: dict[str, str]) -> str | None:
+    """Line warning that writing ``fields`` replaces a different ``[name]`` section.
+
+    :param name: Section name.
+    :param fields: Fields about to be written.
+    :return: The warning, or ``None`` when the section is absent or identical.
+    """
+    section = snowflake_session.connection_section(name)
+    if section is None or {key: str(value) for key, value in section.items()} == fields:
+        return None
+    user = section.get("user", "?")
+    account = section.get("account", "?")
+    path = snowflake_session.connections_file()
+    return f"[{name}] in {path} signs in as {user} on {account}. It is replaced."
+
+
+def job_connection_fields(account: str, key_path: Path) -> dict[str, str]:
+    """``[arena]`` fields for the service user.
+
+    :param account: Account identifier.
+    :param key_path: Private key path.
+    :return: Connection fields.
+    """
+    return {
+        "account": account,
+        "user": SERVICE_USER,
+        "authenticator": "SNOWFLAKE_JWT",
+        "private_key_file": str(key_path),
+        "role": ROLE,
+        "warehouse": WAREHOUSE,
+        "database": DATABASE,
+        "schema": SCHEMA,
+    }
+
+
+def admin_connection_fields(account: str, login_name: str) -> dict[str, str]:
+    """``[arena-admin]`` fields. Snowflake OAuth in a browser, no password.
+
+    The connector uses Snowflake's built-in local OAuth application when no
+    client id is set. No role is set, so the token is not scoped to one role;
+    setup switches to ACCOUNTADMIN after sign-in.
+
+    :param account: Account identifier.
+    :param login_name: ``LOGIN_NAME`` of a user that has ACCOUNTADMIN.
+    :return: Connection fields.
+    """
+    return {
+        "account": account,
+        "user": login_name,
+        "authenticator": ADMIN_AUTHENTICATOR,
+    }
+
+
 def profile_from_mapping(section: Mapping[str, object]) -> AccountProfile:
     """Build a profile from a setup.json object.
 
@@ -218,6 +458,38 @@ def put_setup_json(
         session.file.put(str(path), prefix, auto_compress=False, overwrite=True)
 
 
+def job_connection_name(connection_name: str | None) -> str | None:
+    """Connection submit, publish, status, and logs open.
+
+    An ``[arena]`` section in the connections file selects ``arena``. Otherwise
+    an omitted name stays unset and the Snowflake default connection is used.
+
+    :param connection_name: ``--connection``, or ``None`` when omitted.
+    :return: The connection name to open.
+    """
+    if connection_name is not None:
+        return connection_name
+    if snowflake_session.connection_section(JOB_CONNECTION) is not None:
+        return JOB_CONNECTION
+    return None
+
+
+def checked_job_connection(connection_name: str | None) -> str | None:
+    """:func:`job_connection_name`, refused when it cannot run a job.
+
+    :param connection_name: ``--connection``, or ``None`` when omitted.
+    :return: The connection name, or ``None`` for the Snowflake default.
+    :raises ValueError: The connection is the browser admin, or its key is missing.
+    """
+    name = job_connection_name(connection_name)
+    if name is None:
+        return None
+    rejection = browser_admin_rejection(name) or missing_key_rejection(name)
+    if rejection is not None:
+        raise ValueError(rejection)
+    return name
+
+
 def sole_gpu_pool(profile: AccountProfile) -> str | None:
     """GPU pool name when the profile records one GPU family.
 
@@ -228,3 +500,80 @@ def sole_gpu_pool(profile: AccountProfile) -> str | None:
     if len(pools) == 1:
         return pools[0]
     return None
+
+
+def profile_pool_names(profile: AccountProfile) -> tuple[str, ...]:
+    """Broker, head, and GPU pool names, in that order.
+
+    :param profile: Account record.
+    :return: Pool names setup created.
+    """
+    names = [profile.pools.broker.pool, profile.pools.head.pool]
+    names.extend(item.pool for item in profile.pools.gpu.values())
+    return tuple(names)
+
+
+def browser_admin_rejection(connection_name: str) -> str | None:
+    """Message when a job command is pointed at the browser admin connection.
+
+    :param connection_name: Section name.
+    :return: The message, or ``None`` when the connection can run a job.
+    """
+    section = snowflake_session.load_connection(connection_name)
+    authenticator = str(section.get("authenticator", "")).strip().upper()
+    if (
+        connection_name == ADMIN_CONNECTION
+        or authenticator in snowflake_session.BROWSER_SIGN_IN
+    ):
+        return (
+            f"Connection {connection_name} signs in with a browser as ACCOUNTADMIN.\n"
+            f"Job commands use the {JOB_CONNECTION} connection (user {SERVICE_USER})."
+        )
+    return None
+
+
+def admin_connection_rejection(connection_name: str) -> str | None:
+    """Message when an admin command is pointed at a job connection.
+
+    :param connection_name: Section name.
+    :return: The message, or ``None`` when the connection is not a job login.
+    """
+    section = snowflake_session.load_connection(connection_name)
+    user = str(section.get("user", "")).strip() or connection_name
+    role = str(section.get("role", "")).strip().upper()
+    if user.upper() != SERVICE_USER.upper() and role != ROLE.upper():
+        return None
+    return (
+        f"Connection {connection_name} signs in as user {user}.\n"
+        f"Admin commands use the {ADMIN_CONNECTION} connection, or --connection "
+        "with a user that has ACCOUNTADMIN."
+    )
+
+
+def missing_key_message(path: Path) -> str:
+    """Message when a connection's private key file is not on this machine.
+
+    :param path: Path from the connection.
+    :return: The message.
+    """
+    return (
+        f"No private key at {path}.\n"
+        "The private key is not in Snowflake.\n"
+        "Run arena snowflake join to sign in as your own Snowflake user."
+    )
+
+
+def missing_key_rejection(connection_name: str) -> str | None:
+    """Message when ``connection_name`` points at a key file that is not there.
+
+    :param connection_name: Section name.
+    :return: The message, or ``None`` when the connection has no key file or the file exists.
+    """
+    section = snowflake_session.load_connection(connection_name)
+    raw = section.get("private_key_file") or section.get("private_key_path")
+    if not raw:
+        return None
+    path = Path(str(raw)).expanduser()
+    if path.is_file():
+        return None
+    return missing_key_message(path)

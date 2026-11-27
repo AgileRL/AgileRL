@@ -34,6 +34,7 @@ from snowflake_app.app_code.arena_app import (
 
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.snowflake import license as license_mod
+from agilerl.arena.snowflake.job import ServiceLeftRunningError
 from agilerl.arena.snowflake.license import SnowflakeLicenseError
 from tests.test_snowflake_license import Arena, reply
 from tests.test_snowflake_setup import Row
@@ -248,6 +249,19 @@ class AppSession:
         return Result([])
 
 
+class NodeLimitSession(AppSession):
+    """Procedure session where the account's node limit refuses the worker service."""
+
+    def sql(self, statement: str) -> Result:
+        if statement.startswith(
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_"
+        ):
+            self.statements.append(statement)
+            msg = "Requested number of nodes 1 exceeds the node limit for the account."
+            raise SnowparkSQLException(msg, sql_error_code=395034)
+        return super().sql(statement)
+
+
 class FailingHeadSession(AppSession):
     """Procedure session where starting the head service fails."""
 
@@ -257,6 +271,17 @@ class FailingHeadSession(AppSession):
         ):
             self.statements.append(statement)
             msg = "head pool is full"
+            raise SnowparkSQLException(msg)
+        return super().sql(statement)
+
+
+class FailingHeadAndDropSession(FailingHeadSession):
+    """Procedure session where the head fails to start and the broker fails to drop."""
+
+    def sql(self, statement: str) -> Result:
+        if statement.startswith("DROP SERVICE"):
+            self.statements.append(statement)
+            msg = "drop timed out"
             raise SnowparkSQLException(msg)
         return super().sql(statement)
 
@@ -370,6 +395,12 @@ def nv_m_setup(max_gpus: int = 8) -> dict:
         "gpu_memory_gib": 24,
     }
     return {**SETUP, "pools": {**SETUP["pools"], "gpu": {"GPU_NV_M": nv_m}}}
+
+
+def one_node_session(arena: Arena) -> AppSession:
+    """Submit session whose only priced pool is one 4-GPU GPU_NV_M node."""
+    arena.replies = [capabilities(["GPU_NV_M"])]
+    return submit_session(nv_m_setup(4), [Row(name="GPU_NV_M", gpu_count=4)])
 
 
 def capabilities(priced: list[str] | None) -> httpx.Response:
@@ -497,7 +528,9 @@ class TestSubmit:
         )
         assert insert < resume < session.statements.index(executes(session)[0])
 
-    def test_a_failed_service_start_still_leaves_the_run_for_billing(self) -> None:
+    def test_a_failed_service_start_drops_the_started_services_and_the_usage_item(
+        self,
+    ) -> None:
         # Arrange
         session = FailingHeadSession(submit_session().routes)
 
@@ -506,18 +539,60 @@ class TestSubmit:
             submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
 
         # Assert
-        [insert] = [s for s in session.statements if "usage_items" in s]
+        insert, delete = [s for s in session.statements if "usage_items" in s]
         [run_id] = re.findall(
             r"VALUES \('run', '([^']+)', CURRENT_TIMESTAMP\(\)\)", insert
         )
-        assert f"@app_state.runs/{run_id}/job.json" in session.file.puts
+        assert delete == (
+            "DELETE FROM app_state.usage_items WHERE kind = 'run' "
+            f"AND usage_id = '{run_id}'"
+        )
+        [drop] = [s for s in session.statements if s.startswith("DROP SERVICE")]
+        assert re.fullmatch(r"DROP SERVICE app_state\.ARENA_RUN_\w+_BROKER FORCE", drop)
 
-    def test_stages_a_built_in_reward_in_the_manifest(self) -> None:
+    def test_a_service_that_cannot_be_dropped_keeps_its_usage_item(self) -> None:
+        # Arrange
+        session = FailingHeadAndDropSession(submit_session().routes)
+
+        # Act
+        with pytest.raises(
+            ServiceLeftRunningError, match=r"_BROKER started but could not be dropped"
+        ):
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        # Assert
+        assert not any(
+            s.startswith("DELETE FROM app_state.usage_items")
+            for s in session.statements
+        )
+
+    def test_the_account_node_limit_is_a_plain_refusal(self) -> None:
+        # Arrange
+        session = NodeLimitSession(submit_session().routes)
+
+        # Act
+        with pytest.raises(ValueError, match="node limit") as exc:
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        # Assert
+        assert str(exc.value) == (
+            "Your Snowflake account's node limit is reached; wait for running "
+            "jobs or ask Snowflake to raise it.\nNothing was started."
+        )
+        assert len([s for s in session.statements if s.startswith("DROP SERVICE")]) == 2
+        assert any(
+            s.startswith("DELETE FROM app_state.usage_items")
+            for s in session.statements
+        )
+
+    def test_stages_a_built_in_reward_in_the_manifest(
+        self, priced_arena: Arena
+    ) -> None:
         manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "numeric"})
-        session = submit_session()
+        session = one_node_session(priced_arena)
 
         text = submit(
-            session, manifest, 2, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
+            session, manifest, 4, "SOURCE_VIEW", "gsm8k", "GPU_NV_M", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
@@ -589,13 +664,15 @@ class TestSubmit:
         assert session.statements == [REWARD_REFS]
         assert session.file.puts == {}
 
-    def test_starts_a_function_reward_once_a_function_is_bound(self) -> None:
+    def test_starts_a_function_reward_once_a_function_is_bound(
+        self, priced_arena: Arena
+    ) -> None:
         manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "snowflake_function"})
-        session = submit_session()
+        session = one_node_session(priced_arena)
         session.routes.append(exact(REWARD_REFS, [Row(REFS='["ref-1"]')]))
 
         text = submit(
-            session, manifest, 2, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
+            session, manifest, 4, "SOURCE_VIEW", "gsm8k", "GPU_NV_M", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
@@ -605,7 +682,7 @@ class TestSubmit:
         assert staged["environment"]["reward"] == {"type": "snowflake_function"}
         assert len(executes(session)) == 3
 
-    def test_returns_the_manifest_warnings(self) -> None:
+    def test_returns_the_manifest_warnings(self, priced_arena: Arena) -> None:
         manifest = yaml.safe_dump(
             {
                 "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
@@ -621,9 +698,9 @@ class TestSubmit:
                 "training": {"max_steps": 2},
             }
         )
-        session = submit_session()
+        session = one_node_session(priced_arena)
 
-        text = submit(session, manifest, 2, None, None, None, None, None, None)
+        text = submit(session, manifest, 4, None, None, None, None, None, None)
 
         [warning] = [line for line in text.splitlines() if line.startswith("warning:")]
         assert warning.startswith("warning: env_url must be reachable from the job.")
@@ -962,7 +1039,7 @@ class TestSubmit:
         manifest = grpo_manifest("Qwen/Qwen3.5-0.8B")
 
         # Act
-        with pytest.raises(ValueError, match="GRPO needs at least 2 GPUs") as exc:
+        with pytest.raises(ValueError, match="runs on one GPU node") as exc:
             submit(
                 session,
                 manifest,
@@ -977,9 +1054,11 @@ class TestSubmit:
 
         # Assert
         assert str(exc.value) == (
-            "GRPO needs at least 2 GPUs on GPU_NV_S: training and rollout "
-            "generation run on separate GPUs.\n"
-            "Ask for 2 GPUs or more.\n"
+            "On Snowflake, reinforcement learning runs on one GPU node so the "
+            "trainer can share weights with the rollout engines.\n"
+            "GPU_NV_S has 1 GPU(s) per node, and GRPO needs at least 2 on one node.\n"
+            "Use a GPU family with at least 2 GPUs per node, and ask for at most "
+            "its GPUs per node.\n"
             "Nothing was started."
         )
         assert executes(session) == []
@@ -988,7 +1067,7 @@ class TestSubmit:
     def test_refuses_an_rl_run_on_one_gpu_when_the_family_is_picked(self) -> None:
         session = submit_session()
 
-        with pytest.raises(ValueError, match="GRPO needs at least 2 GPUs on GPU_NV_S"):
+        with pytest.raises(ValueError, match="GRPO needs at least 2 on one node"):
             submit(
                 session,
                 grpo_manifest("Qwen/Qwen3.5-0.8B"),
