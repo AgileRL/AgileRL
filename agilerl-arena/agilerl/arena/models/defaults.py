@@ -11,17 +11,22 @@ from typing import Any
 from pydantic import ValidationError
 
 from agilerl.arena.models import LLMAlgorithmSpec, visibility
+from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import REWARD_FILE_AT_SUBMIT, TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.arena.models.training import (
     LLM_EVALUATION_INTERVAL,
     LLM_REPORTING_INTERVAL,
     ROLLOUT_LLM_MAX_STEPS,
 )
-from agilerl.arena.models.verdict import errors, failure, is_local_model_path, verdict
+from agilerl.arena.models.verdict import (
+    errors,
+    failure,
+    unsupported_model_failures,
+    verdict,
+)
 
 
 def default_verdict(
@@ -58,21 +63,11 @@ def default_verdict(
             ]
         )
 
-    model = draft.get("network", {}).get("pretrained_model_name_or_path")
-    if (
-        isinstance(model, str)
-        and model not in SUPPORTED_MODEL_INFO
-        and not is_local_model_path(model)
-    ):
-        return failure(
-            [
-                {
-                    "path": "network.pretrained_model_name_or_path",
-                    "message": f"Arena does not support the model '{model}'.",
-                    "kind": "value_error",
-                }
-            ]
-        )
+    unsupported = unsupported_model_failures(draft)
+    if unsupported:
+        return failure(unsupported)
+    if issubclass(spec_cls, OPDSpec):
+        reference_answer_column(draft)
 
     try:
         manifest = TrainingManifest.model_validate(draft, context=context)
@@ -85,6 +80,23 @@ def default_verdict(
     if user_view and record["ok"]:
         record["payload"] = template_view(record["payload"])
     return record
+
+
+def reference_answer_column(draft: dict[str, Any]) -> None:
+    """Point OPD's self-distilling teacher at the dataset's answer column when the draft names no reference.
+
+    :param draft: An OPD draft whose sections are mappings; edited in place.
+    :type draft: dict[str, Any]
+    """
+    columns = draft.get("environment", {}).get("columns")
+    if not isinstance(columns, dict) or "answer" not in columns:
+        return
+    teacher = draft["algorithm"].get("teacher", {})
+    if not isinstance(teacher, dict) or any(
+        teacher.get(key) for key in ("model", "adapter", "base", "context_key")
+    ):
+        return
+    draft["algorithm"]["teacher"] = {**teacher, "context_key": "answer"}
 
 
 def template_view(spec: dict[str, Any], section: str | None = None) -> dict[str, Any]:

@@ -371,8 +371,8 @@ def resolve_plans(request: SetupRequest, state: AccountState) -> list[PoolPlan]:
     :param request: Setup flags.
     :param state: Account state.
     :return: Plans in create order.
-    :raises ValueError: A family is not in this region, or an existing pool
-        uses another family.
+    :raises ValueError: A family is not in this region, ``--max-gpus`` is not
+        whole nodes of a family, or an existing pool uses another family.
     """
     saved = state.profile
     broker = request.broker_family or (
@@ -393,6 +393,8 @@ def resolve_plans(request: SetupRequest, state: AccountState) -> list[PoolPlan]:
         saved_cap = saved_gpus[name].max_gpus if name in saved_gpus else None
         cap = request.max_gpus if request.max_gpus is not None else saved_cap
         gpu_plans.append(_gpu_plan(name, cap, state.families))
+        if request.max_gpus is not None:
+            check_gpu_cap(name, request.max_gpus, GPU_FAMILIES[name].gpus)
     plans = [
         _cpu_plan(BROKER_POOL, broker, "broker", state.families),
         _cpu_plan(HEAD_POOL, head, "head", state.families),
@@ -431,6 +433,25 @@ def nodes_for_gpus(max_gpus: int, gpus_per_node: int) -> int:
     :return: ``ceil(max_gpus / gpus_per_node)``.
     """
     return math.ceil(max_gpus / gpus_per_node)
+
+
+def check_gpu_cap(family: str, max_gpus: int, gpus_per_node: int) -> None:
+    """Refuse a GPU cap that is not whole nodes of the family.
+
+    :param family: GPU instance family.
+    :param max_gpus: GPU cap.
+    :param gpus_per_node: GPUs on one node of the family.
+    :raises ValueError: ``max_gpus`` is not a multiple of ``gpus_per_node``.
+    """
+    if max_gpus % gpus_per_node == 0:
+        return
+    msg = (
+        f"{family} has {gpus_per_node} GPUs per node, so its cap is a multiple of "
+        f"{gpus_per_node}: {gpus_per_node}, {2 * gpus_per_node}, "
+        f"{3 * gpus_per_node} and so on. {max_gpus} is not.\n"
+        "No pool was changed."
+    )
+    raise ValueError(msg)
 
 
 def family_listed(family: str, families: list[GpuFamily]) -> bool:
@@ -655,7 +676,8 @@ def print_setup_sql(request: SetupRequest) -> str:
 
     :param request: Setup flags. No session, Docker, or Arena call is made.
     :return: The worksheet. Secret values and the public key are placeholders.
-    :raises ValueError: A GPU family is not one Arena sizes.
+    :raises ValueError: A GPU family is not one Arena sizes, or ``--max-gpus``
+        is not whole nodes of a family.
     """
     names = tuple(dict.fromkeys(name.upper() for name in request.gpu_families)) or (
         "GPU_NV_S",
@@ -673,6 +695,7 @@ def print_setup_sql(request: SetupRequest) -> str:
         if spec is None:
             raise ValueError(unsupported_gpu_message(name))
         gpus = request.max_gpus or spec.gpus * DEFAULT_GPU_NODES
+        check_gpu_cap(name, gpus, spec.gpus)
         plans.append(
             PoolPlan(
                 gpu_pool_name(name),

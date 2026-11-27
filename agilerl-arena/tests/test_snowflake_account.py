@@ -564,14 +564,70 @@ class TestSetGpuCap:
             ],
         )
 
-        with pytest.raises(ValueError, match="using 3 nodes") as raised:
+        with pytest.raises(ValueError, match="needs 3 nodes") as raised:
             set_gpu_cap(session, "GPU_NV_S", 2)
 
         assert str(raised.value) == (
-            "arena.training.arena_run_2_workers is using 3 nodes. "
+            "arena.training.arena_run_2_workers needs 3 nodes. "
             "MAX_NODES 2 is below that.\n"
             "The pool was not changed."
         )
+
+    def test_a_queued_job_blocks_a_shrink_below_the_nodes_it_asked_for(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        paths(tmp_path, monkeypatch)
+        session = cap_session(
+            [Row(name="arena_gpu_GPU_NV_M", instance_family="GPU_NV_M", max_nodes=2)],
+            [
+                Row(
+                    name="arena_run_3_workers",
+                    database_name="arena",
+                    schema_name="training",
+                    status="PENDING",
+                    current_instances=0,
+                    target_instances=2,
+                    min_instances=2,
+                )
+            ],
+        )
+
+        # Act
+        with pytest.raises(ValueError, match="needs 2 nodes") as raised:
+            set_gpu_cap(session, "GPU_NV_M", 4)
+
+        # Assert
+        assert str(raised.value) == (
+            "arena.training.arena_run_3_workers needs 2 nodes. "
+            "MAX_NODES 1 is below that.\n"
+            "The pool was not changed."
+        )
+        assert not any(s.startswith("ALTER COMPUTE POOL") for s in session.statements)
+        assert session.file.uploads == []
+
+    def test_refuses_a_cap_that_is_not_whole_nodes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths(tmp_path, monkeypatch)
+        session = cap_session(
+            [Row(name="arena_gpu_GPU_NV_M", instance_family="GPU_NV_M", max_nodes=1)],
+            [],
+        )
+
+        with pytest.raises(ValueError, match="multiple of 4") as raised:
+            set_gpu_cap(session, "GPU_NV_M", 6)
+
+        assert str(raised.value) == (
+            "GPU_NV_M has 4 GPUs per node, so its cap is a multiple of 4: "
+            "4, 8, 12 and so on. 6 is not.\n"
+            "No pool was changed."
+        )
+        assert not any(
+            s.startswith(("CREATE COMPUTE", "ALTER COMPUTE"))
+            for s in session.statements
+        )
+        assert session.file.uploads == []
 
     def test_an_unknown_family_runs_no_pool_sql(self) -> None:
         session = FakeSession(admin_routes())

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agilerl.arena.snowflake.gpu_fit import GpuShortfallError
 from agilerl.arena.snowflake.job import (
     BROKER_COMMAND,
     CONTAINER_ARGS,
@@ -98,6 +99,33 @@ def _sft(export: str | None = "merged") -> dict:
         "network": NETWORK,
         "training": training,
     }
+
+
+def _grpo() -> dict:
+    return {
+        "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 8},
+        "environment": {
+            "env_type": "rollout",
+            "dataset": "questions",
+            "columns": {"question": "QUESTION", "answer": "ANSWER"},
+            "prompt_template": {"user_0": "{question}"},
+            "reward": {"type": "exact_match"},
+        },
+        "network": NETWORK,
+        "training": {"max_steps": 2},
+    }
+
+
+def _opd_teacher() -> dict:
+    """An OPD rollout scored by a separate teacher model."""
+    document = _grpo()
+    document["algorithm"] = {
+        "name": "OPD",
+        "batch_size": 8,
+        "teacher": {"model": {"pretrained_model_name_or_path": "Qwen/Qwen3.5-4B"}},
+    }
+    del document["environment"]["reward"]
+    return document
 
 
 def _dpo() -> dict:
@@ -856,7 +884,9 @@ class TestRunState:
             ("cancelling", "running", "running", "cancelling"),
             ("cancelled", "cancelled", "cancelled", "cancelled"),
             ("gone", "gone", "gone", "gone"),
-            ("running", "gone", "running", "running"),
+            ("gone", "running", "running", "running"),
+            ("running", "gone", "running", "failed"),
+            ("running", "running", "gone", "failed"),
         ],
     )
     def test_states(self, broker: str, head: str, worker: str, state: str) -> None:
@@ -1437,11 +1467,11 @@ def _gpu(family: str, per_node: int, memory: int, max_gpus: int) -> GpuPool:
     return GpuPool(f"arena_gpu_{family}", max_gpus, per_node, memory)
 
 
-def _accepts(pool: GpuPool) -> bool:
+def _accepts(family: str, pool: GpuPool) -> bool:
     return True
 
 
-def _rejects(pool: GpuPool) -> bool:
+def _rejects(family: str, pool: GpuPool) -> bool:
     raise AssertionError(pool.pool)
 
 
@@ -1475,7 +1505,7 @@ class TestChooseGpuFamily:
     def test_a_named_family_the_estimator_cannot_size_warns(self) -> None:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 8)}
 
-        def unsized(pool: GpuPool) -> bool:
+        def unsized(family: str, pool: GpuPool) -> bool:
             msg = "unknown model architecture"
             raise ValueError(msg)
 
@@ -1488,7 +1518,7 @@ class TestChooseGpuFamily:
     def test_an_omitted_family_the_estimator_cannot_size_raises(self) -> None:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 8)}
 
-        def unsized(pool: GpuPool) -> bool:
+        def unsized(family: str, pool: GpuPool) -> bool:
             msg = "unknown model architecture"
             raise ValueError(msg)
 
@@ -1502,7 +1532,7 @@ class TestChooseGpuFamily:
         }
 
         chosen = choose_gpu_family(
-            pools, 8, None, lambda pool: pool.gpu_memory_gib >= 40
+            pools, 8, None, lambda family, pool: pool.gpu_memory_gib >= 40
         )
 
         assert chosen == "GPU_NV_L"
@@ -1511,7 +1541,7 @@ class TestChooseGpuFamily:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 8)}
 
         with pytest.raises(ValueError, match=r"GPU_NV_S \(24 GiB\)") as raised:
-            choose_gpu_family(pools, 8, "GPU_NV_S", lambda pool: False)
+            choose_gpu_family(pools, 8, "GPU_NV_S", lambda family, pool: False)
 
         assert "cannot hold this manifest" in str(raised.value)
 
@@ -1523,7 +1553,9 @@ class TestChooseGpuFamily:
         }
 
         with pytest.raises(ValueError, match="Too small") as raised:
-            choose_gpu_family(pools, 4, None, lambda pool: pool.gpu_memory_gib >= 80)
+            choose_gpu_family(
+                pools, 4, None, lambda family, pool: pool.gpu_memory_gib >= 80
+            )
 
         text = str(raised.value)
         assert "GPU_NV_M (24 GiB)" in text
@@ -1536,8 +1568,48 @@ class TestChooseGpuFamily:
         with pytest.raises(ValueError, match="4, 8, 12, 16") as raised:
             choose_gpu_family(pools, 6, "GPU_NV_M", _rejects)
 
-        assert "GPU_NV_M does not divide 6 GPUs." in str(raised.value)
-        assert "GPU_NV_M runs 4, 8, 12, 16 GPUs." in str(raised.value)
+        assert str(raised.value) == (
+            "GPU_NV_M has 4 GPUs per node, so it cannot run 6 GPUs.\n"
+            "Valid GPU counts on GPU_NV_M: 4, 8, 12, 16 (multiples of 4, up to "
+            "the 16 GPUs the pool holds).\n"
+            "Nothing was started."
+        )
+
+    def test_a_named_family_with_too_few_gpus_is_refused_not_warned(self) -> None:
+        pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 2)}
+
+        def short(family: str, pool: GpuPool) -> bool:
+            msg = "GRPO needs at least 2 GPUs"
+            raise GpuShortfallError(msg)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(GpuShortfallError, match="needs at least 2 GPUs"):
+                choose_gpu_family(pools, 1, "GPU_NV_S", short)
+
+    def test_an_omitted_family_skips_one_whose_nodes_are_too_small(self) -> None:
+        pools = {
+            "GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 4),
+            "GPU_NV_M": _gpu("GPU_NV_M", 4, 24, 4),
+        }
+
+        def fits(family: str, pool: GpuPool) -> bool:
+            if family == "GPU_NV_S":
+                msg = "bundle too wide"
+                raise GpuShortfallError(msg)
+            return True
+
+        assert choose_gpu_family(pools, 4, None, fits) == "GPU_NV_M"
+
+    def test_an_omitted_family_shows_the_shortfall_when_none_fits(self) -> None:
+        pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 4)}
+
+        def short(family: str, pool: GpuPool) -> bool:
+            msg = "GRPO needs at least 2 GPUs"
+            raise GpuShortfallError(msg)
+
+        with pytest.raises(ValueError, match=r"^GRPO needs at least 2 GPUs$"):
+            choose_gpu_family(pools, 1, None, short)
 
     def test_no_enabled_family_dividing_lists_every_family(self) -> None:
         pools = {
@@ -1545,12 +1617,12 @@ class TestChooseGpuFamily:
             "GPU_NV_L": _gpu("GPU_NV_L", 8, 40, 16),
         }
 
-        with pytest.raises(ValueError, match="No GPU family divides 6 GPUs") as raised:
+        with pytest.raises(ValueError, match="No GPU pool can run 6 GPUs") as raised:
             choose_gpu_family(pools, 6, None, _rejects)
 
         text = str(raised.value)
-        assert "GPU_NV_M runs 4, 8, 12 GPUs." in text
-        assert "GPU_NV_L runs 8, 16 GPUs." in text
+        assert "Valid GPU counts on GPU_NV_M: 4, 8, 12 (multiples of 4" in text
+        assert "Valid GPU counts on GPU_NV_L: 8, 16 (multiples of 8" in text
 
     def test_a_missing_family_names_the_enabled_ones(self) -> None:
         pools = {"GPU_NV_S": _gpu("GPU_NV_S", 1, 24, 2)}
@@ -1558,19 +1630,24 @@ class TestChooseGpuFamily:
         with pytest.raises(ValueError, match="GPU_NV_L is not in this account profile"):
             choose_gpu_family(pools, 8, "GPU_NV_L", _rejects)
 
-    def test_a_family_whose_max_is_below_one_node_runs_no_count(self) -> None:
+    def test_a_max_below_one_node_still_holds_one_node(self) -> None:
         pools = {
             "GPU_NV_M": _gpu("GPU_NV_M", 4, 24, 2),
             "GPU_NV_L": _gpu("GPU_NV_L", 8, 40, 16),
         }
 
-        with pytest.raises(ValueError, match="No GPU family divides 6 GPUs") as raised:
+        with pytest.raises(ValueError, match="No GPU pool can run 6 GPUs") as raised:
             choose_gpu_family(pools, 6, None, _rejects)
 
         assert str(raised.value) == (
-            "No GPU family divides 6 GPUs.\n"
-            "GPU_NV_L runs 8, 16 GPUs.\n"
-            "GPU_NV_M runs no GPU count within its max."
+            "No GPU pool can run 6 GPUs: a run takes whole nodes, up to the GPUs "
+            "its pool holds.\n"
+            "Valid GPU counts on GPU_NV_L: 8, 16 (multiples of 8, up to the "
+            "16 GPUs the pool holds).\n"
+            "Valid GPU counts on GPU_NV_M: 4 (multiples of 4, up to the "
+            "4 GPUs the pool holds).\n"
+            "To run more GPUs, raise the pool's maximum GPUs first.\n"
+            "Nothing was started."
         )
 
     def test_a_profile_without_gpu_pools_asks_for_setup(self) -> None:
@@ -1584,12 +1661,12 @@ class TestManifestFits:
     def test_a_manifest_within_the_gpu_memory_fits(self, tmp_path: Path) -> None:
         pool = _gpu("GPU_NV_SL", 1, 80, 8)
 
-        assert manifest_fits(_write(tmp_path, _sft()), pool, 1) is True
+        assert manifest_fits(_write(tmp_path, _sft()), "GPU_NV_SL", pool, 1) is True
 
     def test_a_manifest_over_the_gpu_memory_does_not_fit(self, tmp_path: Path) -> None:
         pool = _gpu("GPU_NV_S", 1, 1, 8)
 
-        assert manifest_fits(_write(tmp_path, _sft()), pool, 1) is False
+        assert manifest_fits(_write(tmp_path, _sft()), "GPU_NV_S", pool, 1) is False
 
     def test_the_estimate_lays_the_run_out_on_the_family_nodes(
         self, tmp_path: Path
@@ -1601,11 +1678,84 @@ class TestManifestFits:
         eight_nodes = _gpu("GPU_NV_S", 1, 4, 8)
 
         # Act
-        on_one_node = manifest_fits(manifest, one_node, 8)
-        on_eight_nodes = manifest_fits(manifest, eight_nodes, 8)
+        on_one_node = manifest_fits(manifest, "GPU_NV_L", one_node, 8)
+        on_eight_nodes = manifest_fits(manifest, "GPU_NV_S", eight_nodes, 8)
 
         # Assert
         assert (on_one_node, on_eight_nodes) == (False, True)
+
+    def test_a_rollout_with_a_builtin_reward_is_sized_on_the_family_gpu(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        document = {
+            "algorithm": {"name": "CISPO", "group_size": 4, "batch_size": 8},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "questions",
+                "columns": {"question": "QUESTION", "answer": "ANSWER"},
+                "prompt_template": {"user_0": "{question}"},
+                "reward": {"type": "numeric"},
+            },
+            "network": NETWORK,
+            "training": {"max_steps": 2},
+        }
+
+        # Act
+        fits = manifest_fits(
+            _write(tmp_path, document), "GPU_NV_M", _gpu("GPU_NV_M", 4, 24, 4), 4
+        )
+
+        # Assert
+        assert fits is True
+
+    def test_an_rl_run_on_too_few_gpus_is_refused_with_the_count_to_ask_for(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(GpuShortfallError) as raised:
+            manifest_fits(
+                _write(tmp_path, _grpo()), "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 8), 1
+            )
+
+        assert str(raised.value) == (
+            "GRPO needs at least 2 GPUs on GPU_NV_S: training and rollout "
+            "generation run on separate GPUs.\n"
+            "Ask for 2 GPUs or more.\n"
+            "Nothing was started."
+        )
+
+    def test_a_shortfall_past_the_pool_says_to_raise_its_maximum(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(GpuShortfallError, match="holds 1 GPUs, so raise"):
+            manifest_fits(
+                _write(tmp_path, _grpo()), "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 1), 1
+            )
+
+    def test_a_teacher_run_on_one_gpu_nodes_is_refused_at_any_count(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        path = _write(tmp_path, _opd_teacher())
+        pool = _gpu("GPU_NV_S", 1, 24, 8)
+
+        # Act / Assert
+        for gpus in (1, 3):
+            with pytest.raises(GpuShortfallError) as raised:
+                manifest_fits(path, "GPU_NV_S", pool, gpus)
+            assert str(raised.value) == (
+                "OPD with a separate teacher model runs each rollout engine and its "
+                "teacher on one node, 2 GPUs, but GPU_NV_S has 1 GPU(s) per node.\n"
+                "Use a GPU family with at least 2 GPUs per node.\n"
+                "Nothing was started."
+            )
+
+    def test_a_teacher_run_fits_a_node_that_holds_the_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        pool = _gpu("GPU_NV_M", 4, 24, 4)
+
+        assert manifest_fits(_write(tmp_path, _opd_teacher()), "GPU_NV_M", pool, 4)
 
     def test_an_invalid_manifest_raises_the_estimator_message(
         self, tmp_path: Path
@@ -1614,7 +1764,7 @@ class TestManifestFits:
         path.write_text("algorithm: [\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="could not validate"):
-            manifest_fits(path, _gpu("GPU_NV_S", 1, 24, 8), 1)
+            manifest_fits(path, "GPU_NV_S", _gpu("GPU_NV_S", 1, 24, 8), 1)
 
 
 class TestSubmitServices:

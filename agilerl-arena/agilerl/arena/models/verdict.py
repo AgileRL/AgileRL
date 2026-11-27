@@ -122,6 +122,74 @@ def is_local_model_path(model: str) -> bool:
     )
 
 
+def unsupported_model_failures(document: dict[str, Any]) -> list[dict[str, str]]:
+    """Report a Hub id outside the Arena catalog as one error.
+
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    network = document.get("network")
+    model = (
+        network.get("pretrained_model_name_or_path")
+        if isinstance(network, dict)
+        else None
+    )
+    if (
+        not isinstance(model, str)
+        or model in SUPPORTED_MODEL_INFO
+        or is_local_model_path(model)
+    ):
+        return []
+    return [
+        {
+            "path": "network.pretrained_model_name_or_path",
+            "message": (
+                f"Arena does not support the model '{model}'."
+                f"{did_you_mean(model, SUPPORTED_MODEL_INFO)}"
+            ),
+            "kind": "value_error",
+        }
+    ]
+
+
+def unsupported_hub_id_failures(document: dict[str, Any]) -> list[dict[str, str]]:
+    """Report an ``org/name`` Hub id outside the Arena catalog as one error.
+
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    # A name without "/" is a model registered on Arena, which the platform resolves.
+    return [
+        record
+        for record in unsupported_model_failures(document)
+        if "/" in document["network"]["pretrained_model_name_or_path"]
+    ]
+
+
+def unsupported_model_symptom_failures(
+    document: dict[str, Any], err: ValidationError | ValueError
+) -> list[dict[str, str]]:
+    """Report an ``org/name`` Hub id outside the catalog instead of the context error it causes.
+
+    An unknown Hub id has no catalog window, so an unset context stays unset.
+    A name without ``/`` is registered on Arena and keeps the context error.
+
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :param err: The error validating *document* raised.
+    :type err: ValidationError | ValueError
+    :returns: The one unsupported-model error, or none when *err* is not a context error for a Hub id.
+    :rtype: list[dict[str, str]]
+    """
+    if all(record["path"] != "network.max_context_length" for record in errors(err)):
+        return []
+    return unsupported_hub_id_failures(document)
+
+
 def model_warnings(manifest: TrainingManifest) -> list[str]:
     """Warn when an LLM manifest's model is outside the Arena catalog, deprecated or in preview.
 
@@ -149,8 +217,33 @@ def model_warnings(manifest: TrainingManifest) -> list[str]:
     return [msg]
 
 
+def model_status_errors(manifest: TrainingManifest) -> list[dict[str, str]]:
+    """Report a catalog model that is deprecated or in preview, which Arena refuses on submit.
+
+    :param manifest: A validated manifest.
+    :type manifest: TrainingManifest
+    :returns: Zero or one error record.
+    :rtype: list[dict[str, str]]
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, LLMAlgorithmSpec):
+        return []
+    hub_id = algorithm.pretrained_model_name_or_path
+    info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
+    notice = info.status_notice if info else None
+    if notice is None:
+        return []
+    return [
+        {
+            "path": "network.pretrained_model_name_or_path",
+            "message": notice,
+            "kind": "model_status",
+        }
+    ]
+
+
 def context_warnings(manifest: TrainingManifest) -> list[str]:
-    """Warn when Arena set the context to the model's whole window because the manifest left it unset.
+    """Warn when Arena filled the context with its default because the manifest left it unset.
 
     :param manifest: A validated manifest.
     :type manifest: TrainingManifest
@@ -158,16 +251,14 @@ def context_warnings(manifest: TrainingManifest) -> list[str]:
     :rtype: list[str]
     """
     network = manifest.network
-    if not manifest.context_from_catalog or not isinstance(
-        network, FinetuningNetworkSpec
-    ):
+    if not manifest.context_defaulted or not isinstance(network, FinetuningNetworkSpec):
         return []
     message = (
-        f"network.max_context_length is unset, so Arena used "
-        f"{network.pretrained_model_name_or_path}'s full context window "
-        f"({network.max_context_length} tokens). The run and its memory "
-        "estimate are sized for that; set a smaller network.max_context_length "
-        "if your prompts and completions are shorter."
+        f"network.max_context_length is unset, so Arena used a default "
+        f"context of {network.max_context_length} tokens. The run and its "
+        "memory and cost estimates are sized for that, and rows that do not "
+        "fit are dropped; set network.max_context_length to fit your longest "
+        "prompt and completion."
     )
     return [message]
 
@@ -226,6 +317,31 @@ def override_warnings(
         for path in arena_chosen_paths(
             TrainingManifest, document, manifest, context, tier="advanced"
         )
+    ]
+
+
+def manifest_warnings(
+    manifest: TrainingManifest,
+    document: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> list[str]:
+    """Every warning a valid manifest gets: model, context, overrides, vLLM share and LoRA targets.
+
+    :param manifest: *document*, validated.
+    :type manifest: TrainingManifest
+    :param document: The raw manifest document.
+    :type document: dict[str, Any]
+    :param context: The pydantic validation context *manifest* was validated with.
+    :type context: dict[str, Any] | None
+    :returns: The warnings.
+    :rtype: list[str]
+    """
+    return [
+        *model_warnings(manifest),
+        *context_warnings(manifest),
+        *override_warnings(manifest, document, context),
+        *catalog_gpu_share_warnings(manifest, document),
+        *target_modules_warnings(document),
     ]
 
 
@@ -434,6 +550,8 @@ def submit_errors(
     """
     return [
         *run_errors(manifest),
+        *unsupported_hub_id_failures(document),
+        *model_status_errors(manifest),
         *arena_chosen_errors(manifest, document, context),
     ]
 
@@ -474,7 +592,7 @@ def verdict(
     try:
         manifest = TrainingManifest.model_validate(document, context=context)
     except (ValidationError, ValueError) as err:
-        failures = errors(err)
+        failures = unsupported_model_symptom_failures(document, err) or errors(err)
     else:
         failures = arena_failures(manifest)
         if submit:
@@ -483,13 +601,7 @@ def verdict(
             return {
                 "ok": True,
                 "payload": manifest.to_payload(),
-                "warnings": [
-                    *model_warnings(manifest),
-                    *context_warnings(manifest),
-                    *override_warnings(manifest, document, context),
-                    *catalog_gpu_share_warnings(manifest, document),
-                    *target_modules_warnings(document),
-                ],
+                "warnings": manifest_warnings(manifest, document, context),
                 "manifest_version": __version__,
             }
     return failure(failures)
@@ -512,10 +624,15 @@ __all__ = [
     "is_classic_rl",
     "is_local_model_path",
     "loc_to_path",
+    "manifest_warnings",
+    "model_status_errors",
     "model_warnings",
     "override_warnings",
     "read_manifest",
     "submit_errors",
     "target_modules_warnings",
+    "unsupported_hub_id_failures",
+    "unsupported_model_failures",
+    "unsupported_model_symptom_failures",
     "verdict",
 ]

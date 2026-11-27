@@ -92,7 +92,7 @@ def _accept_every_family(monkeypatch: pytest.MonkeyPatch) -> None:
     """Submit tests that do not care about fit never call the estimator."""
     monkeypatch.setattr(
         "agilerl.arena.snowflake.cli.manifest_fits",
-        lambda manifest, pool, gpus: True,
+        lambda manifest, family, pool, gpus: True,
     )
 
 
@@ -608,15 +608,50 @@ class TestRunStatus:
         assert run_status(handle, RUN_ID).endswith("state: cancelling")
 
 
+STATUS_COMMAND = f"arena snowflake status {RUN_ID}"
+READY = [Row(instance_id=0, container_name="main", status="READY")]
+
+
 class TestServiceLogs:
     def test_a_running_service_reads_live_logs(self) -> None:
-        handle = RunHandle({HEAD: "RUNNING"}, live="trainer started")
+        handle = RunHandle({HEAD: "RUNNING"}, READY, live="trainer started")
 
-        text = service_logs(handle, RUN_ID, 0)
+        text = service_logs(handle, RUN_ID, 0, status_command=STATUS_COMMAND)
 
         assert text == "trainer started"
-        assert handle.statements[-1] == (
-            f"SELECT SYSTEM$GET_SERVICE_LOGS('{HEAD}', 0, 'main')"
+        assert handle.statements[-2:] == [
+            f"SHOW SERVICE CONTAINERS IN SERVICE {HEAD}",
+            f"SELECT SYSTEM$GET_SERVICE_LOGS('{HEAD}', 0, 'main')",
+        ]
+
+    def test_a_pending_container_says_it_has_not_started(self) -> None:
+        pending = [Row(instance_id=0, container_name="main", status="PENDING")]
+        handle = RunHandle({HEAD: "RUNNING", WORKERS: "PENDING"}, pending)
+
+        text = service_logs(handle, RUN_ID, 0, "worker", status_command=STATUS_COMMAND)
+
+        assert text == (
+            "The worker container has not started yet (state: PENDING). "
+            "Its node can take several minutes to start; GPU nodes take longest. "
+            f"Check progress with arena snowflake status {RUN_ID}."
+        )
+        assert not any("SYSTEM$GET_SERVICE_LOGS" in item for item in handle.statements)
+
+    def test_an_instance_not_listed_yet_has_not_started(self) -> None:
+        handle = RunHandle({WORKERS: "RUNNING"}, READY)
+
+        text = service_logs(handle, RUN_ID, 1, "worker", status_command=STATUS_COMMAND)
+
+        assert text.startswith("The worker container has not started yet")
+
+    def test_a_started_container_with_no_logs_says_so(self) -> None:
+        handle = RunHandle({HEAD: "RUNNING"}, READY)
+
+        text = service_logs(handle, RUN_ID, 0, status_command=STATUS_COMMAND)
+
+        assert text == (
+            "The head container has started but has written no logs yet. "
+            "Check again in a minute."
         )
 
     def test_a_finished_service_reads_the_event_table(self) -> None:
@@ -626,7 +661,7 @@ class TestServiceLogs:
         )
 
         # Act
-        text = service_logs(handle, RUN_ID, 1, "worker")
+        text = service_logs(handle, RUN_ID, 1, "worker", status_command=STATUS_COMMAND)
 
         # Assert
         assert text == "step 1\nstep 2\nOOM"
@@ -641,7 +676,7 @@ class TestServiceLogs:
         handle = RunHandle({HEAD: "DONE"})
 
         with pytest.raises(ValueError, match=f"{BROKER} was dropped"):
-            service_logs(handle, RUN_ID, 0, "broker")
+            service_logs(handle, RUN_ID, 0, "broker", status_command=STATUS_COMMAND)
 
 
 class TestSnowflakeSqlErrors:
@@ -860,7 +895,10 @@ class TestSubmitProfile:
         )
 
         assert result.exit_code != 0
-        assert "GPU_NV_M runs 4, 8, 12, 16 GPUs." in result.output
+        assert (
+            "Valid GPU counts on GPU_NV_M: 4, 8, 12, 16 (multiples of 4, up to the "
+            "16 GPUs the pool holds)." in result.output
+        )
         assert [s.startswith(SETUP_READ) for s in session.statements] == [True]
         assert session.closed == 1
 
@@ -872,7 +910,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         monkeypatch.setattr(
             "agilerl.arena.snowflake.cli.manifest_fits",
-            lambda manifest_path, pool, gpus: False,
+            lambda manifest_path, family, pool, gpus: False,
         )
         session = Closable()
         monkeypatch.setattr(
@@ -921,7 +959,7 @@ class TestSubmitProfile:
 
         monkeypatch.setattr(
             "agilerl.arena.snowflake.cli.manifest_fits",
-            lambda manifest_path, pool, gpus: pool.gpu_memory_gib >= 40,
+            lambda manifest_path, family, pool, gpus: pool.gpu_memory_gib >= 40,
         )
         monkeypatch.setattr("agilerl.arena.snowflake.cli.submit_job", fake_submit)
         monkeypatch.setattr(
@@ -945,7 +983,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         seen: list[tuple[GpuPool, int]] = []
 
-        def fits(path: Path, pool: GpuPool, gpus: int) -> bool:
+        def fits(path: Path, family: str, pool: GpuPool, gpus: int) -> bool:
             seen.append((pool, gpus))
             return True
 
@@ -977,7 +1015,7 @@ class TestSubmitProfile:
         _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
         seen: list[SubmitSettings] = []
 
-        def unsized(path: Path, pool: GpuPool, gpus: int) -> bool:
+        def unsized(path: Path, family: str, pool: GpuPool, gpus: int) -> bool:
             msg = "no architecture for this model"
             raise ValueError(msg)
 

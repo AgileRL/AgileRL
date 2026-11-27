@@ -1002,6 +1002,41 @@ class TestAggregateMetricsDict:
         assert reduced[0].shape == (4, 3)
         assert out == {"loss": 2.0, "peak_gib": 75.5, "retries": 0.0}
 
+    def test_minimized_metrics_take_the_smallest_rank_value_in_the_same_all_reduce(
+        self,
+    ):
+        # Arrange: this is rank 0 of 2; rank 1 reports loss 3, adv_min -4, adv_max 1.
+        reduced: list[torch.Tensor] = []
+
+        def sum_with_peer(tensor, op):
+            reduced.append(tensor.clone())
+            peer = torch.zeros_like(tensor)
+            peer[0] = torch.tensor([3.0, -4.0, 1.0])
+            peer[1] = torch.tensor([1.0, 1.0, 1.0])
+            peer[3] = torch.tensor([0.0, -4.0, 1.0])
+            tensor.add_(peer)
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.dist.get_rank", return_value=0),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch(
+                "agilerl.distributed.process.dist.all_reduce",
+                side_effect=sum_with_peer,
+            ),
+        ):
+            out = aggregate_metrics_dict(
+                {"loss": 1.0, "adv_min": -2.0, "adv_max": 5.0},
+                maximized=("adv_max",),
+                minimized=("adv_min",),
+            )
+
+        # Assert
+        assert len(reduced) == 1
+        assert out == {"loss": 2.0, "adv_min": -4.0, "adv_max": 5.0}
+
 
 class TestSyncGrads:
     def test_leaves_grads_unchanged_without_process_group(self):

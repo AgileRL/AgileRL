@@ -534,16 +534,18 @@ class TestResolveRunMemorySplit:
 
 class TestResolveRunMemory:
     @pytest.mark.parametrize(
-        ("fsdp", "priced"),
+        ("fsdp", "priced", "split"),
         [
-            pytest.param(None, [5], id="searched"),
-            pytest.param({"ep": 5}, [5, 10], id="pinned"),
+            pytest.param(None, [5], (5, 11), id="searched"),
+            pytest.param({"ep": 5}, [5, 10], (10, 6), id="pinned"),
         ],
     )
     def test_only_a_pinned_expert_group_is_priced_across_nodes(
-        self, fsdp: dict | None, priced: list[int]
+        self, fsdp: dict | None, priced: list[int], split: tuple[int, int]
     ) -> None:
-        # Arrange: EP 5 on 8-GPU nodes; 10 trainers puts a group across two nodes.
+        # Arrange: EP 5 on 8-GPU nodes; 10 trainers puts a group across two
+        # nodes. The step waits on the L4 learn, so the pinned group takes the
+        # 10 trainers it may price.
         doc = unset_split(
             with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
         )
@@ -569,7 +571,7 @@ class TestResolveRunMemory:
         # Assert
         assert [sorted(plans) for plans in cache.plans.values()] == [priced]
         assert plan.split is not None
-        assert (plan.split.trainers, plan.split.engines) == (5, 7)
+        assert (plan.split.trainers, plan.split.engines) == split
         assert plan.training.fsdp is not None
         assert plan.training.fsdp.ep == 5
 
@@ -713,6 +715,7 @@ def _plan_with_host(host_total: int, host_usable: int | None) -> TrainingMemoryP
         moe_collectives_saveable=False,
         cost=1.0,
         tokens=1.0,
+        fixed_cost=0.0,
         optimizer_offload_seconds=0.0,
         settings=TrainingSettings(),
         breakdown=PhaseBreakdown(
@@ -2231,8 +2234,8 @@ class TestResolveRunMemoryCrossNodeExperts:
     def test_kept_counts_take_the_expert_degree_that_learns_faster(self) -> None:
         # Arrange: 8 L4 trainers on two nodes. EP 8 sends more bytes between
         # nodes than EP 1, but as routed tokens at the faster exchange rate
-        # instead of expert gathers that outlast compute; a shard group per
-        # node keeps the dense gathers off the network.
+        # instead of expert gathers that outlast compute. The L4's compute
+        # outlasts the dense gathers, so no shard group is needed.
         raw = _countdown_at(1536, {})
         raw["network"]["pretrained_model_name_or_path"] = "openai/gpt-oss-20b"
         raw["algorithm"].update(name="CISPO", batch_size=32)
@@ -2252,7 +2255,7 @@ class TestResolveRunMemoryCrossNodeExperts:
 
         # Assert
         assert plan is not None
-        assert _layout(plan) == ParallelLayout(ep=8, shard_group_size=4)
+        assert _layout(plan) == ParallelLayout(ep=8)
 
     def test_one_node_keeps_the_least_parallel_layout(self) -> None:
         # Arrange: on one node no group crosses, so the least parallel fit

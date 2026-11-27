@@ -49,7 +49,7 @@ class TestLearnCosts:
         device = lookup_gpu("NVIDIA L4").device_spec()
 
         assert learn_costs(device) == L4_LEARN_COSTS
-        assert learn_costs(device).peak_speed > SM80_LEARN_COSTS.peak_speed
+        assert learn_costs(device).peak_speed < SM80_LEARN_COSTS.peak_speed
 
     def test_unmeasured_capability_uses_a100_entry(self) -> None:
         device = lookup_gpu("NVIDIA L40S").device_spec()

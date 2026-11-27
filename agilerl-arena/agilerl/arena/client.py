@@ -47,19 +47,20 @@ from agilerl.arena.inference.cache import (
 )
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
-    LLMAlgorithmSpec,
     TrainingManifest,
     __version__,
 )
 from agilerl.arena.models.env import LLMEnvSpec
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.manifest import warn_once
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.verdict import (
     CLASSIC_RL_UNAVAILABLE_MESSAGE,
     arena_failures,
     describe,
     is_classic_rl,
+    manifest_warnings,
     submit_errors,
+    unsupported_model_symptom_failures,
 )
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.reward_check import check_reward_file
@@ -1370,7 +1371,7 @@ class ArenaClient:
         :type idempotency_key: str | None
         :raises ArenaValidationError: When ``num_gpus`` is below 1, the manifest
             turns on HPO, or the manifest's rubric path names a different file
-            than ``reward_file``.
+            than ``reward_file``, or a local file when ``reward_file`` is unset.
         """
         validated, resolved_project = self._checked_submit(
             manifest, num_gpus, project, reward_file
@@ -1450,12 +1451,21 @@ class ArenaClient:
         self._check_num_gpus(num_gpus)
         manifest = with_reward_file_path(manifest, reward_file)
         document = TrainingManifest.load(manifest)
-        training_manifest = TrainingManifest.get_validated(document, mode="python")
+        try:
+            training_manifest = TrainingManifest.get_validated(document, mode="python")
+        except ValueError as err:
+            unsupported = unsupported_model_symptom_failures(document, err)
+            if not unsupported:
+                raise
+            raise ArenaValidationError(describe(unsupported[0])) from err
+        for warning in manifest_warnings(training_manifest, document):
+            warn_once(warning)
         self._check_runs_on_arena(training_manifest)
-        self._check_model_status(training_manifest)
         self._check_submit_rules(training_manifest, document)
         environment = training_manifest.environment
-        if reward_file is not None and isinstance(environment, LLMEnvSpec):
+        if reward_file is None:
+            self._check_rubric_file_uploaded(training_manifest)
+        elif isinstance(environment, LLMEnvSpec):
             check_reward_file(reward_file, environment)
         resolved_project = self._resolve_project(project)
         if not resolved_project:
@@ -1567,16 +1577,23 @@ class ArenaClient:
             raise ArenaValidationError("\n".join(lines))
 
     @staticmethod
-    def _check_model_status(manifest: TrainingManifest) -> None:
-        """Reject a deprecated or preview pretrained model."""
-        algorithm = manifest.algorithm
-        if not isinstance(algorithm, LLMAlgorithmSpec):
+    def _check_rubric_file_uploaded(manifest: TrainingManifest) -> None:
+        """Reject a rollout whose rubric path names a local file that no reward file uploads."""
+        environment = manifest.environment
+        if not isinstance(environment, LLMEnvSpec) or environment.env_type != "rollout":
             return
-        hub_id = algorithm.pretrained_model_name_or_path
-        entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
-        notice = entry.status_notice if entry else None
-        if notice is not None:
-            raise ArenaValidationError(notice)
+        path = environment.rubric_file_path
+        if path is None or path.startswith("s3://"):
+            return
+        msg = (
+            f"environment.rubric_file_path names the local file {path!r}, "
+            "but the submit uploads no reward file."
+        )
+        raise ArenaValidationError(
+            msg,
+            sdk_hint=f"Pass reward_file={path!r}, or set rubric_file_path to an s3:// URI.",
+            cli_hint=f"Add --reward-file {path}, or set rubric_file_path to an s3:// URI.",
+        )
 
     @staticmethod
     def _check_submit_rules(

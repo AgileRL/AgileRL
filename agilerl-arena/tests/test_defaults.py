@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agilerl.arena.models import SUPPORTED_MODEL_INFO, SFTSpec
+from agilerl.arena.models import SFTSpec
 from agilerl.arena.models.defaults import default_verdict
 from agilerl.arena.models.verdict import verdict
 
@@ -97,14 +97,12 @@ class TestDefaultVerdict:
         )
         assert record["payload"]["environment"]["rubric_name"] == "RUBRIC"
 
-    def test_fills_context_length_from_the_catalog(self) -> None:
+    def test_fills_the_default_context_length(self) -> None:
         # Act
         record = default_verdict(document({"name": "GRPO"}, dataset_rollout()))
 
         # Assert
-        assert record["payload"]["network"]["max_context_length"] == (
-            SUPPORTED_MODEL_INFO[MODEL].max_context_length
-        )
+        assert record["payload"]["network"]["max_context_length"] == 2048
 
     def test_keeps_authored_training_values(self) -> None:
         # Arrange
@@ -170,15 +168,15 @@ class TestDefaultVerdict:
         assert record["ok"] is False
         assert record["errors"][0]["path"] == "algorithm.batch_size"
 
-    def test_warns_that_the_context_is_the_whole_catalog_window(self) -> None:
+    def test_warns_that_the_context_is_the_default(self) -> None:
         # Act
         record = default_verdict(document({"name": "GRPO"}, dataset_rollout()))
 
         # Assert
         assert record["ok"] is True, record
-        window = SUPPORTED_MODEL_INFO[MODEL].max_context_length
+        assert record["payload"]["network"]["max_context_length"] == 2048
         assert any(
-            f"full context window ({window} tokens)" in warning
+            "default context of 2048 tokens" in warning
             for warning in record["warnings"]
         )
 
@@ -195,7 +193,7 @@ class TestDefaultVerdict:
         assert record["ok"] is True, record
         assert record["payload"]["network"]["max_context_length"] == 32768
         assert record["payload"]["algorithm"]["max_output_tokens"] == 2048
-        assert not any("full context window" in w for w in record["warnings"])
+        assert not any("default context" in w for w in record["warnings"])
 
     def test_reports_an_unknown_algorithm(self) -> None:
         # Act
@@ -583,3 +581,50 @@ class TestSFTSpecBeta:
     def test_rejects_a_value_outside_zero_to_one(self, beta: float, match: str) -> None:
         with pytest.raises(ValidationError, match=match):
             SFTSpec(beta=beta)
+
+
+class TestDefaultVerdictOPDReference:
+    def test_dataset_rollout_teacher_reads_the_answer_column(self) -> None:
+        # Act
+        record = default_verdict(
+            document({"name": "OPD"}, dataset_rollout()), user_view=True
+        )
+
+        # Assert
+        assert record["ok"] is True
+        assert record["payload"]["algorithm"]["teacher"]["context_key"] == "answer"
+        assert verdict(record["payload"], submit=True)["ok"] is True
+
+    def test_keeps_an_authored_reference_column(self) -> None:
+        # Arrange
+        algorithm = {"name": "OPD", "teacher": {"context_key": "solution"}}
+
+        # Act
+        record = default_verdict(document(algorithm, dataset_rollout()))
+
+        # Assert
+        assert record["payload"]["algorithm"]["teacher"]["context_key"] == "solution"
+
+    def test_base_weights_teacher_gets_no_reference(self) -> None:
+        # Arrange
+        algorithm = {"name": "OPD", "teacher": {"base": True}}
+
+        # Act
+        record = default_verdict(document(algorithm, dataset_rollout()))
+
+        # Assert
+        assert "context_key" not in record["payload"]["algorithm"]["teacher"]
+
+    def test_environment_without_an_answer_column_keeps_the_trace_reference(
+        self,
+    ) -> None:
+        # Arrange
+        environment = {**dataset_rollout(), "columns": {"question": "question"}}
+
+        # Act
+        record = default_verdict(document({"name": "OPD"}, environment))
+
+        # Assert
+        assert record["payload"]["algorithm"]["teacher"]["context_key"] == (
+            "reference_trace"
+        )

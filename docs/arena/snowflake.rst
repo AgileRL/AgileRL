@@ -237,7 +237,8 @@ caps, and pools unless you pass new values.
      - GPU pool family. Repeat for each one. Default: the families already
        set up, else the smallest GPU family in the region.
    * - ``--max-gpus``
-     - GPUs each GPU pool can hold. Default: the saved cap, else two nodes.
+     - GPUs each GPU pool can hold, a multiple of the family's GPUs per
+       node. Default: the saved cap, else two nodes.
    * - ``--broker-family`` / ``--head-family``
      - CPU families for the broker and head pools. Defaults ``CPU_X64_L`` and
        ``CPU_X64_SL``.
@@ -351,7 +352,10 @@ Compute pools and GPU caps
 
 ``pools`` lists each pool, its family, its cap, and the nodes in use.
 ``pools set`` sets a family's GPU cap. The pool's ``MAX_NODES`` becomes the
-node count that holds that many GPUs. A family with no pool yet gets one.
+node count that holds that many GPUs, so the cap is a multiple of the
+family's GPUs per node. A family with no pool yet gets one. ``pools set``
+refuses a cap below the nodes a queued or running service on the pool asked
+for, and changes nothing.
 Snowflake limits nodes per family (see `GPUs`_); above that, ask your
 Snowflake account team.
 
@@ -584,7 +588,9 @@ Status, logs, and cancel
 
 ``status`` prints the state of the broker, head, and workers, the containers
 of each, and one overall state: ``running``, ``succeeded``, ``failed``,
-``cancelling``, ``cancelled``, or ``gone``.
+``cancelling``, ``cancelled``, or ``gone``. A run whose head or worker
+service is gone before the head finished reads ``failed``, since it cannot
+make progress; ``cancel`` frees the nodes its other services hold.
 
 ``logs`` prints the ``main`` container log of one role (``broker``, ``head``,
 or ``worker``; default ``head``) and instance (default 0). Logs of a finished
@@ -701,8 +707,8 @@ prints the model, version, service, and endpoint.
    * - ``--max-model-len``
      - vLLM ``--max-model-len``. Unset uses vLLM's default.
    * - ``--compute-pool``
-     - Pool for the publish job and the service. Default: the account's GPU
-       pool when there is one GPU family, else the run's pool.
+     - GPU pool for the service. Default: the account's GPU pool when there
+       is one GPU family, else the run's pool.
    * - ``--database`` / ``--schema``
      - Where the model and service go. Pass both. Default
        ``arena.training``.
@@ -715,10 +721,10 @@ The trainer writes ``merged/`` when the ``checkpoint_export`` trigger fires,
 by default at the final save. A run stopped before then has no ``merged/``
 and cannot be published, and ``--step`` takes only a checkpoint with a
 complete ``merged/``. ``publish`` stops before it starts anything when the
-version or the service already exists. The job needs host memory of about the weights' size plus
-4 GiB on one node (bf16 is 2 bytes per parameter, so about 12 GiB for a 4B
-model) and holds it while the service starts, so the pool needs a second node
-unless one node fits both.
+version or the service already exists. The job runs on the head pool, so the
+service can take the whole GPU node. It needs host memory of about the
+weights' size plus 4 GiB on one head node (bf16 is 2 bytes per parameter, so
+about 12 GiB for a 4B model) and holds it while the service starts.
 
 Get the endpoint
 ~~~~~~~~~~~~~~~~

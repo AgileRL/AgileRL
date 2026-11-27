@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -47,25 +48,29 @@ from agilerl.arena.memory.resolve.run import (
     SearchCache,
     SplitSearchError,
     WeightSyncMode,
-    kept_weight_sync_mode,
+    kept_split_memory,
     resolve_run_memory,
+    weight_sync_modes,
 )
 from agilerl.arena.memory.resolve.split import (
+    RowTokens,
     TrainerCost,
+    dataset_learn_seconds,
     price_gpu_split,
     split_workload_from_manifest,
 )
-from agilerl.arena.memory.resolve.supervised import supervised_step_seconds
 from agilerl.arena.memory.resolve.weight_sync import SyncLink
 from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
 from agilerl.arena.memory.training_host import layout_free_host_bytes
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.dpo import DPOSpec
 from agilerl.arena.models.algorithms.opd import (
     distillation_teacher,
     teacher_engine_gpus,
 )
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.algorithms.sft import SFTSpec
 from agilerl.arena.models.fsdp import parallel_layout_pins
 from agilerl.arena.models.manifest import TrainingManifest, async_rollout
 
@@ -108,10 +113,10 @@ class TierCheck:
     engine_tensor_parallel: int | None = None
     # GPUs per separate OPD teacher engine; ``None`` without one.
     teacher_engine_tensor_parallel: int | None = None
-    # Predicted step, the slower of learn and generation. ``None`` when the
-    # split was not searched.
+    # Predicted step: the slower of learn and generation for a searched split,
+    # the learn step for SFT and DPO, else ``None``.
     step_seconds: float | None = None
-    # The same split's step at the low and high tokens per turn of the
+    # A searched split's step at the low and high tokens per turn of the
     # expected lengths; both equal ``step_seconds`` without a range.
     # ``None`` exactly when ``step_seconds`` is.
     step_seconds_low: float | None = None
@@ -123,6 +128,20 @@ class TierCheck:
     @property
     def fits(self) -> bool:
         return self.reason is None
+
+
+# Matches every :func:`shortfall_message`; group 1 is the GPUs the job needs.
+SHORTFALL = re.compile(r"\d+ GPUs, the job needs (\d+)")
+
+
+def shortfall_message(allocation: int, needed: int) -> str:
+    """Why ``allocation`` GPUs cannot run a job that lays out on ``needed``.
+
+    :param allocation: GPUs in the allocation.
+    :param needed: GPUs the job lays out on.
+    :return: The message, which :data:`SHORTFALL` matches.
+    """
+    return f"{allocation} GPUs, the job needs {needed}"
 
 
 def gpus_required(manifest: TrainingManifest, tensor_parallel_size: int = 1) -> int:
@@ -199,7 +218,7 @@ def engines_per_member(
     """
     needed = gpus_required(manifest, tensor_parallel_size)
     if num_gpus < needed:
-        msg = f"{num_gpus} GPUs, the job needs {needed}"
+        msg = shortfall_message(num_gpus, needed)
         raise ValueError(msg)
     training = manifest.training
     return resolve_rollout_engines_per_agent(
@@ -421,7 +440,7 @@ def _placement_shortfall(
         return None
     needed = gpus_required(placed, width)
     if allocation < needed:
-        return f"{allocation} GPUs, the job needs {needed}"
+        return shortfall_message(allocation, needed)
     return None
 
 
@@ -509,8 +528,9 @@ class SyncPlan:
 
     laid_out: TrainingManifest
     mode: WeightSyncMode
-    # The searched split's predicted step and its :func:`_step_range`; with
-    # kept counts, SFT and DPO's :func:`supervised_step_seconds` and no range.
+    # The predicted step and its low and high: a searched split's step and
+    # :func:`_step_range`, or an SFT or DPO learn step at both ends; ``None``
+    # otherwise.
     step_seconds: float | None = None
     step_range: tuple[float, float] | None = None
     # Why no split fits, and that miss's kind; ``None`` when one did or none
@@ -528,13 +548,17 @@ def _weight_sync_plan(
     layout: ParallelLayout | None,
     cache: SearchCache,
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> SyncPlan:
     """The counts and weight-sync mode the run picks on ``allocation`` GPUs.
 
     A searched split runs :func:`split_manifest`; kept counts, or a split
-    that does not fit, take :func:`kept_weight_sync_mode` on ``placed``.
+    that does not fit, take :func:`kept_split_memory`'s mode on ``placed``,
+    else the first of :func:`weight_sync_modes`. SFT and DPO price their
+    learn step on the kept plan (:func:`dataset_learn_seconds`).
 
     :param placed: ``manifest`` at ``layout``.
+    :param row_tokens: The SFT or DPO dataset's row lengths, or ``None``.
     """
     sync_link = tier_sync_link(allocation, device.gpus_per_node)
     plan_model = training_plan_model(placed, model)
@@ -563,19 +587,32 @@ def _weight_sync_plan(
                 expected_lengths,
             )
             return SyncPlan(laid_out, mode, step_seconds, step_range)
-    mode = kept_weight_sync_mode(
-        placed,
-        plan_model,
-        device,
-        allocation,
-        sync_link,
-        cache,
-        expected_lengths,
+    kept = kept_split_memory(
+        placed, plan_model, device, allocation, sync_link, cache, expected_lengths
     )
+    if kept is None:
+        mode = weight_sync_modes(placed, device, sync_link)[0]
+        return SyncPlan(
+            placed, mode, split_reason=split_reason, split_failure=split_failure
+        )
+    mode = WeightSyncMode(kept.merged_lora_sync, kept.weight_sync_transport)
+    spec = placed.algorithm
+    step_seconds = None
+    if isinstance(spec, SFTSpec | DPOSpec):
+        step_seconds = dataset_learn_seconds(
+            spec,
+            placed.training.training_gpus_per_agent,
+            plan_model,
+            device,
+            kept.training,
+            row_tokens,
+        )
+    step_range = None if step_seconds is None else (step_seconds, step_seconds)
     return SyncPlan(
         placed,
         mode,
-        step_seconds=supervised_step_seconds(placed, model, device),
+        step_seconds,
+        step_range,
         split_reason=split_reason,
         split_failure=split_failure,
     )
@@ -710,6 +747,7 @@ def _price(
     num_nodes: int,
     cache: SearchCache,
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> TierCheck:
     """``num_nodes`` of ``tier`` at ``layout``.
 
@@ -722,15 +760,8 @@ def _price(
     cache.host_limited = False
     node_gpus = _node_gpus(tier)
     allocation = _allocation(tier, num_nodes)
-    device = device_spec_from_resource_class(tier).model_copy(
-        update={"gpus_per_node": node_gpus}
-    )
-    sized_key = (device.name, allocation, node_gpus)
-    if sized_key not in cache.teacher_sized:
-        cache.teacher_sized[sized_key] = teacher_sized_manifest(
-            manifest, device, allocation, node_gpus
-        )
-    manifest = colocated_manifest(cache.teacher_sized[sized_key], allocation)
+    device = _tier_device(tier, node_gpus)
+    manifest = _colocated(manifest, device, allocation, node_gpus, cache)
     placed = manifest if layout is None else manifest_at_layout(manifest, layout)
     shortfall = _placement_shortfall(
         placed,
@@ -742,7 +773,15 @@ def _price(
     if shortfall is not None:
         return _other_miss(tier, shortfall, num_nodes)
     sync = _weight_sync_plan(
-        manifest, placed, model, device, allocation, layout, cache, expected_lengths
+        manifest,
+        placed,
+        model,
+        device,
+        allocation,
+        layout,
+        cache,
+        expected_lengths,
+        row_tokens,
     )
     laid_out = sync.laid_out
     mode = sync.mode
@@ -751,7 +790,7 @@ def _price(
     if allocation < needed:
         return _other_miss(
             tier,
-            f"{allocation} GPUs, the job needs {needed}",
+            shortfall_message(allocation, needed),
             num_nodes,
             cache.host_limited,
         )
@@ -779,6 +818,32 @@ def _price(
         cache.host_limited,
     )
     return _with_cross_node_bytes(check, laid_out, model, device, mode, layout)
+
+
+def _tier_device(tier: dict[str, Any], node_gpus: int) -> DeviceSpec:
+    """The device of ``tier`` with ``node_gpus`` GPUs per node."""
+    return device_spec_from_resource_class(tier).model_copy(
+        update={"gpus_per_node": node_gpus}
+    )
+
+
+def _colocated(
+    manifest: TrainingManifest,
+    device: DeviceSpec,
+    allocation: int,
+    node_gpus: int,
+    cache: SearchCache,
+) -> TrainingManifest:
+    """``manifest`` with its teacher sized for ``device`` and colocated on ``allocation`` GPUs.
+
+    The teacher sizing is cached per device, allocation and GPUs per node.
+    """
+    sized_key = (device.name, allocation, node_gpus)
+    if sized_key not in cache.teacher_sized:
+        cache.teacher_sized[sized_key] = teacher_sized_manifest(
+            manifest, device, allocation, node_gpus
+        )
+    return colocated_manifest(cache.teacher_sized[sized_key], allocation)
 
 
 def _with_cross_node_bytes(
@@ -929,6 +994,7 @@ def _price_step(
     num_nodes: int,
     cache: SearchCache,
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> TierCheck | None:
     """Price ``step`` on ``num_nodes`` of ``tier``. ``None`` when its node-sized shard groups cannot run there."""
     if not isinstance(step, NodeShardGroups):
@@ -941,6 +1007,7 @@ def _price_step(
             num_nodes,
             cache,
             expected_lengths,
+            row_tokens,
         )
     layout = _node_shard_layout(
         step, manifest, _node_gpus(tier), _allocation(tier, num_nodes)
@@ -948,7 +1015,15 @@ def _price_step(
     if layout is None:
         return None
     return _price(
-        tier, manifest, model, build_config, layout, num_nodes, cache, expected_lengths
+        tier,
+        manifest,
+        model,
+        build_config,
+        layout,
+        num_nodes,
+        cache,
+        expected_lengths,
+        row_tokens,
     )
 
 
@@ -981,6 +1056,7 @@ def _lock_layout(
     cache: SearchCache,
     first_failure: dict[str, TierCheck],
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> TierCheck | None:
     """The first fitting step. A searched expert group wider than a tier's node waits until layouts on that node miss.
 
@@ -1007,6 +1083,7 @@ def _lock_layout(
                 cache,
                 first_failure,
                 expected_lengths,
+                row_tokens,
             )
             if found is not None:
                 return found
@@ -1024,6 +1101,7 @@ def check_tiers(
     ],
     search_cache: SearchCache | None = None,
     expected_lengths: ExpectedLengths | None = None,
+    row_tokens: RowTokens | None = None,
 ) -> list[TierCheck]:
     """Every tier's verdict, cheapest first.
 
@@ -1069,6 +1147,8 @@ def check_tiers(
         one; ``None`` starts a fresh cache.
     :param expected_lengths: Expected row lengths to price splits and steps
         at; ``None`` uses the generic defaults, with no step range.
+    :param row_tokens: An SFT or DPO dataset's row lengths, for step seconds;
+        ``None`` prices ``max_model_len`` rows.
     """
     ordered = sorted(tiers, key=lambda t: t["price_per_node_hour"])
     ruled_out = {tier["name"]: check for tier in ordered if (check := _unusable(tier))}
@@ -1085,10 +1165,18 @@ def check_tiers(
         cache,
         first_failure,
         expected_lengths,
+        row_tokens,
     )
     if lock is not None:
         lock = _fewer_cross_node_bytes(
-            lock, steps, manifest, model, build_config, cache, expected_lengths
+            lock,
+            steps,
+            manifest,
+            model,
+            build_config,
+            cache,
+            expected_lengths,
+            row_tokens,
         )
     return [
         ruled_out.get(tier["name"])
@@ -1101,6 +1189,7 @@ def check_tiers(
             build_config,
             cache,
             expected_lengths,
+            row_tokens,
         )
         for tier in ordered
     ]
@@ -1116,6 +1205,7 @@ def _fewer_cross_node_bytes(
     ],
     cache: SearchCache,
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> TierCheck:
     """``lock``, or the fit at a higher expert degree on its tier and node count that moves fewer bytes between nodes.
 
@@ -1149,6 +1239,7 @@ def _fewer_cross_node_bytes(
             lock.num_nodes,
             cache,
             expected_lengths,
+            row_tokens,
         )
         if (
             check is not None
@@ -1170,6 +1261,7 @@ def _first_fit(
     cache: SearchCache,
     first_failure: dict[str, TierCheck],
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> TierCheck | None:
     """The first tier that fits ``step``, fewest nodes then cheapest; ``None`` when none does.
 
@@ -1190,6 +1282,7 @@ def _first_fit(
                 num_nodes,
                 cache,
                 expected_lengths,
+                row_tokens,
             )
         return known[key]
 
@@ -1270,6 +1363,7 @@ def _verdict(
     ],
     cache: SearchCache,
     expected_lengths: ExpectedLengths | None,
+    row_tokens: RowTokens | None,
 ) -> TierCheck:
     """``tier``'s check: the lock, a price at the lock, or its first failure."""
     name = tier["name"]
@@ -1285,6 +1379,7 @@ def _verdict(
             lock.num_nodes,
             cache,
             expected_lengths,
+            row_tokens,
         )
     # With no lock, the first step priced and failed every usable tier.
     if lock is None or name in first_failure:

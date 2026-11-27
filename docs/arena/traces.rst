@@ -190,8 +190,8 @@ Each target assistant message of a row (see ``weight`` and
        template
      - Loss on every target assistant turn; other messages are context. A
        template that renders earlier turns differently once later ones follow
-       (gpt-oss drops their analysis) trains each target turn after its own
-       prompt instead, with a warning.
+       (gpt-oss, Qwen3 and Gemma 4 drop their reasoning) trains each target
+       turn after its own prompt instead, with a warning.
    * - OPD, separate teacher (``teacher.model``)
      - Each target turn's prompt (+ ``tools``) as a single-turn rollout prompt
      - The student samples one assistant turn and the teacher scores it. The

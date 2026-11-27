@@ -1770,7 +1770,13 @@ class TestCli:
         )
 
     def test_reads_a_manifest_from_stdin(self, tmp_path) -> None:
-        document = manifest(GRPO, network={"max_context_length": 1024})
+        document = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 1024,
+            },
+        )
 
         result = self._run("validate", "-", "--json", stdin=json.dumps(document))
 
@@ -4164,21 +4170,51 @@ class TestVerdictArenaOptions:
             "network.max_context_length"
         ]
 
-    def test_warns_when_the_context_is_the_filled_catalog_window(self) -> None:
+    def test_warns_when_the_context_is_the_filled_default(self) -> None:
         document = copy.deepcopy(GRPO)
         del document["network"]["max_context_length"]
 
         result = verdict(document)
 
         assert result["ok"] is True, result
-        assert any(
-            "full context window (32768 tokens)" in w for w in result["warnings"]
-        )
+        assert any("default context of 2048 tokens" in w for w in result["warnings"])
+
+    def test_filled_default_leaves_room_for_the_output_cap(self) -> None:
+        document = copy.deepcopy(GRPO)
+        del document["network"]["max_context_length"]
+        document["algorithm"]["max_output_tokens"] = 4096
+
+        result = verdict(document)
+
+        assert result["ok"] is True, result
+        assert any("default context of 8192 tokens" in w for w in result["warnings"])
+
+    def test_filled_default_reads_a_quoted_output_cap(self) -> None:
+        document = copy.deepcopy(GRPO)
+        del document["network"]["max_context_length"]
+        document["algorithm"]["max_output_tokens"] = "4096"
+
+        result = verdict(document)
+
+        assert result["ok"] is True, result
+        assert any("default context of 8192 tokens" in w for w in result["warnings"])
+
+    def test_filled_default_leaves_room_for_answer_continuation(self) -> None:
+        document = copy.deepcopy(GRPO)
+        del document["network"]["max_context_length"]
+        document["algorithm"]["max_output_tokens"] = 2048
+        document["algorithm"]["answer_continuation"] = True
+        document["algorithm"]["constrain_answer_pattern"] = r"\d+"
+
+        result = verdict(document)
+
+        assert result["ok"] is True, result
+        assert any("default context of 8192 tokens" in w for w in result["warnings"])
 
     def test_no_context_warning_when_the_manifest_sets_it(self) -> None:
         result = verdict(GRPO_ON_ARENA)
 
-        assert not any("full context window" in w for w in result["warnings"])
+        assert not any("default context" in w for w in result["warnings"])
 
 
 class TestVerdictClassicRl:

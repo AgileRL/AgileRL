@@ -1140,8 +1140,7 @@ def _check_tool_calls_parse(
     """Raise unless the chat format parses ``turn`` to ``message``'s tool calls.
 
     A rollout runs only the calls the chat format parses, so SFT must not train
-    calls it would miss. Names are compared; Gemma's parser keeps scalar
-    arguments as text for the executor to coerce.
+    calls it would miss. Names are compared, not arguments.
     """
     expected = [
         call.get("function", call).get("name") for call in message.get("tool_calls", [])

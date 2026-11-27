@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import json
-import logging
 import sys
-import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib.metadata import entry_points
@@ -18,7 +16,7 @@ import yaml
 
 from agilerl.arena import console
 from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
-from agilerl.arena.cli_agent import register_deployment_commands
+from agilerl.arena.cli_agent import register_deployment_commands, session_for_prompt
 from agilerl.arena.cli_datasets import datasets_group
 from agilerl.arena.cli_experiment_logs import register_experiment_log_commands
 from agilerl.arena.cli_manifest import handle_help_option
@@ -59,7 +57,6 @@ from agilerl.arena.submit_quote import (
 
 ArenaError.enable_cli_mode()
 
-logger = logging.getLogger(__name__)
 
 ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Command)
 
@@ -1113,30 +1110,6 @@ def agent_run(
         )
 
 
-def _session_for_prompt(
-    deployment: str,
-    session_id: str | None,
-    *,
-    new_session: bool,
-) -> str:
-    """Pick the session a prompt runs in, starting and recording one if needed.
-
-    A new conversation gets its id here rather than from the deployment, which is
-    what lets the next prompt carry on from it: a streamed reply is plain text
-    and has nowhere to hand an id back.
-    """
-    if session_id:
-        return session_id.strip()
-    if not new_session:
-        resumed = load_active_session(deployment)
-        if resumed:
-            return resumed
-    started = str(uuid.uuid4())
-    save_active_session(deployment, started)
-    logger.info("Started session %s.", started)
-    return started
-
-
 @agent_cli.command("generate")
 @click.argument("deployment_name", required=False, default=None)
 @_agent_deployment_options
@@ -1159,6 +1132,13 @@ def _session_for_prompt(
     default=False,
     help="Start a new conversation and continue it in later prompts.",
 )
+@click.option(
+    "--max-tokens",
+    type=click.IntRange(min=1),
+    default=512,
+    show_default=True,
+    help="Most tokens the answer may run to. A longer answer is cut off.",
+)
 @click.pass_obj
 def agent_generate(
     config: CommandConfig,
@@ -1169,6 +1149,7 @@ def agent_generate(
     prompt: str,
     session_id: str | None,
     new_session: bool,
+    max_tokens: int,
 ) -> None:
     """Stream a completion from a prompt through a deployed LLM agent.
 
@@ -1182,8 +1163,10 @@ def agent_generate(
     with _open_agent(
         config, deployment_name, refresh, experiment_name, project_name
     ) as (deployment, agent):
-        resolved = _session_for_prompt(deployment, session_id, new_session=new_session)
-        for chunk in agent.generate_stream(prompt, session_id=resolved):
+        resolved = session_for_prompt(deployment, session_id, new_session=new_session)
+        for chunk in agent.generate_stream(
+            prompt, params={"max_new_tokens": max_tokens}, session_id=resolved
+        ):
             console.print(chunk, end="", markup=False, highlight=False, soft_wrap=True)
         console.print()
 
@@ -1321,7 +1304,7 @@ def agent_sessions_resume(
         chosen = _choose_session(sessions, session_id, load_active_session(deployment))
 
     save_active_session(deployment, chosen)
-    console.print(f"Resuming session {chosen} on {deployment}.")
+    console.print(f"Resuming session {chosen} on {deployment}.", markup=False)
 
 
 @agent_sessions.command("delete")
@@ -1364,9 +1347,9 @@ def agent_sessions_delete(
     if load_active_session(deployment) == session_id.strip():
         clear_active_session(deployment)
     if deleted:
-        console.print(f"Deleted session {session_id} on {deployment}.")
+        console.print(f"Deleted session {session_id} on {deployment}.", markup=False)
     else:
-        console.print(f"No session {session_id} on {deployment}.")
+        console.print(f"No session {session_id} on {deployment}.", markup=False)
 
 
 @agent_sessions.command("clear")
@@ -1380,9 +1363,9 @@ def agent_sessions_clear(deployment_name: str | None) -> None:
     """
     target, _, _ = _resolve_agent_target(deployment_name, None, None)
     if clear_active_session(target):
-        console.print(f"Cleared the session on {target}.")
+        console.print(f"Cleared the session on {target}.", markup=False)
     else:
-        console.print(f"No session to clear on {target}.")
+        console.print(f"No session to clear on {target}.", markup=False)
 
 
 @main.group("projects")

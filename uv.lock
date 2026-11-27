@@ -131,6 +131,7 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
+    { name = "boto3" },
     { name = "datasets" },
     { name = "flash-linear-attention", marker = "sys_platform == 'linux'" },
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
@@ -153,6 +154,7 @@ cpu = [
 ]
 cpu-llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
+    { name = "boto3" },
     { name = "datasets" },
     { name = "jsonschema" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
@@ -162,6 +164,7 @@ cpu-llm = [
 ]
 llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
+    { name = "boto3" },
     { name = "datasets" },
     { name = "flash-linear-attention", marker = "sys_platform == 'linux'" },
     { name = "jsonschema" },
@@ -213,6 +216,9 @@ requires-dist = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.50.2" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'cpu-llm'", specifier = "==0.50.2" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.50.2" },
+    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.34" },
+    { name = "boto3", marker = "extra == 'cpu-llm'", specifier = ">=1.34" },
+    { name = "boto3", marker = "extra == 'llm'", specifier = ">=1.34" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==5.1.0" },
     { name = "datasets", marker = "extra == 'cpu-llm'", specifier = "==5.1.0" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==5.1.0" },

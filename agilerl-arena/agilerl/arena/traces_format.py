@@ -52,6 +52,7 @@ __all__ = [
     "WEIGHT",
     "ExcludedCounts",
     "ModelVersionCount",
+    "RowTokens",
     "SnapshotFile",
     "SnapshotManifest",
     "TimeRange",
@@ -146,7 +147,7 @@ class ModelVersionCount:
 
 @dataclass(frozen=True)
 class TimeRange:
-    """The first and last ``received_at`` in a snapshot."""
+    """The first and last ``received_at`` of the calls in a snapshot."""
 
     start: datetime
     end: datetime
@@ -159,11 +160,29 @@ class ExcludedCounts:
     :ivar no_content: Captured without content.
     :ivar error_or_cancelled: Ended in ``error`` or ``cancelled``.
     :ivar invalid: In a segment that breaks the traces spec.
+    :ivar with_images: Sent an image, which traces SFT does not train.
     """
 
     no_content: int = 0
     error_or_cancelled: int = 0
     invalid: int = 0
+    with_images: int = 0
+
+
+@dataclass(frozen=True)
+class RowTokens:
+    """Tokens per row of a snapshot, as the model that served the calls counted them.
+
+    A row's length is its last call's prompt plus completion tokens. Reasoning
+    a client left out when resending earlier turns is in the row but not in
+    that count. Rows without counts are left out of the stats.
+
+    :ivar mean: Mean tokens per row.
+    :ivar mean_square: Mean of each row's squared token count.
+    """
+
+    mean: float
+    mean_square: float
 
 
 @dataclass(frozen=True)
@@ -181,6 +200,7 @@ class SnapshotManifest:
 
     :ivar row_count: Segments in ``files``.
     :ivar turn_count: Assistant messages across all segments.
+    :ivar row_tokens: Token stats of the rows whose length is known, ``None`` when none is.
     """
 
     snapshot_id: str
@@ -199,6 +219,7 @@ class SnapshotManifest:
     organization_id: str | None = None
     deployment_ids: list[str] = dataclasses.field(default_factory=list)
     turn_count: int | None = None
+    row_tokens: RowTokens | None = None
     format: str = TRACES_FORMAT
     schema_version: int = TRACES_SCHEMA_VERSION
 
@@ -300,6 +321,9 @@ def read_manifest(path: str | Path) -> SnapshotManifest:
     excluded = _optional(data, "excluded", dict)
     if excluded is not None:
         optional["excluded"] = _record(ExcludedCounts, excluded, "excluded")
+    row_tokens = _optional(data, "row_tokens", dict)
+    if row_tokens is not None:
+        optional["row_tokens"] = _record(RowTokens, row_tokens, "row_tokens")
     fields.update(
         {name: value for name, value in optional.items() if value is not None}
     )
@@ -316,8 +340,10 @@ def _typed(data: dict[str, Any], name: str, kind: type[T]) -> T:
 
 
 def _is_kind(value: object, kind: type) -> bool:
-    """Whether ``value`` is a ``kind``; bool is an int subclass, but a count of True is a writer bug."""
-    return isinstance(value, kind) and not (kind is int and isinstance(value, bool))
+    """Whether ``value`` is a ``kind``; a whole number counts as a float, and bool, an int subclass, as neither."""
+    if isinstance(value, bool):
+        return kind is bool
+    return isinstance(value, kind) or (kind is float and isinstance(value, int))
 
 
 def _optional(data: dict[str, Any], name: str, kind: type[T]) -> T | None:

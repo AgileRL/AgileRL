@@ -55,6 +55,7 @@ from agilerl.arena.snowflake.profile import (
     trainer_image_path,
 )
 from agilerl.arena.snowflake.setup import (
+    check_gpu_cap,
     no_gpu_message,
     nodes_for_gpus,
     pool_family_message,
@@ -68,7 +69,17 @@ from agilerl.arena.snowflake.setup_sql import (
 )
 from agilerl.arena.snowflake.source import SnowflakeRow, SnowflakeSession
 
-TERMINAL_SERVICE = frozenset({"DONE", "FAILED", "CANCELLED", "CANCELED", "SUSPENDED"})
+TERMINAL_SERVICE = frozenset(
+    {
+        "DONE",
+        "FAILED",
+        "INTERNAL_ERROR",
+        "CANCELLED",
+        "CANCELED",
+        "SUSPENDED",
+        "DELETED",
+    }
+)
 TABLE_NAME = re.compile(rf"({TABLE_PART})\.({TABLE_PART})\.({TABLE_PART})")
 HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 HOST_NAME = re.compile(rf"{HOST_LABEL}(?:\.{HOST_LABEL})+")
@@ -165,7 +176,8 @@ def set_gpu_cap(session: SnowflakeSession, family: str, max_gpus: int) -> str:
     :param family: GPU instance family.
     :param max_gpus: GPU cap.
     :return: The line to print.
-    :raises ValueError: The family is unknown, or a running service blocks the change.
+    :raises ValueError: The family is unknown, the cap is not whole nodes, or a
+        queued or running service blocks the change.
     """
     require_accountadmin(session)
     name = family.strip().upper()
@@ -175,6 +187,7 @@ def set_gpu_cap(session: SnowflakeSession, family: str, max_gpus: int) -> str:
     families = load_families(session)
     if not family_sized(name, families):
         raise ValueError(no_gpu_message(name, families))
+    check_gpu_cap(name, max_gpus, spec.gpus)
     nodes = nodes_for_gpus(max_gpus, spec.gpus)
     profile = remote_profile(session)
     if profile is None:
@@ -216,12 +229,12 @@ def pool_grant_statements(pool: str) -> list[str]:
 def blocking_services(
     session: SnowflakeSession, pool: str, max_nodes: int
 ) -> list[tuple[str, int]]:
-    """Running services on ``pool`` that use more nodes than ``max_nodes``.
+    """Queued or running services on ``pool``, job services included, that need more nodes than ``max_nodes``.
 
     :param session: Admin session.
     :param pool: Compute pool name.
-    :param max_nodes: Proposed ``MAX_NODES``.
-    :return: Service name and the nodes it is using.
+    :param max_nodes: Proposed ``MAX_NODES``. ``0`` for a pool about to be dropped.
+    :return: Service name and the nodes it needs.
     """
     blocked = []
     for row in collect(session, f"SHOW SERVICES IN COMPUTE POOL {pool}"):
@@ -236,14 +249,15 @@ def blocking_services(
 
 
 def shrink_message(blocked: list[tuple[str, int]], max_nodes: int) -> str:
-    """Message when a lower ``MAX_NODES`` would drop a running service.
+    """Message when a lower ``MAX_NODES`` would strand a queued or running service.
 
-    :param blocked: Service name and the nodes it is using.
+    :param blocked: Service name and the nodes it needs.
     :param max_nodes: Proposed ``MAX_NODES``.
     :return: The message.
     """
     lines = [
-        f"{name} is using {nodes} nodes. MAX_NODES {max_nodes} is below that."
+        f"{name} needs {nodes} {'node' if nodes == 1 else 'nodes'}. "
+        f"MAX_NODES {max_nodes} is below that."
         for name, nodes in blocked
     ]
     lines.append("The pool was not changed.")
@@ -251,10 +265,9 @@ def shrink_message(blocked: list[tuple[str, int]], max_nodes: int) -> str:
 
 
 def _service_nodes(values: dict[str, object]) -> int:
-    for key in ("current_instances", "target_instances"):
-        if values.get(key) not in (None, ""):
-            return whole_number(values.get(key))
-    return whole_number(values.get("min_instances"))
+    # A queued service reports 0 current instances; a live one needs at least a node.
+    keys = ("current_instances", "target_instances", "min_instances")
+    return max(1, *(whole_number(values.get(key)) for key in keys))
 
 
 def service_name(values: dict[str, object]) -> str:

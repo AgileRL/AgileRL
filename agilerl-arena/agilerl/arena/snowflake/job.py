@@ -26,6 +26,15 @@ from agilerl.arena.memory import cli as memory_cli
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
+from agilerl.arena.snowflake.gpu_fit import (
+    GpuShortfallError,
+    check_rollout_bundle,
+    fitting_pools,
+    gpu_counts_message,
+    shortfall_needed,
+    shortfall_refusal,
+    too_small_message,
+)
 from agilerl.arena.snowflake.license import CHANNEL_ENV, PURCHASED_ENV, REGION_ENV
 from agilerl.arena.snowflake.ports import TrainerPorts, service_endpoints
 from agilerl.arena.snowflake.profile import (
@@ -372,14 +381,18 @@ def trainer_ports(manifest: TrainingManifest, worker_gpus: int) -> TrainerPorts:
     return TrainerPorts(agents=training.pop_size, engines_per_agent=max(1, engines))
 
 
-def manifest_fits(manifest_path: Path, pool: GpuPool, gpus: int) -> bool:
+def manifest_fits(manifest_path: Path, family: str, pool: GpuPool, gpus: int) -> bool:
     """Whether the memory estimator says the manifest fits the run's GPUs.
 
     :param manifest_path: Training manifest.
+    :param family: The pool's GPU family, which names the GPU model the
+        estimator prices the trainer and rollout split on.
     :param pool: The family's pool, for per-GPU memory and GPUs per node.
     :param gpus: GPUs for the whole run, a multiple of ``pool.gpus_per_node``.
         The trainer lays the run out on ``gpus // pool.gpus_per_node`` nodes.
     :return: Whether both phases fit with the underprediction buffer.
+    :raises GpuShortfallError: The run needs more GPUs, or a node larger
+        than the family's, for its rollout engines.
     :raises ValueError: The estimator cannot size the manifest.
     """
     stdout = StringIO()
@@ -387,16 +400,21 @@ def manifest_fits(manifest_path: Path, pool: GpuPool, gpus: int) -> bool:
     with redirect_stdout(stdout), redirect_stderr(stderr):
         code = memory_cli.main(
             str(manifest_path),
+            gpu=GPU_FAMILIES[family].gpu,
             device_gb=float(pool.gpu_memory_gib),
             num_gpus=gpus,
             gpus_per_node=pool.gpus_per_node,
             as_json=True,
         )
-    if code == memory_cli.EXIT_OK:
-        return True
-    if code == memory_cli.EXIT_OVER_BUDGET:
-        return False
+    if code in {memory_cli.EXIT_OK, memory_cli.EXIT_OVER_BUDGET}:
+        check_rollout_bundle(load_manifest(manifest_path), family, pool)
+        return code == memory_cli.EXIT_OK
     detail = stderr.getvalue().strip() or stdout.getvalue().strip()
+    needed = shortfall_needed(detail)
+    if needed is not None:
+        manifest = load_manifest(manifest_path)
+        check_rollout_bundle(manifest, family, pool)
+        raise GpuShortfallError(shortfall_refusal(manifest, family, pool, needed))
     raise ValueError(detail or "the memory estimator could not size this manifest")
 
 
@@ -404,7 +422,7 @@ def choose_gpu_family(
     pools: dict[str, GpuPool],
     gpus: int,
     family: str | None,
-    fits: Callable[[GpuPool], bool],
+    fits: Callable[[str, GpuPool], bool],
 ) -> str:
     """Pick a GPU family that divides ``gpus`` and that ``fits`` accepts.
 
@@ -419,8 +437,9 @@ def choose_gpu_family(
         ``ValueError`` when the estimator cannot size the manifest.
     :return: The family name.
     :raises ValueError: The family is missing, none divide ``gpus``, none
-        that divide can hold the manifest, or the estimator cannot size it
-        for an omitted family.
+        that divide can hold the manifest, the run needs more GPUs or a
+        larger node (:class:`GpuShortfallError`), or the estimator cannot
+        size it for an omitted family.
     """
     if not pools:
         msg = "This account profile has no GPU pool.\nRun arena snowflake setup again."
@@ -435,9 +454,11 @@ def choose_gpu_family(
             )
             raise ValueError(msg)
         if pool.gpus_per_node < 1 or gpus % pool.gpus_per_node != 0:
-            raise ValueError(_gpu_counts_message(gpus, {family: pool}, family))
+            raise ValueError(gpu_counts_message(gpus, {family: pool}, family))
         try:
-            fitted = fits(pool)
+            fitted = fits(family, pool)
+        except GpuShortfallError:
+            raise
         except ValueError as exc:
             warnings.warn(
                 f"The memory estimator could not size this manifest, so "
@@ -446,7 +467,7 @@ def choose_gpu_family(
             )
             return family
         if not fitted:
-            raise ValueError(_too_small_message(gpus, [(family, pool)], family))
+            raise ValueError(too_small_message(gpus, [(family, pool)], family))
         return family
     dividing = [
         (name, pool)
@@ -454,10 +475,10 @@ def choose_gpu_family(
         if pool.gpus_per_node > 0 and gpus % pool.gpus_per_node == 0
     ]
     if not dividing:
-        raise ValueError(_gpu_counts_message(gpus, pools, None))
-    holding = [(name, pool) for name, pool in dividing if fits(pool)]
+        raise ValueError(gpu_counts_message(gpus, pools, None))
+    holding, short = fitting_pools(dividing, fits)
     if not holding:
-        raise ValueError(_too_small_message(gpus, dividing, None))
+        raise ValueError(short or too_small_message(gpus, dividing, None))
     holding.sort(
         key=lambda item: (item[1].gpu_memory_gib, -item[1].gpus_per_node, item[0])
     )
@@ -1059,11 +1080,14 @@ def run_state(states: Mapping[str, str]) -> str:
     """One state for a run from its role states.
 
     The head runs the trainer, so its exit decides success. The head drops
-    the broker when it ends.
+    the broker as its last step, so a missing broker alone is the head
+    finishing. A missing head or worker before the head is done means the run
+    cannot progress.
 
     :param states: Role to :func:`job_state`, for every role in :data:`ROLES`.
     :return: ``failed``, ``cancelling``, ``cancelled``, ``succeeded``,
-        ``gone`` when every service is dropped, else ``running``.
+        ``gone`` when every service is dropped, ``failed`` when the head or
+        worker service is dropped, else ``running``.
     """
     values = set(states.values())
     for state in ("failed", "cancelling", "cancelled"):
@@ -1073,6 +1097,8 @@ def run_state(states: Mapping[str, str]) -> str:
         return "succeeded"
     if values == {"gone"}:
         return "gone"
+    if "gone" in (states["head"], states["worker"]):
+        return "failed"
     return "running"
 
 
@@ -1276,45 +1302,6 @@ def _execute_services(
         for name in reversed(started):
             session.sql(drop_service_sql(name)).collect()
         raise
-
-
-def _too_small_message(
-    gpus: int, pools: list[tuple[str, GpuPool]], family: str | None
-) -> str:
-    """Families that divide ``gpus`` whose GPU memory cannot hold the manifest."""
-    named = sorted(pools)
-    listed = "\n".join(f"{name} ({pool.gpu_memory_gib} GiB)" for name, pool in named)
-    if family is not None:
-        return f"{listed} cannot hold this manifest."
-    return (
-        f"No GPU family that divides {gpus} GPUs can hold this manifest.\n"
-        f"Too small:\n{listed}"
-    )
-
-
-def _gpu_counts_message(
-    gpus: int, pools: dict[str, GpuPool], family: str | None
-) -> str:
-    if family is None:
-        lines = [f"No GPU family divides {gpus} GPUs."]
-        names = sorted(pools)
-    else:
-        lines = [f"{family} does not divide {gpus} GPUs."]
-        names = [family]
-    for name in names:
-        pool = pools[name]
-        counts: list[int] = []
-        count = pool.gpus_per_node
-        if count > 0:
-            while count <= pool.max_gpus:
-                counts.append(count)
-                count += pool.gpus_per_node
-        if counts:
-            listed = ", ".join(str(item) for item in counts)
-            lines.append(f"{name} runs {listed} GPUs.")
-        else:
-            lines.append(f"{name} runs no GPU count within its max.")
-    return "\n".join(lines)
 
 
 def _head_integrations(

@@ -8,16 +8,31 @@ from __future__ import annotations
 import json
 import os
 import signal
-import socket
-import subprocess
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
+from agilerl.arena.broker import (
+    CGROUP_MEMORY_MAX,
+    DEFAULT_PULSAR_HOME,
+    HEALTH_TIMEOUT_S,
+    POLL_S,
+    CommandResult,
+    PulsarProcess,
+    broker_memory,
+    cgroup_memory_bytes,
+    ensure_tenant_and_namespace,
+    http_status,
+    node_ip,
+    pulsar_home_from,
+    run_command,
+    start_process,
+    start_standalone,
+    stop_pulsar,
+    wait_until_healthy,
+    write_broker_config,
+)
 from agilerl.arena.snowflake.job import (
     RUN_MOUNT,
     cpu_memory_gib,
@@ -34,51 +49,10 @@ from agilerl.arena.snowflake.node import (
 from agilerl.arena.snowflake.session import open_session
 from agilerl.arena.snowflake.source import SnowflakeRow, SnowflakeSession
 
-HEALTH_TIMEOUT_S = 600.0
 HEAD_GONE_S = 60.0
-POLL_S = 2.0
 RUN_POLL_S = 20.0
 # Reopening re-reads /snowflake/session/token, which Snowflake keeps fresh.
 SESSION_MAX_AGE_S = 1800.0
-DEFAULT_PULSAR_HOME = Path("/opt/pulsar")
-CGROUP_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
-JOURNAL_DIR = Path("/pulsar-data/journal")
-LEDGER_DIR = Path("/pulsar-data/ledgers")
-
-
-class PulsarProcess(Protocol):
-    """The standalone process while it runs."""
-
-    def poll(self) -> int | None:
-        """Exit code, or ``None`` while the process is running."""
-        ...
-
-    def terminate(self) -> None:
-        """Send SIGTERM."""
-        ...
-
-    def wait(self) -> int:
-        """Block until the process exits."""
-        ...
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    """Exit code and combined output of one finished command."""
-
-    code: int
-    output: str
-
-
-@dataclass(frozen=True)
-class BrokerMemory:
-    """JVM heap, direct memory, and ledger caches, in MiB."""
-
-    heap_mib: int
-    direct_mib: int
-    ledger_cache_mib: int
-    db_write_cache_mib: int
-    db_read_cache_mib: int
 
 
 @dataclass
@@ -152,12 +126,9 @@ def memory_limit_bytes(path: Path, family: str) -> int:
     :raises ValueError: The file is not a byte count and ``family`` is not a
         known CPU family.
     """
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        text = ""
-    if text.isdecimal():
-        return int(text)
+    limit = cgroup_memory_bytes(path)
+    if limit is not None:
+        return limit
     # CPU pools omit memory.max, or write the literal max.
     return cpu_memory_gib(family) * 1024 * 1024 * 1024
 
@@ -185,66 +156,13 @@ def run_broker(runtime: BrokerRuntime | None = None) -> int:
     limit = memory_limit_bytes(current.memory_limit_path, str(job["broker_family"]))
     memory = broker_memory(limit)
     write_broker_config(current.pulsar_home, current.node_ip(), memory)
-    env = dict(current.environ)
-    env["PULSAR_HOME"] = str(current.pulsar_home)
-    command = [
-        str(current.pulsar_home / "bin" / "pulsar"),
-        "standalone",
-        "--config",
-        str(current.pulsar_home / "conf" / "standalone.conf"),
-    ]
-    process = current.start_process(command, env)
+    process = start_standalone(current)
     try:
-        _wait_until_healthy(current)
-        _ensure_tenant_and_namespace(current)
+        wait_until_healthy(current)
+        ensure_tenant_and_namespace(current)
         return _poll_run(current, process, run_prefix, head_service)
     finally:
-        _stop_pulsar(process)
-
-
-def broker_memory(limit_bytes: int) -> BrokerMemory:
-    """Heap, direct memory, and cache sizes for a cgroup memory limit.
-
-    :param limit_bytes: ``memory.max`` in bytes.
-    :return: Sizes in MiB, each at least 256.
-    """
-    # CPU_X64_L is 116 GiB: heap 24, direct 48, ledger cache 8, each db cache 4.
-    memory_parts = 116
-    mib = 1024 * 1024
-    minimum_mib = 256
-
-    def portion(parts: int) -> int:
-        share = limit_bytes * parts // (memory_parts * mib)
-        return max(share, minimum_mib)
-
-    db_cache_mib = portion(4)
-    return BrokerMemory(
-        heap_mib=portion(24),
-        direct_mib=portion(48),
-        ledger_cache_mib=portion(8),
-        db_write_cache_mib=db_cache_mib,
-        db_read_cache_mib=db_cache_mib,
-    )
-
-
-def write_broker_config(
-    pulsar_home: Path, advertised_address: str, memory: BrokerMemory
-) -> None:
-    """Write broker, bookie, and JVM settings under the Pulsar install.
-
-    :param pulsar_home: Pulsar install root.
-    :param advertised_address: This container's IP.
-    :param memory: Heap, direct memory, and cache sizes.
-    """
-    conf_dir = pulsar_home / "conf"
-    conf_dir.mkdir(parents=True, exist_ok=True)
-    JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
-    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
-    _write_merged(
-        conf_dir / "standalone.conf", _broker_properties(advertised_address, memory)
-    )
-    _write_merged(conf_dir / "bookkeeper.conf", _bookie_properties(memory))
-    _write_merged(conf_dir / "pulsar_env.sh", {"PULSAR_MEM": _pulsar_mem(memory)})
+        stop_pulsar(process)
 
 
 def service_status_terminal(rows: list[SnowflakeRow]) -> bool:
@@ -305,122 +223,18 @@ def production_runtime() -> BrokerRuntime:
 
     :return: The default runtime.
     """
-    home = os.environ.get("PULSAR_HOME", "").strip()
     return BrokerRuntime(
         environ=os.environ,
-        node_ip=lambda: socket.gethostbyname(socket.gethostname()),
+        node_ip=node_ip,
         open_session=lambda: open_session(None),
-        start_process=_start_process,
-        run_command=_run_command,
-        http_status=_http_status,
+        start_process=start_process,
+        run_command=run_command,
+        http_status=http_status,
         sleep=time.sleep,
         monotonic=time.monotonic,
-        pulsar_home=Path(home) if home else DEFAULT_PULSAR_HOME,
+        pulsar_home=pulsar_home_from(os.environ),
         memory_limit_path=CGROUP_MEMORY_MAX,
     )
-
-
-def _broker_properties(address: str, memory: BrokerMemory) -> dict[str, str]:
-    return {
-        "advertisedAddress": address,
-        "managedLedgerDefaultEnsembleSize": "1",
-        "managedLedgerDefaultWriteQuorum": "1",
-        "managedLedgerDefaultAckQuorum": "1",
-        "maxMessageSize": "5242880",
-        "managedLedgerCacheSizeMB": str(memory.ledger_cache_mib),
-        "allowAutoTopicCreation": "true",
-        "brokerDeleteInactiveTopicsEnabled": "false",
-        "ttlDurationDefaultInSeconds": "0",
-        "backlogQuotaDefaultLimitBytes": "-1",
-        "defaultRetentionTimeInMinutes": "0",
-        "defaultRetentionSizeInMB": "0",
-    }
-
-
-def _bookie_properties(memory: BrokerMemory) -> dict[str, str]:
-    return {
-        "journalDirectories": JOURNAL_DIR.as_posix(),
-        "ledgerDirectories": LEDGER_DIR.as_posix(),
-        "journalSyncData": "false",
-        "dbStorage_writeCacheMaxSizeMb": str(memory.db_write_cache_mib),
-        "dbStorage_readAheadCacheMaxSizeMb": str(memory.db_read_cache_mib),
-    }
-
-
-def _write_merged(path: Path, values: dict[str, str]) -> None:
-    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    path.write_text(_merge_assignments(existing, values), encoding="utf-8")
-
-
-def _pulsar_mem(memory: BrokerMemory) -> str:
-    return (
-        f'"-Xms{memory.heap_mib}m -Xmx{memory.heap_mib}m '
-        f'-XX:MaxDirectMemorySize={memory.direct_mib}m"'
-    )
-
-
-def _merge_assignments(text: str, values: dict[str, str]) -> str:
-    lines = text.splitlines()
-    seen: set[str] = set()
-    merged: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("#") or "=" not in stripped:
-            merged.append(line)
-            continue
-        key = stripped.split("=", 1)[0].strip()
-        if key in values:
-            merged.append(f"{key}={values[key]}")
-            seen.add(key)
-        else:
-            merged.append(line)
-    for key, value in values.items():
-        if key not in seen:
-            merged.append(f"{key}={value}")
-    return "\n".join(merged) + "\n"
-
-
-def _wait_until_healthy(runtime: BrokerRuntime) -> None:
-    url = "http://127.0.0.1:8080/admin/v2/brokers/health"
-    deadline = runtime.monotonic() + runtime.health_timeout_s
-    while runtime.http_status(url) != 200:
-        if runtime.monotonic() >= deadline:
-            msg = (
-                f"Broker health at {url} did not return 200 "
-                f"after {runtime.health_timeout_s:.0f}s"
-            )
-            raise TimeoutError(msg)
-        runtime.sleep(runtime.poll_s)
-
-
-def _ensure_tenant_and_namespace(runtime: BrokerRuntime) -> None:
-    admin = str(runtime.pulsar_home / "bin" / "pulsar-admin")
-    admin_url = "http://127.0.0.1:8080"
-    _run_admin(
-        runtime,
-        [
-            admin,
-            "--admin-url",
-            admin_url,
-            "tenants",
-            "create",
-            "arena",
-            "--allowed-clusters",
-            "standalone",
-        ],
-    )
-    _run_admin(
-        runtime,
-        [admin, "--admin-url", admin_url, "namespaces", "create", "arena/run"],
-    )
-
-
-def _run_admin(runtime: BrokerRuntime, command: list[str]) -> None:
-    result = runtime.run_command(command)
-    if result.code == 0 or "already exists" in result.output.lower():
-        return
-    msg = f"pulsar-admin failed ({result.code}): {result.output}"
-    raise RuntimeError(msg)
 
 
 def _poll_run(
@@ -472,13 +286,6 @@ def _watch_head(
         runtime.sleep(runtime.run_poll_s)
 
 
-def _stop_pulsar(process: PulsarProcess) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    process.wait()
-
-
 def _row_statuses(values: dict[str, object]) -> list[str]:
     if "status" in values:
         return _statuses_in(values["status"])
@@ -504,25 +311,6 @@ def _statuses_in(value: object) -> list[str]:
     if text == "":
         return []
     return [text.upper()]
-
-
-def _http_status(url: str) -> int:
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            return int(response.status)
-    except urllib.error.HTTPError as exc:
-        return int(exc.code)
-    except OSError:
-        return 0
-
-
-def _start_process(command: list[str], env: Mapping[str, str]) -> PulsarProcess:
-    return subprocess.Popen(command, env=dict(env))
-
-
-def _run_command(command: list[str]) -> CommandResult:
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    return CommandResult(completed.returncode, completed.stdout + completed.stderr)
 
 
 if __name__ == "__main__":
