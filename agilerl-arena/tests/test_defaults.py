@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from agilerl.arena.models import SFTSpec
 from agilerl.arena.models.defaults import default_verdict
+from agilerl.arena.models.prompt_template import DEFAULT_PROMPT_TEMPLATE
 from agilerl.arena.models.verdict import verdict
 
 MODEL = "Qwen/Qwen3.5-0.8B"
@@ -560,6 +561,130 @@ class TestDefaultVerdict:
                 "kind": "value_error",
             }
         ]
+
+
+def untemplated_rollout() -> dict[str, Any]:
+    environment = dataset_rollout()
+    del environment["prompt_template"]
+    environment["reward"] = {"type": "exact_match"}
+    return environment
+
+
+class TestDefaultVerdictStartingValues:
+    def test_fills_the_prompt_template_and_max_reward_over_dataset_rows(
+        self,
+    ) -> None:
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, untemplated_rollout()))
+
+        # Assert
+        assert record["ok"] is True, record
+        environment = record["payload"]["environment"]
+        assert environment["prompt_template"] == {
+            "system_0": (
+                "A conversation between User and Assistant. The user asks a "
+                "question, and the Assistant solves it. The assistant first "
+                "thinks about the reasoning process in the mind and then gives "
+                "the final answer inside <answer> </answer> tags, i.e., "
+                "<answer> answer here </answer>."
+            ),
+            "user_1": (
+                "Answer the following question as accurately, clearly, and "
+                "concisely as possible.\n\nQuestion: {question}\n"
+            ),
+        }
+        assert environment["max_reward"] == 1.0
+        assert environment["max_turns"] == 1
+        assert verdict(record["payload"], submit=True)["ok"] is True
+
+    def test_fills_the_default_model_when_the_request_names_none(self) -> None:
+        # Arrange
+        partial = document({"name": "GRPO"}, untemplated_rollout())
+        del partial["network"]
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is True, record
+        assert record["payload"]["network"]["pretrained_model_name_or_path"] == (
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+        )
+
+    def test_keeps_a_model_named_only_on_the_algorithm(self) -> None:
+        # Arrange
+        partial = document(
+            {"name": "GRPO", "pretrained_model_name_or_path": MODEL},
+            untemplated_rollout(),
+        )
+        del partial["network"]
+
+        # Act
+        record = default_verdict(partial)
+
+        # Assert
+        assert record["ok"] is True, record
+        payload = record["payload"]
+        assert payload["algorithm"]["pretrained_model_name_or_path"] == MODEL
+        assert "network" not in payload
+        assert payload["environment"]["prompt_template"] == DEFAULT_PROMPT_TEMPLATE
+        assert payload["environment"]["max_reward"] == 1.0
+        assert verdict(payload, submit=True)["ok"] is True
+
+    def test_keeps_an_authored_template_max_reward_and_model(self) -> None:
+        # Arrange
+        template = {"system_prompt": "Be brief.", "user_prompt": "Q: {question}"}
+        environment = {
+            **untemplated_rollout(),
+            "prompt_template": template,
+            "max_reward": 5.0,
+        }
+
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, environment))
+
+        # Assert
+        assert record["ok"] is True, record
+        assert record["payload"]["environment"]["prompt_template"] == template
+        assert record["payload"]["environment"]["max_reward"] == 5.0
+        assert record["payload"]["network"]["pretrained_model_name_or_path"] == MODEL
+
+    def test_leaves_a_hosted_env_without_template_or_max_reward(self) -> None:
+        # Arrange
+        environment = {"name": "env", "env_type": "rollout", "env_image": "env:1"}
+
+        # Act
+        record = default_verdict(document({"name": "GRPO"}, environment))
+
+        # Assert
+        assert record["ok"] is True, record
+        assert "prompt_template" not in record["payload"]["environment"]
+        assert "max_reward" not in record["payload"]["environment"]
+
+    def test_leaves_a_traces_rollout_without_template_or_max_reward(self) -> None:
+        # Arrange
+        environment = {
+            "name": "traces",
+            "env_type": "rollout",
+            "dataset": "traces",
+            "dataset_format": "traces",
+        }
+
+        # Act
+        record = default_verdict(document({"name": "OPD"}, environment))
+
+        # Assert
+        assert record["ok"] is True, record
+        assert "prompt_template" not in record["payload"]["environment"]
+        assert "max_reward" not in record["payload"]["environment"]
+
+    def test_validation_fills_no_template(self) -> None:
+        # Act
+        record = verdict(document({"name": "GRPO"}, untemplated_rollout()))
+
+        # Assert
+        assert record["ok"] is False
+        assert "Prompt template is required" in record["errors"][0]["message"]
 
 
 class TestSFTSpecBeta:

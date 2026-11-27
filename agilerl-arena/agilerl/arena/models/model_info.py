@@ -557,6 +557,9 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
     )
 }
 
+# The model Arena's starting manifest trains when the request names none.
+DEFAULT_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+
 
 def catalog_lora_modules(hub_id: str) -> list[str]:
     """The modules Arena trains LoRA on for a catalog model: its text model's linears.
