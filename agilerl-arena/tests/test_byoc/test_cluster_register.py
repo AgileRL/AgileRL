@@ -158,6 +158,17 @@ ENTERPRISE_BUNDLE = {
 }
 
 
+PULL_SECRET = '{"auths":{"registry.example.com":{"auth":"cHVsbC1zZWNyZXQ="}}}'
+
+IMAGE_PULL_VALUES = {
+    "mode": "api",
+    "credential": {
+        "dockerConfigJson": PULL_SECRET,
+        "expiresAt": "2026-11-27T12:00:00Z",
+    },
+}
+
+
 class TestByocApiRegisterCluster:
     def test_register_cluster_passes_camel_case_body(
         self, byoc_api: ByocApi, mock_client: MagicMock
@@ -282,6 +293,45 @@ class TestRunClusterRegister:
         assert token_path.read_text(encoding="utf-8").strip() == "abc.def"
         if sys.platform != "win32":
             assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(agent_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(storage_path.stat().st_mode) == 0o600
+
+    def test_writes_image_pull_credential_unchanged_without_printing_it(
+        self,
+        mock_client: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange
+        bundle = {
+            **ENTERPRISE_BUNDLE,
+            "agentHelmValues": {
+                **ENTERPRISE_BUNDLE["agentHelmValues"],
+                "imagePull": IMAGE_PULL_VALUES,
+            },
+        }
+
+        # Act
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(ByocApi, "register_cluster", return_value=bundle),
+        ):
+            run_cluster_register(
+                mock_client,
+                name="prod-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+            )
+
+        # Assert
+        agent_path = tmp_path / "agent-helm-values.yaml"
+        agent = yaml.safe_load(agent_path.read_text(encoding="utf-8"))
+        assert agent["imagePull"] == IMAGE_PULL_VALUES
+        if sys.platform != "win32":
+            assert stat.S_IMODE(agent_path.stat().st_mode) == 0o600
+        captured = capsys.readouterr()
+        assert PULL_SECRET not in captured.out + captured.err
 
     def test_passes_byoc_provider_to_register_api(
         self,
@@ -2814,6 +2864,36 @@ class TestInstallChartsFromArenaPackage:
             "storage_helm_values_yaml"
         ]
         install_mock.assert_called_once()
+
+    def test_sends_image_pull_credential_unchanged(self, tmp_path: Path) -> None:
+        api = MagicMock(spec=ByocApi)
+        api.download_cluster_install_package.return_value = b"pkg"
+
+        with (
+            patch(
+                "agilerl.arena.byoc.cluster_register.extract_cluster_install_package",
+                return_value=tmp_path,
+            ),
+            patch(
+                "agilerl.arena.byoc.cluster_register.install_from_install_package_root"
+            ),
+        ):
+            _install_charts_from_arena_package(
+                api,
+                cluster_name="prod-cluster",
+                agent_values={"clusterName": "prod", "imagePull": IMAGE_PULL_VALUES},
+                storage_values=None,
+                include_storage=False,
+                helm_wait=True,
+                agent_namespace="arena",
+                agent_release="arena-byoc-agent",
+                install_agent=True,
+            )
+
+        agent_yaml = api.download_cluster_install_package.call_args.kwargs[
+            "agent_helm_values_yaml"
+        ]
+        assert yaml.safe_load(agent_yaml)["imagePull"] == IMAGE_PULL_VALUES
 
 
 class TestRunClusterRegisterFailures:
