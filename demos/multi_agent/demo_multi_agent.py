@@ -8,6 +8,7 @@ from tensordict import TensorDictBase
 
 from agilerl.algorithms import MADDPG
 from agilerl.components.data import MultiAgentTransition
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -77,19 +78,19 @@ if __name__ == "__main__":
 
     # Create a population ready for evolutionary hyper-parameter optimisation
     pop: list[MADDPG] = create_population(
-        "MADDPG",
-        observation_spaces,
-        action_spaces,
-        NET_CONFIG,
-        INIT_HP,
+        algo="MADDPG",
+        net_config=NET_CONFIG,
+        INIT_HP=INIT_HP,
+        observation_space=observation_spaces,
+        action_space=action_spaces,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
     )
 
     # Configure the multi-agent replay buffer
-    memory = MultiAgentReplayBuffer(
-        INIT_HP["MEMORY_SIZE"],
+    memory = ReplayBuffer(
+        max_size=INIT_HP["MEMORY_SIZE"],
         device=device,
     )
 
