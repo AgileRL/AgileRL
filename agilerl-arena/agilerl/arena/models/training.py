@@ -353,7 +353,12 @@ class TrainingSpec(BaseModel):
     )
 
     checkpoint_steps: int | None = Field(
-        default=None, ge=1, description="Steps between checkpoints. Unset never writes."
+        default=None,
+        ge=1,
+        description=(
+            "Steps between checkpoints. Unset, Arena checkpoints every "
+            "max_steps // 10 steps; local AgileRL training saves no periodic ones."
+        ),
     )
     checkpoint_path: str | None = Field(
         default=None, description="Where checkpoints are written."
