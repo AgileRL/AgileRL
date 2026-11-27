@@ -1,30 +1,21 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""arena snowflake publish: client checks, the request file, and the job service."""
+"""Publish: the request file, the job service, the wait, and served versions."""
 
 from __future__ import annotations
 
 import dataclasses
 import io
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 import yaml
-from click.testing import CliRunner
 
-from agilerl.arena.cli import main
 from agilerl.arena.snowflake.profile import (
-    AccountPools,
-    AccountProfile,
-    CpuPool,
     GpuPool,
-    admin_connection_fields,
-    job_connection_fields,
-    write_connection,
 )
 from agilerl.arena.snowflake.publish import (
     PublishDocument,
@@ -40,13 +31,11 @@ from agilerl.arena.snowflake.publish import (
     publish_job_name,
     select_checkpoint,
     served_version,
-    service_endpoint,
     submit_publish,
     unpublish,
-    version_endpoint,
+    version_service,
     wait_for_publish,
 )
-from agilerl.arena.snowflake.publish_cli import endpoint_command, unpublish_command
 
 RUN_ID = "arena-20261109163457-abc123"
 PREFIX = f"@arena.training.runs/{RUN_ID}"
@@ -282,62 +271,6 @@ def settings(**overrides: object) -> PublishSettings:
 
 
 class TestSubmitPublish:
-    def test_writes_the_request_and_starts_the_job(self) -> None:
-        # Arrange
-        account = SnowflakeAccount(two_checkpoints(), models=("ARENA_POLICY",))
-
-        # Act
-        job = submit_publish(account, settings(), now=NOW)
-
-        # Assert
-        assert job.name.startswith("ARENA_PUBLISH_20261110120005_")
-        assert list(account.file.uploads) == [f"{PREFIX}/publish-{job.name}.json"]
-        assert account.published(job.name) == {
-            "checkpoint": "checkpoint_10",
-            "compute_pool": "arena_gpu_pool",
-            "database": "ARENA",
-            "gpu_count": 1,
-            "image_build_compute_pool": "arena_head_pool",
-            "ingress": True,
-            "max_model_len": None,
-            "model_name": "arena_policy",
-            "run_id": RUN_ID,
-            "schema": "TRAINING",
-            "service_name": "arena_policy_checkpoint_10",
-            "step": 10,
-            "version_name": "checkpoint_10",
-        }
-        assert job.document == account.published(job.name)
-        statement = account.statements[-1]
-        assert statement.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL arena_head_pool\n"
-            f"NAME = {job.name}\nASYNC = TRUE\nQUERY_WAREHOUSE = arena_wh\n"
-        )
-        container = account.job_spec()["spec"]["containers"][0]
-        assert container["image"] == "/arena/training/images/snowflake-job:1.0"
-        assert container["command"] == [
-            "tini",
-            "--",
-            "python",
-            "-m",
-            "agilerl.arena.snowflake.publish_job",
-            f"/arena/run/publish-{job.name}.json",
-        ]
-        assert "args" not in container
-        assert container["resources"] == {
-            "requests": {"memory": "7Gi"},
-            "limits": {"memory": "57.5Gi"},
-        }
-        assert account.job_spec()["spec"]["volumes"] == [
-            {
-                "name": "run",
-                "source": "stage",
-                "stageConfig": {"name": PREFIX},
-                "uid": 1000,
-                "gid": 100,
-            }
-        ]
-
     def test_overrides_replace_the_run_settings(self) -> None:
         account = SnowflakeAccount(two_checkpoints())
 
@@ -481,7 +414,7 @@ class TestSubmitPublish:
     ) -> None:
         account = SnowflakeAccount(two_checkpoints())
 
-        with pytest.raises(ValueError, match="both --database and --schema"):
+        with pytest.raises(ValueError, match="both the database and the schema"):
             submit_publish(account, settings(database=database, schema=schema))
 
         assert account.statements == []
@@ -489,7 +422,7 @@ class TestSubmitPublish:
     def test_session_without_a_schema_is_rejected(self) -> None:
         account = SnowflakeAccount(two_checkpoints(), current=("ARENA", None))
 
-        with pytest.raises(ValueError, match="no current schema"):
+        with pytest.raises(ValueError, match="no current database or schema"):
             submit_publish(account, settings())
 
     @pytest.mark.parametrize(
@@ -689,8 +622,8 @@ class TestWaitForPublish:
             "Status: SHOW SERVICE CONTAINERS IN SERVICE ARENA_PUBLISH_X",
             "Logs: SELECT SYSTEM$GET_SERVICE_LOGS('ARENA_PUBLISH_X', 0, 'main')",
             (
-                "Endpoint, once the job is done: arena snowflake endpoint arena_policy "
-                "--version checkpoint_10 --database ARENA --schema TRAINING"
+                "Endpoint, once the job is done: "
+                "CALL <app>.app_code.endpoint('arena_policy', 'checkpoint_10')"
             ),
         ]
         assert clock.now == 120.0
@@ -801,32 +734,8 @@ class TestServedVersion:
             ],
         )
 
-        with pytest.raises(ValueError, match=r"on versions V1, V2\. Pass --version"):
+        with pytest.raises(ValueError, match=r"on versions V1, V2\. Pass version_name"):
             served_version(account, "ARENA", "TRAINING", "arena_policy", None)
-
-
-class TestVersionEndpoint:
-    def test_returns_the_services_inference_url(self) -> None:
-        account = SnowflakeAccount(
-            [],
-            endpoints=[Row(name="inference", ingress_url="abc.snowflakecomputing.app")],
-        )
-
-        url = version_endpoint(account, served())
-
-        assert url == "abc.snowflakecomputing.app"
-        assert account.statements == [f"SHOW ENDPOINTS IN SERVICE {POLICY_SERVICE}"]
-
-    @pytest.mark.parametrize(
-        "services", [(), ("ARENA.TRAINING.SVC_1", "ARENA.TRAINING.SVC_2")]
-    )
-    def test_version_needs_exactly_one_service(self, services: tuple[str, ...]) -> None:
-        account = SnowflakeAccount([])
-
-        with pytest.raises(ValueError, match=f"has {len(services)} inference services"):
-            version_endpoint(account, served(services=services))
-
-        assert account.statements == []
 
 
 class TestChatFunction:
@@ -910,40 +819,10 @@ class TestUnpublish:
     def test_version_without_a_service_needs_drop_version(self) -> None:
         account = SnowflakeAccount([])
 
-        with pytest.raises(ValueError, match="Pass --drop-version"):
+        with pytest.raises(ValueError, match="Pass drop_version"):
             unpublish(account, served(services=()), drop_version=False)
 
         assert account.statements == []
-
-
-class TestServiceEndpoint:
-    def test_returns_the_inference_endpoint_by_name(self) -> None:
-        account = SnowflakeAccount(
-            [],
-            endpoints=[
-                Row(name="metrics", ingress_url="m.snowflakecomputing.app"),
-                Row(name="inference", ingress_url="abc.snowflakecomputing.app"),
-            ],
-        )
-
-        endpoint = service_endpoint(account, SERVICE_DOCUMENT)
-
-        assert endpoint == "abc.snowflakecomputing.app"
-        assert account.statements == [
-            "SHOW ENDPOINTS IN SERVICE ARENA.TRAINING.policy_svc"
-        ]
-
-    def test_missing_inference_endpoint_is_rejected(self) -> None:
-        account = SnowflakeAccount([], endpoints=[Row(name="metrics", ingress_url="")])
-
-        with pytest.raises(ValueError, match="has no inference endpoint"):
-            service_endpoint(account, SERVICE_DOCUMENT)
-
-    def test_publish_without_a_service_is_rejected(self) -> None:
-        document: PublishDocument = {**SERVICE_DOCUMENT, "service_name": None}
-
-        with pytest.raises(ValueError, match="started no service"):
-            service_endpoint(SnowflakeAccount([]), document)
 
 
 class TestPublishJobName:
@@ -953,99 +832,6 @@ class TestPublishJobName:
         assert name.startswith("ARENA_PUBLISH_20261110120005_")
         assert len(name) == len("ARENA_PUBLISH_20261110120005_ABCDEF")
         assert name == name.upper()
-
-
-class TestPublishCommand:
-    def test_help_works_without_the_snowflake_extra(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setitem(sys.modules, "snowflake", None)
-
-        result = CliRunner().invoke(main, ["snowflake", "publish", "--help"])
-
-        assert result.exit_code == 0, result.output
-        assert "--runs-stage" in result.output
-        assert "--gpu-count" in result.output
-
-    def test_snowflake_help_lists_publish(self) -> None:
-        result = CliRunner().invoke(main, ["snowflake", "--help"])
-
-        assert result.exit_code == 0
-        assert "publish" in result.output
-
-    def test_prints_job_model_version_and_endpoint(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        account = SnowflakeAccount(
-            two_checkpoints(),
-            endpoints=[Row(name="inference", ingress_url="abc.snowflakecomputing.app")],
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.snowflake.publish_cli.open_session", lambda name: account
-        )
-
-        result = CliRunner().invoke(main, [*PUBLISH_ARGS, "--serve"])
-
-        assert result.exit_code == 0, result.output
-        lines = result.output.splitlines()
-        assert lines[0].startswith("job: ARENA_PUBLISH_")
-        assert lines[1:] == [
-            "status: DONE",
-            "model: ARENA.TRAINING.arena_policy",
-            "version: checkpoint_10",
-            "service: arena_policy_checkpoint_10",
-            "endpoint: abc.snowflakecomputing.app",
-        ]
-        assert account.closed
-
-    def test_no_serve_prints_no_service(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        account = SnowflakeAccount(two_checkpoints())
-        monkeypatch.setattr(
-            "agilerl.arena.snowflake.publish_cli.open_session", lambda name: account
-        )
-
-        result = CliRunner().invoke(main, PUBLISH_ARGS)
-
-        assert result.exit_code == 0, result.output
-        assert result.output.splitlines()[1:] == [
-            "status: DONE",
-            "model: ARENA.TRAINING.arena_policy",
-            "version: checkpoint_10",
-        ]
-        job_name = result.output.splitlines()[0].removeprefix("job: ")
-        assert account.published(job_name)["image_build_compute_pool"] == (
-            "arena_head_pool"
-        )
-
-    def test_errors_are_shown_without_a_traceback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        account = SnowflakeAccount(
-            two_checkpoints(), statuses=[["FAILED"]], logs="OSError: disk full"
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.snowflake.publish_cli.open_session", lambda name: account
-        )
-
-        half_set = CliRunner().invoke(main, [*PUBLISH_ARGS, "--schema", "registry"])
-        failed = CliRunner().invoke(main, PUBLISH_ARGS)
-
-        assert half_set.exit_code == 1
-        assert "Pass both --database and --schema" in half_set.output
-        assert failed.exit_code == 1
-        assert "OSError: disk full" in failed.output
-        assert account.closed
-
-    def test_missing_snowflake_extra_is_reported(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setitem(sys.modules, "snowflake", None)
-        monkeypatch.setitem(sys.modules, "snowflake.snowpark", None)
-
-        result = CliRunner().invoke(main, PUBLISH_ARGS)
-
-        assert result.exit_code == 1
-        assert "agilerl-arena[snowflake]" in result.output
 
 
 ONE_GPU_FAMILY = {"GPU_NV_S": GpuPool("arena_gpu_GPU_NV_S", 2, 1, 24)}
@@ -1070,206 +856,6 @@ class Published:
         }
 
 
-def _saved_account(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    image: str,
-    gpu: dict[str, GpuPool] = ONE_GPU_FAMILY,
-) -> None:
-    """Write ``[arena]`` and ``[arena-admin]``, and serve setup.json from the account."""
-    key = tmp_path / "key.p8"
-    key.write_bytes(b"key")
-    write_connection("arena", job_connection_fields("ORGNAME-ACCOUNT", key))
-    write_connection(
-        "arena-admin", admin_connection_fields("ORGNAME-ACCOUNT", "admin@example.com")
-    )
-    profile = AccountProfile(
-        image=image,
-        warehouse="arena_wh",
-        stage="arena.training.runs",
-        metrics_table="arena.training.arena_metrics",
-        external_access_integrations=("arena_hf_eai",),
-        pools=AccountPools(
-            broker=CpuPool("arena_pulsar_pool", "CPU_X64_L"),
-            head=CpuPool("team_head_pool", "CPU_X64_SL"),
-            gpu=gpu,
-        ),
-    )
-    monkeypatch.setattr(SnowflakeAccount, "setup_doc", profile.as_dict())
-
-
-def _capture_settings(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """Stand in for the job so only the settings the command builds are kept."""
-    seen: dict[str, object] = {}
-
-    def fake_submit(session: object, settings: PublishSettings) -> Published:
-        seen["settings"] = settings
-        return Published()
-
-    def fake_open(name: str | None) -> SnowflakeAccount:
-        seen["connection"] = name
-        return SnowflakeAccount([])
-
-    monkeypatch.setattr(
-        "agilerl.arena.snowflake.publish_cli.submit_publish", fake_submit
-    )
-    monkeypatch.setattr(
-        "agilerl.arena.snowflake.publish_cli.wait_for_publish",
-        lambda session, job, echo: None,
-    )
-    monkeypatch.setattr("agilerl.arena.snowflake.publish_cli.open_session", fake_open)
-    return seen
-
-
-class TestPublishProfile:
-    def test_omitted_flags_come_from_the_profile(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        seen = _capture_settings(monkeypatch)
-
-        result = CliRunner().invoke(
-            main, ["snowflake", "publish", RUN_ID, "--model-name", "arena_policy"]
-        )
-
-        assert result.exit_code == 0, result.output
-        settings = seen["settings"]
-        assert isinstance(settings, PublishSettings)
-        assert seen["connection"] == "arena"
-        assert settings.compute_pool == "arena_gpu_GPU_NV_S"
-        assert settings.head_pool == "team_head_pool"
-        assert settings.image == "/arena/training/images/snowflake-job:1"
-        assert settings.warehouse == "arena_wh"
-        assert settings.runs_stage == "arena.training.runs"
-
-    def test_flags_win_over_the_profile(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        seen = _capture_settings(monkeypatch)
-
-        result = CliRunner().invoke(
-            main,
-            [
-                *PUBLISH_ARGS,
-                "--compute-pool",
-                "other_pool",
-                "--warehouse",
-                "other_wh",
-                "--image",
-                "/arena/training/images/snowflake-job:2",
-            ],
-        )
-
-        assert result.exit_code == 0, result.output
-        settings = seen["settings"]
-        assert isinstance(settings, PublishSettings)
-        assert settings.compute_pool == "other_pool"
-        assert settings.warehouse == "other_wh"
-        assert settings.image == "/arena/training/images/snowflake-job:2"
-        assert settings.head_pool == "team_head_pool"
-
-    def test_several_gpu_families_use_the_runs_pool(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        _saved_account(
-            tmp_path,
-            monkeypatch,
-            "/arena/training/images/snowflake-job:1",
-            gpu=SEVERAL_GPU_FAMILIES,
-        )
-        account = SnowflakeAccount(
-            two_checkpoints(),
-            endpoints=[Row(name="inference", ingress_url="abc.snowflakecomputing.app")],
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.snowflake.publish_cli.open_session", lambda name: account
-        )
-
-        # Act
-        result = CliRunner().invoke(main, [*PUBLISH_ARGS, "--serve"])
-
-        # Assert
-        assert result.exit_code == 0, result.output
-        job_name = result.output.splitlines()[0].removeprefix("job: ")
-        assert account.published(job_name)["compute_pool"] == "arena_gpu_pool"
-        assert account.published(job_name)["image_build_compute_pool"] == (
-            "team_head_pool"
-        )
-        execute = next(s for s in account.statements if s.startswith("EXECUTE JOB"))
-        assert execute.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL team_head_pool\n"
-        )
-        container = account.job_spec()["spec"]["containers"][0]
-        assert container["image"] == "/arena/training/images/snowflake-job:1"
-
-    def test_an_empty_image_stays_unset(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _saved_account(tmp_path, monkeypatch, "")
-        seen = _capture_settings(monkeypatch)
-
-        result = CliRunner().invoke(
-            main, ["snowflake", "publish", RUN_ID, "--model-name", "arena_policy"]
-        )
-
-        assert result.exit_code == 0, result.output
-        settings = seen["settings"]
-        assert isinstance(settings, PublishSettings)
-        assert settings.image is None
-        assert settings.runs_stage == "arena.training.runs"
-
-    def test_omitted_stage_without_setup_json_is_a_usage_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seen = _capture_settings(monkeypatch)
-
-        result = CliRunner().invoke(
-            main, ["snowflake", "publish", RUN_ID, "--model-name", "arena_policy"]
-        )
-
-        assert result.exit_code == 2
-        assert "This account has no setup.json. Pass --runs-stage." in result.output
-        assert "settings" not in seen
-
-    def test_reads_setup_json_on_every_publish(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        seen = _capture_settings(monkeypatch)
-        args = ["snowflake", "publish", RUN_ID, "--model-name", "arena_policy"]
-
-        # Act
-        CliRunner().invoke(main, args)
-        first = seen["settings"]
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:2")
-        result = CliRunner().invoke(main, args)
-
-        # Assert
-        assert result.exit_code == 0, result.output
-        assert isinstance(first, PublishSettings)
-        assert first.image == "/arena/training/images/snowflake-job:1"
-        second = seen["settings"]
-        assert isinstance(second, PublishSettings)
-        assert second.image == "/arena/training/images/snowflake-job:2"
-
-    def test_browser_admin_connection_is_rejected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        seen = _capture_settings(monkeypatch)
-
-        result = CliRunner().invoke(
-            main, [*PUBLISH_ARGS, "--connection", "arena-admin"]
-        )
-
-        assert result.exit_code == 1
-        assert "signs in with a browser as ACCOUNTADMIN" in result.output
-        assert seen == {}
-
-
 def served_account(
     models: tuple[str, ...] = ("ARENA_POLICY",),
     model_versions: list[Row] | None = None,
@@ -1287,158 +873,15 @@ def served_account(
     )
 
 
-def _open_account(
-    monkeypatch: pytest.MonkeyPatch, account: SnowflakeAccount
-) -> list[str | None]:
-    opened: list[str | None] = []
+class TestVersionService:
+    def test_one_service_is_returned(self) -> None:
+        served = ServedVersion("M", "V1", ("DB.S.SVC",), True, True)
 
-    def fake_open(name: str | None) -> SnowflakeAccount:
-        opened.append(name)
-        return account
+        assert version_service(served) == "DB.S.SVC"
 
-    monkeypatch.setattr("agilerl.arena.snowflake.publish_cli.open_session", fake_open)
-    return opened
+    @pytest.mark.parametrize("services", [(), ("DB.S.A", "DB.S.B")])
+    def test_none_or_several_are_refused(self, services: tuple[str, ...]) -> None:
+        served = ServedVersion("M", "V1", services, True, True)
 
-
-class TestEndpointCommand:
-    def test_prints_the_served_versions_url(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        account = served_account()
-        opened = _open_account(monkeypatch, account)
-
-        # Act
-        result = CliRunner().invoke(endpoint_command, ["arena_policy"])
-
-        # Assert
-        assert result.exit_code == 0, result.output
-        assert result.output == "abc.snowflakecomputing.app\n"
-        assert opened == ["arena"]
-        assert account.statements[-1] == f"SHOW ENDPOINTS IN SERVICE {POLICY_SERVICE}"
-        assert account.closed
-
-    def test_version_and_schema_select_the_model(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        account = served_account()
-        opened = _open_account(monkeypatch, account)
-
-        result = CliRunner().invoke(
-            endpoint_command,
-            [
-                "arena_policy",
-                "--version",
-                "checkpoint_10",
-                "--database",
-                "ml",
-                "--schema",
-                "registry",
-            ],
-        )
-
-        assert result.exit_code == 0, result.output
-        assert opened == [None]
-        assert "SHOW VERSIONS IN MODEL ml.registry.arena_policy" in account.statements
-
-    def test_version_without_a_service_is_an_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        account = served_account()
-        _open_account(monkeypatch, account)
-
-        result = CliRunner().invoke(
-            endpoint_command, ["arena_policy", "--version", "checkpoint_9"]
-        )
-
-        assert result.exit_code == 1
-        assert "has 0 inference services" in result.output
-        assert account.closed
-
-    def test_browser_admin_connection_is_rejected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        opened = _open_account(monkeypatch, served_account())
-
-        result = CliRunner().invoke(
-            endpoint_command, ["arena_policy", "--connection", "arena-admin"]
-        )
-
-        assert result.exit_code == 1
-        assert "signs in with a browser as ACCOUNTADMIN" in result.output
-        assert opened == []
-
-
-class TestUnpublishCommand:
-    def test_drops_the_service_and_keeps_the_version(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        _saved_account(tmp_path, monkeypatch, "/arena/training/images/snowflake-job:1")
-        account = served_account()
-        opened = _open_account(monkeypatch, account)
-
-        # Act
-        result = CliRunner().invoke(unpublish_command, ["arena_policy"])
-
-        # Assert
-        assert result.exit_code == 0, result.output
-        assert result.output == f"dropped service: {POLICY_SERVICE}\n"
-        assert opened == ["arena"]
-        assert account.statements[-1] == f"DROP SERVICE {POLICY_SERVICE}"
-        assert not any("DROP VERSION" in s for s in account.statements)
-        assert account.closed
-
-    def test_drop_version_drops_the_version_too(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        account = served_account()
-        _open_account(monkeypatch, account)
-
-        result = CliRunner().invoke(
-            unpublish_command,
-            ["arena_policy", "--version", "checkpoint_10", "--drop-version"],
-        )
-
-        assert result.exit_code == 0, result.output
-        assert result.output.splitlines() == [
-            f"dropped service: {POLICY_SERVICE}",
-            "dropped version: CHECKPOINT_10",
-        ]
-        assert account.statements[-2:] == [
-            f"DROP SERVICE {POLICY_SERVICE}",
-            "ALTER MODEL ARENA.TRAINING.arena_policy DROP VERSION CHECKPOINT_10",
-        ]
-
-    def test_drop_version_of_the_only_version_drops_the_model(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        account = served_account(
-            model_versions=[
-                version_row("checkpoint_10", [POLICY_SERVICE], is_default=True)
-            ]
-        )
-        _open_account(monkeypatch, account)
-
-        result = CliRunner().invoke(
-            unpublish_command, ["arena_policy", "--drop-version"]
-        )
-
-        assert result.exit_code == 0, result.output
-        assert result.output.splitlines() == [
-            f"dropped service: {POLICY_SERVICE}",
-            "dropped model: ARENA.TRAINING.arena_policy",
-        ]
-        assert account.statements[-1] == "DROP MODEL ARENA.TRAINING.arena_policy"
-
-    def test_missing_model_is_an_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        account = served_account(models=())
-        _open_account(monkeypatch, account)
-
-        result = CliRunner().invoke(unpublish_command, ["arena_policy"])
-
-        assert result.exit_code == 1
-        assert "Model ARENA.TRAINING.arena_policy does not exist" in result.output
-        assert not any(s.startswith("DROP") for s in account.statements)
+        with pytest.raises(ValueError, match=f"has {len(services)} inference services"):
+            version_service(served)

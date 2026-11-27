@@ -64,7 +64,6 @@ from agilerl.arena.snowflake.catalog import (
     load_families,
     remote_profile,
 )
-from agilerl.arena.snowflake.cli import run_status, service_logs
 from agilerl.arena.snowflake.gpu_fit import gpu_counts_message, pool_gpus
 from agilerl.arena.snowflake.job import (
     ROLES,
@@ -138,6 +137,7 @@ from agilerl.arena.snowflake.setup_sql import (
     string_literal,
 )
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
+from agilerl.arena.snowflake.status import run_status, service_logs
 
 if TYPE_CHECKING:
     from agilerl.arena.snowflake.catalog import GpuFamily
@@ -568,7 +568,7 @@ def submit(
     :param source_reference: ``source_table`` or ``source_view``, or ``None``
         when the manifest trains on no rows.
     :param source_alias: Alias of the bound object the run reads.
-    :param gpu_family: GPU family. ``None`` picks one as ``arena snowflake submit`` does.
+    :param gpu_family: GPU family. ``None`` picks one with ``choose_gpu_family``.
     :param reward_file: Refused unless ``None``: the app runs no code from
         outside its package.
     :param checkpoint_steps: Training steps between checkpoints, or ``None``.

@@ -57,8 +57,6 @@ from agilerl.arena.snowflake.source import (
 
 RUN_ID_RE = re.compile(r"^arena-(\d{14})-([0-9a-f]{6})$")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
-TABLE_PART = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")+")'
-QUALIFIED_TABLE = re.compile(rf"^{TABLE_PART}\.{TABLE_PART}\.{TABLE_PART}$")
 UPLOADED_MARKER = re.compile(r"^checkpoint_(\d+)/\.uploaded$")
 # COPY FILES between internal stages rejects larger files.
 COPY_FILES_MAX_BYTES = 5 * 10**9
@@ -130,7 +128,7 @@ class RunServices:
 
 @dataclass(frozen=True)
 class SubmitSettings:
-    """What one ``arena snowflake submit`` sends with the manifest."""
+    """What one ``app_code.submit`` sends with the manifest."""
 
     image: str
     warehouse: str
@@ -255,14 +253,14 @@ def write_job_manifest(
 
     The trainer replaces the dataset and rubric with the exported rows and
     ``reward.py``. An LLM environment that names no env gets ``dataset`` from
-    ``source`` and, for a rollout, ``rubric_file_path`` from ``--reward-file``,
+    ``source`` and, for a rollout, ``rubric_file_path`` from the reward file,
     so the manifest does not need placeholders. A manifest without
     ``training.checkpoint_export`` gets ``format: merged``, which ``publish``
     reads. Fields the manifest sets stay.
 
     :param manifest_path: The user's manifest.
-    :param source: ``--source-table`` or ``--source-query``, or ``None``.
-    :param has_reward_file: Whether ``--reward-file`` was passed.
+    :param source: The table or query the run reads, or ``None``.
+    :param has_reward_file: Whether a reward file was passed.
     :param directory: Where the copy is written.
     :return: ``directory / "manifest.yaml"``.
     """
@@ -302,8 +300,8 @@ def validate_manifest(
     """Reject manifests a job service cannot run or publish.
 
     :param manifest: Parsed training manifest.
-    :param has_reward_file: Whether ``--reward-file`` was passed.
-    :param has_source: Whether ``--source-table`` or ``--source-query`` was passed.
+    :param has_reward_file: Whether a reward file was passed.
+    :param has_source: Whether a source table or query was passed.
     :return: Whether the job exports the source. An env-backed rollout does not.
     :raises ValueError: The manifest is not an LLM run, starts an env image,
         has no env to roll out against, needs a source that was not passed,
@@ -339,7 +337,7 @@ def validate_manifest(
             stacklevel=2,
         )
     if exports_source and not has_source:
-        msg = "This manifest trains on rows. Pass --source-table or --source-query."
+        msg = "This manifest trains on rows. Pass a source table or view."
         raise ValueError(msg)
     export = manifest.training.effective_checkpoint_export()
     if export.format != "merged":
@@ -357,7 +355,7 @@ def validate_manifest(
     if environment.env_url is not None:
         warnings.warn(
             "env_url must be reachable from the job. A host outside the "
-            "account needs an External Access Integration passed with --eai. "
+            "account needs an External Access Integration on the job. "
             "An SPCS service in the same account needs none.",
             stacklevel=2,
         )
@@ -432,7 +430,7 @@ def choose_gpu_family(
 
     :param pools: Families the account profile enabled.
     :param gpus: Requested GPU count.
-    :param family: ``--gpu-family``, or ``None`` to pick one.
+    :param family: The requested GPU family, or ``None`` to pick one.
     :param fits: Whether the manifest fits that family's GPU memory. Raises
         ``ValueError`` when the estimator cannot size the manifest.
     :return: The family name.
@@ -442,7 +440,10 @@ def choose_gpu_family(
         size it for an omitted family.
     """
     if not pools:
-        msg = "This account profile has no GPU pool.\nRun arena snowflake setup again."
+        msg = (
+            "This app has no GPU pool.\n"
+            "Run CALL <app>.app_code.set_pools(['<gpu family>']) first."
+        )
         raise ValueError(msg)
     if family is not None:
         pool = pools.get(family)
@@ -1158,20 +1159,6 @@ def job_state(service_statuses: set[str]) -> str:
     return "running"
 
 
-def qualified_table(name: str) -> str:
-    """Validate a ``database.schema.table`` name. Parts may be double-quoted.
-
-    :param name: ``--source-table`` value.
-    :return: The name with surrounding space removed.
-    :raises ValueError: The name is not three dot-separated identifiers.
-    """
-    text = name.strip()
-    if QUALIFIED_TABLE.fullmatch(text) is None:
-        msg = f"--source-table must be database.schema.table, got {name!r}"
-        raise ValueError(msg)
-    return text
-
-
 def log_text(rows: list[SnowflakeRow]) -> str:
     """First column of the first logs result row.
 
@@ -1285,7 +1272,7 @@ def _reject_worker_capacity(
         return
     msg = (
         f"{workers} workers is above MAX_NODES {max_nodes} on {settings.gpu_pool}.\n"
-        f"arena snowflake pools set {settings.gpu_family} --max-gpus {settings.gpus}"
+        f"Run CALL <app>.app_code.set_pools(['{settings.gpu_family}'], {settings.gpus})."
     )
     raise ValueError(msg)
 

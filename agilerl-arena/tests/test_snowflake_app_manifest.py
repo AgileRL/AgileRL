@@ -18,21 +18,21 @@ import yaml
 from snowflake_app.app_code import arena_app
 
 from agilerl.arena.models.rewards import BuiltinReward
-from agilerl.arena.snowflake.images import TRAINER_REPOSITORY
 from agilerl.arena.snowflake.license import DEFAULT_BASE_URL, arena_api_hostname
-from agilerl.arena.snowflake.profile import (
-    ARENA_API_INTEGRATION,
-    ENV_INTEGRATION,
-    HF_INTEGRATION,
-    WAREHOUSE,
-)
-from agilerl.arena.snowflake.setup_sql import (
-    HF_HOSTS,
-    PROBE_INTEGRATION,
-    storage_statements,
-    warehouse_statements,
-)
 from tests.test_snowflake_setup import FakeSession, Row
+
+HF_HOSTS = (
+    "huggingface.co:443",
+    "cas-server.xethub.hf.co:443",
+    "cas-server.xethub-eu.hf.co:443",
+    "transfer.xethub.hf.co:443",
+    "transfer.xethub-eu.hf.co:443",
+    "us.aws.cdn.hf.co:443",
+    "us.gcp.cdn.hf.co:443",
+    "cdn-lfs.hf.co:443",
+    "cdn-lfs-us-1.hf.co:443",
+    "cdn-lfs-eu-1.hf.co:443",
+)
 
 APP_DIR = Path(__file__).resolve().parents[1] / "snowflake_app"
 MANIFEST = yaml.safe_load((APP_DIR / "manifest.yml").read_text())
@@ -53,6 +53,14 @@ def quoted_lists(keyword: str) -> list[set[str]]:
 
 
 class TestManifest:
+    def test_one_gpu_image_from_provider_repository(self) -> None:
+        services = MANIFEST["artifacts"]["container_services"]
+
+        [image] = services["images"]
+
+        assert services["uses_gpu"] is True
+        assert image.rpartition(":")[0] == "/arena_provider/images/repo/snowflake-job"
+
     def test_uses_automated_privilege_granting(self) -> None:
         assert MANIFEST["manifest_version"] == 2
 
@@ -60,17 +68,6 @@ class TestManifest:
         path = APP_DIR / MANIFEST["artifacts"]["setup_script"]
 
         assert path.is_file()
-
-    def test_one_gpu_image_from_provider_repository(self) -> None:
-        services = MANIFEST["artifacts"]["container_services"]
-
-        [image] = services["images"]
-
-        assert services["uses_gpu"] is True
-        assert (
-            image.rpartition(":")[0]
-            == f"/arena_provider/images/repo/{TRAINER_REPOSITORY}"
-        )
 
     def test_requests_only_documented_privileges(self) -> None:
         names = [name for entry in MANIFEST["privileges"] for name in entry]
@@ -128,32 +125,8 @@ class TestManifest:
 
 
 class TestSetupScriptExternalAccess:
-    def test_rules_and_specifications_name_the_same_hosts(self) -> None:
+    def test_integrations_are_named_per_app(self) -> None:
         # Arrange
-        arena = {f"{arena_api_hostname(DEFAULT_BASE_URL)}:443"}
-        expected = [set(HF_HOSTS), arena]
-
-        # Act
-        rules = quoted_lists("VALUE_LIST")
-        specifications = quoted_lists("HOST_PORTS")
-
-        # Assert
-        assert rules == expected
-        assert specifications == expected
-
-    def test_creates_admin_and_user_application_roles(self) -> None:
-        roles = re.findall(r"CREATE APPLICATION ROLE IF NOT EXISTS (\w+);", SETUP_SQL)
-
-        assert roles == ["app_admin", "app_user"]
-
-    def test_integrations_are_named_per_app_apart_from_the_cli(self) -> None:
-        # Arrange
-        cli_names = {
-            HF_INTEGRATION,
-            ARENA_API_INTEGRATION,
-            ENV_INTEGRATION,
-            PROBE_INTEGRATION,
-        }
         readme = (APP_DIR / "README.md").read_text()
 
         # Act
@@ -173,10 +146,27 @@ class TestSetupScriptExternalAccess:
         assert created == ["hf_integration", "arena_integration"]
         assert prefix is not None
         assert prefix.group(1) == "AGILERL_APP_"
-        assert not any(name.upper().startswith("AGILERL_APP_") for name in cli_names)
         assert "CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS" not in SETUP_SQL
         assert "AGILERL_APP_<APP>_HF_EAI" in readme
         assert "AGILERL_APP_<APP>_ARENA_EAI" in readme
+
+    def test_rules_and_specifications_name_the_same_hosts(self) -> None:
+        # Arrange
+        arena = {f"{arena_api_hostname(DEFAULT_BASE_URL)}:443"}
+        expected = [set(HF_HOSTS), arena]
+
+        # Act
+        rules = quoted_lists("VALUE_LIST")
+        specifications = quoted_lists("HOST_PORTS")
+
+        # Assert
+        assert rules == expected
+        assert specifications == expected
+
+    def test_creates_admin_and_user_application_roles(self) -> None:
+        roles = re.findall(r"CREATE APPLICATION ROLE IF NOT EXISTS (\w+);", SETUP_SQL)
+
+        assert roles == ["app_admin", "app_user"]
 
 
 class TestReadme:
@@ -303,19 +293,7 @@ class TestSnowflakeProject:
 
 
 class TestSetupScriptObjects:
-    def test_storage_matches_the_cli_setup(self) -> None:
-        cli = [
-            f"{statement.replace('arena.training.', 'app_state.')};"
-            for statement in storage_statements()
-            if "IMAGE REPOSITORY" not in statement
-        ]
-
-        assert all(statement in SETUP_SQL for statement in cli)
-
-    def test_warehouse_matches_the_cli_setup_and_no_pool_is_created(self) -> None:
-        cli = warehouse_statements(0)[0].replace(WAREHOUSE, "IDENTIFIER(:warehouse)")
-
-        assert f"{' '.join(cli.split())};" in " ".join(SETUP_SQL.split())
+    def test_no_pool_is_created(self) -> None:
         assert "CREATE COMPUTE POOL" not in SETUP_SQL
 
     def test_account_level_names_match_the_procedure_names(self) -> None:

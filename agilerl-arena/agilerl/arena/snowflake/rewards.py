@@ -38,11 +38,11 @@ REWARD_QUERY = (
 def check_reward_file(
     manifest: TrainingManifest, environment: LLMEnvSpec, has_reward_file: bool
 ) -> None:
-    """Reject a ``--reward-file`` the manifest does not use, or a missing one it needs.
+    """Reject a reward file the manifest does not use, or a missing reward it needs.
 
     :param manifest: Parsed training manifest.
     :param environment: The manifest's LLM environment.
-    :param has_reward_file: Whether ``--reward-file`` was passed.
+    :param has_reward_file: Whether a reward file was passed.
     :raises ValueError: A dataset-backed rollout has no reward file or
         ``environment.reward`` and is not OPD with no rubric, or a non-rollout
         manifest has one.
@@ -59,12 +59,12 @@ def check_reward_file(
         and not opd_without_rubric
     ):
         msg = (
-            "A dataset-backed rollout needs --reward-file or environment.reward, "
+            "A dataset-backed rollout needs environment.reward, "
             "unless it runs OPD and names no rubric."
         )
         raise ValueError(msg)
     if not rollout and has_reward_file:
-        msg = "--reward-file is only used by RL manifests."
+        msg = "A reward file is only used by RL manifests."
         raise ValueError(msg)
 
 
