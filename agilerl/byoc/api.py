@@ -411,26 +411,35 @@ class ByocApi:
             raise ArenaAPIError(msg)
         return {str(key): value for key, value in result.items()}
 
-    def rotate_cluster_token(
-        self, name: str, cluster_uid: str | None = None
-    ) -> dict[str, Any]:
-        """Rotate the agent token for the BYOC cluster named *name*.
+    def renew_cluster_credential(self, name: str) -> dict[str, Any]:
+        """Ask the agent of the BYOC cluster named *name* to renew its credential.
 
         :param name: The registered cluster name.
         :type name: str
-        :param cluster_uid: kube-system namespace UID the new token is for.
-            Arena refuses the rotation when it stores a different one.
-        :type cluster_uid: str | None
-        :returns: Rotation bundle with the new token.
+        :returns: The cluster's credential state.
         :rtype: dict[str, Any]
         """
-        logger.info("Rotating BYOC cluster token for %r…", name)
-        args: dict[str, object] = {"name": name}
-        if cluster_uid is not None:
-            args["clusterUid"] = cluster_uid
-        result = self._invoke(endpoints.ROTATE_CLUSTER_TOKEN, args)
+        logger.info(
+            "Asking the agent of BYOC cluster %r to renew its credential…", name
+        )
+        return self._credential_call(endpoints.RENEW_CLUSTER_CREDENTIAL, name)
+
+    def revoke_cluster_credentials(self, name: str) -> dict[str, Any]:
+        """Revoke every credential of the BYOC cluster named *name* now.
+
+        :param name: The registered cluster name.
+        :type name: str
+        :returns: The cluster's credential state.
+        :rtype: dict[str, Any]
+        """
+        logger.info("Revoking every credential of BYOC cluster %r…", name)
+        return self._credential_call(endpoints.REVOKE_CLUSTER_CREDENTIALS, name)
+
+    def _credential_call(self, invoke: ManifestInvoke, name: str) -> dict[str, Any]:
+        """Call a cluster credential route and return the credential state."""
+        result = self._invoke(invoke, {"name": name})
         if not isinstance(result, dict):
-            msg = "Unexpected cluster token rotation response from Arena."
+            msg = "Unexpected cluster credential response from Arena."
             raise ArenaAPIError(msg)
         return result
 

@@ -19,7 +19,16 @@ from agilerl.exceptions import ArenaAPIError
 CLUSTER_AND_CLASS_CALLS: list[tuple[Callable[[ByocApi], object], str, str]] = [
     (lambda api: api.list_clusters(), "/clusters/list", "query"),
     (lambda api: api.unregister_cluster("arena"), "/clusters/unregister", "body"),
-    (lambda api: api.rotate_cluster_token("arena"), "/clusters/rotate-token", "body"),
+    (
+        lambda api: api.renew_cluster_credential("arena"),
+        "/clusters/credential/renew",
+        "body",
+    ),
+    (
+        lambda api: api.revoke_cluster_credentials("arena"),
+        "/clusters/credential/revoke",
+        "body",
+    ),
     (
         lambda api: api.fetch_cluster_install_artifacts("arena"),
         "/clusters/install-artifacts",
@@ -479,26 +488,43 @@ class TestByocApi:
         with pytest.raises(ArenaAPIError, match="Unexpected cluster unregister"):
             byoc_api.unregister_cluster("prod-cluster")
 
-    def test_rotate_cluster_token_sends_json_name_body(
-        self, byoc_api: ByocApi, mock_client: MagicMock
+    @pytest.mark.parametrize(
+        ("call", "path"),
+        [
+            (
+                lambda api: api.renew_cluster_credential("prod-cluster"),
+                "/api/cli/v1/byoc/clusters/credential/renew",
+            ),
+            (
+                lambda api: api.revoke_cluster_credentials("prod-cluster"),
+                "/api/cli/v1/byoc/clusters/credential/revoke",
+            ),
+        ],
+    )
+    def test_credential_calls_send_the_name(
+        self,
+        byoc_api: ByocApi,
+        mock_client: MagicMock,
+        call: Callable[[ByocApi], dict[str, object]],
+        path: str,
     ) -> None:
-        mock_client._invoke_manifest_command.return_value = {"token": "rotated.tok"}
+        mock_client._invoke_manifest_command.return_value = {"kind": "agent"}
 
-        result = byoc_api.rotate_cluster_token("prod-cluster")
+        result = call(byoc_api)
 
         invoke, body = mock_client._invoke_manifest_command.call_args.args
-        assert result == {"token": "rotated.tok"}
+        assert result == {"kind": "agent"}
         assert invoke["method"] == "POST"
-        assert invoke["path"] == "/api/cli/v1/byoc/clusters/rotate-token"
+        assert invoke["path"] == path
         assert body == {"name": "prod-cluster"}
 
-    def test_rotate_cluster_token_rejects_non_dict(
+    def test_credential_call_rejects_non_dict(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:
         mock_client._invoke_manifest_command.return_value = ["token"]
 
-        with pytest.raises(ArenaAPIError, match="Unexpected cluster token rotation"):
-            byoc_api.rotate_cluster_token("prod-cluster")
+        with pytest.raises(ArenaAPIError, match="Unexpected cluster credential"):
+            byoc_api.renew_cluster_credential("prod-cluster")
 
     def test_request_cluster_smoke_sends_the_name_and_cluster_uid(
         self, byoc_api: ByocApi, mock_client: MagicMock
@@ -764,7 +790,7 @@ class TestByocApiPlatformScope:
         )
 
         with pytest.raises(ArenaAPIError, match="Cluster not found"):
-            ByocApi(http_client, platform=True).rotate_cluster_token("arena")
+            ByocApi(http_client, platform=True).renew_cluster_credential("arena")
 
 
 class TestByocApiClusterUid:
@@ -775,18 +801,6 @@ class TestByocApiClusterUid:
         ]
         assert calls, f"no request to {route}"
         return calls[-1].kwargs["json"]
-
-    def test_rotate_sends_the_cluster_uid(self, http_client: ArenaClient) -> None:
-        ByocApi(http_client).rotate_cluster_token("arena", cluster_uid="uid-1")
-
-        body = self._sent_body(http_client, "/clusters/rotate-token")
-        assert body == {"name": "arena", "clusterUid": "uid-1"}
-
-    def test_rotate_without_a_uid_sends_none(self, http_client: ArenaClient) -> None:
-        ByocApi(http_client).rotate_cluster_token("arena")
-
-        body = self._sent_body(http_client, "/clusters/rotate-token")
-        assert body == {"name": "arena"}
 
     def test_register_sends_the_cluster_uid(self, http_client: ArenaClient) -> None:
         ByocApi(http_client).register_cluster(name="arena", cluster_uid="uid-1")

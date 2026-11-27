@@ -29,6 +29,7 @@ from agilerl.byoc.commands import (
     build_cluster_provision_command,
     build_cluster_register_classes_command,
     build_cluster_register_command,
+    build_cluster_revoke_token_command,
     build_cluster_rotate_token_command,
     build_cluster_smoke_command,
     build_cluster_status_command,
@@ -256,6 +257,7 @@ class ClusterDynamicGroup(click.Group):
         self.add_command(build_cluster_register_command())
         self.add_command(build_cluster_unregister_command())
         self.add_command(build_cluster_rotate_token_command())
+        self.add_command(build_cluster_revoke_token_command())
         self.add_command(build_cluster_upgrade_command())
         self.add_command(build_cluster_manifest_command())
         self.add_command(build_cluster_smoke_command())

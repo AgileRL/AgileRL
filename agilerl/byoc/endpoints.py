@@ -226,14 +226,23 @@ UNREGISTER_CLUSTER: ManifestInvoke = {
     ],
 }
 
-ROTATE_CLUSTER_TOKEN: ManifestInvoke = {
+RENEW_CLUSTER_CREDENTIAL: ManifestInvoke = {
     "method": "POST",
-    "path": "/api/cli/v1/byoc/clusters/rotate-token",
+    "path": "/api/cli/v1/byoc/clusters/credential/renew",
     "responseKind": "json",
     "params": [
         {"name": "name", "in": "body", "type": "string", "required": True},
         {"name": "byocScope", "in": "body", "type": "string", "required": False},
-        {"name": "clusterUid", "in": "body", "type": "string", "required": False},
+    ],
+}
+
+REVOKE_CLUSTER_CREDENTIALS: ManifestInvoke = {
+    "method": "POST",
+    "path": "/api/cli/v1/byoc/clusters/credential/revoke",
+    "responseKind": "json",
+    "params": [
+        {"name": "name", "in": "body", "type": "string", "required": True},
+        {"name": "byocScope", "in": "body", "type": "string", "required": False},
     ],
 }
 

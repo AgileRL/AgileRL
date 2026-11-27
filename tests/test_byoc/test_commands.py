@@ -23,6 +23,7 @@ from agilerl.byoc import (
     build_cluster_plan_command,
     build_cluster_preflight_command,
     build_cluster_register_command,
+    build_cluster_revoke_token_command,
     build_cluster_rotate_token_command,
     build_cluster_unregister_command,
 )
@@ -565,8 +566,24 @@ def test_cluster_rotate_token_requires_confirmation(
     rotate_mock.assert_not_called()
 
 
-def test_cluster_rotate_token_yes_skips_prompt(
-    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
+@pytest.mark.parametrize(
+    ("build", "target", "args"),
+    [
+        (build_cluster_rotate_token_command, "run_cluster_rotate_token", []),
+        (build_cluster_revoke_token_command, "run_cluster_revoke_token", []),
+        (
+            build_cluster_revoke_token_command,
+            "run_cluster_revoke_token",
+            ["--platform"],
+        ),
+    ],
+)
+def test_cluster_credential_commands_yes_skips_prompt(
+    command_config: CommandConfig,
+    client_context: Callable[[MagicMock], MagicMock],
+    build: Callable[[], click.Command],
+    target: str,
+    args: list[str],
 ) -> None:
     client = MagicMock()
     with (
@@ -574,50 +591,42 @@ def test_cluster_rotate_token_yes_skips_prompt(
             "agilerl.byoc.commands.arena_client",
             return_value=client_context(client),
         ),
-        patch("agilerl.byoc.commands.run_cluster_rotate_token") as rotate_mock,
+        patch(f"agilerl.byoc.commands.{target}") as run_mock,
     ):
         result = CliRunner().invoke(
-            build_cluster_rotate_token_command(),
-            ["--name", "prod-cluster", "--yes"],
-            obj=command_config,
+            build(), ["--name", " prod-cluster ", "--yes", *args], obj=command_config
         )
 
     assert result.exit_code == 0, result.output
-    assert "Rotate the cluster token" not in result.output
-    rotate_mock.assert_called_once()
-    assert rotate_mock.call_args.args[0] is client
-    assert rotate_mock.call_args.kwargs["name"] == "prod-cluster"
-    assert rotate_mock.call_args.kwargs["namespace"] is None
+    assert "?" not in result.output
+    run_mock.assert_called_once_with(client, name="prod-cluster", platform=bool(args))
 
 
-def test_cluster_rotate_token_passes_agent_namespace(
-    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
+def test_cluster_revoke_token_asks_first(command_config: CommandConfig) -> None:
+    with patch("agilerl.byoc.commands.run_cluster_revoke_token") as revoke_mock:
+        result = CliRunner().invoke(
+            build_cluster_revoke_token_command(),
+            ["--name", "prod-cluster"],
+            obj=command_config,
+            input="n\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Revoke every credential of 'prod-cluster' now?" in result.output
+    revoke_mock.assert_not_called()
+
+
+def test_cluster_credential_command_rejects_a_blank_name(
+    command_config: CommandConfig,
 ) -> None:
-    client = MagicMock()
-    with (
-        patch(
-            "agilerl.byoc.commands.arena_client",
-            return_value=client_context(client),
-        ),
-        patch("agilerl.byoc.commands.run_cluster_rotate_token") as rotate_mock,
-    ):
-        result = CliRunner().invoke(
-            build_cluster_rotate_token_command(),
-            [
-                "--name",
-                "prod-cluster",
-                "--agent-namespace",
-                "arena-agent",
-                "--context",
-                "corp",
-                "--yes",
-            ],
-            obj=command_config,
-        )
+    result = CliRunner().invoke(
+        build_cluster_rotate_token_command(),
+        ["--name", "  ", "--yes"],
+        obj=command_config,
+    )
 
-    assert result.exit_code == 0, result.output
-    assert rotate_mock.call_args.kwargs["namespace"] == "arena-agent"
-    assert rotate_mock.call_args.kwargs["context"] == "corp"
+    assert result.exit_code != 0
+    assert "--name is required." in result.output
 
 
 PREFLIGHT_PASS = PreflightCheck(
