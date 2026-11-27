@@ -1,0 +1,203 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+"""Shared rollout-LLM algorithm specification."""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+from pydantic import Field, model_validator
+from typing_extensions import Self
+
+from agilerl.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.models.descriptions import (
+    BETA,
+    COSINE_LR,
+    IS_CAP,
+    MAX_OUTPUT_TOKENS,
+    MAX_ROW_TOKENS,
+    MICRO_BATCH,
+    MICRO_BATCH_TOKENS,
+    MIN_OUTPUT_TOKENS,
+    MIN_P,
+    MINI_BATCH,
+    REFERENCE_UPDATE_INTERVAL,
+    REPETITION_PENALTY,
+    TEMPERATURE,
+    TOP_K,
+    TOP_P,
+    VLLM_CONFIG,
+    VLLM_MAX_CLIP_FRACTION,
+    VLLM_MAX_LOGPROB_GAP,
+)
+from agilerl.models.env import LLMEnvType
+from agilerl.models.networks import CosineLRScheduleConfig, VLLMConfig
+
+
+def drafting_rejected_sampling(min_p: float, logit_bias: bool) -> list[str]:
+    """Sampling parameters set on every rollout request that vLLM rejects on a drafting engine.
+
+    :param min_p: The algorithm's ``min_p``.
+    :param logit_bias: Rollout requests carry a ``logit_bias``.
+    :return: ``min_p`` and ``logit_bias`` where they apply; empty when the
+        engine can draft.
+    """
+    return [
+        name
+        for name, applies in (("min_p", min_p > 0.0), ("logit_bias", logit_bias))
+        if applies
+    ]
+
+
+def records_sampling_supports(
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    min_p: float,
+    constrain_answer_pattern: str | None,
+) -> bool:
+    """Whether rollout records the token ids vLLM could sample at each generated token.
+
+    The trainer scores a token over the support vLLM drew it from (grammar,
+    ``min_p``, ``top_k`` and ``top_p`` applied), which vLLM reports only for
+    requests with ``top_k > 0`` and ``temperature > 0``.
+
+    :param temperature: Training sampling temperature.
+    :type temperature: float
+    :param top_k: Most likely tokens kept per step; ``0`` keeps every token.
+    :type top_k: int
+    :param top_p: Nucleus sampling probability mass.
+    :type top_p: float
+    :param min_p: Floor relative to the most likely token's probability.
+    :type min_p: float
+    :param constrain_answer_pattern: Answer regex turns are constrained to, or
+        ``None``.
+    :type constrain_answer_pattern: str | None
+    :return: ``True`` when the sampling settings let vLLM report supports.
+    :rtype: bool
+    :raises ValueError: If ``top_p``, ``min_p`` or an answer grammar narrows the
+        sampling distribution but vLLM cannot report its support.
+    """
+    if top_k > 0 and temperature > 0:
+        return True
+    narrowed = [
+        name
+        for name, applies in (
+            ("top_p", top_p < 1.0),
+            ("min_p", min_p > 0.0),
+            ("constrain_answer_pattern", constrain_answer_pattern is not None),
+        )
+        if applies
+    ]
+    if narrowed:
+        msg = (
+            f"{', '.join(narrowed)} narrows the distribution rollout samples from, "
+            "and vLLM reports that support only with top_k > 0 and temperature > 0 "
+            f"(got top_k={top_k}, temperature={temperature}); without it the "
+            "trainer's importance ratio compares different distributions. Set "
+            "top_k > 0 and temperature > 0."
+        )
+        raise ValueError(msg)
+    return False
+
+
+class RolloutLLMSpec(LLMAlgorithmSpec):
+    """Shared surface for the LLM algorithms that generate their own rollouts."""
+
+    temperature: float = Field(default=0.9, gt=0.0, le=2.0, description=TEMPERATURE)
+    repetition_penalty: float = Field(
+        default=1.0, gt=0.0, description=REPETITION_PENALTY
+    )
+    top_p: float = Field(default=1.0, gt=0.0, le=1.0, description=TOP_P)
+    top_k: int = Field(default=50, ge=0, description=TOP_K)
+    min_p: float = Field(default=0.0, ge=0.0, le=1.0, description=MIN_P)
+    max_output_tokens: int | None = Field(
+        default=None, ge=1, description=MAX_OUTPUT_TOKENS
+    )
+    max_row_tokens: int | None = Field(default=None, ge=1, description=MAX_ROW_TOKENS)
+    beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
+    reference_update_interval: int | None = Field(
+        default=None, ge=1, description=REFERENCE_UPDATE_INTERVAL
+    )
+    mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
+    micro_batch_size_per_gpu: int | None = Field(
+        default=None, ge=1, description=MICRO_BATCH
+    )
+    micro_batch_tokens_per_gpu: int | None = Field(
+        default=None, ge=1, description=MICRO_BATCH_TOKENS
+    )
+    min_output_tokens: int | None = Field(
+        default=None, ge=0, description=MIN_OUTPUT_TOKENS
+    )
+    cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(
+        default=None, description=COSINE_LR
+    )
+    vllm_config: VLLMConfig | None = Field(default=None, description=VLLM_CONFIG)
+    vllm_importance_sampling_cap: float = Field(default=2.0, gt=0.0, description=IS_CAP)
+    vllm_max_logprob_gap: float = Field(
+        default=0.1, ge=0.0, description=VLLM_MAX_LOGPROB_GAP
+    )
+    vllm_max_clip_fraction: float = Field(
+        default=0.02, ge=0.0, le=1.0, description=VLLM_MAX_CLIP_FRACTION
+    )
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
+    supports_sequence_packing: ClassVar[bool] = True
+
+    @model_validator(mode="after")
+    def _validate_sampling_support(self) -> Self:
+        records_sampling_supports(
+            self.temperature,
+            self.top_k,
+            self.top_p,
+            self.min_p,
+            self.constrain_answer_pattern,
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_speculative_min_p(self) -> Self:
+        self.check_speculative_sampling(False)
+        return self
+
+    def check_speculative_sampling(self, logit_bias: bool) -> None:
+        """Reject a ``speculative_config`` that vLLM cannot serve rollout requests with.
+
+        :param logit_bias: Rollout requests carry a ``logit_bias`` masking the
+            tokenizer's image token.
+        :raises ValueError: If ``vllm_engine_args.speculative_config`` drafts
+            and requests set ``min_p`` or ``logit_bias``.
+        """
+        if self.vllm_engine_args.get("speculative_config") is None:
+            return
+        rejected = drafting_rejected_sampling(self.min_p, logit_bias)
+        if not rejected:
+            return
+        msg = (
+            "vllm_engine_args.speculative_config drafts, and vLLM rejects every "
+            f"request that sets {' and '.join(rejected)} on a drafting engine"
+        )
+        if logit_bias:
+            msg += (
+                f"; {self.pretrained_model_name_or_path} rollouts mask the "
+                "tokenizer's image token with logit_bias"
+            )
+        msg += ". Set vllm_engine_args.speculative_config to null."
+        raise ValueError(msg)
+
+    def _max_output_tokens(self) -> int | None:
+        return self.max_output_tokens
+
+    def check_output_fits_context(self) -> None:
+        """Reject a completion cap that leaves no prompt room in the context window.
+
+        :raises ValueError: If ``max_output_tokens`` is at least ``max_model_len``.
+        """
+        cap = self.max_output_tokens
+        if cap is None or cap < self.max_model_len:
+            return
+        msg = (
+            f"max_output_tokens ({cap}) must be less than the model's context "
+            f"length ({self.max_model_len})"
+        )
+        raise ValueError(msg)

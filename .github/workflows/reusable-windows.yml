@@ -11,62 +11,24 @@ jobs:
     tests:
         runs-on: windows-2025
         timeout-minutes: 40
-        strategy:
-            fail-fast: false
-            matrix:
-                python-version: ['3.10', '3.11', '3.12', '3.13']
-                shard: [1, 2, 3, 4]
         env:
-            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
-
+            # Native App tests import snowflake_app from the repository root.
+            PYTHONPATH: ${{ github.workspace }}
         steps:
             - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
-                  python-version: ${{ matrix.python-version }}
-            - name: Restore Windows test durations
-              uses: actions/cache/restore@v4
-              with:
-                  path: .ci-durations/windows.json
-                  key: windows-cpu-durations-${{ github.run_id }}
-                  restore-keys: windows-cpu-durations-
+                  python-version: '3.13'
             - name: Install dependencies
-              run: |
-                  pip install uv
-                  uv sync --locked --all-groups --extra all
-
-            - name: Show runner CPU
-              run: Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer | Format-List
-
-            - name: Run Windows shard
+              run: uv sync --locked --group dev --extra snowflake-job
+            - name: Run tests
               shell: bash
-              # Cap CPU-ISA dispatch at AVX2: part of the heterogeneous Azure fleet
-              # behind windows-2025 runners faults (0xc000001d, illegal instruction)
-              # in torch's native kernel threads when an above-AVX2 code path is
-              # selected. AVX2 is supported fleet-wide.
-              env:
-                  ATEN_CPU_CAPABILITY: avx2
-                  ONEDNN_MAX_CPU_ISA: AVX2
-                  MKL_ENABLE_INSTRUCTIONS: AVX2
-              run: |
-                  uv run --no-sync python scripts/pytest_shard.py run \
-                    --root tests \
-                    --root agilerl-arena/tests \
-                    --total-shards 4 \
-                    --shard-index ${{ matrix.shard }} \
-                    --durations-file .ci-durations/windows.json \
-                    -- \
-                    --import-mode=importlib \
-                    --junitxml=junit-windows.xml \
-                    --timeout=600 --timeout-method=thread \
-                    -m "not llm and not gpu and not vllm" \
-                    -n logical --dist loadgroup \
-                    --durations=15
+              run: uv run --no-sync python -m pytest tests snowflake_app/tests --import-mode=importlib --junitxml=junit-windows.xml
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-windows-${{ matrix.python-version }}-${{ matrix.shard }}
+                  name: junit-windows-3.13
                   path: junit-windows.xml
                   if-no-files-found: ignore

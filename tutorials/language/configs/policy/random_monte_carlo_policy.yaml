@@ -1,5 +1,0 @@
----
-defaults:
-    - /policy@sample_policy: random_mixture_policy
-name: monte_carlo_policy
-n_samples: 10

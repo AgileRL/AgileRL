@@ -1,8 +1,0 @@
----
-defaults:
-    - /env: wordle_env
-
-name: utterance_iql_evaluator
-verbose: true
-kind: greedy
-generation_kwargs: {}

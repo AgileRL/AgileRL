@@ -13,8 +13,9 @@ authors:
     affiliation: AgileRL
 repository-code: 'https://github.com/AgileRL/AgileRL'
 url: 'https://agilerl.com'
-repository: 'https://docs.agilerl.com'
+repository: 'https://docs.arena.agilerl.com'
 abstract: >-
-  AgileRL is a Deep Reinforcement Learning library focused
-  on streamlining development by introducing RLOps.
+  agilerl is the command-line interface and Python SDK for
+  AgileRL Arena, a platform for post-training LLMs with
+  reinforcement learning.
 license: Apache-2.0

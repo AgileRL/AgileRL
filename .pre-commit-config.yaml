@@ -57,28 +57,6 @@ repos:
       hooks:
           - id: uv-lock
 
-    - repo: local
-      hooks:
-          - id: arena-symlink
-            name: Create the agilerl/arena dev symlink
-            entry: bash -c '[ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena'
-            language: system
-            pass_filenames: false
-            always_run: true
-          - id: check-extras
-            name: Check the agilerl-arena requirement and that all unions every extra
-            entry: python scripts/check-extras.py
-            language: python
-            additional_dependencies: [tomli; python_version < '3.11']
-            pass_filenames: false
-            files: ^(pyproject\.toml|agilerl-arena/pyproject\.toml|scripts/check-extras\.py)$
-          # Reasoning prompts use <think>; reward parsing splits on </think>.
-          - id: no-redacted-thinking
-            name: Reject redacted_thinking tags in configs
-            entry: redacted_thinking
-            language: pygrep
-            files: ^configs/
-
     - repo: https://github.com/astral-sh/ty-pre-commit
       rev: v0.0.65
       hooks:

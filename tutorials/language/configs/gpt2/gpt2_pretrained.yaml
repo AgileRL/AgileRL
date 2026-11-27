@@ -1,5 +1,0 @@
----
-name: gpt2
-gpt2_type: gpt2
-from_pretrained: true
-lm_head: true

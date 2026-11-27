@@ -4,8 +4,7 @@ name: Publish release
 # Public PyPI path for spoke tags. Uploads the already-published wheel/sdist
 # for that tag. Does not rebuild. Does not publish to any private index.
 #
-#   vX.Y.Z              → agilerl
-#   agilerl-arena/vX.Y.Z → agilerl-arena
+#   vX.Y.Z → agilerl
 #
 # Trigger: pushing the release tag. workflow_dispatch from a tag ref backfills
 # a version PyPI is missing, or retries a failed run. No inputs — the tag ref
@@ -16,8 +15,6 @@ name: Publish release
 #             AWS_CODEARTIFACT_READ_ROLE_ARN). No long-lived AWS keys.
 #   publish — PyPI Trusted Publishing (OIDC) via environment `pypi`.
 #             No UV_PUBLISH_TOKEN. Fetch credentials do not leak into publish.
-#             A framework tag and its arena tag are pushed together, so the
-#             agilerl upload waits for the arena range its wheel declares.
 #   release — GITHUB_TOKEN creates the GitHub Release after PyPI succeeds.
 #             Title and body come from spoke commit messages (spoke-public
 #             copy), not GitHub generate-notes.
@@ -26,7 +23,6 @@ on:
     push:
         tags:
             - v*
-            - agilerl-arena/v*
     workflow_dispatch:
 
 permissions:
@@ -47,8 +43,6 @@ jobs:
         outputs:
             tag: ${{ steps.tag.outputs.tag }}
             version: ${{ steps.tag.outputs.version }}
-            dist_name: ${{ steps.tag.outputs.dist_name }}
-            package: ${{ steps.tag.outputs.package }}
             previous_tag: ${{ steps.prev.outputs.previous_tag }}
         steps:
             - name: Resolve tag
@@ -56,31 +50,17 @@ jobs:
               run: |
                   set -euo pipefail
                   if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-                    echo "Run this workflow from a v* or agilerl-arena/v* tag (Use workflow from), not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+                    echo "Run this workflow from a v* tag (Use workflow from), not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
                     exit 1
                   fi
                   TAG="${GITHUB_REF_NAME}"
                   TAG="${TAG#refs/tags/}"
-                  case "${TAG}" in
-                    agilerl-arena/v*)
-                      VER="${TAG#agilerl-arena/v}"
-                      PKG=agilerl-arena
-                      DIST=agilerl_arena
-                      ;;
-                    v*)
-                      VER="${TAG#v}"
-                      PKG=agilerl
-                      DIST=agilerl
-                      ;;
-                    *)
-                      echo "ref ${TAG} is not a v* or agilerl-arena/v* release tag" >&2
-                      exit 1
-                      ;;
-                  esac
+                  if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "ref ${TAG} is not a vX.Y.Z release tag" >&2
+                    exit 1
+                  fi
                   echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-                  echo "version=${VER}" >> "$GITHUB_OUTPUT"
-                  echo "package=${PKG}" >> "$GITHUB_OUTPUT"
-                  echo "dist_name=${DIST}" >> "$GITHUB_OUTPUT"
+                  echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
             - name: Checkout fetch script
               uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -88,7 +68,7 @@ jobs:
                   persist-credentials: false
                   fetch-depth: 1
 
-            - name: Previous same-family tag
+            - name: Previous release tag
               id: prev
               env:
                   GH_TOKEN: ${{ github.token }}
@@ -128,13 +108,12 @@ jobs:
             - name: Fetch INTERNAL dist
               env:
                   VER: ${{ steps.tag.outputs.version }}
-                  PKG: ${{ steps.tag.outputs.package }}
               run: |
                   set -euo pipefail
                   rm -rf dist
                   mkdir -p dist
                   python3 scripts/fetch_arena_internal_dist.py \
-                    --package "${PKG}" \
+                    --package agilerl \
                     --version "${VER}" \
                     --out-dir dist \
                     --domain agilerl-pypi \
@@ -159,12 +138,6 @@ jobs:
             contents: read
             id-token: write
         steps:
-            - name: Checkout wait script
-              uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-              with:
-                  persist-credentials: false
-                  fetch-depth: 1
-
             - name: Download dist
               uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
@@ -176,28 +149,18 @@ jobs:
               with:
                   enable-cache: false
 
-            # The wheel states the agilerl-arena range it needs. Uploading
-            # agilerl before that range resolves ships a broken arena extra.
-            - name: Wait for agilerl-arena on PyPI
-              run: |
-                  uv run --no-project --with packaging \
-                    python3 scripts/await_pypi_dependency.py \
-                    --dist-dir dist \
-                    --requirement agilerl-arena
-
             - name: Publish to PyPI (OIDC)
               env:
                   TAG: ${{ needs.fetch.outputs.tag }}
                   VER: ${{ needs.fetch.outputs.version }}
-                  DIST: ${{ needs.fetch.outputs.dist_name }}
               run: |
                   set -euo pipefail
                   shopt -s nullglob
-                  artifacts=(dist/${DIST}-${VER}*)
+                  artifacts=(dist/agilerl-${VER}*)
                   if [[ ${#artifacts[@]} -eq 0 ]]; then
-                    echo "missing dist artifacts for ${DIST}==${VER}"; ls -la dist; exit 1
+                    echo "missing dist artifacts for agilerl==${VER}"; ls -la dist; exit 1
                   fi
-                  echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
+                  echo "Publishing agilerl==${VER} from tag ${TAG} via Trusted Publishing"
                   # Skip artifacts already on PyPI so a retry can finish.
                   uv publish --trusted-publishing always --check-url https://pypi.org/simple "${artifacts[@]}"
 
@@ -255,11 +218,6 @@ jobs:
                     --notes-file "${notes_dir}/notes.md" \
                     < "${notes_dir}/commits.log"
                   TITLE="$(cat "${notes_dir}/title.txt")"
-                  latest_args=()
-                  if [[ "${TAG}" == agilerl-arena/* ]]; then
-                    latest_args+=(--latest=false)
-                  fi
                   gh release create "${TAG}" "${artifacts[@]}" \
                     --title "${TITLE}" \
-                    --notes-file "${notes_dir}/notes.md" \
-                    "${latest_args[@]}"
+                    --notes-file "${notes_dir}/notes.md"

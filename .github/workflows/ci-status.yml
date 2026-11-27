@@ -6,8 +6,8 @@ on:
         branches: [main]
         paths:
             - agilerl/**
-            - agilerl-arena/**
             - tests/**
+            - snowflake_app/**
             - .github/workflows/**
             - pyproject.toml
             - uv.lock

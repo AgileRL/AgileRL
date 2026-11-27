@@ -149,13 +149,6 @@ def commits_from_compare(payload: dict[str, object]) -> list[SpokeCommit]:
     return parsed
 
 
-def release_name_prefix(tag: str) -> str:
-    """User-facing tag for the release title."""
-    if tag.startswith("agilerl-arena/v"):
-        return f"agilerl-arena {tag.removeprefix('agilerl-arena/')}"
-    return tag
-
-
 def _title_rank(commit: SpokeCommit) -> tuple[int, int]:
     if commit.breaking:
         return (0, 0)
@@ -170,18 +163,17 @@ def _title_rank(commit: SpokeCommit) -> tuple[int, int]:
 
 def release_title(tag: str, commits: Sequence[SpokeCommit]) -> str:
     """`vX.Y.Z: headline` from the highest-signal commit."""
-    prefix = release_name_prefix(tag)
     if not commits:
-        return prefix
+        return tag
     primary = min(commits, key=_title_rank)
     headline = primary.subject.strip()
     if not headline:
-        return prefix
-    title = f"{prefix}: {headline}"
+        return tag
+    title = f"{tag}: {headline}"
     if len(title) <= GITHUB_TITLE_MAX:
         return title
-    keep = GITHUB_TITLE_MAX - len(prefix) - 2
-    return f"{prefix}: {headline[:keep].rstrip()}"
+    keep = GITHUB_TITLE_MAX - len(tag) - 2
+    return f"{tag}: {headline[:keep].rstrip()}"
 
 
 def _render_entry(commit: SpokeCommit) -> str:

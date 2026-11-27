@@ -1,140 +1,129 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+"""The AgileRL training manifest contract."""
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
 
-import lazy_loader as lazy
-
-from agilerl.arena.models.algorithms import (
+from agilerl.models.algorithms import (
+    AlgorithmSpec,
     AlgoSpec,
     CISPOSpec,
-    CQNSpec,
-    DDPGSpec,
     DPOSpec,
-    DQNSpec,
     GRPOSpec,
     GSPOSpec,
-    IPPOSpec,
     LLMAlgorithmSpec,
     LLMPPOSpec,
     LLMREINFORCESpec,
-    MADDPGSpec,
-    MATD3Spec,
-    MultiAgentAlgorithmSpec,
-    NeuralTSSpec,
-    NeuralUCBSpec,
-    PPOSpec,
-    RainbowDQNSpec,
+    OPDSpec,
+    RolloutLLMSpec,
     SFTSpec,
-    SingleAgentAlgorithmSpec,
-    TD3Spec,
 )
-from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.models.env import (
+    EnvContainerSpec,
+    EnvHostVolume,
+    EnvServiceSpec,
+    EnvSpec,
+    JudgeSpec,
+    LLMEnvSpec,
+    LLMEnvType,
+)
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationProbabilities,
     MutationSpec,
-    NetworkMutationRanges,
+    RLHyperparameter,
     SelectionStrategySpec,
     TournamentSelectionSpec,
+    mutation_ceiling,
+    resolve_frequency_ratios,
+    resolve_selection_brackets,
 )
-from agilerl.models.manifest import TrainingManifest
+from agilerl.models.manifest import (
+    API_VERSION,
+    TrainingManifest,
+)
+from agilerl.models.model_info import (
+    SUPPORTED_MODEL_INFO,
+    ModelArchitecture,
+    ModelInfo,
+    ModelStatus,
+)
 from agilerl.models.networks import (
-    CnnLstmSpec,
-    CnnSpec,
-    ContinuousQNetworkSpec,
-    DeterministicActorSpec,
+    CosineLRScheduleConfig,
     FinetuningNetworkSpec,
-    LstmSpec,
-    MlpSpec,
-    MultiInputSpec,
-    NetworkSpec,
-    QNetworkSpec,
-    RainbowQNetworkSpec,
-    SimbaSpec,
-    StochasticActorSpec,
-    ValueNetworkSpec,
-    normalize_manifest_network,
+    LoraConfigDict,
+    VLLMConfig,
+    default_rollout_vllm_config,
 )
-from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-
-# NOTE: env has heavy imports (gymnasium, pandas, datasets, pettingzoo)
-# so we lazy-load it to keep imports from agilerl.models lightweight.
-__getattr__, __dir__, _ = lazy.attach(
-    __name__,
-    submod_attrs={
-        "env": [
-            "BanditEnvSpec",
-            "EnvSpec",
-            "GymEnvSpec",
-            "LLMEnvSpec",
-            "LLMEnvType",
-            "OfflineEnvSpec",
-        ],
-    },
+from agilerl.models.registry import MANIFEST_REGISTRY, AgentType, register
+from agilerl.models.schema import SCHEMA_ID, manifest_schema
+from agilerl.models.training import (
+    BufferSpec,
+    CheckpointExportSpec,
+    LLMRolloutBufferSpec,
+    RolloutMode,
+    RolloutVersionStamp,
+    TrainingSpec,
 )
 
-if TYPE_CHECKING:
-    from agilerl.models.env import (
-        BanditEnvSpec,
-        GymEnvSpec,
-        LLMEnvSpec,
-        OfflineEnvSpec,
-    )
-
-    EnvironmentSpecType = GymEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-    ReplayBufferSpecType = ReplayBufferSpec | None
-    TrainingSpecType = TrainingSpec | None
-    MutationSpecType = MutationSpec | None
+try:
+    __version__ = _distribution_version("agilerl")
+except PackageNotFoundError:  # running straight from a source tree
+    __version__ = "0+unknown"
 
 __all__ = [
+    "API_VERSION",
     "MANIFEST_REGISTRY",
+    "SCHEMA_ID",
+    "SUPPORTED_MODEL_INFO",
+    "AgentType",
     "AlgoSpec",
+    "AlgorithmSpec",
+    "BufferSpec",
     "CISPOSpec",
-    "CQNSpec",
-    "CnnLstmSpec",
-    "CnnSpec",
-    "ContinuousQNetworkSpec",
-    "DDPGSpec",
+    "CheckpointExportSpec",
+    "CosineLRScheduleConfig",
     "DPOSpec",
-    "DQNSpec",
-    "DeterministicActorSpec",
+    "EnvContainerSpec",
+    "EnvHostVolume",
+    "EnvServiceSpec",
+    "EnvSpec",
     "FinetuningNetworkSpec",
     "GRPOSpec",
     "GSPOSpec",
-    "IPPOSpec",
+    "JudgeSpec",
     "LLMAlgorithmSpec",
+    "LLMEnvSpec",
+    "LLMEnvType",
     "LLMPPOSpec",
     "LLMREINFORCESpec",
-    "LstmSpec",
-    "MADDPGSpec",
-    "MATD3Spec",
-    "MlpSpec",
-    "MultiAgentAlgorithmSpec",
+    "LLMRolloutBufferSpec",
+    "LoraConfigDict",
+    "ModelArchitecture",
+    "ModelInfo",
+    "ModelStatus",
     "MultiFrequencySelectionSpec",
-    "MultiInputSpec",
     "MutationProbabilities",
     "MutationSpec",
-    "NetworkMutationRanges",
-    "NetworkSpec",
-    "NeuralTSSpec",
-    "NeuralUCBSpec",
-    "PPOSpec",
-    "QNetworkSpec",
-    "RainbowDQNSpec",
-    "RainbowQNetworkSpec",
-    "ReplayBufferSpec",
+    "OPDSpec",
+    "RLHyperparameter",
+    "RolloutLLMSpec",
+    "RolloutMode",
+    "RolloutVersionStamp",
     "SFTSpec",
     "SelectionStrategySpec",
-    "SimbaSpec",
-    "SingleAgentAlgorithmSpec",
-    "StochasticActorSpec",
-    "TD3Spec",
     "TournamentSelectionSpec",
     "TrainingManifest",
     "TrainingSpec",
-    "ValueNetworkSpec",
-    "normalize_manifest_network",
+    "VLLMConfig",
+    "default_rollout_vllm_config",
+    "manifest_schema",
+    "mutation_ceiling",
+    "register",
+    "resolve_frequency_ratios",
+    "resolve_selection_brackets",
 ]

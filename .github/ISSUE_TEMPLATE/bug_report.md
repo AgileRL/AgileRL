@@ -7,15 +7,13 @@ assignees: ''
 
 ---
 
-**What version of AgileRL are you using?**
-**What operating system and processor architecture are you using?**
+**What version of agilerl are you using?** (`pip show agilerl`)
+**What operating system, processor architecture and Python version are you using?**
 
 **What did you do?**
-Steps to reproduce the behaviour:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+The `arena` command or SDK call you ran, with secrets removed:
+1. Run `arena ...`
+2. See error
 
 **What did you expect to see?**
 A clear and concise description of what you expected to happen.

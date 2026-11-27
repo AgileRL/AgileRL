@@ -2,7 +2,7 @@
 
 ### Thank you for taking the time to contribute to AgileRL! 🤖🎉
 
-Contributions are really valuable to AgileRL, and we are grateful to the community for your support. We are happy to have you here! AgileRL powers real-world AI systems, and your contributions directly impact the tools that researchers and engineers depend on every day.
+Contributions are really valuable to AgileRL, and we are grateful to the community for your support. This repository is `agilerl`: the `arena` CLI and Python SDK for the [Arena](https://arena.agilerl.com) platform.
 
 In this guide you will get an overview of the contribution workflow from opening an issue, creating a PR, reviewing, and merging the PR.
 
@@ -16,16 +16,13 @@ When contributing to AgileRL, we ask that you:
 
 - Open a GitHub Pull Request with your patches and we will review your contribution and respond as quickly as possible. Keep in mind that this is an open source project, and it may take us some time to get back to you. Your patience is very much appreciated.
 
-There are many ways to contribute, from writing tutorials or blog posts, improving the documentation, submitting bug reports and feature requests or writing code which can be incorporated into AgileRL itself.
+There are many ways to contribute, from submitting bug reports and feature requests to writing code which can be incorporated into the CLI itself.
 
 All members of the AgileRL community are expected to follow the [Code of Conduct](https://github.com/AgileRL/AgileRL/blob/main/CODE_OF_CONDUCT.md).
 
 ## Your First Contribution
 
-There is a lot of scope to contribute on what you find interesting, and your
-contributions can have a real impact on the framework.
-
-We always appreciate new algorithms, features, and improvements for RL and LLM training. Whether you want to implement a cutting-edge paper, optimize existing code, or improve our docs - there's room for it all. Feel free to suggest new ideas and check the GitHub Issue tracker for bugs, improvements, and feature requests.
+We welcome bug fixes, new CLI features and better error messages. Feel free to suggest new ideas and check the GitHub Issue tracker for bugs, improvements, and feature requests. The Arena docs live at [docs.arena.agilerl.com](https://docs.arena.agilerl.com/).
 
 Contributing to an open source project for the first time? You can learn how from [this great resource](https://www.firsttimersonly.com/).
 
@@ -40,14 +37,14 @@ To make a code contribution:
 3. Do the changes in your fork.
 4. Run the tests with `pytest tests`
 5. Make the test pass.
-6. Run the type checker with `just typecheck` (or `uv run ty check agilerl agilerl/arena`) and fix any errors it reports.
+6. Run the type checker with `just typecheck` (or `uv run ty check agilerl`) and fix any errors it reports.
 7. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
 8. Push to your fork and submit a pull request **to the `main` branch**. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
 
 Keep your pull request open — do not merge it yourself. If we ask for changes, push them here (rebase onto `main` if you are behind). A maintainer adds the `hub-sync-import` label when the change is ready for internal CI; we merge this PR after that passes.
 
 #### Type checking
-AgileRL is type-checked with [`ty`](https://docs.astral.sh/ty/) and ships `py.typed` markers, so the public API's annotations are part of the released package. The configuration lives in `pyproject.toml` under `[tool.ty]`: the whole `agilerl` package is checked strictly. The CI workflow's ty job blocks PRs on new type errors, so run `just typecheck` before pushing.
+AgileRL is type-checked with [`ty`](https://docs.astral.sh/ty/) and ships `py.typed` markers, so the public API's annotations are part of the released package. The whole `agilerl` package is checked. The CI workflow's ty job blocks PRs on new type errors, so run `just typecheck` before pushing.
 
 Prefer fixing types at the source — tighter annotations, `@overload`s, or a small typed wrapper — over narrowing with `cast()` / `assert isinstance(...)`, or suppressing with `# ty: ignore`. Reach for a suppression only for genuine third-party or stub gaps, and justify it with an inline comment.
 
@@ -67,7 +64,7 @@ If you find a security vulnerability, do NOT open an issue. Email dev@agilerl.co
 
 When filing an issue, make sure to answer these five questions:
 
-- What version of AgileRL are you using?
+- What version of `agilerl` are you using (`pip show agilerl`)?
 - What operating system and processor architecture are you using?
 - What did you do?
 - What did you expect to see?
@@ -76,9 +73,7 @@ When filing an issue, make sure to answer these five questions:
 General questions should go to the [AgileRL Discord](https://discord.gg/eB8HyTA2ux) instead of the issue tracker.
 
 ## How to suggest a feature or enhancement
-The AgileRL philosophy is to provide streamlined tooling for reinforcement learning development, to make it easier and faster to create incredible models.
-
-If you find yourself wishing for a feature that doesn't exist in AgileRL, you are probably not alone. There are bound to be others out there with similar needs. Many of the features that AgileRL has today have been added because our users saw the need. Open an issue on our issues list on GitHub which describes the feature you would like to see, why you need it, and how it should work.
+If you find yourself wishing for a feature that doesn't exist in the Arena CLI, you are probably not alone. There are bound to be others out there with similar needs. Many of the features that AgileRL has today have been added because our users saw the need. Open an issue on our issues list on GitHub which describes the feature you would like to see, why you need it, and how it should work.
 
 ## Community
 You can chat with the core team on the [AgileRL Discord](https://discord.gg/eB8HyTA2ux). We try to respond as quickly as possible.

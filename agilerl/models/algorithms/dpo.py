@@ -1,0 +1,43 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+"""DPO algorithm specification."""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+from pydantic import Field
+
+from agilerl.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.models.descriptions import BETA, LR, REFERENCE_UPDATE_INTERVAL
+from agilerl.models.env import LLMEnvType
+from agilerl.models.registry import register
+
+
+@register()
+class DPOSpec(LLMAlgorithmSpec):
+    """Direct Preference Optimization."""
+
+    lr: float = Field(default=0.000005, gt=0.0, le=1.0, description=LR)
+    beta: float = Field(default=0.1, ge=0.0, le=1.0, description=BETA)
+    reference_update_interval: int | None = Field(
+        default=None, ge=1, description=REFERENCE_UPDATE_INTERVAL
+    )
+    nll_alpha: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Weight on the auxiliary likelihood term over chosen responses, "
+            "which keeps the model fluent while preferences are optimized."
+        ),
+    )
+    answer_continuation: bool = Field(
+        default=False,
+        exclude=True,
+        description="Unused: DPO trains on dataset rows, with no rollout to continue.",
+    )
+
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
+    objective: ClassVar[str] = "preference"
+    supports_sequence_packing: ClassVar[bool] = True

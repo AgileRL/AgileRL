@@ -3,13 +3,6 @@ name: macOS
 
 on:
     workflow_call:
-        inputs:
-            pythons:
-                type: string
-                required: true
-            max_parallel:
-                type: number
-                default: 5
 
 permissions:
     contents: read
@@ -17,50 +10,23 @@ permissions:
 jobs:
     tests:
         runs-on: macos-26
-        strategy:
-            fail-fast: false
-            max-parallel: ${{ inputs.max_parallel }}
-            matrix:
-                python-version: ${{ fromJSON(inputs.pythons) }}
-                shard: [1, 2, 3, 4, 5]
         env:
-            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
-
+            # Native App tests import snowflake_app from the repository root.
+            PYTHONPATH: ${{ github.workspace }}
         steps:
             - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
-                  python-version: ${{ matrix.python-version }}
-            - name: Restore macOS test durations
-              uses: actions/cache/restore@v4
-              with:
-                  path: .ci-durations/macos.json
-                  key: macos-cpu-durations-${{ github.run_id }}
-                  restore-keys: macos-cpu-durations-
+                  python-version: '3.13'
             - name: Install dependencies
-              run: |
-                  uv sync --locked --all-groups --extra all
-            # Linux runs the multi_rank (gloo process group) tests; macOS ranks
-            # cannot fork from the preloaded forkserver and spawn is several times slower.
-            - name: Run macOS shard
-              run: |
-                  uv run --no-sync python scripts/pytest_shard.py run \
-                    --root tests \
-                    --root agilerl-arena/tests \
-                    --total-shards 5 \
-                    --shard-index ${{ matrix.shard }} \
-                    --durations-file .ci-durations/macos.json \
-                    -- \
-                    --import-mode=importlib \
-                    --junitxml=junit-macos.xml \
-                    -m "not gpu and not vllm and not multi_rank" \
-                    -n logical --dist loadgroup \
-                    --durations=15
+              run: uv sync --locked --group dev --extra snowflake-job
+            - name: Run tests
+              run: uv run --no-sync python -m pytest tests snowflake_app/tests --import-mode=importlib --junitxml=junit-macos.xml
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-macos-${{ matrix.python-version }}-${{ matrix.shard }}
+                  name: junit-macos-3.13
                   path: junit-macos.xml
                   if-no-files-found: ignore

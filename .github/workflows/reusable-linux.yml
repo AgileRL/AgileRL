@@ -4,368 +4,41 @@ name: Linux
 on:
     workflow_call:
         inputs:
-            cpu_pythons:
+            pythons:
+                description: JSON list of Python versions
                 type: string
-                required: true
-            cpu_shards:
-                description: JSON list of shard indexes, 1..cpu_shard_total
-                type: string
-                required: true
-            cpu_shard_total:
-                type: number
-                required: true
-            gpu_pythons:
-                type: string
-                required: true
-            gpu_shards:
-                type: string
-                required: true
-            gpu_shard_total:
-                type: number
-                required: true
-            tests:
-                description: JSON list of test files to run; empty runs every test
-                type: string
-                default: ''
-            coverage:
-                description: Measure 3.13 coverage with test contexts and build the test map
-                type: boolean
                 required: true
 
 permissions:
     contents: read
 
 jobs:
-    cpu:
-        if: inputs.cpu_shard_total > 0
+    tests:
         runs-on: ubuntu-24.04
         strategy:
             fail-fast: false
             matrix:
-                python-version: ${{ fromJSON(inputs.cpu_pythons) }}
-                shard: ${{ fromJSON(inputs.cpu_shards) }}
+                python-version: ${{ fromJSON(inputs.pythons) }}
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
-            HF_HOME: /tmp/hf-cache
-            TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
             CUDA_VISIBLE_DEVICES: ''
-            ACCELERATE_USE_CPU: 'true'
-            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
-            COVERAGE_FILE: ${{ github.workspace }}/.coverage
-
+            # Native App tests import snowflake_app from the repository root.
+            PYTHONPATH: ${{ github.workspace }}
         steps:
             - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
-            - name: Cache HuggingFace models
-              uses: actions/cache@v4
-              with:
-                  path: /tmp/hf-cache
-                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: hf-${{ matrix.python-version }}-
-            - name: Hash CPU vector ISA
-              id: cpu-isa
-              # Inductor's cache key omits the CPU ISA, but cached C++ kernels are
-              # tiled for the host that generated them. Runners mix AVX2 and AVX-512.
-              run: echo "hash=$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|amx|fma|f16c)' | sort | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
-            - name: Cache torch inductor compilations
-              uses: actions/cache@v4
-              with:
-                  path: /tmp/inductor-cache
-                  key: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-
-            - name: Restore CPU test durations
-              uses: actions/cache/restore@v4
-              with:
-                  path: .ci-durations/cpu.json
-                  key: linux-cpu-durations-${{ github.run_id }}
-                  restore-keys: linux-cpu-durations-
             - name: Install dependencies
-              run: |
-                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu --extra verifiers
-                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
-            - name: Write the selected tests
-              if: inputs.tests != ''
-              env:
-                  SELECTED_TESTS: ${{ inputs.tests }}
-              run: python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))' > .ci-selected-tests.txt
-            - name: Run CPU shard
-              run: |
-                  rm -f .coverage .coverage.*
-                  uv run --no-sync python scripts/pytest_shard.py run \
-                    --root tests \
-                    --root agilerl-arena/tests \
-                    --total-shards ${{ inputs.cpu_shard_total }} \
-                    --shard-index ${{ matrix.shard }} \
-                    --durations-file .ci-durations/cpu.json \
-                    ${{ inputs.tests != '' && '--select-file .ci-selected-tests.txt' || '' }} \
-                    -- \
-                    --import-mode=importlib \
-                    --junitxml=junit-cpu.xml \
-                    -m "not gpu and not vllm" \
-                    -n logical --dist loadgroup \
-                    --durations=15 \
-                    ${{ inputs.coverage && matrix.python-version == '3.13' && '--cov --cov-context=test --cov-report=xml' || '' }}
+              run: uv sync --locked --group dev --extra snowflake-job
+            - name: Run tests
+              run: uv run --no-sync python -m pytest tests snowflake_app/tests --import-mode=importlib --junitxml=junit-linux.xml
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-linux-cpu-${{ matrix.python-version }}-${{ matrix.shard }}
-                  path: junit-cpu.xml
+                  name: junit-linux-${{ matrix.python-version }}
+                  path: junit-linux.xml
                   if-no-files-found: ignore
-            - name: Upload 3.13 coverage data
-              if: inputs.coverage && matrix.python-version == '3.13'
-              uses: actions/upload-artifact@v4
-              with:
-                  name: cov-3.13-cpu-${{ matrix.shard }}
-                  include-hidden-files: true
-                  if-no-files-found: error
-                  path: .coverage*
-
-    # Native App tests import Snowpark. The CPU matrix does not install that
-    # extra, and the GPU shard only collects gpu and vllm tests.
-    snowflake:
-        runs-on: ubuntu-24.04
-        env:
-            UV_CACHE_DIR: /tmp/uv-cache
-            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
-            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
-            CUDA_VISIBLE_DEVICES: ''
-            ACCELERATE_USE_CPU: 'true'
-        steps:
-            - uses: actions/checkout@v5
-            - uses: astral-sh/setup-uv@v7
-              with:
-                  enable-cache: true
-                  python-version: '3.13'
-            - name: Install dependencies
-              run: |
-                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu --extra verifiers
-                  uv sync --locked --package agilerl-arena --extra snowflake --inexact
-                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
-            - name: Run Native App tests
-              run: |
-                  uv run pytest \
-                    agilerl-arena/tests/test_snowflake_app_billing.py \
-                    agilerl-arena/tests/test_snowflake_app_config.py \
-                    agilerl-arena/tests/test_snowflake_app_manifest.py \
-                    agilerl-arena/tests/test_snowflake_app_runs.py \
-                    --import-mode=importlib \
-                    -m "not gpu and not vllm" \
-                    --junitxml=junit-snowflake.xml \
-                    -q
-            - name: Upload junit
-              if: always()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: junit-linux-snowflake-3.13
-                  path: junit-snowflake.xml
-                  if-no-files-found: ignore
-
-    gpu:
-        # Fork PRs never reach the self-hosted pool; their hub import MR runs these tests.
-        if: >-
-            inputs.gpu_shard_total > 0
-            && (github.event_name != 'pull_request'
-            || github.event.pull_request.head.repo.full_name == github.repository)
-        runs-on: gha-runner-scale-set
-        strategy:
-            fail-fast: false
-            max-parallel: 8
-            matrix:
-                python-version: ${{ fromJSON(inputs.gpu_pythons) }}
-                shard: ${{ fromJSON(inputs.gpu_shards) }}
-        env:
-            UV_CACHE_DIR: /tmp/uv-cache
-            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
-            HF_HOME: /tmp/hf-cache
-            TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
-            PYTEST_XDIST_AUTO_NUM_WORKERS: '4'
-            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
-            COVERAGE_FILE: ${{ github.workspace }}/.coverage
-
-        steps:
-            - uses: actions/checkout@v5
-            - uses: astral-sh/setup-uv@v7
-              with:
-                  enable-cache: true
-                  python-version: ${{ matrix.python-version }}
-            - name: Cache HuggingFace models
-              uses: actions/cache@v4
-              with:
-                  path: /tmp/hf-cache
-                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: hf-${{ matrix.python-version }}-
-            - name: Hash CPU vector ISA
-              id: cpu-isa
-              # Inductor's cache key omits the CPU ISA, but cached C++ kernels are
-              # tiled for the host that generated them.
-              run: echo "hash=$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|amx|fma|f16c)' | sort | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
-            - name: Cache torch inductor compilations
-              uses: actions/cache@v4
-              with:
-                  path: /tmp/inductor-cache
-                  key: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-
-            - name: Restore GPU test durations
-              uses: actions/cache/restore@v4
-              with:
-                  path: .ci-durations/gpu.json
-                  key: linux-gpu-durations-${{ github.run_id }}
-                  restore-keys: linux-gpu-durations-
-            - name: Install dependencies
-              run: |
-                  uv sync --locked --all-groups --extra all
-                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
-            - name: Install flash-attn
-              # The trainer raises without flash_attn on CUDA. The wheel must match uv.lock's torch (2.13, CUDA 13).
-              # GitHub releases 504 when several HTTP/2 streams fetch this wheel.
-              run: |
-                  set -euo pipefail
-                  py="cp$(echo '${{ matrix.python-version }}' | tr -d .)"
-                  url="https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-${py}-${py}-linux_x86_64.whl"
-                  export UV_CONCURRENT_DOWNLOADS=1
-                  export UV_HTTP_RETRIES=10
-                  for attempt in 1 2 3 4 5; do
-                    set +e
-                    output="$(uv pip install --python "$UV_PROJECT_ENVIRONMENT" "$url" 2>&1)"
-                    status=$?
-                    set -e
-                    printf '%s\n' "$output"
-                    if [[ "$status" -eq 0 ]]; then
-                      break
-                    fi
-                    if [[ "$attempt" -eq 5 ]] || ! grep -q -F -e 'server error (5' -e 'http2 error' <<<"$output"; then
-                      exit "$status"
-                    fi
-                    delay=$((2 ** (attempt - 1)))
-                    echo "flash-attn install attempt $attempt hit a transient fetch error; retrying in ${delay}s" >&2
-                    sleep "$delay"
-                  done
-                  python -c "import flash_attn"
-            - name: Write the selected tests
-              if: inputs.tests != ''
-              env:
-                  SELECTED_TESTS: ${{ inputs.tests }}
-              run: python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))' > .ci-selected-tests.txt
-            - name: Run GPU shard
-              run: |
-                  rm -f .coverage .coverage.*
-                  # vLLM 0.32 needs Python >= 3.11; on 3.10 the extra
-                  # installs nothing, so only CUDA-marked tests run there.
-                  marker="gpu or vllm"
-                  if [[ "${{ matrix.python-version }}" == "3.10" ]]; then
-                    marker="gpu"
-                  fi
-                  uv run --no-sync python scripts/pytest_shard.py run \
-                    --root tests \
-                    --root agilerl-arena/tests \
-                    --total-shards ${{ inputs.gpu_shard_total }} \
-                    --shard-index ${{ matrix.shard }} \
-                    --durations-file .ci-durations/gpu.json \
-                    ${{ inputs.tests != '' && '--select-file .ci-selected-tests.txt' || '' }} \
-                    -- \
-                    --import-mode=importlib \
-                    --junitxml=junit-gpu.xml \
-                    --timeout=600 --timeout-method=thread \
-                    -m "$marker" \
-                    -n auto --dist loadgroup \
-                    --durations=15 \
-                    ${{ inputs.coverage && matrix.python-version == '3.13' && '--cov --cov-context=test --cov-report=xml' || '' }}
-            - name: Upload 3.13 coverage data
-              if: inputs.coverage && matrix.python-version == '3.13'
-              uses: actions/upload-artifact@v4
-              with:
-                  name: cov-3.13-gpu-${{ matrix.shard }}
-                  include-hidden-files: true
-                  if-no-files-found: error
-                  path: .coverage*
-            - name: Upload junit
-              if: always()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: junit-linux-gpu-${{ matrix.python-version }}-${{ matrix.shard }}
-                  path: junit-gpu.xml
-                  if-no-files-found: ignore
-
-    coverage:
-        needs: [cpu, gpu]
-        permissions:
-            contents: read
-            # Codecov upload authenticates with the run's OIDC token.
-            id-token: write
-        # Fork PRs skip gpu, which uploads no coverage parts.
-        if: >-
-            inputs.coverage
-            && needs.cpu.result == 'success'
-            && needs.gpu.result == 'success'
-        runs-on: ubuntu-24.04
-        env:
-            UV_CACHE_DIR: /tmp/uv-cache
-            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
-        steps:
-            - uses: actions/checkout@v5
-            - uses: astral-sh/setup-uv@v7
-              with:
-                  enable-cache: true
-                  python-version: '3.13'
-            - name: Install dependencies
-              run: |
-                  uv sync --locked --only-group dev --no-install-project
-                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
-            - name: Download 3.13 coverage data
-              uses: actions/download-artifact@v4
-              with:
-                  pattern: cov-3.13-*
-                  path: coverage-parts
-            - name: Combine 3.13 coverage
-              env:
-                  CPU_SHARDS: ${{ inputs.cpu_shard_total }}
-                  GPU_SHARDS: ${{ inputs.gpu_shard_total }}
-              run: |
-                  set -eu
-                  index=0
-                  shards=()
-                  for shard in $(seq 1 "$CPU_SHARDS"); do shards+=("cov-3.13-cpu-${shard}"); done
-                  for shard in $(seq 1 "$GPU_SHARDS"); do shards+=("cov-3.13-gpu-${shard}"); done
-                  for shard in "${shards[@]}"; do
-                    dir="coverage-parts/${shard}"
-                    test -d "$dir"
-                    shard_files=0
-                    while IFS= read -r part; do
-                      cp "$part" ".coverage.${index}"
-                      index=$((index + 1))
-                      shard_files=$((shard_files + 1))
-                    done < <(find "$dir" \( -name '.coverage' -o -name '.coverage.*' \) -print)
-                    test "$shard_files" -ge 1
-                  done
-                  test "$index" -ge "${#shards[@]}"
-                  uv run --no-sync coverage combine
-                  uv run --no-sync coverage json --rcfile=pyproject.toml -o framework-coverage.json
-            - name: Write the coverage report
-              if: github.event_name == 'schedule'
-              run: uv run --no-sync coverage xml --rcfile=pyproject.toml -o coverage.xml
-            - name: Build the test map
-              run: uv run --no-sync python scripts/build_test_map.py --data .coverage --out test-map.json
-            - uses: actions/upload-artifact@v4
-              with:
-                  name: framework-coverage
-                  path: framework-coverage.json
-            - uses: actions/upload-artifact@v4
-              with:
-                  name: test-map
-                  path: test-map.json
-                  retention-days: 30
-            # Nightly on main only. A rejected OIDC upload must not fail the
-            # workflow: CI durations promote only when it succeeds.
-            - name: Upload coverage to Codecov
-              if: github.event_name == 'schedule'
-              continue-on-error: true
-              uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-              with:
-                  files: coverage.xml
-                  disable_search: true
-                  use_oidc: true

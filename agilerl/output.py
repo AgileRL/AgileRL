@@ -1,0 +1,727 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import logging
+import os
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import singledispatch
+from typing import Any
+
+import click
+from pydantic import ValidationError
+from rich.live import Live
+from rich.markup import escape
+from rich.padding import Padding
+from rich.table import Table
+from rich.text import Text
+from typing_extensions import Self
+
+from agilerl import console, error_console
+from agilerl.exceptions import (
+    ArenaAPIError,
+    ArenaClientUpgradeRequiredError,
+    ArenaError,
+    resolve_api_error_class,
+)
+from agilerl.models.verdict import errors as manifest_errors
+from agilerl.stream import (
+    CheckEvent,
+    ErrorEvent,
+    LogEvent,
+    StatusEvent,
+    StreamEvent,
+)
+from agilerl.upgrade import offer_upgrade
+
+if sys.platform == "win32":
+    import msvcrt  # pragma: no cover
+else:
+    import select
+    import termios
+    import tty
+
+logger = logging.getLogger(__name__)
+
+# ``ctx.meta`` key set by the root ``--json`` flag.
+JSON_OUTPUT_META_KEY = "agilerl.json_output"
+# Rich's default of 80 columns would truncate table cells when piped.
+PIPED_TABLE_WIDTH = 100_000
+
+
+def json_output_enabled() -> bool:
+    """Whether the running command was asked for JSON with the root ``--json`` flag.
+
+    :returns: ``True`` inside a command run with ``--json`` or ``ARENA_JSON``.
+    :rtype: bool
+    """
+    ctx = click.get_current_context(silent=True)
+    return ctx is not None and bool(ctx.meta.get(JSON_OUTPUT_META_KEY))
+
+
+def emit_json_result(result: object) -> None:
+    """Print *result* as one JSON document on stdout when ``--json`` is on.
+
+    For commands whose human output is a progress stream rather than the result.
+
+    :param result: The result to emit.
+    :type result: object
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(result, default=str))
+
+
+def _print_rich(renderable: object, *, is_error: bool = False) -> None:
+    target = error_console if is_error else console
+    if not target.is_terminal:
+        target.width = PIPED_TABLE_WIDTH
+    target.print(renderable)
+
+
+def emit_result(
+    result: object,
+    is_error: bool = False,
+    columns: list[str] | None = None,
+    display: Callable[[Any], Any] | None = None,
+    empty_message: str = "No results.",
+) -> None:
+    """Emit *result* as JSON under ``--json``, otherwise as a Rich table.
+
+    :param result: The result to emit.
+    :type result: Any
+    :param is_error: Whether to print the result as an error.
+    :type is_error: bool
+    :param columns: The columns to display in the table. If None, all columns will be displayed.
+    :type columns: list[str] | None
+    :param display: Reshapes *result* for the table only; JSON keeps every field.
+    :type display: Callable[[Any], Any] | None
+    :param empty_message: Printed instead of a table when *result* is empty.
+    :type empty_message: str
+    :returns: None
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(result, default=str), err=is_error)
+        return
+    if isinstance(result, (dict, list)) and not result:
+        target = error_console if is_error else console
+        # The message can hold user-supplied names that are not Rich markup.
+        target.print(empty_message, markup=False, highlight=False, soft_wrap=True)
+        return
+    _emit_table(
+        display(result) if display else result, is_error=is_error, columns=columns
+    )
+
+
+@singledispatch
+def _emit_table(
+    result: object,
+    *,
+    is_error: bool = False,
+    columns: list[str] | None = None,
+) -> None:
+    """Print *result* as a Rich table, dispatching on its runtime type.
+
+    :param result: A dict (key/value table or environment catalog), a list
+        (table of dicts or simple value list), or anything else (``str()``).
+    :type result: Any
+    :param is_error: Whether to print the result as an error.
+    :type is_error: bool
+    :param columns: The columns to display in the table. If None, all columns will be displayed.
+    :type columns: list[str] | None
+    :returns: None
+    """
+    _print_rich(_format_cell(result), is_error=is_error)
+
+
+@_emit_table.register(dict)
+def _emit_result_dict(
+    result: dict, *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
+    if _looks_like_environment_catalog(result):
+        _emit_environment_catalog(result, is_error=is_error)
+        return
+    _emit_key_value_table(result, is_error=is_error, columns=columns)
+
+
+@_emit_table.register(list)
+def _emit_result_list(
+    result: list, *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
+    if result and all(isinstance(item, dict) for item in result):
+        _emit_list_of_dicts(result, is_error=is_error, columns=columns)
+        return
+    _emit_simple_list(result, is_error=is_error, columns=columns)
+
+
+def _emit_key_value_table(
+    values: dict[str, Any], *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
+    table = Table(show_header=True, header_style="bold")
+    col_names = columns if columns and len(columns) == 2 else ["Field", "Value"]
+    for name in col_names:
+        table.add_column(name)
+    for key, value in values.items():
+        table.add_row(_format_cell(key), _format_cell(value))
+    _print_rich(table, is_error=is_error)
+
+
+def _emit_simple_list(
+    values: list[Any], *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
+    table = Table(show_header=True, header_style="bold")
+    col_name = columns[0] if columns and len(columns) >= 1 else "Value"
+    table.add_column(col_name)
+    for value in values:
+        table.add_row(_format_cell(value))
+    _print_rich(table, is_error=is_error)
+
+
+def _row_keys(values: list[dict[str, Any]]) -> list[str]:
+    """Union of the keys across *values*, in first-seen order."""
+    keys: list[str] = []
+    for row in values:
+        for key in row:
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _emit_list_of_dicts(
+    values: list[dict[str, Any]],
+    *,
+    is_error: bool = False,
+    columns: list[str] | None = None,
+) -> None:
+    keys = _row_keys(values)
+    headers = columns if columns and len(columns) == len(keys) else keys
+    table = Table(show_header=True, header_style="bold")
+    for header in headers:
+        table.add_column(str(header))
+
+    for row in values:
+        table.add_row(*[_format_cell(row.get(key)) for key in keys])
+    _print_rich(table, is_error=is_error)
+
+
+def _looks_like_environment_catalog(values: dict[str, Any]) -> bool:
+    if not values:
+        return False
+    for version_map in values.values():
+        if not isinstance(version_map, dict):
+            return False
+        for metadata in version_map.values():
+            if not isinstance(metadata, dict):
+                return False
+            if "validated" not in metadata:
+                return False
+    return True
+
+
+def _emit_environment_catalog(
+    values: dict[str, Any], *, is_error: bool = False
+) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Environment")
+    table.add_column("Version")
+    table.add_column("Validated")
+
+    if not values:
+        _print_rich("No environments found.", is_error=is_error)
+        return
+
+    for env_name, versions in values.items():
+        if not isinstance(versions, dict):
+            continue
+        for version_name, metadata in versions.items():
+            metadata_dict = metadata if isinstance(metadata, dict) else {}
+            table.add_row(
+                f"[bold]{escape(env_name)}[/bold]",
+                _format_cell(version_name),
+                "[green]✔[/green]"
+                if metadata_dict.get("validated")
+                else "[red]✘[/red]",
+            )
+    _print_rich(table, is_error=is_error)
+
+
+def _format_cell(value: object) -> str:
+    """*value* as table text, with Rich markup escaped so server text prints as sent."""
+    if isinstance(value, (dict, list)):
+        return escape(json.dumps(value, default=str))
+    return escape(str(value))
+
+
+_ROLE_STYLES = {
+    "user": "bold cyan",
+    "assistant": "bold green",
+    "system": "bold yellow",
+    "tool": "bold magenta",
+}
+
+
+def emit_session_transcript(session: dict[str, Any], *, is_error: bool = False) -> None:
+    """Print a chat session as a conversation rather than a table of fields.
+
+    Message text is printed as-is, so markup and escapes in a model's reply are
+    shown rather than interpreted.
+
+    :param session: Session detail with ``session_id`` and ``messages``; keys the
+        deployment leaves out, such as timestamps, are skipped.
+    :type session: dict[str, Any]
+    :param is_error: Whether to print to the error console.
+    :type is_error: bool
+    :returns: None
+    """
+    raw = session.get("messages")
+    messages = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+
+    header = Text(f"Session {session.get('session_id') or 'unknown'}", style="bold")
+    header.append(f"  ·  {len(messages)} messages", style="dim")
+    for label, key in (("created", "created_at"), ("updated", "last_updated")):
+        value = session.get(key)
+        if value:
+            header.append(f"  ·  {label} {value}", style="dim")
+    _print_rich(header, is_error=is_error)
+
+    if not messages:
+        _print_rich(
+            Text("No messages in this session.", style="dim"), is_error=is_error
+        )
+        return
+
+    for message in messages:
+        _print_rich("", is_error=is_error)
+        role = str(message.get("role") or "unknown")
+        _print_rich(Text(role, style=_ROLE_STYLES.get(role, "bold")), is_error=is_error)
+        _print_rich(
+            Padding(Text(str(message.get("content") or "")), (0, 0, 0, 2)),
+            is_error=is_error,
+        )
+
+
+# -----------------------------------------------------------------------------
+### Interactive row selection ###
+# -----------------------------------------------------------------------------
+
+UP, DOWN, ENTER, CANCEL = "up", "down", "enter", "cancel"
+
+_POSIX_SEQUENCES = {"[A": UP, "[B": DOWN, "OA": UP, "OB": DOWN}
+_WINDOWS_SEQUENCES = {"H": UP, "P": DOWN}
+
+
+def supports_interactive_selection() -> bool:
+    """Whether the terminal can drive :func:`select_row`.
+
+    False when stdin is a pipe or the output is redirected, which is what makes
+    the CLI usable from scripts and CI.
+
+    :returns: Whether an interactive picker can run.
+    :rtype: bool
+    """
+    try:
+        return sys.stdin.isatty() and console.is_terminal
+    except (AttributeError, ValueError):
+        return False
+
+
+def stdin_is_a_terminal() -> bool:
+    """Whether stdin can answer a prompt.
+
+    False when stdin is a pipe or closed. Redirected stdout still counts: the
+    prompt is written to stderr.
+
+    :returns: Whether stdin is a terminal.
+    :rtype: bool
+    """
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _read_key_windows() -> str | None:
+    char = msvcrt.getwch()
+    if char in ("\x00", "\xe0"):
+        return _WINDOWS_SEQUENCES.get(msvcrt.getwch())
+    if char in ("\r", "\n"):
+        return ENTER
+    if char in ("\x03", "\x1b", "q"):
+        return CANCEL
+    return None
+
+
+def _read_key_posix() -> str | None:
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd)
+    try:
+        # TCSADRAIN, not tty.setraw's default TCSAFLUSH, which would discard a
+        # keystroke that arrived while the previous one was being handled.
+        tty.setraw(fd, termios.TCSADRAIN)
+        char = os.read(fd, 1).decode(errors="ignore")
+        if char == "\x1b":
+            # An arrow key sends two more bytes immediately; a bare Escape does
+            # not, and waiting on a read that never comes would hang the picker.
+            if not select.select([fd], [], [], 0.05)[0]:
+                return CANCEL
+            return _POSIX_SEQUENCES.get(os.read(fd, 2).decode(errors="ignore"))
+        if char in ("\r", "\n"):
+            return ENTER
+        # Raw mode swallows SIGINT, so Ctrl-C arrives as a plain byte.
+        if char in ("\x03", "q"):
+            return CANCEL
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+
+
+def _read_key() -> str | None:
+    """Block for one keypress, returning a direction, ENTER, CANCEL, or None."""
+    if sys.platform == "win32":
+        return _read_key_windows()
+    return _read_key_posix()
+
+
+def _selection_table(
+    values: list[dict[str, Any]],
+    keys: list[str],
+    headers: list[str],
+    selected: int,
+) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("")
+    for header in headers:
+        table.add_column(str(header))
+
+    for index, row in enumerate(values):
+        cells = [_format_cell(row.get(key)) for key in keys]
+        if index == selected:
+            table.add_row("[cyan]▸[/cyan]", *[f"[cyan]{c}[/cyan]" for c in cells])
+        else:
+            table.add_row(" ", *cells)
+    return table
+
+
+def select_row(
+    values: list[dict[str, Any]],
+    *,
+    columns: list[str] | None = None,
+    prompt: str = "Use ↑/↓ to choose, Enter to select, Esc to cancel.",
+    selected: int = 0,
+) -> dict[str, Any] | None:
+    """Let the user pick one row with the arrow keys.
+
+    Call :func:`supports_interactive_selection` first; this assumes a terminal.
+
+    :param values: The rows to choose between.
+    :type values: list[dict[str, Any]]
+    :param columns: Display names for the row keys, positionally matched when the
+        counts are equal.
+    :type columns: list[str] | None
+    :param prompt: The hint shown above the table.
+    :type prompt: str
+    :param selected: The row highlighted when the picker opens.
+    :type selected: int
+    :returns: The chosen row, or ``None`` if the user cancelled.
+    :rtype: dict[str, Any] | None
+    """
+    if not values:
+        return None
+
+    keys = _row_keys(values)
+    headers = columns if columns and len(columns) == len(keys) else keys
+    index = min(max(selected, 0), len(values) - 1)
+
+    console.print(prompt, style="dim")
+    with Live(console=console, auto_refresh=False, transient=True) as live:
+        while True:
+            live.update(_selection_table(values, keys, headers, index), refresh=True)
+            key = _read_key()
+            if key == UP:
+                index = (index - 1) % len(values)
+            elif key == DOWN:
+                index = (index + 1) % len(values)
+            elif key == ENTER:
+                return values[index]
+            elif key == CANCEL:
+                return None
+
+
+def handle_error(exc: Exception) -> None:
+    """Print an :class:`ArenaError` or an invalid manifest and exit, or re-raise.
+
+    :param exc: The exception to handle.
+    :type exc: Exception
+    :returns: None
+    :raises click.exceptions.Exit: If the exception is an :class:`ArenaError` or
+        a pydantic :class:`~pydantic.ValidationError`.
+    """
+    if isinstance(exc, ValidationError):
+        _print_invalid_manifest(exc)
+        raise click.exceptions.Exit(1) from exc
+    if isinstance(exc, ArenaClientUpgradeRequiredError):
+        offer_upgrade(exc.detail)
+    if isinstance(exc, ArenaError):
+        if json_output_enabled():
+            error = {"error": str(exc), "type": type(exc).__name__}
+            click.echo(json.dumps(error), err=True)
+        else:
+            error_console.print(f"[red bold]Error:[/red bold] {escape(str(exc))}")
+        raise click.exceptions.Exit(1) from exc
+    raise exc
+
+
+def _print_invalid_manifest(exc: ValidationError) -> None:
+    """Print one line per pydantic error: the manifest field, then what is wrong with it."""
+    records = manifest_errors(exc)
+    summary = "The manifest is invalid."
+    if json_output_enabled():
+        error = {"error": summary, "type": "ValidationError", "errors": records}
+        click.echo(json.dumps(error), err=True)
+        return
+    error_console.print(f"[red bold]Error:[/red bold] {summary}")
+    for record in records:
+        # pydantic prefixes a validator's message with its error kind.
+        message = record["message"].removeprefix("Value error, ")
+        where = f"{record['path']}: " if record["path"] else ""
+        error_console.print(f"  {escape(where)}{escape(message)}", soft_wrap=True)
+
+
+@dataclass(slots=True)
+class StreamRow:
+    event_type: str
+    name: str
+    status: str
+    details: str = ""
+
+
+class StreamRichRenderer:
+    """Render :class:`~arena.stream.StreamEvent` objects as a live Rich table."""
+
+    def __init__(
+        self,
+        *,
+        is_error: bool = False,
+        error_cls: type[ArenaAPIError] = ArenaAPIError,
+    ) -> None:
+        # stdout stays one JSON document under ``--json``.
+        self._console = error_console if is_error or json_output_enabled() else console
+        self._rows: list[StreamRow] = []
+        self._live: Live | None = None
+        self._error_cls = error_cls
+
+    @staticmethod
+    def _styled_status(status: str) -> str:
+        upper = status.upper()
+        if upper == "PASS":
+            return "[green]PASS[/green]"
+        if upper == "FAIL":
+            return "[red]FAIL[/red]"
+        if upper in ("WARNING", "WARN"):
+            return "[dark_orange]WARNING[/dark_orange]"
+        if upper == "COMPLETED":
+            return "[green]COMPLETED[/green]"
+        return status
+
+    def handle_event(self, event: StreamEvent) -> None:
+        """Dispatch a typed stream event to the appropriate renderer.
+
+        :param event: The stream event to handle.
+        :type event: StreamEvent
+        :returns: None
+        """
+        if isinstance(event, StatusEvent):
+            if event.status == "completed":
+                self.close()
+            if event.kind == "warning":
+                logger.warning("%s", event.message)
+            elif event.level == "secondary-info":
+                logger.info(
+                    "  [dim]%s[/dim]", escape(event.message), extra={"markup": True}
+                )
+            else:
+                logger.info("%s", event.message)
+            return
+
+        if isinstance(event, ErrorEvent):
+            if self._live is not None:
+                self._render_error(event)
+                self._refresh()
+            else:
+                sdk_hint, cli_hint = ArenaError._generate_hints(
+                    {"error": event.message, **event.extras}, event.extras
+                )
+                error_cls = resolve_api_error_class(self._error_cls, event.message)
+                raise error_cls(
+                    detail=event.message,
+                    extras=event.extras,
+                    sdk_hint=sdk_hint,
+                    cli_hint=cli_hint,
+                )
+            return
+
+        self._ensure_live()
+        if isinstance(event, CheckEvent):
+            self._render_check(event)
+        elif isinstance(event, LogEvent):
+            self._render_log(event)
+        self._refresh()
+
+    def close(self) -> None:
+        """Stop the live table renderer.
+
+        :returns: None
+        """
+        if self._live is not None:
+            self._live.update(self._build_table())
+            self._live.stop()
+            self._live = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _render_check(self, event: CheckEvent) -> None:
+        """Render an environment validation check event."""
+        has_warnings = len(event.warnings) > 0
+        if event.success is True and has_warnings:
+            styled = self._styled_status("WARNING")
+            details = escape("; ".join(event.warnings))
+        elif event.success is True:
+            styled = self._styled_status("PASS")
+            details = ""
+        elif event.success is False:
+            styled = self._styled_status("FAIL")
+            details = escape(event.error or "")
+        else:
+            styled = "UNKNOWN"
+            details = ""
+
+        self._rows.append(
+            StreamRow("check", f"[bold]{escape(event.name)}[/bold]", styled, details)
+        )
+
+    def _render_error(self, event: ErrorEvent) -> None:
+        """Render an error event as a table row."""
+        detail = event.message
+        for key, value in event.extras.items():
+            label = key.replace("_", " ").capitalize()
+            if isinstance(value, list):
+                detail += f"\n{label}: {', '.join(str(v) for v in value)}"
+            else:
+                detail += f"\n{label}: {value}"
+        detail = escape(detail)
+
+        _, cli_hint = ArenaError._generate_hints(
+            {"error": event.message, **event.extras}, event.extras
+        )
+        if cli_hint:
+            detail += f"\n[yellow]{escape(cli_hint)}[/yellow]"
+
+        self._rows.append(StreamRow("error", "-", f"[red]{detail}[/red]"))
+
+    def _render_log(self, event: LogEvent) -> None:
+        """Render a log event."""
+        if event.text:
+            self._rows.append(StreamRow("log", "-", escape(event.text)))
+
+    def _ensure_live(self) -> None:
+        """Ensure the live table renderer is started."""
+        if self._live is not None:
+            return
+        self._live = Live(console=self._console, auto_refresh=False)
+        self._live.start()
+
+    def _refresh(self) -> None:
+        if self._live is not None:
+            self._live.update(self._build_table(), refresh=True)
+
+    def _build_table(self) -> Table:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Check", no_wrap=True)
+        table.add_column("Result", no_wrap=True)
+        table.add_column("Details")
+        for row in self._rows:
+            table.add_row(row.name, row.status, row.details)
+        return table
+
+
+def emit_log_line(line: dict[str, Any]) -> None:
+    """Print one experiment log line, or its JSON object under ``--json``.
+
+    :param line: ``timestamp`` (Unix microseconds), ``severity`` and ``message``.
+    :type line: dict[str, Any]
+    """
+    if json_output_enabled():
+        click.echo(json.dumps(line))
+        return
+    when = datetime.fromtimestamp(line["timestamp"] / 1_000_000, tz=timezone.utc)
+    click.echo(f"{when:%Y-%m-%d %H:%M:%S} {line['severity']:<7} {line['message']}")
+
+
+def emit_log_summary(page: dict[str, Any], *, printed: int) -> None:
+    """Close ``arena experiments logs`` with the status and any failure reason.
+
+    :param page: The last logs page, carrying ``status`` and ``failure_reason``.
+    :type page: dict[str, Any]
+    :param printed: How many log lines were printed.
+    :type printed: int
+    """
+    if json_output_enabled():
+        summary = {
+            key: page.get(key)
+            for key in ("experiment_name", "status", "failure_reason")
+        }
+        click.echo(json.dumps(summary))
+        return
+    if printed == 0:
+        click.echo(f"No log lines for {page['experiment_name']} yet.", err=True)
+    if page.get("failure_reason"):
+        click.echo(f"{page['status']}: {page['failure_reason']}", err=True)
+
+
+def emit_csv_preview(payload: bytes, *, max_rows: int) -> None:
+    text = payload.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return
+
+    header = rows[0]
+    data_rows = rows[1 : max_rows + 1]
+    if len(header) > len(data_rows) + 1:
+        table = _build_pivoted_preview(header, data_rows)
+    else:
+        table = _build_flat_preview(header, data_rows)
+    console.print(table)
+
+
+def _build_flat_preview(header: list[str], data_rows: list[list[str]]) -> Table:
+    """One column per metric, one row per record (natural CSV layout)."""
+    table = Table(title=f"Metrics Preview (first {len(data_rows)} rows)")
+    for column in header:
+        table.add_column(column)
+    for row in data_rows:
+        padded = row + [""] * max(0, len(header) - len(row))
+        table.add_row(*padded[: len(header)])
+    return table
+
+
+def _build_pivoted_preview(header: list[str], data_rows: list[list[str]]) -> Table:
+    """One row per metric with a column per record."""
+    table = Table(title=f"Metrics Preview (first {len(data_rows)} rows)")
+    table.add_column("Metric", style="bold", no_wrap=True)
+    for index in range(len(data_rows)):
+        table.add_column(f"Row {index + 1}", justify="right")
+    for col_index, name in enumerate(header):
+        values = [row[col_index] if col_index < len(row) else "" for row in data_rows]
+        table.add_row(name, *values)
+    return table

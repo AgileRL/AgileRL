@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Download INTERNAL agilerl / agilerl-arena dists for a public PyPI upload.
+"""Download INTERNAL agilerl dists for a public PyPI upload.
 
 CodeArtifact is the source of truth. This script does not rebuild or publish.
 """
@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-ALLOWED_PACKAGES = frozenset({"agilerl", "agilerl-arena"})
-DIST_PREFIX = {"agilerl": "agilerl", "agilerl-arena": "agilerl_arena"}
+ALLOWED_PACKAGES = frozenset({"agilerl"})
+DIST_PREFIX = {"agilerl": "agilerl"}
 # Hub CodeArtifact SoT; the GitHub fetch job must pass the same values.
 DEFAULT_DOMAIN = "agilerl-pypi"
 DEFAULT_OWNER = "761296822462"
@@ -53,7 +53,7 @@ def describe_package_version_failure(
 
 def _require_allowed_package(package: str) -> str:
     if package not in ALLOWED_PACKAGES:
-        _fail(f"error: package must be agilerl or agilerl-arena (got {package!r})")
+        _fail(f"error: package must be agilerl (got {package!r})")
     return package
 
 

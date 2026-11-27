@@ -1,6 +1,3 @@
-# Symlink for Pylance/Pyright type checking of namespace package (repo root only)
-/agilerl/arena
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -164,9 +161,6 @@ AGENTS.md
 
 # Checkpoints written by test runs
 /models/
-
-# Symlink for type-checking (repo root only)
-/agilerl/arena/
 
 # Checkpoints written by the training loops (and by the test suite).
 /models/

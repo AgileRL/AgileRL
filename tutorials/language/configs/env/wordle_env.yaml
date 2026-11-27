@@ -1,4 +1,0 @@
----
-defaults:
-    - /vocab: wordle_official
-name: wordle_env

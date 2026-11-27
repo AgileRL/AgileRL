@@ -1,0 +1,418 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+"""Base classes for the manifest's ``algorithm`` section."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import fields
+from typing import Annotated, Any, ClassVar
+
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+from pydantic.json_schema import WithJsonSchema
+from typing_extensions import Self
+
+from agilerl.models.descriptions import (
+    BETA,
+    GRADIENT_CHECKPOINTING,
+    MICRO_BATCH,
+    MINI_BATCH,
+)
+from agilerl.models.env import LLMEnvType
+from agilerl.models.fsdp import (
+    PARALLEL_LAYOUT_FIELDS,
+    FSDPConfig,
+    parallel_layout_pins,
+    record_parallel_pins,
+)
+from agilerl.models.model_info import (
+    KNOWN_REASONING_PARSERS,
+    enforces_thinking_budget,
+    resolve_reasoning_parser,
+)
+from agilerl.models.networks import LoraConfigDict
+from agilerl.models.registry import AgentType
+from agilerl.models.visibility import AUTO
+
+FSDP_KNOWN_FIELDS = frozenset(field.name for field in fields(FSDPConfig)) - {
+    "parallel_pins"
+}
+FSDP_JSON_SCHEMA = {
+    "anyOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        TypeAdapter(FSDPConfig).json_schema(),
+    ]
+}
+
+
+def drop_schema_default(schema: dict[str, Any]) -> None:
+    """Leave a field's default out of the published schema."""
+    schema.pop("default", None)
+
+
+class AlgorithmSpec(BaseModel):
+    """Fields every algorithm's manifest section carries.
+
+    Runtime-only state (torch modules, resolved hyperparameter configs) is not
+    declared here. Builders and strategies sit beside this spec; they do not
+    subclass it to add construction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # False for algorithms that only run under LocalTrainer (no Ray builder).
+    cluster_supported: ClassVar[bool] = True
+
+    batch_size: int = Field(
+        default=64,
+        ge=1,
+        description=(
+            "Transitions sampled per learn step. For the LLM algorithms this is "
+            "prompts per step, and the rollout batch is batch_size x group_size."
+        ),
+    )
+
+    default_evo_steps: ClassVar[int] = 10_000
+    agent_type: ClassVar[AgentType]
+    # Fills in environment.env_type when the manifest omits it.
+    env_type: ClassVar[LLMEnvType]
+    # Fills in environment.objective the same way: the teacher-forced loss a
+    # dataset env trains with. None everywhere except DPO and SFT.
+    objective: ClassVar[str | None] = None
+
+    @property
+    def name(self) -> str:
+        """The registry key this spec was resolved from."""
+        return self.__class__.__name__.removesuffix("Spec")
+
+
+class LLMAlgorithmSpec(AlgorithmSpec):
+    """LLM fine-tuning algorithms.
+
+    ``pretrained_model_name_or_path``, ``weights_path``, ``max_model_len`` and
+    ``lora_config`` are written under the manifest's ``network`` section and
+    lifted onto the algorithm when the manifest is validated.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_size: int = Field(
+        default=16,
+        ge=1,
+        json_schema_extra=AUTO,
+        description=(
+            "Prompts sampled per step; the rollout batch is batch_size x group_size."
+        ),
+    )
+    beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
+    max_grad_norm: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Gradients are clipped to this global norm before each step.",
+    )
+    update_epochs: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Optimizer passes over each batch of collected rollouts.",
+    )
+    use_separate_reference_adapter: bool = Field(
+        default=True,
+        description=(
+            "Hold the reference policy in its own frozen LoRA adapter rather "
+            "than the base weights."
+        ),
+    )
+    calc_position_embeddings: bool = Field(
+        default=True,
+        description=(
+            "Compute position embeddings in the forward pass. Turn off only for "
+            "models that build their own."
+        ),
+    )
+    seed: int = Field(
+        default=42,
+        description="Seed for sampling, data order and initialization.",
+    )
+
+    quantization: str | dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Trainer-side bitsandbytes quantization: a preset name such as "
+            "'nf4', or BitsAndBytesConfig keyword arguments."
+        ),
+    )
+    micro_batch_size_per_gpu: int | None = Field(
+        default=None, ge=1, description=MICRO_BATCH
+    )
+    gradient_checkpointing: bool | None = Field(
+        default=None, description=GRADIENT_CHECKPOINTING
+    )
+    mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
+
+    thinking_token_budget: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Tokens the model may spend reasoning before it has to answer. "
+            "Unset leaves reasoning length unconstrained."
+        ),
+    )
+    constrain_answer_pattern: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("constrain_answer_pattern", "answer_pattern"),
+        description=(
+            "Regex grammar for vLLM structured outputs on each turn, or on an "
+            "answer continuation when answer_continuation is enabled."
+        ),
+    )
+    answer_continuation: bool = Field(
+        default=False,
+        description=(
+            "After the thinking budget runs out, continue into the answer "
+            "instead of ending the episode."
+        ),
+    )
+    fsdp: Annotated[FSDPConfig | None, WithJsonSchema(FSDP_JSON_SCHEMA)] = Field(
+        default=None,
+        description=(
+            "FSDP2 shard config. Omitted, true or {}: the run trains the "
+            "faster plan that fits, DDP when the model fits one GPU with an "
+            "equal-or-cheaper plan, else FSDP. Setting ep or tp above 1 "
+            "keeps FSDP."
+        ),
+    )
+    routed_expert_chunk_mib: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "MiB of the widest activation of one routed-expert row chunk "
+            "under DDP; FSDP runs use fsdp.routed_expert_chunk_mib. Picked "
+            "from the memory estimate; manifests cannot set it. None on a "
+            "MoE model picks the largest of 512/256/128/64 whose estimated "
+            "training peak fits; unpicked, the trainer uses 64."
+        ),
+    )
+    vllm_engine_args: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Engine arguments forwarded to vLLM verbatim.",
+    )
+    vllm_lora_export_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory the trainer writes LoRA adapters to for vLLM to pick up. "
+            "Unset uses the run's default adapter root."
+        ),
+    )
+
+    pretrained_model_name_or_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "HuggingFace model id or local path to fine-tune. Normally written "
+            "in the network section and lifted onto the algorithm."
+        ),
+    )
+    weights_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Local or s3:// directory to load the weights and tokenizer from, "
+            "when they are not at pretrained_model_name_or_path. Normally "
+            "written in the network section and lifted onto the algorithm."
+        ),
+    )
+    max_model_len: int = Field(
+        default=1024,
+        ge=1,
+        # The network's context always replaces it; published, the default reads as the run's context.
+        json_schema_extra=drop_schema_default,
+        description=(
+            "Context window the run is sized for, prompt plus completion. "
+            "Normally written as network.max_context_length."
+        ),
+    )
+    lora_config: LoraConfigDict | None = Field(
+        default=None,
+        description=(
+            "LoRA adapter configuration. Normally written in the network "
+            "section and lifted onto the algorithm."
+        ),
+    )
+
+    agent_type: ClassVar[AgentType] = AgentType.LLMAgent
+    default_evo_steps: ClassVar[int] = 20
+    # Times one gradient forward stacks the batch along rows.
+    gradient_row_copies: ClassVar[int] = 1
+    # The gradient forward packs its sequences when the attention backend can.
+    supports_sequence_packing: ClassVar[bool] = False
+
+    @property
+    def load_path(self) -> str | None:
+        """Where the weights and tokenizer load from."""
+        return self.weights_path or self.pretrained_model_name_or_path
+
+    @field_validator("fsdp", mode="before")
+    @classmethod
+    def _coerce_fsdp(cls, value: object) -> FSDPConfig | None:
+        """Normalize manifest ``fsdp`` to :class:`FSDPConfig` or ``None``."""
+        if value is None:
+            return None
+        if value is True or value == {}:
+            return record_parallel_pins(FSDPConfig(), ())
+        if isinstance(value, FSDPConfig):
+            return value
+        if isinstance(value, dict):
+            unknown = set(value) - FSDP_KNOWN_FIELDS
+            if unknown:
+                msg = (
+                    f"Unknown fsdp keys {sorted(unknown)}; "
+                    f"valid keys are {sorted(FSDP_KNOWN_FIELDS)}"
+                )
+                raise ValueError(msg)
+            return record_parallel_pins(FSDPConfig(**value), value)
+        msg = "fsdp must be null, true, a dict, or FSDPConfig"
+        raise TypeError(msg)
+
+    @field_serializer("fsdp", mode="wrap")
+    def _serialize_fsdp(
+        self, value: FSDPConfig | None, handler: Callable[[object], object]
+    ) -> object:
+        """Dump only the ``tp``, ``ep``, ``cp`` and ``shard_group_size`` the manifest set.
+
+        A re-validated dump then searches the same layout fields.
+        """
+        dumped = handler(value)
+        if value is not None:
+            for name in PARALLEL_LAYOUT_FIELDS - parallel_layout_pins(value):
+                dumped.pop(name, None)
+        return dumped
+
+    @field_validator("constrain_answer_pattern")
+    @classmethod
+    def _validate_constrain_answer_pattern(cls, value: str | None) -> str | None:
+        """The answer grammar has to compile, and it may not be anchored."""
+        if value is None:
+            return value
+        if value.startswith("^") or (value.endswith("$") and not value.endswith("\\$")):
+            msg = (
+                f"constrain_answer_pattern {value!r} carries an anchor: a "
+                "structured-output grammar matches the whole continuation and "
+                "cannot honour one, so drop the leading ^ or trailing $"
+            )
+            raise ValueError(msg)
+        try:
+            re.compile(value)
+        except re.error as err:
+            msg = f"constrain_answer_pattern is not a valid regular expression: {err}"
+            raise ValueError(msg) from err
+        return value
+
+    @field_validator("vllm_engine_args")
+    @classmethod
+    def _validate_reasoning_parser(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Only reasoning parsers checked against the model's format parser may be set."""
+        parser = value.get("reasoning_parser")
+        if parser is None or parser in KNOWN_REASONING_PARSERS:
+            return value
+        known = ", ".join(sorted(KNOWN_REASONING_PARSERS))
+        msg = (
+            f"vllm_engine_args.reasoning_parser={parser!r} is not a supported "
+            f"reasoning parser; set one of {known}"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _validate_answer_continuation(self) -> Self:
+        """The continuation's grammar is built from constrain_answer_pattern."""
+        if self.answer_continuation and not self.constrain_answer_pattern:
+            msg = (
+                "answer_continuation requires constrain_answer_pattern to be set: "
+                "the continuation constrains its output to that pattern, so there "
+                "is no grammar to generate an answer under without one"
+            )
+            raise ValueError(msg)
+        return self
+
+    def _max_output_tokens(self) -> int | None:
+        return None
+
+    @model_validator(mode="after")
+    def _validate_thinking_token_budget(self) -> Self:
+        """A reasoning budget has to leave answer headroom inside the turn cap."""
+        budget = self.thinking_token_budget
+        if budget is None:
+            return self
+        max_output_tokens = self._max_output_tokens()
+        if max_output_tokens is None:
+            msg = (
+                f"thinking_token_budget={budget} requires max_output_tokens to be set: "
+                "the reasoning budget is only meaningful against a turn output cap"
+            )
+            raise ValueError(msg)
+        if budget >= max_output_tokens:
+            msg = (
+                f"thinking_token_budget={budget} must be less than "
+                f"max_output_tokens={max_output_tokens} so the turn can still emit an "
+                "answer once the reasoning block is closed"
+            )
+            raise ValueError(msg)
+        return self
+
+    def check_thinking_budget_parser(self, model_type: str) -> None:
+        """Reject a thinking budget with no vLLM reasoning start/end tokens to enforce it.
+
+        :param model_type: Hugging Face ``model_type`` of the checkpoint.
+        :raises ValueError: If a budget is set and the reasoning parser is missing
+            or has no reasoning start/end tokens.
+        """
+        budget = self.thinking_token_budget
+        parser = resolve_reasoning_parser(self.vllm_engine_args, model_type)
+        if budget is None or enforces_thinking_budget(parser):
+            return
+        lacking = (
+            f"reasoning parser {parser}"
+            if parser
+            else self.pretrained_model_name_or_path
+        )
+        budget_parsers = filter(enforces_thinking_budget, KNOWN_REASONING_PARSERS)
+        msg = (
+            f"thinking_token_budget={budget} needs a vLLM reasoning parser with "
+            f"reasoning start and end tokens, and {lacking} has none. Unset "
+            "thinking_token_budget, or set algorithm.vllm_engine_args.reasoning_parser "
+            f"to one that has them: {', '.join(sorted(budget_parsers))}."
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _validate_mini_batch_size(self) -> Self:
+        """A mini-batch has to be a whole number of micro-batches."""
+        if (
+            self.mini_batch_size is not None
+            and self.micro_batch_size_per_gpu is not None
+            and self.mini_batch_size % self.micro_batch_size_per_gpu != 0
+        ):
+            msg = (
+                f"algorithm.mini_batch_size={self.mini_batch_size} is not a "
+                "multiple of algorithm.micro_batch_size_per_gpu="
+                f"{self.micro_batch_size_per_gpu}: gradient_accumulation_steps "
+                "= mini_batch_size / micro_batch_size_per_gpu must be a whole "
+                "number of backward passes."
+            )
+            raise ValueError(msg)
+        return self
+
+
+AlgoSpec = LLMAlgorithmSpec

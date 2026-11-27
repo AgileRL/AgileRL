@@ -1,168 +1,81 @@
 [project]
 name = "agilerl"
 dynamic = ["version"]
-description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
-authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
+description = "Train and deploy specialized agents on Arena, AgileRL's post-training platform, from your terminal."
+authors = [{ name = "AgileRL", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
 readme = "README.md"
-
 requires-python = ">=3.10,<3.14"
-
-dependencies = [
-    "accelerate>=1.7.0",
-    "agilerl-arena>=1.37.0,<2.0",
-    "dill>=0.3.7",
-    "fastrand>=1.3.0",
-    "flatten_dict>=0.4.2",
-    "gymnasium>=1.0.0",
-    "google-cloud-storage>=2.5.0",
-    "h5py>=3.15.0",
-    "hydra-core>=1.3.2,<1.4",
-    "matplotlib>=3.9.4",
-    "minari[all]>=0.5.2",
-    "numpy>=2.0.0,<3.0",
-    "omegaconf>=2.3.0,<2.4",
-    "pandas>=2.2.3",
-    "pettingzoo>=1.23.1,<1.27",
-    # MPE envs, moved out of pettingzoo into their own package as of 1.25.
-    "mpe2>=1.1.0",
-    "jax[cpu]>=0.4.31",
-    "lazy-loader>=0.4",
-    "packaging>=20.0",
-    "pre-commit>=3.8.0",
-    "pydantic>=2.0,<3",
-    "pygame-ce>=2.5.0",
-    "pymunk>=6.2,<7.4",
-    "redis>=4.4.4,<8.2.0",
-    "rich>=13.0,<16",
-    "SuperSuit>=3.9.0",
-    "tabulate>=0.9.0",
-    "termcolor>=1.1.0",
-    "torch>=2.13.0",
-    "tensordict==0.15.1",
-    "tqdm>=4.66.4",
-    "wandb>=0.18.0",
+keywords = ["reinforcement learning", "llm", "rlhf", "arena", "agilerl"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = [
+    "click>=8.3.0",
+    "cryptography>=42",
+    "lazy-loader>=0.4",
+    "httpx>=0.27,<1",
+    "packaging>=20.0",
+    "pydantic>=2.0,<3",
+    "python-keycloak>=4.0,<8",
+    "pyyaml>=6.0",
+    "rich>=13.0,<16",
+    # Imported directly (typing_extensions.Self); do not rely on pydantic's
+    # transitive pin.
+    "typing-extensions>=4.4",
+]
+
+[project.urls]
+Homepage = "https://agilerl.com"
+Documentation = "https://docs.arena.agilerl.com/"
+Repository = "https://github.com/AgileRL/AgileRL"
+Issues = "https://github.com/AgileRL/AgileRL/issues"
 
 [project.optional-dependencies]
-box2d = [
-    "swig>=4.4.1; sys_platform != 'win32'",
-    "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
+# Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 on s390x.
+snowflake = [
+    "snowflake-connector-python>=4.8,<4.9; platform_machine != 's390x'",
+    "snowflake-snowpark-python; platform_machine != 's390x'",
 ]
-cpu = [
-    # Same 2.13 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
-    "torch>=2.13.0,<2.14",
-]
-# LLM Python stack without vLLM. Hosted CPU CI uses this with the cpu extra.
-cpu-llm = [
-    "bitsandbytes==0.50.2; sys_platform == 'linux'",
-    # Bedrock LLM judges.
-    "boto3>=1.34",
-    "datasets==5.1.0",
-    # Built-in json_schema reward.
-    "jsonschema>=4.0",
-    "liger-kernel==0.8.5; sys_platform == 'linux'",
-    "openenv>=0.4.1,<0.5",
-    "peft==0.21.2",
-    "transformers==5.19.0",
-]
-vllm = [
-    "vllm==0.32.0; sys_platform == 'linux' and python_version >= '3.11'",
-]
-llm = [
-    "agilerl[cpu-llm,vllm]",
-    "flash-linear-attention==0.5.2; sys_platform == 'linux'",
-]
-verifiers = [
-    # verifiers needs Python >=3.11; agilerl supports 3.10.
-    # Custom runtime backends (type: custom) first ship in the 0.4.1 dev builds.
-    "verifiers==0.4.2.dev6; python_version >= '3.11'",
-    # Tool envs are served as OpenEnv MCP environments.
-    "openenv>=0.4.1,<0.5; python_version >= '3.11'",
-]
-all = [
-    "agilerl[box2d,llm,verifiers]",
+# Model Registry calls and the parquet export run inside the Snowflake job.
+snowflake-job = [
+    "agilerl[snowflake]; platform_machine != 's390x'",
+    "pyarrow; platform_machine != 's390x'",
+    "snowflake-ml-python>=2.8.0; platform_machine != 's390x'",
 ]
 
+[project.scripts]
+arena = "agilerl.cli:main"
+
 [dependency-groups]
+# test_snowflake_publish_job builds a tiny transformers model with torch.
 dev = [
+    "jsonschema>=4",
+    # test_reward_check runs reward files that import numpy.
+    "numpy>=2.0.0,<3.0",
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-env>=1.2.0",
     "pytest-timeout>=2.3.1",
     "pytest-xdist>=3.5",
-    "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
-]
-docs = [
-    # Renders pydantic Field(description=...) in the API reference; the spec
-    # models carry their documentation on the fields, not in the docstring.
-    "autodoc-pydantic>=2.2",
-    "furo>=2025.12.19",
-    "sphinx>=7,<9",
-    "sphinx-autobuild>=2024.10.3",
-    "sphinx-copybutton>=0.5",
-    "sphinx-design>=0.6",
-    "sphinx-github-changelog>=1.7.1",
-    "sphinx-notfound-page>=1.1.0",
-    "sphinx-toolbox>=4.1.2",
-    "sphinxcontrib-googleanalytics>=0.5",
+    "torch>=2.13.0",
+    "transformers>=5.16.1",
 ]
 
 [tool.uv.workspace]
-members = ["agilerl-arena"]
+members = []
 
 [tool.uv.sources]
-agilerl-arena = { workspace = true }
-torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.pytest.ini_options]
-addopts = [
-    "-n", "logical",
-    "--dist", "loadgroup",
-    "--durations=0",
-    "--durations-min=1.0",
-]
-env = [
-    "PYTHONHASHSEED=0",
-    "VLLM_USE_FLASHINFER_SAMPLER=0",
-    "PYTORCH_ENABLE_MPS_FALLBACK=1",
-]
-filterwarnings = [
-    # MakeEvolvable deprecation (use EvolvableModule/EvolvableNetwork instead)
-    "ignore::DeprecationWarning:agilerl.wrappers.make_evolvable",
-    # HPO: activation mutations not supported for some algorithms
-    "ignore:Activation mutations are not supported for .*:UserWarning:agilerl.hpo.mutation",
-    # Pygame/setuptools warnings
-    "ignore:pkg_resources is deprecated",
-    "ignore:Deprecated call to `pkg_resources.*",
-    # Matplotlib/pyparsing deprecation warnings in test environment
-    "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
-]
-markers = [
-    "vllm: needs vLLM (import or real engine). Hosted Linux CPU excludes these; the GPU job runs them. Real vLLM init is loadgroup-pinned because GPU memory profiling fails when peer workers free memory mid-init.",
-    "gpu: tests that use a GPU (CUDA, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
-    "multi_rank: runs a torch.distributed process group across child processes (tests.rank_launch.run_ranks). Skipped on Windows (no gloo).",
-]
-
-[tool.coverage.run]
-source = ["agilerl", "agilerl-arena/agilerl"]
-relative_files = true
-parallel = true
-concurrency = ["multiprocessing", "thread"]
-sigterm = true
-
-[tool.coverage.report]
-exclude_also = [
-    "pragma: no cover",
-    "if TYPE_CHECKING:",
-]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -176,6 +89,7 @@ fallback-version = "0.0.0"
 search_parent_directories = true
 version_scheme = "no-guess-dev"
 local_scheme = "no-local-version"
+# Hub tags are agilerl/vX.Y.Z; the public repo tags vX.Y.Z.
 tag_regex = "^(?:agilerl/)?v(?P<version>\\d+\\.\\d+\\.\\d+)$"
 git_describe_command = [
     "git",
@@ -188,115 +102,28 @@ git_describe_command = [
     "v[0-9]*",
 ]
 
-[tool.uv]
-# Not solved for s390x: Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 there.
-environments = [
-    "sys_platform == 'linux' and platform_machine != 's390x'",
-    "sys_platform == 'darwin'",
-    "sys_platform == 'win32'",
-]
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "vllm" },
-    ],
-    [
-        { extra = "cpu" },
-        { extra = "llm" },
-    ],
-]
-# box2d has a bug where it doesn't declare swig as a build dependency.
-# This workaround tells uv to build box2d-py using the project environment directly
-# (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
-# (no-build-isolation packages are built after the others).
-#
-no-build-isolation-package = [
-    "box2d-py",
-]
-
-# Overrides replace upstream transitive pins.
-override-dependencies = [
-    # torch 2.13.0's cu13 wheel pins nvidia-nccl-cu13==2.29.7 in its metadata,
-    # but its binary actually references ncclDevCommDestroy, which was only
-    # added in NCCL 2.30. Following torch's pin gets you an undefined-symbol
-    # ImportError on first `import torch`. Override the pin to >=2.30.
-    # Linux-only: nvidia-nccl-cu13 has no wheels for macOS/Windows, so an
-    # unmarked override forces the resolver to try installing it everywhere
-    # and breaks non-Linux CI.
-    "nvidia-nccl-cu13>=2.30; sys_platform == 'linux'",
-]
-
 [tool.hatch.build.targets.wheel]
-packages = ["agilerl"]
-exclude = ["agilerl/arena"]
+only-include = ["agilerl"]
 
 [tool.hatch.build.targets.sdist]
-include = ["agilerl", "README.md", "LICENSE", "pyproject.toml"]
-exclude = ["agilerl-arena", "agilerl/arena"]
+only-include = ["agilerl", "README.md"]
 
-# ---------------------------------------------------------------------------
-# ty — static type checking (run with `just typecheck`)
-# ---------------------------------------------------------------------------
-# Strict: the whole of agilerl/ is checked and blocks CI. `agilerl/arena` is the
-# gitignored dev symlink into agilerl-arena/agilerl/arena; `just typecheck`
-# creates it and passes both paths explicitly (ty does not traverse symlinked
-# directories during discovery).
-
-[tool.ty.environment]
-python-version = "3.13"
-
-[tool.ty.src]
-include = ["agilerl", "agilerl/arena"]
-
-# Imports that only resolve on some platforms/extras: vllm is Linux-only and
-# conflicts with cpu. Triton ships only with CUDA torch builds. Box2D needs the
-# box2d extra. flash-linear-attention and flash-attn are optional CUDA kernels.
-# GPU Linux (`--extra all`)
-# resolves vllm; GitHub-hosted CPU Linux (`--extra cpu --extra cpu-llm`) and
-# macOS/Windows cannot.
-[[tool.ty.overrides]]
-include = [
-    "agilerl/algorithms/core/base.py",
-    "agilerl/architectures/glm5_next/liger.py",
-    "agilerl/architectures/granite_liger.py",
-    "agilerl/architectures/liger_rope.py",
-    "agilerl/architectures/nemotron_h/liger.py",
-    "agilerl/architectures/mimo_v2/liger.py",
-    "agilerl/lora/moe/layouts.py",
-    "agilerl/architectures/qwen3_5/causal_lm.py",
-    "agilerl/architectures/vllm_language.py",
-    "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
-    "agilerl/lora/moe/triton_kernels.py",
-    "agilerl/utils/stochastic_round_kernel.py",
-    "agilerl/distributed/context_parallel/gdn.py",
-    "agilerl/distributed/context_parallel/ulysses.py",
-    "agilerl/algorithms/grpo.py",
-    "agilerl/algorithms/sft.py",
-    "agilerl/utils/llm_utils.py",
-    "agilerl/utils/sampling_supports.py",
-    "agilerl/utils/utils.py",
-    "agilerl/lora/moe/layouts.py",
+[tool.pytest.ini_options]
+addopts = [
+    "-n", "logical",
+    "--dist", "loadgroup",
+    "--durations=0",
+    "--durations-min=1.0",
 ]
-
-[tool.ty.overrides.rules]
-unresolved-import = "ignore"
-# Unknown vLLM bases cannot form an MRO on hosted CPU (no vLLM extra).
-inconsistent-mro = "ignore"
-# Suppressions these files need on Linux (where vllm/liger resolve
-# and their base classes become checkable) are necessarily unused elsewhere.
-unused-ignore-comment = "ignore"
+env = [
+    "PYTHONHASHSEED=0",
+]
 
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-extend-exclude = ["tests/assets/tiny_llm", "docs/_static/examples"]
 
 [tool.ruff.lint.isort]
-# Pin first-party classification: `agilerl` is our own package in both
-# distributions. Without this, isort infers it from the filesystem and the
-# gitignored agilerl/arena dev symlink (created by `just typecheck`) flips
-# arena imports between first- and third-party, so local runs and
-# pre-commit.ci would reorder each other's imports indefinitely.
 known-first-party = ["agilerl"]
 
 [tool.ruff.lint]
@@ -325,7 +152,7 @@ ignore = [
 allow-star-arg-any = true
 
 [tool.ruff.lint.per-file-ignores]
-"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests}/**" = [
+"{agilerl,tests}/**" = [
     "D1",            # missing docstrings in public modules/classes/methods/packages
     "D205",          # 1 blank line between summary and description
     "D4",            # first line punctuation/period (conflicts with multi-line)
@@ -344,17 +171,14 @@ allow-star-arg-any = true
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
-"{tests,agilerl-arena/tests}/**" = [
+"tests/**" = [
     "ANN",           # test signatures don't need annotations
 ]
-"{benchmarking,demos,tutorials,scripts}/**" = ["ALL"]
+"scripts/*.py" = ["ALL"]
 ".github/**" = [
     "INP001",        # standalone CI scripts, not a package
 ]
-"{agilerl/lora/moe/triton_kernels.py,agilerl/utils/stochastic_round_kernel.py}" = [
-    "ANN001", "ANN201", # Triton's JIT reads kernel parameter annotations as kernel types; non-Triton annotations fail to compile
-]
-"agilerl-arena/snowflake_app/**" = [
+"snowflake_app/**" = [
     "S608",          # SQL values pass through setup_sql.string_literal
 ]
 "scripts/**" = [

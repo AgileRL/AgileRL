@@ -1,5 +1,0 @@
----
-name: vocab
-vocab_path: data/wordle/word_lists/wordle_official.txt
-cache_path:
-fill_cache: true

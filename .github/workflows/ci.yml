@@ -3,7 +3,7 @@ name: CI
 # Hub dispatches carry scope and gate so the hub waits on the run it started.
 # GitHub pull requests gate nothing: hub-sync-import turns them into GitLab
 # MRs, which test, review and merge them. Their runs use the affected scope
-# so they leave hosted capacity to the hub's merge-train runs.
+# (Linux 3.13 and ty) so they leave hosted capacity to the hub's runs.
 run-name: >-
     ${{ github.event_name == 'workflow_dispatch' && format('CI {0} {1}', inputs.scope, inputs.gate)
     || github.event_name == 'schedule' && 'CI nightly'
@@ -14,27 +14,22 @@ on:
         branches: [main]
         paths:
             - agilerl/**
-            - agilerl-arena/**
             - tests/**
+            - snowflake_app/**
             - .github/workflows/**
             - pyproject.toml
             - uv.lock
     workflow_dispatch:
         inputs:
             scope:
-                description: full runs every job; affected runs the Linux 3.13 tests the diff from base reaches, and ty
+                description: full runs every job; affected runs Linux 3.13 and ty
                 type: choice
                 options: [full, affected]
                 default: full
-            base:
-                description: Commit the affected scope diffs against
-                type: string
-                default: ''
             gate:
                 description: Caller id echoed in the run name
                 type: string
                 default: ''
-    # The nightly run adds GPU and macOS on every Python.
     schedule:
         - cron: 0 2 * * *
 
@@ -46,96 +41,20 @@ permissions:
     contents: read
 
 jobs:
-    select:
-        if: inputs.scope == 'affected' || github.event_name == 'pull_request'
-        runs-on: ubuntu-24.04
-        timeout-minutes: 5
-        permissions:
-            contents: read
-            actions: read
-        outputs:
-            tests: ${{ steps.plan.outputs.tests }}
-            cpu_shards: ${{ steps.plan.outputs.cpu_shards }}
-            cpu_shard_total: ${{ steps.plan.outputs.cpu_shard_total }}
-            gpu_shards: ${{ steps.plan.outputs.gpu_shards }}
-            gpu_shard_total: ${{ steps.plan.outputs.gpu_shard_total }}
-        steps:
-            - uses: actions/checkout@v5
-            - name: Diff against base
-              env:
-                  BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
-              run: |
-                  set -euo pipefail
-                  test -n "$BASE"
-                  git fetch --depth 1 origin "$BASE"
-                  git diff --name-only --no-renames "$BASE" HEAD | tee changed.txt
-            - name: Restore CPU test durations
-              uses: actions/cache/restore@v4
-              with:
-                  path: .ci-durations/cpu.json
-                  key: linux-cpu-durations-${{ github.run_id }}
-                  restore-keys: linux-cpu-durations-
-            - name: Restore GPU test durations
-              uses: actions/cache/restore@v4
-              with:
-                  path: .ci-durations/gpu.json
-                  key: linux-gpu-durations-${{ github.run_id }}
-                  restore-keys: linux-gpu-durations-
-            - name: Download the newest test map
-              # Only runs on refs of this repository: fork PR runs cannot seed it.
-              env:
-                  GH_TOKEN: ${{ github.token }}
-              run: |
-                  set -euo pipefail
-                  run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-map&per_page=50" --jq '
-                    [.artifacts[] | select(.expired | not)
-                      | select(.workflow_run.head_repository_id == .workflow_run.repository_id)]
-                    | sort_by(.created_at) | last | .workflow_run.id // empty')"
-                  if [[ -n "$run_id" ]]; then
-                    gh run download "$run_id" --name test-map --dir .ci-test-map
-                    echo "test map from https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
-                  fi
-            - name: Plan the affected tests
-              id: plan
-              run: |
-                  python3 scripts/select_tests.py \
-                    --changed changed.txt \
-                    --map .ci-test-map/test-map.json \
-                    --cpu-durations .ci-durations/cpu.json \
-                    --gpu-durations .ci-durations/gpu.json \
-                    --cpu-shards 7 \
-                    --gpu-shards 4 \
-                    | tee -a "$GITHUB_OUTPUT"
     linux:
-        needs: select
-        if: ${{ !cancelled() && needs.select.result != 'failure' }}
         uses: ./.github/workflows/reusable-linux.yml
-        permissions:
-            contents: read
-            id-token: write
         with:
-            cpu_pythons: ${{ needs.select.result == 'success' && '["3.13"]' || '["3.10", "3.11", "3.12", "3.13"]' }}
-            cpu_shards: ${{ needs.select.outputs.cpu_shards || '[1, 2, 3, 4, 5]' }}
-            cpu_shard_total: ${{ fromJSON(needs.select.outputs.cpu_shard_total || '5') }}
-            gpu_pythons: ${{ github.event_name == 'schedule' && '["3.10", "3.11", "3.12", "3.13"]' || '["3.13"]' }}
-            gpu_shards: ${{ needs.select.outputs.gpu_shards || '[1, 2, 3, 4]' }}
-            gpu_shard_total: ${{ fromJSON(needs.select.outputs.gpu_shard_total || '4') }}
-            tests: ${{ needs.select.outputs.tests }}
-            coverage: ${{ needs.select.result == 'skipped' }}
+            pythons: ${{ (inputs.scope == 'affected' || github.event_name == 'pull_request') && '["3.13"]' || '["3.10", "3.11", "3.12", "3.13"]' }}
     macos:
         if: inputs.scope == 'full' || github.event_name == 'schedule'
         uses: ./.github/workflows/reusable-macos.yml
-        with:
-            pythons: ${{ github.event_name == 'schedule' && '["3.10", "3.11", "3.12", "3.13"]' || '["3.13"]' }}
-            # The nightly run leaves macOS slots for merge-train runs.
-            max_parallel: ${{ github.event_name == 'schedule' && 3 || 5 }}
     windows:
         if: inputs.scope == 'full' || github.event_name == 'schedule'
         uses: ./.github/workflows/reusable-windows.yml
     ty:
         uses: ./.github/workflows/reusable-type-checks.yml
     codeql:
-        if: inputs.scope != 'affected'
+        if: inputs.scope != 'affected' && github.event_name != 'pull_request'
         uses: ./.github/workflows/codeql.yml
         permissions:
             contents: read

@@ -1,764 +1,166 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-import gc
+"""Shared fixtures for Arena auth/client tests."""
+
+from __future__ import annotations
+
 import importlib.util
-import os
-import shutil
+import json
+import logging
 import sys
-import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
-from types import ModuleType
+from typing import Any
 
-# xdist workers already fill the CPUs. Per-worker OpenMP pools on top of that
-# contend for cores and run the suite 2-4x slower. Set before numpy/torch load.
-if os.environ.get("PYTEST_XDIST_WORKER"):
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
+import pytest
 
-import gymnasium as gym
-
-# Must be absolute before isolate_working_directory chdirs. A relative
-# COVERAGE_FILE follows that chdir and the shard never uploads those hits.
-os.environ["COVERAGE_FILE"] = os.path.abspath(
-    os.environ.get("COVERAGE_FILE", ".coverage")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Snowflake puts each procedure IMPORTS file on the path, so app_code modules
+# import each other by bare name.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "snowflake_app" / "app_code")
 )
 
-from tests.dist_ports import get_free_port, gloo_socket_ifname
-from tests.xdist_async_vec import ASYNC_VEC_XDIST_GROUP, nodeid_spawns_async_vector_env
+from agilerl.auth import ArenaOAuth2
+from agilerl.models import model_info
 
-# Register lightweight test environments
-gym.register(
-    id="DummyImage-v0",
-    entry_point="tests.envs.image_env:DummyImageEnv",
-)
-
-# Give each xdist worker its own torch inductor cache dir BEFORE torch is
-# imported. Parallel workers sharing the default cache race on precompiled
-# headers (mtime checks fail on macOS clang++ and can cause flaky rebuilds
-# elsewhere). When the CI presets TORCHINDUCTOR_CACHE_DIR for restoration,
-# we nest each worker under it so cache reuse across runs still works.
-# This is a no-op when running without xdist.
-_xdist_worker_id = os.environ.get("PYTEST_XDIST_WORKER")
-if _xdist_worker_id:
-    _inductor_base = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or tempfile.gettempdir()
-    _worker_cache = os.path.join(_inductor_base, f"worker_{_xdist_worker_id}")
-
-    def _writable(path: str) -> bool:
-        try:
-            os.makedirs(path, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=path, delete=True):
-                pass
-            return True
-        except OSError:
-            return False
-
-    # A stale dir left by a previous run (e.g. created inside a container as
-    # root, or with restrictive perms after a tmpwatch sweep on /var/tmp) can
-    # be unwritable by the current user, causing torch.compile to crash with
-    # PermissionError. Probe both the worker dir and the inner ``cache/``
-    # subdir torch.compile creates; wipe and retry on failure, falling back
-    # to ``mkdtemp`` so the run can always proceed.
-    _inner = os.path.join(_worker_cache, "cache")
-    if not (
-        _writable(_worker_cache) and (not os.path.exists(_inner) or _writable(_inner))
-    ):
-        shutil.rmtree(_worker_cache, ignore_errors=True)
-        if not _writable(_worker_cache):
-            _worker_cache = tempfile.mkdtemp(
-                prefix=f"torchinductor_{_xdist_worker_id}_"
-            )
-
-    os.environ["TORCHINDUCTOR_CACHE_DIR"] = _worker_cache
-
-# Force HF libs offline during tests. Any test that tries to download from the
-# Hub fails loudly instead of silently fetching (and getting CI rate-limited).
-# Tests that need an LLM use tests/assets/tiny_llm/ via TINY_LLM_FIXTURE_PATH.
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-# Gloo resolves this machine's hostname for every process group unless pinned
-# to an interface. Ubuntu maps that name to 127.0.1.1, and the TCP pair then
-# drops. Spawned gloo ranks inherit the variable; they only talk over loopback.
-# Windows has no ``lo`` device — leave Gloo on its default interface.
-if (ifname := gloo_socket_ifname()) is not None:
-    os.environ.setdefault("GLOO_SOCKET_IFNAME", ifname)
-
-from tests.gpu_host_env import apply as apply_gpu_host_env  # noqa: E402
-
-apply_gpu_host_env()
-
-# Tests that construct ``Accelerator()`` directly (instead of via the
-# ``distributed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
-# xdist workers then race to bind the same port and one fails with
-# ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
-# so any later distributed init uses a non-colliding port.
-if _xdist_worker_id:
-    _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
-    os.environ.setdefault("MASTER_PORT", str(29500 + _worker_num))
-
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-import torch  # noqa: E402
-from accelerate.state import AcceleratorState, PartialState  # noqa: E402
-from gymnasium import spaces  # noqa: E402
-from torch import nn  # noqa: E402
-
-from agilerl.algorithms.core.registry import (  # noqa: E402
-    HyperparameterConfig,
-    RLParameter,
-)
-from tests.helper_functions import (  # noqa: E402
-    gen_multi_agent_dict_or_tuple_spaces,
-    generate_dict_or_tuple_space,
-    generate_discrete_space,
-    generate_multi_agent_box_spaces,
-    generate_multi_agent_discrete_spaces,
-    generate_multi_agent_multidiscrete_spaces,
-    generate_multidiscrete_space,
-    generate_random_box_space,
-)
-
-if not torch.cuda.is_available():
-    os.environ.setdefault("ACCELERATE_USE_CPU", "true")
-
-# Env vars PartialState / Accelerator inspect when choosing a distributed
-# backend. Leaks from distributed tests cause later Accelerator() calls to
-# DDP-wrap models (Linux) or hang on rendezvous (macOS / Windows).
-_DIST_ENV_VARS = (
-    "WORLD_SIZE",
-    "RANK",
-    "LOCAL_RANK",
-    "MASTER_ADDR",
-    "GROUP_RANK",
-    "LOCAL_WORLD_SIZE",
-    "ACCELERATE_USE_DEEPSPEED",
-)
-
-# Per-xdist-worker MASTER_PORT from above; restored after clearing leaked dist env.
-_WORKER_MASTER_PORT = os.environ.get("MASTER_PORT") if _xdist_worker_id else None
-
-
-def _reset_bf16_rounding() -> None:
-    """Drop the shared bf16 draw so the next test starts on round-to-nearest."""
-    from agilerl.utils.stochastic_round import bf16_round_step
-
-    bf16_round_step.set(None)
-
-
-def _reset_distributed_env() -> None:
-    """Clear distributed launch env vars leaked by GPU / LLM tests.
-
-    Does not call ``destroy_process_group()``. Tearing the group down between
-    consecutive ``@pytest.mark.gpu`` tests can leave handles unregistered.
-    Suites that need an explicit destroy (multi-agent) do so in
-    ``tests/test_algorithms/test_multi_agent/conftest.py``.
-    """
-    for var in _DIST_ENV_VARS:
-        os.environ.pop(var, None)
-
-    if _WORKER_MASTER_PORT is not None:
-        os.environ["MASTER_PORT"] = _WORKER_MASTER_PORT
-    else:
-        os.environ.pop("MASTER_PORT", None)
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(config, items):
-    """Pin tests that share mutable global state to dedicated xdist workers so
-    they never run in parallel with each other.
-
-    - ``vllm``- and ``gpu``-marked tests share a single pool of four
-      ``gputest0``..``gputest3`` xdist groups, sized to cap **total
-      concurrent GPU-touching tests at 4** regardless of the runner's
-      CPU count. With ``--dist loadgroup`` and ``-n auto`` on the 8-core
-      Linux runner, four workers consume the GPU pool in parallel and the
-      remaining four fan out across CPU-only tests — so a single ``pytest``
-      invocation handles both. The cap is set by:
-
-      1. **GPU memory.** Each container has a dedicated ~14.6 GiB GPU. Peak
-         per-test usage: ~4.4 GiB (``test_grpo_sync_actor_to_vllm``), ~3.0
-         GiB (``test_grpo_learn``), ~2.5 GiB
-         (``test_grpo_clone_distributed_vllm``); median ~1.5 GiB.
-         With every test factory constructing ``VLLMConfig`` with
-         ``gpu_memory_utilization≈0.2`` and
-         ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
-         ~3.2 GiB and ``gpu`` (FSDP) tests use ~0.5 GiB; the worst-case
-         "4 vLLM workers + small FSDP share" still fits in ~13 GiB.
-      2. **Port races.** Concurrent distributed inits race on MASTER_PORT;
-         ``get_free_port`` hands each xdist worker a disjoint port range to
-         avoid cross-worker ``EADDRINUSE``, and capping GPU-test concurrency
-         keeps simultaneous inits rare.
-
-      ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
-      worker-process state is reset between them. ``gpu`` tests run in-process
-      and share Accelerator / process-group state across the worker:
-      Accelerator state is reset per fixture (``AcceleratorState._reset_state``).
-      MASTER_PORT is still per-test (``get_free_port``) to avoid
-      ``EADDRINUSE`` on concurrent inits.
-    - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
-    - Tests that construct ``AsyncPettingZooVecEnv`` or gymnasium
-      ``AsyncVectorEnv`` spawn subprocesses. One ``async_vec`` loadgroup so
-      they never run concurrently under xdist (spawn start methods EOFError
-      the pipes otherwise).
-
-    Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
-    before xdist's own ``pytest_collection_modifyitems`` (in ``xdist/remote.py``)
-    reads them and appends ``@group`` suffixes to nodeids for loadgroup
-    scheduling.
-
-    Background on ``kv_cache_memory_bytes``: vLLM's
-    ``determine_available_memory`` profile run asserts that GPU free-memory
-    does not increase between the pre- and post-profile snapshots. When peer
-    processes on the same GPU (concurrent xdist workers, sibling CI
-    containers sharing one GPU) release memory mid-profile, the assertion
-    fires with ``Error in memory profiling. Initial free memory ... current
-    free memory ...``. Setting ``kv_cache_memory_bytes`` triggers vLLM's
-    early-return path in ``determine_available_memory`` and skips the
-    assertion entirely. When adding new vLLM-using tests, route them through
-    the existing ``generate_grpo`` / ``generate_reinforce`` factories — or
-    set both ``kv_cache_memory_bytes`` and a small ``gpu_memory_utilization``
-    on the ``VLLMConfig`` directly.
-    """
-    # Single shared pool: vllm-marked + gpu-marked tests round-robin into
-    # the same 4 xdist groups, capping total GPU-test concurrency at 4
-    # regardless of -n auto's worker count. See docstring above.
-    gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
-    minari_group = pytest.mark.xdist_group("minari")
-    async_vec_group = pytest.mark.xdist_group(ASYNC_VEC_XDIST_GROUP)
-    # ``gpu``/``vllm``-marked tests need a usable CUDA device (FSDP wrap,
-    # a live vLLM engine). Skip them when CUDA is unavailable — a CPU-only
-    # runner, or a GPU whose driver is too old for the installed torch (the GPU
-    # is then hidden via ``CUDA_VISIBLE_DEVICES=``, so ``is_available()`` is
-    # False). On a real GPU the guard is inert and they run as before.
-    cuda_available = torch.cuda.is_available()
-    skip_no_cuda = pytest.mark.skip(
-        reason="Requires a usable CUDA device (gpu/vllm-marked); none available."
-    )
-    skip_no_gloo = pytest.mark.skip(reason="multi_rank tests need gloo")
-    gputest_count = 0
-    for item in items:
-        if sys.platform == "win32" and item.get_closest_marker("multi_rank"):
-            item.add_marker(skip_no_gloo)
-        if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
-            item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
-            gputest_count += 1
-            if not cuda_available:
-                item.add_marker(skip_no_cuda)
-        elif "test_minari_utils" in item.nodeid:
-            item.add_marker(minari_group)
-        elif nodeid_spawns_async_vector_env(item.nodeid):
-            item.add_marker(async_vec_group)
-
-
-# Only clear CUDA cache when actually needed
-@pytest.fixture(autouse=True)
-def cleanup():
-    # Reset the process-wide ``AcceleratorState`` / ``PartialState`` singletons
-    # **before** every test. Both are accelerate's shared-state caches keyed by
-    # device, so once any test instantiates an ``Accelerator()`` the device is
-    # frozen for the rest of the worker's lifetime — a later test asking for a
-    # different device (typically ``cpu=True`` on macOS/MPS workers, set via
-    # ``ACCELERATE_USE_CPU=true`` above) then hits ``_check_initialized`` and
-    # fails with ``AcceleratorState has already been initialized ...``.
-    #
-    # Also clear leaked distributed launch env vars (WORLD_SIZE, RANK, …).
-    # Otherwise a later ``Accelerator()`` can DDP-wrap models so attribute
-    # access like ``actor.encoder`` fails, or hang on a multi-worker rendezvous.
-    # Process-group destroy stays out of this global path — see
-    # ``_reset_distributed_env``.
-    #
-    # Resetting at setup (vs. teardown) is robust to fixtures that swallow
-    # exceptions, tests that create accelerators inside ``with`` blocks that
-    # raise, and ordering with subdirectory conftests like
-    # ``tests/test_algorithms/test_llms/conftest.py`` that already reset on
-    # teardown — those will continue to work and just be redundant on the next
-    # test's setup. ``.clear()`` is a no-op when state is empty, so this is
-    # cheap.
-    _reset_distributed_env()
-    AcceleratorState._reset_state(reset_partial_state=True)
-    PartialState._reset_state()
-    _reset_bf16_rounding()
-
-    yield
-
-    _reset_distributed_env()
-    AcceleratorState._reset_state(reset_partial_state=True)
-    PartialState._reset_state()
-    _reset_bf16_rounding()
-
-    # Only clear CUDA cache if CUDA was actually used
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
-        torch.cuda.empty_cache()
-
-    # Only collect garbage periodically, not after every test
-    if hasattr(cleanup, "call_count"):
-        cleanup.call_count += 1
-    else:
-        cleanup.call_count = 1
-
-    # Only run garbage collection every 10 tests
-    if cleanup.call_count % 5 == 0:
-        gc.collect()
-
-
-def hf_modeling_modules() -> list[ModuleType]:
-    """HF modeling modules imported so far."""
-    return [
-        module
-        for name, module in list(sys.modules.items())
-        if name.startswith("transformers.models.") and ".modeling_" in name
+# The Native App modules import Snowpark, which only the snowflake extra installs.
+if (
+    importlib.util.find_spec("snowflake") is None
+    or importlib.util.find_spec("snowflake.snowpark") is None
+):
+    collect_ignore = [
+        "test_snowflake_app_billing.py",
+        "test_snowflake_app_config.py",
+        "test_snowflake_app_keys.py",
+        "test_snowflake_app_manifest.py",
+        "test_snowflake_app_runs.py",
     ]
 
 
-@pytest.fixture(scope="session")
-def hf_modeling_attrs() -> dict[ModuleType, dict[str, object]]:
-    """Attributes of the HF modeling modules imported at collection."""
-    return {module: dict(vars(module)) for module in hf_modeling_modules()}
+@pytest.fixture(autouse=True)
+def _detach_arena_rich_handler() -> None:
+    """Detach the package ``RichHandler`` from ``agilerl`` during tests.
+
+    The package attaches a ``RichHandler`` to the ``agilerl`` logger at
+    import time. Under coverage instrumentation that handler's highlighter can
+    raise, turning any test that merely emits a log record into a spurious
+    failure. Tests don't assert on rendered log output (they patch the module
+    logger when they care), so drop the handler and let records propagate to
+    pytest's capture instead.
+    """
+    arena_logger = logging.getLogger("agilerl")
+    saved_handlers = arena_logger.handlers[:]
+    saved_propagate = arena_logger.propagate
+    arena_logger.handlers = []
+    arena_logger.propagate = True
+    try:
+        yield
+    finally:
+        arena_logger.handlers = saved_handlers
+        arena_logger.propagate = saved_propagate
 
 
 @pytest.fixture(autouse=True)
-def restore_hf_modeling_modules(
-    hf_modeling_attrs: dict[ModuleType, dict[str, object]],
-) -> Iterator[None]:
-    """Undo module-level class swaps, such as Liger's, on loaded HF modeling modules."""
-    # Session scope captures the modules before module-scoped fixtures patch them.
-    for module in hf_modeling_modules():
-        hf_modeling_attrs.setdefault(module, dict(vars(module)))
+def empty_catalog_config_cache():
+    """Start and end each test with an empty catalog config cache.
 
+    Tests patch bundled configs and catalog entries, which the cache key does
+    not cover.
+    """
+    model_info._pickled_config.cache_clear()
     yield
-
-    for module, attrs in hf_modeling_attrs.items():
-        for attr, value in attrs.items():
-            if vars(module).get(attr) is not value:
-                setattr(module, attr, value)
-
-
-@pytest.fixture(scope="session", autouse=True)
-def isolate_working_directory(tmp_path_factory):
-    """Run the test session in a temporary working directory."""
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv(
-            "COVERAGE_FILE",
-            os.path.abspath(os.environ.get("COVERAGE_FILE", ".coverage")),
-        )
-        monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
-        yield
+    model_info._pickled_config.cache_clear()
 
 
 @pytest.fixture(autouse=True)
-def skip_cuda_parametrization_when_unavailable(request):
-    """Skip CUDA-specific parametrized tests on environments without CUDA."""
-    callspec = getattr(request.node, "callspec", None)
-    if (
-        callspec is not None
-        and callspec.params.get("device") == "cuda"
-        and not torch.cuda.is_available()
-    ):
-        pytest.skip("CUDA parametrization skipped because CUDA is unavailable.")
-
-
-@pytest.fixture(autouse=True)
-def skip_torch_compile_parametrization_when_windows_compiler_unavailable(request):
-    """Skip torch.compile parametrized tests on Windows without MSVC compiler."""
-    callspec = getattr(request.node, "callspec", None)
-    if callspec is None or sys.platform != "win32":
-        return
-
-    compile_mode = callspec.params.get("compile_mode")
-    if compile_mode is not None and shutil.which("cl") is None:
-        pytest.skip(
-            "torch.compile parametrization skipped: MSVC compiler (`cl`) is unavailable on Windows runner."
-        )
-
-
-# Shared device fixture to avoid repeated device checks
-@pytest.fixture(scope="session")
-def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-# Common observation spaces (session-scoped for reuse)
-@pytest.fixture(scope="session")
-def vector_space():
-    return generate_random_box_space(shape=(4,))
-
-
-@pytest.fixture(scope="session")
-def discrete_space():
-    return generate_discrete_space(2)
-
-
-@pytest.fixture(scope="session")
-def dict_space():
-    return generate_dict_or_tuple_space(2, 2, dict_space=True)
-
-
-@pytest.fixture(scope="session")
-def tuple_space():
-    return generate_dict_or_tuple_space(2, 2, dict_space=False)
-
-
-@pytest.fixture(scope="session")
-def multidiscrete_space():
-    return generate_multidiscrete_space(2, 2)
-
-
-@pytest.fixture(scope="session")
-def multibinary_space():
-    return spaces.MultiBinary(4)
-
-
-@pytest.fixture(scope="session")
-def image_space():
-    return generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-
-
-# Common multi-agent spaces
-@pytest.fixture(scope="session")
-def ma_vector_space():
-    return generate_multi_agent_box_spaces(3, (6,))
-
-
-@pytest.fixture(scope="session")
-def ma_discrete_space():
-    return generate_multi_agent_discrete_spaces(3, 2)
-
-
-@pytest.fixture(scope="session")
-def ma_multidiscrete_space():
-    return generate_multi_agent_multidiscrete_spaces(3, 2)
-
-
-@pytest.fixture(scope="session")
-def ma_multibinary_space():
-    return [spaces.MultiBinary(2) for _ in range(3)]
-
-
-@pytest.fixture(scope="session")
-def ma_image_space():
-    return generate_multi_agent_box_spaces(3, (3, 32, 32), low=0, high=255)
-
-
-@pytest.fixture(scope="session")
-def ma_dict_space():
-    return gen_multi_agent_dict_or_tuple_spaces(3, 2, 2, dict_space=True)
-
-
-@pytest.fixture(scope="session")
-def ma_dict_space_small():
-    return gen_multi_agent_dict_or_tuple_spaces(3, 1, 1, dict_space=True)
-
-
-# Simple network fixtures (function-scoped to avoid state issues)
-@pytest.fixture
-def simple_mlp():
-    return nn.Sequential(
-        nn.Linear(4, 20),
-        nn.ReLU(),
-        nn.Linear(20, 10),
-        nn.ReLU(),
-        nn.Linear(10, 2),
-        nn.Softmax(dim=-1),
-    )
-
-
-@pytest.fixture
-def simple_mlp_critic():
-    return nn.Sequential(
-        nn.Linear(6, 20),
-        nn.ReLU(),
-        nn.Linear(20, 10),
-        nn.ReLU(),
-        nn.Linear(10, 1),
-        nn.Tanh(),
-    )
-
-
-@pytest.fixture
-def simple_cnn():
-    return nn.Sequential(
-        nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2),
-        nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2),
-        nn.Flatten(),
-        nn.Linear(32 * 8 * 8, 128),
-        nn.ReLU(),
-        nn.Linear(128, 2),
-        nn.Softmax(dim=-1),
-    )
-
-
-@pytest.fixture(scope="session")
-def ac_hp_config():
-    return HyperparameterConfig(
-        lr_actor=RLParameter(min=1e-4, max=1e-2),
-        lr_critic=RLParameter(min=1e-4, max=1e-2),
-        batch_size=RLParameter(min=8, max=512, dtype=int),
-        learn_step=RLParameter(
-            min=20,
-            max=200,
-            dtype=int,
-            grow_factor=1.5,
-            shrink_factor=0.75,
-        ),
-    )
-
-
-@pytest.fixture(scope="session")
-def default_hp_config():
-    return HyperparameterConfig(
-        lr=RLParameter(min=6.25e-5, max=1e-2),
-        batch_size=RLParameter(min=8, max=512, dtype=int),
-        learn_step=RLParameter(
-            min=1,
-            max=10,
-            dtype=int,
-            grow_factor=1.5,
-            shrink_factor=0.75,
-        ),
-    )
-
-
-@pytest.fixture(scope="session")
-def grpo_hp_config():
-    return HyperparameterConfig(
-        lr=RLParameter(min=0.00001, max=1),
-    )
-
-
-@pytest.fixture(scope="session")
-def encoder_mlp_config():
-    return {
-        "latent_dim": 8,
-        "min_latent_dim": 1,
-        "encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
-        "head_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
-    }
-
-
-@pytest.fixture(scope="session")
-def encoder_simba_config():
-    return {
-        "latent_dim": 8,
-        "min_latent_dim": 1,
-        "simba": True,
-        "encoder_config": {
-            "hidden_size": 64,
-            "num_blocks": 3,
-        },
-        "head_config": {"hidden_size": [8], "min_mlp_nodes": 1},
-    }
-
-
-@pytest.fixture(scope="session")
-def encoder_cnn_config():
-    return {
-        "latent_dim": 8,
-        "min_latent_dim": 1,
-        "encoder_config": {
-            "channel_size": [5, 5],
-            "kernel_size": [3, 3],
-            "stride_size": [1, 1],
-            "min_channel_size": 1,
-            "max_channel_size": 10,
-        },
-        "head_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
-    }
-
-
-@pytest.fixture(scope="session")
-def encoder_multi_input_config():
-    return {
-        "latent_dim": 8,
-        "min_latent_dim": 1,
-        "encoder_config": {
-            "cnn_config": {
-                "channel_size": [5],
-                "kernel_size": [3],
-                "stride_size": [1],
-                "min_channel_size": 1,
-                "max_channel_size": 10,
-            },
-            "mlp_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
-        },
-        "head_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
-    }
-
-
-class EvoDummyRNG:
-    rng = np.random.default_rng(seed=42)
-
-    def choice(self, a, size=None, replace=True, p=None):
-        return 1
-
-    def integers(self, low=0, high=None):
-        return self.rng.integers(low, high)
-
-
-@pytest.fixture(scope="session")
-def dummy_rng():
-    return EvoDummyRNG()
-
-
-dist_env = {
-    "MASTER_ADDR": "localhost",
-    "MASTER_PORT": "10999",
-    "RANK": "0",
-    "LOCAL_RANK": "0",
-    "WORLD_SIZE": "1",
-    "CUDA_VISIBLE_DEVICES": "0",
-}
-
-
-@pytest.fixture
-def gloo_process_group():
-    """Fixture that allows a real DistributedDataParallel wrapper to be built.
-
-    Tests DDP's attribute-hiding behaviour on a CPU, without a multi-process run.
+def _restore_arena_url_overrides() -> Generator[None, None, None]:
+    """Undo ``configure()`` URL overrides (e.g. a CLI test passing ``--base-url``).
+
+    They are class attributes and take precedence over the env vars, so one test's
+    override would otherwise leak into every later test.
     """
-    if torch.distributed.is_initialized():
-        yield
-        return
+    from agilerl.auth import ArenaOAuth2
+    from agilerl.client import ArenaClient
 
-    saved = {
-        key: os.environ.get(key)
-        for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
-    }
-    os.environ.update(
-        MASTER_ADDR="127.0.0.1",
-        MASTER_PORT=str(get_free_port()),
-        RANK="0",
-        WORLD_SIZE="1",
+    saved = (
+        ArenaClient.BASE_URL,
+        ArenaClient._BASE_URL_OVERRIDE,
+        ArenaOAuth2.KEYCLOAK_URL,
+        ArenaOAuth2._KEYCLOAK_URL_OVERRIDE,
     )
-    torch.distributed.init_process_group("gloo")
-    try:
-        yield
-    finally:
-        torch.distributed.destroy_process_group()
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-@pytest.fixture
-def distributed_env():
-    """Single-process torch.distributed environment for distributed LLM tests."""
-    dynamic_dist_env = dist_env.copy()
-    dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
-    # On a CPU-only / hidden-GPU runner the GPU is masked via
-    # ``CUDA_VISIBLE_DEVICES=`` (so ``is_available()`` is False at collection).
-    # Don't re-expose it here: forcing ``CUDA_VISIBLE_DEVICES=0`` makes
-    # ``is_available()`` flip True for CPU-runnable tests (config=None) that use
-    # this fixture, and they then crash trying to ``.to("cuda")`` on a device
-    # the driver can't actually serve. Keep the GPU masked unless it's usable.
-    if not torch.cuda.is_available():
-        dynamic_dist_env.pop("CUDA_VISIBLE_DEVICES", None)
-    existing_vars = {}
-    for key, value in dynamic_dist_env.items():
-        key = key.upper()
-        if key in os.environ:
-            existing_vars[key] = os.environ[key]
-        os.environ[key] = str(value)
-
-    try:
-        yield
-    finally:
-        for key in dynamic_dist_env:
-            key = key.upper()
-            if key in existing_vars:
-                # restore previous value
-                os.environ[key] = existing_vars[key]
-            else:
-                os.environ.pop(key, None)
-
-
-@pytest.fixture
-def serve_env():
-    """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
-
-    ``url = serve_env(MyEnv())`` returns a base URL to hand to
-    ``RemoteEnvClient`` / ``RolloutHarness``; the server (and any others hosted in
-    the same test) is shut down
-    when the test finishes, so individual tests stay free of start/stop boilerplate.
-    """
-    from agilerl.llm_envs.openenv_server import OpenEnvServer
-
-    servers = []
-
-    def _serve(env):
-        server = OpenEnvServer(env).start()
-        servers.append(server)
-        return server.base_url
-
-    yield _serve
-    for server in servers:
-        server.stop()
-
-
-@pytest.fixture
-def torch_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tiny CPU Qwen3.5 and Nemotron-H models run the PyTorch kernels."""
-    # Defers transformers, an llm extra.
-    from tests.torch_kernels import use_torch_kernels
-
-    use_torch_kernels(monkeypatch)
-
-
-@pytest.fixture
-def pristine_nemotron_classes() -> Iterator[None]:
-    """Undo Nemotron-H Mamba patches a test installs, so later tests see stock classes."""
-    # Defers transformers, an llm extra.
-    from tests.nemotron_classes import restore_nemotron_classes
-
-    with restore_nemotron_classes():
-        yield
+    yield
+    (
+        ArenaClient.BASE_URL,
+        ArenaClient._BASE_URL_OVERRIDE,
+        ArenaOAuth2.KEYCLOAK_URL,
+        ArenaOAuth2._KEYCLOAK_URL_OVERRIDE,
+    ) = saved
 
 
 @pytest.fixture(autouse=True)
-def stub_family_config_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hub ids skip config download. A local checkout still loads its config.json."""
-    if importlib.util.find_spec("transformers") is None:
-        # Core install: no llm extra, so there is no config lookup to stub.
-        return
-    from transformers.configuration_utils import PretrainedConfig
+def _isolate_arena_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent a developer's real Arena credentials from leaking into tests.
 
-    original = PretrainedConfig.get_config_dict
-    hub_keys = (
-        "cache_dir",
-        "force_download",
-        "proxies",
-        "token",
-        "local_files_only",
-        "revision",
-        "trust_remote_code",
-        "subfolder",
-        "_from_pipeline",
-        "_from_auto",
-        "_commit_hash",
-        "_configuration_file",
-        "code_revision",
-        "gguf_file",
-        "resume_download",
-    )
+    Without this, a key exported in the shell makes the CLI attempt real
+    authentication (e.g. ``arena --help`` building a client), producing
+    spurious 401 failures. Tests that need a key set it explicitly.
+    """
+    monkeypatch.delenv("ARENA_API_KEY", raising=False)
+    monkeypatch.delenv("ARENA_ORG_KEY", raising=False)
+    monkeypatch.delenv("ARENA_EXTERNAL_USER_ID", raising=False)
 
-    def fake_get_config_dict(
-        pretrained_model_name_or_path: object, **kwargs: object
-    ) -> tuple[dict[str, str], dict[str, object]]:
-        local = Path(str(pretrained_model_name_or_path)).expanduser()
-        if local.is_dir() and (local / "config.json").is_file():
-            return original(pretrained_model_name_or_path, **kwargs)
-        unused = dict(kwargs)
-        for key in hub_keys:
-            unused.pop(key, None)
-        return {"model_type": "qwen3"}, unused
 
-    monkeypatch.setattr(
-        "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-        fake_get_config_dict,
-    )
+@pytest.fixture
+def arena_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Temporary HOME with ``~/.arena`` created under it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows expands ``~`` from USERPROFILE, not HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    arena_dir = tmp_path / ".arena"
+    arena_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_path
+
+
+@pytest.fixture
+def credentials_path(arena_home: Path) -> Path:
+    """Path to ``credentials.json`` in the isolated arena home."""
+    return arena_home / ".arena" / "credentials.json"
+
+
+@pytest.fixture
+def credentials_file(credentials_path: Path) -> Path:
+    """Write a minimal valid credentials file on the tmp arena home."""
+    payload: dict[str, Any] = {"access_token": "at", "refresh_token": "rt"}
+    credentials_path.write_text(json.dumps(payload), encoding="utf-8")
+    return credentials_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_inference_cache(arena_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the inference cache at the tmp ``~/.arena/inference.json``.
+
+    Deployment bindings and resumed sessions are read by ordinary CLI commands,
+    so without this a test would pick up the developer's real cache, and a test
+    that writes would overwrite it.
+    """
+    path = arena_home / ".arena" / "inference.json"
+    monkeypatch.setattr("agilerl.inference.cache.INFERENCE_FILE", path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_arena_credentials(
+    arena_home: Path,
+) -> None:
+    """Point ArenaOAuth2 at the tmp ``~/.arena/credentials.json`` for every test."""
+    arena_dir = arena_home / ".arena"
+    cred_file = arena_dir / "credentials.json"
+    orig_dir = ArenaOAuth2.CREDENTIALS_DIR
+    orig_file = ArenaOAuth2.CREDENTIALS_FILE
+    ArenaOAuth2.CREDENTIALS_DIR = arena_dir
+    ArenaOAuth2.CREDENTIALS_FILE = cred_file
+    yield
+    ArenaOAuth2.CREDENTIALS_DIR = orig_dir
+    ArenaOAuth2.CREDENTIALS_FILE = orig_file

@@ -1,861 +1,1329 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Environment specs (the arena contract) and the functions that build them."""
+"""The manifest's ``environment`` section, discriminated on ``env_type``."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from functools import cache, partial
-from importlib import import_module
-from itertools import count
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from enum import Enum
+from pathlib import PurePosixPath
+from typing import Any, Literal
 
-import gymnasium as gym
-import pandas as pd
-from pettingzoo import ParallelEnv
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
 
-from agilerl.architectures.catalog import family_runtime
-from agilerl.arena.models.env import (
-    BanditEnvSpec,
-    EnvSpec,
-    GymEnvSpec,
-    LLMEnvSpec,
-    LLMEnvType,
-    OfflineEnvSpec,
-)
-from agilerl.arena.models.rewards import SnowflakeFunctionReward
-from agilerl.data.jsonl import (
-    is_local_jsonl_dataset,
-    load_jsonl_dataset,
-    load_jsonl_train_eval_from_splits,
-)
-from agilerl.data.parquet import (
-    is_local_parquet_dataset,
-    load_parquet_dataset,
-    load_train_eval_from_splits,
-)
-from agilerl.llm_envs import DatasetEnv, RolloutHarness
-from agilerl.llm_envs.env_packages import ensure_importable
-from agilerl.protocols import BanditEnvProtocol, TextEnvProtocol
-from agilerl.typing import EnvFactory, WrapperSpec
-from agilerl.utils.env_utils import (
-    GymEnvType,
-    apply_wrappers,
-    construct_entrypoint_env,
-    get_group_rubric,
-    get_rubric_factory,
-    make_conversation_template,
-    resolve_entrypoint_target,
-)
-from agilerl.utils.llm_utils import render_chat_template, validate_llm_context_lengths
-from agilerl.utils.utils import make_multi_agent_vect_envs, make_vect_envs
-from agilerl.vector import AsyncPettingZooVecEnv
-from agilerl.wrappers.learning import BanditEnv
-
-if TYPE_CHECKING:
-    from datasets import Dataset
-    from openenv.core.rubrics.base import Rubric
-    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-    from agilerl.llm_envs.rubrics import GroupRubric
-
-__all__ = [
-    "BanditEnvSpec",
-    "EnvSpec",
-    "GymEnvSpec",
-    "LLMEnvSpec",
-    "LLMEnvType",
-    "OfflineEnvSpec",
-    "construct_custom_env_fn",
-    "construct_custom_pz_env_fn",
-    "group_rubric_from_spec",
-    "make_bandit_env",
-    "make_env",
-    "make_gym_env",
-    "make_llm_env",
-    "make_pz_env",
-    "make_rollout_env_factory",
-    "make_single_env",
-]
+from agilerl.models.judge import ENV_VAR_NAME_PATTERN, JudgeSpec
+from agilerl.models.prompt_template import check_row_placeholders
+from agilerl.models.rewards import RewardSpec, check_reward_fields
+from agilerl.models.traces import TRACES_DATASET_FORMAT
+from agilerl.models.visibility import ADVANCED, ADVANCED_PLATFORM_WRITTEN
 
 
-def construct_custom_env_fn(
-    entrypoint: str,
-    path: str | None = None,
-    config: dict[str, Any] | None = None,
-    wrappers: Sequence[WrapperSpec] | None = None,
-    factory: str | None = None,
-) -> EnvFactory:
-    """Build a factory for a gym environment from an entrypoint."""
-
-    def default_make_env() -> gym.Env:
-        env = cast(
-            "gym.Env",
-            construct_entrypoint_env(entrypoint, config, factory=factory, path=path),
-        )
-        return apply_wrappers(env, wrappers, path=path)
-
-    return default_make_env
-
-
-def construct_custom_pz_env_fn(
-    entrypoint: str,
-    path: str | None = None,
-    config: dict[str, Any] | None = None,
-    wrappers: Sequence[WrapperSpec] | None = None,
-    factory: str | None = None,
-) -> Callable[[], ParallelEnv]:
-    """Build a factory for a PettingZoo environment from an entrypoint."""
-
-    def default_make_env() -> ParallelEnv:
-        env = cast(
-            "ParallelEnv",
-            construct_entrypoint_env(entrypoint, config, factory=factory, path=path),
-        )
-        return apply_wrappers(env, wrappers, path=path)
-
-    return default_make_env
-
-
-def _gym_env_config(spec: GymEnvSpec) -> dict[str, Any]:
-    return dict(spec.env_config) if isinstance(spec.env_config, dict) else {}
-
-
-def _gym_env_id(spec: GymEnvSpec) -> str:
-    return spec.entrypoint or spec.name
-
-
-def make_single_env(
-    spec: GymEnvSpec, *, multi_agent: bool = False
-) -> gym.Env | ParallelEnv:
-    """Create a single (non-vectorized) environment instance."""
-    if multi_agent:
-        return _make_single_pz_env(spec)
-    cfg = _gym_env_config(spec)
-    if spec.factory is not None:
-        env = cast(
-            "gym.Env",
-            construct_entrypoint_env(
-                _gym_env_id(spec), cfg, factory=spec.factory, path=spec.path
-            ),
-        )
-        return apply_wrappers(env, spec.env_wrappers, path=spec.path)
-    if spec.entrypoint is not None:
-        return construct_custom_env_fn(
-            spec.entrypoint,
-            spec.path,
-            cfg,
-            spec.env_wrappers,
-        )()
-    return gym.make(spec.name, **cfg)
-
-
-def _make_single_pz_env(spec: GymEnvSpec) -> ParallelEnv:
-    cfg = _gym_env_config(spec)
-    if spec.factory is not None:
-        env = cast(
-            "ParallelEnv",
-            construct_entrypoint_env(
-                _gym_env_id(spec), cfg, factory=spec.factory, path=spec.path
-            ),
-        )
-        return apply_wrappers(env, spec.env_wrappers, path=spec.path)
-    if spec.entrypoint is not None:
-        return construct_custom_pz_env_fn(
-            spec.entrypoint,
-            spec.path,
-            cfg,
-            spec.env_wrappers,
-        )()
-    module = import_module(spec.name)
-    if not hasattr(module, "parallel_env"):
-        msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
-        raise AttributeError(msg)
-    env = module.parallel_env(**cfg)
-    return apply_wrappers(env, spec.env_wrappers, path=spec.path)
-
-
-def make_gym_env(
-    spec: GymEnvSpec,
-    extra_wrappers: list[type] | None = None,
-    wrappers: Sequence[WrapperSpec] | None = None,
-) -> GymEnvType:
-    """Instantiate the vectorized gym environment."""
-    resolved = wrappers if wrappers is not None else spec.env_wrappers
-    cfg = _gym_env_config(spec)
-    if spec.factory is not None:
-        make_one: EnvFactory | None = construct_custom_env_fn(
-            _gym_env_id(spec),
-            spec.path,
-            cfg,
-            resolved,
-            factory=spec.factory,
-        )
-    elif spec.entrypoint is not None:
-        make_one = construct_custom_env_fn(
-            spec.entrypoint,
-            spec.path,
-            cfg,
-            resolved,
-        )
-    else:
-        make_one = None
-
-    return make_vect_envs(
-        env_name=spec.name,
-        num_envs=spec.num_envs,
-        make_env=make_one,
-        should_async_vector=(not spec.sync),
-        extra_wrappers=extra_wrappers,
-        **(cfg if make_one is None else {}),
-    )
-
-
-def make_pz_env(
-    spec: GymEnvSpec,
-    extra_wrappers: list[type] | None = None,
-    wrappers: Sequence[WrapperSpec] | None = None,
-) -> AsyncPettingZooVecEnv:
-    """Instantiate vectorized PettingZoo environments."""
-    resolved = wrappers if wrappers is not None else spec.env_wrappers
-    cfg = _gym_env_config(spec)
-    if spec.factory is not None:
-        make_one = construct_custom_pz_env_fn(
-            _gym_env_id(spec),
-            spec.path,
-            cfg,
-            resolved,
-            factory=spec.factory,
-        )
-    elif spec.entrypoint is not None:
-        make_one = construct_custom_pz_env_fn(
-            spec.entrypoint,
-            spec.path,
-            cfg,
-            resolved,
-        )
-    else:
-
-        def make_one() -> ParallelEnv:
-            module = import_module(spec.name)
-            if not hasattr(module, "parallel_env"):
-                msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
-                raise AttributeError(msg)
-            env = module.parallel_env(**cfg)
-            return apply_wrappers(env, resolved, path=spec.path)
-
-    return make_multi_agent_vect_envs(
-        env=make_one,
-        num_envs=spec.num_envs,
-        extra_wrappers=extra_wrappers,
-    )
-
-
-def _load_dataframe(value: str | Path) -> pd.DataFrame:
-    path = Path(value) if isinstance(value, str) else value
-    if path.suffix in {".parquet", ".pq"}:
-        return pd.read_parquet(path)
-    if path.suffix == ".csv":
-        return pd.read_csv(path)
-    if path.suffix in {".h5", ".hdf5"}:
-        return pd.read_hdf(path)
-    msg = f"Unsupported file type: {path.suffix}"
-    raise ValueError(msg)
-
-
-def make_bandit_env(
-    spec: BanditEnvSpec,
+def reject_legacy_llm_env_spelling(
     *,
-    features: pd.DataFrame | str | Path | None = None,
-    targets: pd.DataFrame | str | Path | None = None,
-) -> BanditEnvProtocol:
-    """Construct a bandit environment from a spec, or from in-memory tables."""
-    resolved_features = spec.features if features is None else features
-    resolved_targets = spec.targets if targets is None else targets
-    has_features = resolved_features is not None
-    has_targets = resolved_targets is not None
-    has_entrypoint = spec.entrypoint is not None
+    entrypoint: str | None,
+    factory: str | None,
+    env_config: dict[str, Any] | None,
+) -> None:
+    """Reject ``env_config.env_id`` and factory without an entrypoint.
 
-    if has_features != has_targets:
-        msg = "Both 'features' and 'targets' must be provided together."
-        raise ValueError(msg)
-    has_dataset = has_features and has_targets
-    if has_dataset and has_entrypoint:
-        msg = "Provide either (features + targets) or entrypoint, not both."
-        raise ValueError(msg)
-    if not has_dataset and not has_entrypoint:
+    :param entrypoint: The env to build.
+    :param factory: Optional ``module:attr`` callable that receives the entrypoint.
+    :param env_config: Constructor kwargs; must not contain ``env_id``.
+    """
+    if env_config is not None and "env_id" in env_config:
         msg = (
-            "BanditEnvSpec requires either (features + targets) for "
-            "dataset-based environments, or an entrypoint for custom environments."
+            "env_config cannot contain env_id. Put the env to build in "
+            "entrypoint and the callable that builds it in factory."
+        )
+        raise ValueError(msg)
+    if factory is not None and not entrypoint:
+        msg = (
+            "factory is set but entrypoint is missing. factory is the "
+            "callable; entrypoint is the env it builds."
         )
         raise ValueError(msg)
 
-    if spec.entrypoint is not None:
-        constructor = resolve_entrypoint_target(spec.entrypoint, path=spec.path)
-        if not callable(constructor):
-            msg = f"Entrypoint '{spec.entrypoint}' resolved to non-callable object."
-            raise TypeError(msg)
-        return constructor(
-            **(spec.env_config if isinstance(spec.env_config, dict) else {})
-        )
 
-    loaded_features = (
-        _load_dataframe(resolved_features)
-        if isinstance(resolved_features, str | Path)
-        else resolved_features
+def check_factoryless_entrypoint(entrypoint: str) -> None:
+    """Reject an entrypoint the trainer cannot import when no factory is set.
+
+    Without a factory the trainer imports ``module:attr`` and calls ``attr``,
+    so the part after the last ``:`` must be a Python identifier. A registry
+    id such as ``game:GuessTheNumber-v0-easy`` fails that and needs a factory.
+    A registry id whose name is an identifier passes, since telling it from an
+    import path would need the import.
+
+    :param entrypoint: The env to build.
+    """
+    if entrypoint.startswith(("http://", "https://")):
+        msg = f"entrypoint {entrypoint!r} is a URL; use env_url instead."
+        raise ValueError(msg)
+    module_ref, _, attr = entrypoint.rpartition(":")
+    if not module_ref or not attr.isidentifier():
+        msg = (
+            f"environment.entrypoint {entrypoint!r} is a registry id, not a "
+            "module:attr import path; set environment.factory: gem:make (or "
+            "another factory) to build it."
+        )
+        raise ValueError(msg)
+
+
+DNS_LABEL_PATTERN = r"^[a-z]([-a-z0-9]*[a-z0-9])?$"
+# Env Pods are I/O-bound; this fits beside Ray workers that request a node's CPUs.
+ENV_POD_DEFAULT_CPUS = 0.01
+# A multi-GB env image cold-pulls in minutes.
+ENV_POD_READY_TIMEOUT_S = 600.0
+DEFAULT_ADAPTIVE_TASK_SAMPLING = True
+# Arena fills a named built-in's source when the run starts.
+BUNDLED_ENVIRONMENTS = frozenset({"AgentWorldModel", "VisualWebArena"})
+
+
+class EnvContainerSpec(BaseModel):
+    """One container of an ``env_services`` Pod."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=40,
+        description="Container name, unique within its service.",
     )
-    loaded_targets = (
-        _load_dataframe(resolved_targets)
-        if isinstance(resolved_targets, str | Path)
-        else resolved_targets
+    image: str = Field(description="Container image.")
+    command: list[str] | None = Field(
+        default=None,
+        description="Replaces the image ENTRYPOINT. Required with memory_rootfs.",
     )
-    if loaded_features is None or loaded_targets is None:
-        msg = (
-            "Both 'features' and 'targets' are required for dataset-mode "
-            "bandit environments."
-        )
-        raise ValueError(msg)
-    return BanditEnv(features=loaded_features, targets=loaded_targets)
-
-
-def _require_datasets() -> tuple[type[Dataset], Callable[..., Any]]:
-    """Import HuggingFace ``datasets`` (provided by the ``agilerl[llm]`` extra)."""
-    try:
-        from datasets import Dataset, load_dataset
-    except ImportError as exc:
-        msg = (
-            "The 'datasets' package is required for LLM environments. "
-            "Install with: pip install 'agilerl[llm]'"
-        )
-        raise ImportError(msg) from exc
-    return Dataset, load_dataset
-
-
-def _split_seed(seed: int | None) -> int:
-    """Seed for the shuffle and train/test split, defaulting when unset.
-
-    Every rank loads the dataset for itself and the rollout task assigner hands
-    out rows *by index*, so an unseeded split would leave ranks disagreeing
-    about which row is row ``n`` — their shards would overlap instead of
-    partitioning, and each would hold out a different test set.
-    """
-    return 42 if seed is None else seed
-
-
-def _dataset_train_test_split(spec: LLMEnvSpec) -> float:
-    """Return the train fraction; dataset loaders cannot split without one."""
-    split = spec.train_test_split
-    if split is None:
-        msg = "train_test_split is required to split a dataset"
-        raise ValueError(msg)
-    return split
-
-
-def _rollout_strict_chat_template_boundary(spec: LLMEnvSpec) -> bool:
-    """Treat an unset boundary as strict so GEM rollouts do not fall back to ChatML."""
-    boundary = spec.strict_chat_template_boundary
-    return True if boundary is None else boundary
-
-
-def _load_llm_dataset(
-    spec: LLMEnvSpec, *, seed: int | None = None
-) -> tuple[Dataset, Dataset]:
-    """Load the spec's dataset and split it into train and test.
-
-    A directory with a train split and at least one other split uses every
-    train row for training and every other split's rows for eval. A flat
-    parquet or JSONL source, a train-only directory, or split directories
-    with no train directory are divided with ``train_test_split``.
-    """
-    dataset = spec.dataset
-    if dataset is None:
-        msg = "dataset is required to load rollout/preference/sft data"
-        raise ValueError(msg)
-    if is_local_parquet_dataset(dataset):
-        separated = load_train_eval_from_splits(dataset, column_rename=spec.columns)
-        loader = load_parquet_dataset
-    elif is_local_jsonl_dataset(dataset):
-        separated = load_jsonl_train_eval_from_splits(
-            dataset, column_rename=spec.columns
-        )
-        loader = load_jsonl_dataset
-    else:
-        return _load_dataset_hf(spec, dataset, seed=seed)
-    if separated is not None:
-        return separated
-    split = _dataset_train_test_split(spec)
-    ds = loader(dataset, column_rename=spec.columns)
-    split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
-    return split_ds["train"], split_ds["test"]
-
-
-def _load_dataset_hf(
-    spec: LLMEnvSpec, dataset: str, *, seed: int | None = None
-) -> tuple[Dataset, Dataset]:
-    split = _dataset_train_test_split(spec)
-    _, load_dataset = _require_datasets()
-    ds = load_dataset(dataset, split="train").shuffle(seed=_split_seed(seed))
-    if spec.columns:
-        ds = ds.rename_columns(spec.columns)
-    split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
-    return split_ds["train"], split_ds["test"]
-
-
-def make_llm_env(
-    spec: LLMEnvSpec,
-    tokenizer: PreTrainedTokenizerBase,
-    *,
-    data_batch_size_per_gpu: int = 8,
-    max_context_length: int | None = None,
-    seed: int | None = None,
-    rank: int = 0,
-    world_size: int = 1,
-) -> DatasetEnv:
-    """Build the teacher-forced dataset environment for an LLM spec.
-
-    Rollout envs are built per-trajectory instead: use
-    :func:`make_rollout_env_factory`.
-
-    :param spec: The env spec, with ``env_type="dataset"``.
-    :type spec: LLMEnvSpec
-    :param tokenizer: The tokenizer.
-    :type tokenizer: PreTrainedTokenizerBase
-    :param data_batch_size_per_gpu: Rows each rank draws per step.
-    :type data_batch_size_per_gpu: int
-    :param max_context_length: Token budget a row is truncated to.
-    :type max_context_length: int | None
-    :param seed: Seed for the dataset split and the env's row order.
-    :type seed: int | None
-    :param rank: This process's data-parallel shard index.
-    :type rank: int
-    :param world_size: Number of data-parallel shards.
-    :type world_size: int
-    :return: The dataset environment.
-    :rtype: DatasetEnv
-    """
-    if spec.env_type != LLMEnvType.DATASET:
-        msg = (
-            "Rollout environments cannot be constructed with make_llm_env(). "
-            "Use make_rollout_env_factory() instead."
-        )
-        raise TypeError(msg)
-    if spec.objective is None:
-        msg = "objective is required for dataset environments."
-        raise ValueError(msg)
-    response_column = spec.response_column
-    if response_column is None:
-        msg = "response_column is required for dataset environments."
-        raise ValueError(msg)
-
-    train_ds, test_ds = _load_llm_dataset(spec, seed=seed)
-    return DatasetEnv(
-        train_dataset=train_ds,
-        test_dataset=test_ds,
-        tokenizer=tokenizer,
-        objective=spec.objective,
-        response_column=response_column,
-        chat_template_kwargs=spec.chat_template_kwargs,
-        data_batch_size_per_gpu=data_batch_size_per_gpu,
-        max_context_length=max_context_length,
-        seed=_split_seed(seed),
-        rank=rank,
-        world_size=world_size,
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Container environment, in order. A value may reference an earlier "
+            "variable or any service's url_env as $(NAME)."
+        ),
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description=(
+            "Port this container serves the service on. Exactly one container "
+            "of a service sets it."
+        ),
+    )
+    setup_command: list[str] | None = Field(
+        default=None,
+        description=(
+            "Runs once the container starts; the service is not ready until it "
+            "exits 0, and a failure restarts the container. Output goes to the "
+            "container log."
+        ),
+    )
+    readiness_command: list[str] | None = Field(
+        default=None,
+        description="Exec readiness probe. Unset probes TCP on port, if set.",
+    )
+    readiness_path: str | None = Field(
+        default=None,
+        description="HTTP GET readiness probe on port.",
+    )
+    cpu: str = Field(
+        default="10m",
+        description="CPU request, as a Kubernetes quantity. No CPU limit is set.",
+    )
+    memory: str | None = Field(default=None, description="Memory request.")
+    memory_limit: str | None = Field(default=None, description="Memory limit.")
+    ephemeral_storage: str | None = Field(
+        default=None,
+        description=(
+            "Ephemeral-storage request, so the Pod lands on a node with room "
+            "for a large image."
+        ),
+    )
+    memory_rootfs: str | None = Field(
+        default=None,
+        description=(
+            "Size of a memory-backed volume the image is unpacked into, for an "
+            "image larger than a node's disk. The container then runs command "
+            "under chroot in a privileged container: the image's ENTRYPOINT, "
+            "ENV and WORKDIR do not apply, so set command and env. The unpack "
+            "uses the Pod's image pull secrets."
+        ),
     )
 
-
-def make_rollout_env_factory(
-    spec: LLMEnvSpec,
-    tokenizer: PreTrainedTokenizerBase,
-    *,
-    max_model_len: int | None = None,
-    max_output_tokens: int | None = None,
-    seed: int | None = None,
-) -> tuple[Callable[[], RolloutHarness], int]:
-    """Build a factory that creates fresh :class:`RolloutHarness` instances.
-
-    Each call to the returned factory creates an independent env, so concurrent
-    trajectories never share state. Which of the three builders below runs is
-    decided by the one source the spec names — dataset rows, an ``env_url``, or
-    an ``entrypoint``. ``env_image`` needs an orchestrator that can place Pods,
-    which this process is not.
-
-    The resolved turn budget rides along because only the builder can know it:
-    an entrypoint env that does not declare ``max_turns`` in the manifest is
-    probed for one.
-
-    :param spec: The env spec, with ``env_type="rollout"``.
-    :type spec: LLMEnvSpec
-    :param tokenizer: The tokenizer (shared across all instances).
-    :type tokenizer: PreTrainedTokenizerBase
-    :param max_model_len: Maximum model context length for prompt truncation.
-    :type max_model_len: int | None
-    :param max_output_tokens: Maximum newly generated tokens per turn.
-    :type max_output_tokens: int | None
-    :param seed: Seed for a dataset-backed rollout's train/test split.
-    :type seed: int | None
-    :returns: A zero-argument callable that creates a ``RolloutHarness``, and
-        the rollout's turn budget.
-    :rtype: tuple[Callable[[], RolloutHarness], int]
-    """
-    if spec.env_type != LLMEnvType.ROLLOUT:
-        msg = (
-            "Dataset environments cannot be constructed with "
-            "make_rollout_env_factory(). Use make_llm_env() instead."
-        )
-        raise TypeError(msg)
-    if spec.env_image is not None:
-        msg = (
-            "env_image runs the env as its own Pod, which needs the Ray "
-            "runtime; this process can only build dataset, entrypoint, or "
-            "env_url rollouts."
-        )
-        raise ValueError(msg)
-    if spec.segment_prompt_tokens is not None or spec.segment_max_images is not None:
-        msg = (
-            "segment_prompt_tokens and segment_max_images need the async per-episode rollout path "
-            "(e.g. agilerl-ray's rollout engine); framework training collects "
-            "rollouts in sync batches, which cannot hold restarted episodes."
-        )
-        raise ValueError(msg)
-
-    # max_output_tokens >= max_model_len zeroes the prompt budget: every episode
-    # truncates at reset and training silently never advances. Fail at setup.
-    if max_model_len is not None:
-        validate_llm_context_lengths(max_model_len, max_output_tokens)
-
-    harness_kwargs: dict[str, Any] = {
-        "max_model_len": max_model_len,
-        "chat_template_kwargs": dict(spec.chat_template_kwargs),
-        "include_reasoning": spec.sends_reasoning,
-    }
-    if spec.min_reward is not None:
-        harness_kwargs["min_reward"] = spec.min_reward
-    model_id = tokenizer.name_or_path
-    if isinstance(model_id, str) and model_id:
-        # A tokenizer-only folder or an offline custom id has no config.json;
-        # the harness then detects the format from the vocab.
-        try:
-            chat_format = family_runtime(model_id).chat_format
-        except OSError:
-            chat_format = None
-        if chat_format is not None:
-            harness_kwargs["chat_format"] = chat_format
-    if spec.dataset_backed_rollout:
-        return _make_dataset_rollout_factory(spec, tokenizer, harness_kwargs, seed=seed)
-    if spec.env_url is not None:
-        return _make_url_rollout_factory(spec, tokenizer, harness_kwargs)
-    return _make_entrypoint_rollout_factory(spec, tokenizer, harness_kwargs)
-
-
-def _rubric_factory(spec: LLMEnvSpec) -> Callable[[], Rubric] | None:
-    """One rubric per harness from ``rubric_file_path``; ``None`` when the spec names none.
-
-    The rubric file is read on the first call, so building env factories stays
-    free of I/O. Each harness gets its own rubric: the collector steps its slots
-    on concurrent threads, and a rubric carries scoring state. Every rubric
-    shares the process's one client for ``spec.judge``. A group rubric alone gets
-    ``EnvReward``, which keeps the env's reward and the transcript it reads.
-    A built-in ``spec.reward`` gets its own rubric.
-
-    :raises ValueError: ``spec.reward`` is ``snowflake_function``, which only
-        the Snowflake app runs.
-    """
-    if isinstance(spec.reward, SnowflakeFunctionReward):
-        msg = (
-            "reward type snowflake_function runs only in the AgileRL Snowflake "
-            "app, which calls the function bound to its reward_function reference."
-        )
-        raise ValueError(msg)
-    if spec.reward is not None:
-        from agilerl.llm_envs.builtin_rewards import (  # optional extra: llm
-            BuiltinRewardRubric,
-        )
-
-        return partial(BuiltinRewardRubric, spec.reward)
-    if spec.rubric_file_path is None:
-        return None
-    if spec.rubric_name is None:
-        if spec.group_rubric_name is None:
-            msg = "rubric_name is required with rubric_file_path"
-            raise ValueError(msg)
-        from agilerl.llm_envs.rubrics import EnvReward  # optional extra: llm
-
-        return EnvReward
-    load = cache(
-        partial(
-            get_rubric_factory,
-            rubric_name=spec.rubric_name,
-            file_path=spec.rubric_file_path,
-            judge_spec=spec.judge,
-            judge_optional=spec.group_rubric_name is not None,
-        )
-    )
-    return lambda: load()()
-
-
-def group_rubric_from_spec(spec: LLMEnvSpec) -> GroupRubric | None:
-    """The spec's group rubric, built with the process's judge client.
-
-    :param spec: The rollout env spec.
-    :return: The group rubric; ``None`` when the spec names none.
-    """
-    if spec.group_rubric_name is None or spec.rubric_file_path is None:
-        return None
-    return get_group_rubric(spec.group_rubric_name, spec.rubric_file_path, spec.judge)
-
-
-def _http_timeout_s(spec: LLMEnvSpec) -> float | None:
-    """Per-message ``env_url`` timeout: manifest value, 300 s default, ``0`` unbounds."""
-    if spec.request_timeout_s is None:
-        return 300.0
-    return spec.request_timeout_s or None
-
-
-def _make_dataset_rollout_factory(
-    spec: LLMEnvSpec,
-    tokenizer: PreTrainedTokenizerBase,
-    harness_kwargs: dict[str, Any],
-    *,
-    seed: int | None,
-) -> tuple[Callable[[], RolloutHarness], int]:
-    """Factory serving labelled dataset rows scored by a rubric, in-process."""
-    chat_template_kwargs = harness_kwargs["chat_template_kwargs"]
-
-    # The rubric file and the dataset are read once, on the first env
-    # build, so constructing the factory stays free of I/O.
-    @cache
-    def _resolve() -> tuple[Any, Any, Callable[[Mapping[str, Any]], str], Any]:
-        make_rubric = _rubric_factory(spec)
-        if make_rubric is None or spec.prompt_template is None:
+    @model_validator(mode="after")
+    def _check_container(self) -> Self:
+        if self.readiness_command is not None and self.readiness_path is not None:
             msg = (
-                "reward or rubric_file_path, and prompt_template, are required "
-                "for dataset-backed rollout environments"
+                f"Container {self.name!r} sets readiness_command and "
+                "readiness_path; a container has one readiness probe."
             )
             raise ValueError(msg)
-
-        conversation = make_conversation_template(prompt_template=spec.prompt_template)
-
-        def _prompt_builder(row: Mapping[str, Any]) -> str:
-            """Render the manifest's chat template for one dataset row."""
-            return render_chat_template(
-                conversation,
-                tokenizer,
-                chat_template_kwargs=chat_template_kwargs,
-                **row,
+        if self.readiness_path is not None and self.port is None:
+            msg = f"Container {self.name!r}: readiness_path probes port; set port."
+            raise ValueError(msg)
+        if self.memory_rootfs is not None and self.command is None:
+            msg = (
+                f"Container {self.name!r}: memory_rootfs runs the unpacked image "
+                "without its ENTRYPOINT; set command."
             )
-
-        train_ds, test_ds = _load_llm_dataset(spec, seed=seed)
-        return train_ds, test_ds, _prompt_builder, make_rubric
-
-    def _dataset_factory() -> RolloutHarness:
-        train_ds, test_ds, prompt_builder, make_rubric = _resolve()
-        return RolloutHarness.from_dataset(
-            train_ds,
-            make_rubric(),
-            tokenizer,
-            test_dataset=test_ds,
-            prompt_builder=prompt_builder,
-            # ``prompt_builder`` already rendered the chat template.
-            apply_chat_template=False,
-            max_model_len=harness_kwargs["max_model_len"],
-            chat_format=harness_kwargs.get("chat_format"),
-            include_reasoning=harness_kwargs["include_reasoning"],
-        )
-
-    # A dataset-backed rollout is single-turn; the contract pins max_turns to 1.
-    return _dataset_factory, int(spec.max_turns or 1)
+            raise ValueError(msg)
+        return self
 
 
-def _make_url_rollout_factory(
-    spec: LLMEnvSpec,
-    tokenizer: PreTrainedTokenizerBase,
-    harness_kwargs: dict[str, Any],
-) -> tuple[Callable[[], RolloutHarness], int]:
-    """Factory dialling an env that is already running at ``env_url``.
+class EnvHostVolume(BaseModel):
+    """A node directory mounted read-only into every container of a service."""
 
-    A list of URLs is a set of interchangeable replicas; successive factory
-    calls deal them round-robin, one per rollout slot.
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=40,
+        description="Volume name, unique within its service.",
+    )
+    host_path: str = Field(
+        description=(
+            "Directory on the node under /var/cache/agilerl-, where the platform "
+            "mounts the data it provides. The Pod does not start on a node "
+            "without it."
+        ),
+    )
+    mount_path: str = Field(description="Where the containers see the directory.")
+
+    @model_validator(mode="after")
+    def _check_paths(self) -> Self:
+        paths = {"host_path": self.host_path, "mount_path": self.mount_path}
+        for field, path in paths.items():
+            normal = PurePosixPath(path)
+            if (
+                not normal.is_absolute()
+                or path == "/"
+                or str(normal) != path
+                or ".." in normal.parts
+            ):
+                msg = (
+                    f"Host volume {self.name!r}: {field} must be an absolute path "
+                    f"without '..', a trailing slash or '/' itself; got {path!r}."
+                )
+                raise ValueError(msg)
+        node_data_root = "/var/cache/agilerl-"
+        if not self.host_path.startswith(node_data_root):
+            msg = (
+                f"Host volume {self.name!r}: host_path must be under "
+                f"{node_data_root}*; got {self.host_path!r}."
+            )
+            raise ValueError(msg)
+        # Every env container already mounts a memory volume at /dev/shm.
+        shm = PurePosixPath("/dev/shm")
+        mount = PurePosixPath(self.mount_path)
+        if mount == shm or shm in mount.parents:
+            msg = (
+                f"Host volume {self.name!r}: mount_path {self.mount_path!r} is in "
+                "/dev/shm, the containers' shared-memory mount; pick another path."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class EnvServiceSpec(BaseModel):
+    """A backing service the env sessions share: one Pod behind a stable DNS name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=30,
+        description="Service name, unique within the environment.",
+    )
+    port: int = Field(
+        ge=1,
+        le=65535,
+        description="Port clients dial; the service URL is http://<host>:<port>.",
+    )
+    url_env: str = Field(
+        pattern=ENV_VAR_NAME_PATTERN,
+        description=(
+            "Environment variable carrying the service URL into every env "
+            "session and service container."
+        ),
+    )
+    containers: list[EnvContainerSpec] = Field(
+        min_length=1,
+        description="Containers of the service Pod; they share its network.",
+    )
+    ready_timeout_s: float = Field(
+        default=600.0,
+        gt=0.0,
+        description="How long the service may take to become ready.",
+    )
+    host_volumes: list[EnvHostVolume] = Field(
+        default_factory=list,
+        description=(
+            "Node directories mounted read-only into every container, for data "
+            "the node provides (a disk the cluster attaches) rather than the image."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_service(self) -> Self:
+        names = [container.name for container in self.containers]
+        if len(set(names)) != len(names):
+            msg = f"Service {self.name!r} repeats a container name: {names}."
+            raise ValueError(msg)
+        volume_names = [volume.name for volume in self.host_volumes]
+        if len(set(volume_names)) != len(volume_names):
+            msg = f"Service {self.name!r} repeats a host volume name: {volume_names}."
+            raise ValueError(msg)
+        mount_paths = [volume.mount_path for volume in self.host_volumes]
+        for path in mount_paths:
+            if mount_paths.count(path) > 1:
+                msg = (
+                    f"Service {self.name!r} mounts more than one host volume at {path}."
+                )
+                raise ValueError(msg)
+        rootfs = [c.name for c in self.containers if c.memory_rootfs is not None]
+        if self.host_volumes and rootfs:
+            msg = (
+                f"Service {self.name!r}: host_volumes are not visible under "
+                f"memory_rootfs, which containers {rootfs} set."
+            )
+            raise ValueError(msg)
+        serving = [c.name for c in self.containers if c.port is not None]
+        if len(serving) != 1:
+            msg = (
+                f"Service {self.name!r} needs exactly one container with a port "
+                f"to serve on; got {serving or 'none'}."
+            )
+            raise ValueError(msg)
+        return self
+
+
+def check_restart_keep_turns(
+    restart_keep_turns: int,
+    segment_prompt_tokens: int | None,
+    segment_max_images: int | None,
+    restart_older_obs_field: str,
+    restart_older_images: bool,
+) -> None:
+    """Reject kept turns without a restart limit, or with no room for the next turn's image.
+
+    Also reject settings for older kept turns when fewer than two turns are kept.
+
+    :param restart_keep_turns: Turns a restarted context repeats word for word.
+    :param segment_prompt_tokens: Token count that restarts the context.
+    :param segment_max_images: Image count that restarts the context.
+    :param restart_older_obs_field: Field shown for kept turns before the latest.
+    :param restart_older_images: Whether kept turns before the latest keep images.
     """
-    from agilerl.llm_envs.openenv import RemoteEnvClient  # optional extra: llm
-
-    if spec.env_url is None:
-        msg = "env_url is required to dial a remote rollout env"
-        raise RuntimeError(msg)
-    urls = [spec.env_url] if isinstance(spec.env_url, str) else list(spec.env_url)
-    if not urls:
-        msg = "`env_url` is an empty list; give at least one hosted env URL."
+    if (restart_older_obs_field or not restart_older_images) and restart_keep_turns < 2:
+        msg = (
+            "restart_older_obs_field and restart_older_images apply to kept "
+            "turns before the latest; set restart_keep_turns to 2 or more."
+        )
         raise ValueError(msg)
-    next_url = count()
-    # A remote env's turn budget can't be probed; validation requires max_turns.
-    url_max_turns = spec.max_turns or 1
-    answer_tool = spec.answer_tool
-    action_field = spec.action_field
-    timeout_s = _http_timeout_s(spec)
-    observation_field = spec.observation_field
-    observation_processor = _resolved_observation_processor(spec)
-    action_processor = _resolved_action_processor(spec)
-    strict_boundary = _rollout_strict_chat_template_boundary(spec)
-    remote_client_kwargs: dict[str, Any] = {
-        "answer_tool": answer_tool,
-        "timeout_s": timeout_s,
-    }
-    if isinstance(action_field, str):
-        remote_client_kwargs["action_field"] = action_field
-    make_rubric = _rubric_factory(spec)
-
-    def _url_factory() -> RolloutHarness:
-        # The server's max_concurrent_envs must cover batch*group + the eval env.
-        return RolloutHarness(
-            RemoteEnvClient(
-                urls[next(next_url) % len(urls)],
-                **remote_client_kwargs,
-            ),
-            tokenizer,
-            max_turns=url_max_turns,
-            observation_field=observation_field,
-            observation_processor=observation_processor,
-            action_processor=action_processor,
-            strict_chat_template_boundary=strict_boundary,
-            apply_chat_template=True,
-            screenshot_field=spec.screenshot_field,
-            goal_images_field=spec.goal_images_field,
-            rubric=None if make_rubric is None else make_rubric(),
-            **harness_kwargs,
+    if not restart_keep_turns:
+        return
+    if segment_prompt_tokens is None and segment_max_images is None:
+        msg = (
+            "restart_keep_turns applies at a context restart; set "
+            "segment_prompt_tokens or segment_max_images."
         )
-
-    return _url_factory, url_max_turns
-
-
-def _make_entrypoint_rollout_factory(
-    spec: LLMEnvSpec,
-    tokenizer: PreTrainedTokenizerBase,
-    harness_kwargs: dict[str, Any],
-) -> tuple[Callable[[], RolloutHarness], int]:
-    """Factory importing ``entrypoint`` and driving the env it builds in-process.
-
-    An unset ``max_turns`` is probed off one throwaway env.
-    """
-    if spec.entrypoint is None:
-        msg = "An entrypoint is required for env-backed rollout environments."
         raise ValueError(msg)
-    entrypoint = spec.entrypoint
-    to_import = spec.factory or entrypoint
-    if spec.env_packages is not None:
-        ensure_importable(to_import, spec.env_packages)
-    cfg = dict(spec.env_config or {})
-    # Constructors like ``gem.make`` reject a system_prompt kwarg; it is set
-    # on the built env as an attribute instead.
-    system_prompt = cfg.pop("system_prompt", None)
-
-    def _make_raw_env() -> TextEnvProtocol:
-        env = cast(
-            "TextEnvProtocol",
-            construct_entrypoint_env(entrypoint, cfg, factory=spec.factory),
+    if segment_max_images is not None and restart_keep_turns >= segment_max_images:
+        msg = (
+            f"restart_keep_turns ({restart_keep_turns}) must be below "
+            f"segment_max_images ({segment_max_images}): a restarted prompt "
+            "keeps at most segment_max_images - 1 images so the next turn's "
+            "image fits."
         )
-        if system_prompt is not None:
-            env.system_prompt = system_prompt
-        return env
-
-    max_turns = spec.max_turns
-    if max_turns is None:
-        probe = _make_raw_env()
-        max_turns = int(getattr(probe, "max_turns", 1) or 1)
-        closer = getattr(probe, "close", None)
-        if callable(closer):
-            closer()
-
-    action_field = spec.action_field
-    observation_field = spec.observation_field
-    observation_processor = _resolved_observation_processor(spec)
-    action_processor = _resolved_action_processor(spec)
-    strict_boundary = _rollout_strict_chat_template_boundary(spec)
-    local_harness_kwargs: dict[str, Any] = {
-        "observation_field": observation_field,
-        "observation_processor": observation_processor,
-        "action_processor": action_processor,
-        "apply_chat_template": True,
-        "strict_chat_template_boundary": strict_boundary,
-        **harness_kwargs,
-    }
-    if isinstance(action_field, str):
-        local_harness_kwargs["action_field"] = action_field
-    if spec.screenshot_field is not None:
-        local_harness_kwargs["screenshot_field"] = spec.screenshot_field
-    if spec.goal_images_field is not None:
-        local_harness_kwargs["goal_images_field"] = spec.goal_images_field
-    if spec.answer_tool is not None:
-        local_harness_kwargs["answer_tool"] = spec.answer_tool
-    make_rubric = _rubric_factory(spec)
-
-    def _env_factory() -> RolloutHarness:
-        return RolloutHarness.local(
-            _make_raw_env(),
-            tokenizer,
-            max_turns=max_turns,
-            rubric=None if make_rubric is None else make_rubric(),
-            **local_harness_kwargs,
-        )
-
-    return _env_factory, max_turns
+        raise ValueError(msg)
 
 
-def _resolved_observation_processor(spec: LLMEnvSpec) -> Callable[[Any], str] | None:
-    """Import ``spec.observation_processor``, or ``None`` when the spec names none.
-
-    :raises TypeError: If the dotted path resolves to something not callable.
-    """
-    return _callable_entrypoint(spec.observation_processor, "observation_processor")
-
-
-def _resolved_action_processor(spec: LLMEnvSpec) -> Callable[[str], str] | None:
-    """Import ``spec.action_processor``, or ``None`` when the spec names none.
-
-    :raises TypeError: If the dotted path resolves to something not callable.
-    """
-    return _callable_entrypoint(spec.action_processor, "action_processor")
-
-
-def _callable_entrypoint(
-    entrypoint: str | None, field: str
-) -> Callable[..., Any] | None:
-    """Import ``entrypoint``, or ``None`` when the spec names none.
-
-    :param entrypoint: ``module:fn`` or ``path.py:fn``.
-    :param field: Spec field the path came from, named in the error.
-    :raises TypeError: If the path resolves to something not callable.
-    """
-    if entrypoint is None:
-        return None
-    resolved = resolve_entrypoint_target(entrypoint)
-    if not callable(resolved):
-        msg = f"{field} '{entrypoint}' resolved to a non-callable object."
-        raise TypeError(msg)
-    return resolved
-
-
-def make_env(
-    spec: EnvSpec,
+def check_env_pod_fields(
     *,
-    multi_agent: bool = False,
-    extra_wrappers: list[type] | None = None,
-    tokenizer: PreTrainedTokenizerBase | None = None,
-    features: pd.DataFrame | str | Path | None = None,
-    targets: pd.DataFrame | str | Path | None = None,
-    seed: int | None = None,
-) -> GymEnvType | AsyncPettingZooVecEnv | BanditEnvProtocol | DatasetEnv:
-    """Build the live environment described by *spec*."""
-    if isinstance(spec, LLMEnvSpec):
-        if tokenizer is None:
-            msg = "LLM environment construction requires a tokenizer."
-            raise TypeError(msg)
-        return make_llm_env(spec, tokenizer, seed=seed)
-    if isinstance(spec, BanditEnvSpec):
-        return make_bandit_env(spec, features=features, targets=targets)
-    if not isinstance(spec, GymEnvSpec):
-        msg = f"Cannot build a gym environment from {type(spec).__name__}"
-        raise TypeError(msg)
-    if multi_agent:
-        return make_pz_env(spec, extra_wrappers=extra_wrappers)
-    return make_gym_env(spec, extra_wrappers=extra_wrappers)
+    env_image: str | None,
+    env_vars: dict[str, str],
+    env_sessions_per_host: int | None,
+    env_session_ports: dict[str, int],
+    env_host_memory_limit_bytes: int | None,
+    env_host_ready_timeout_s: float | None,
+    env_services: list[EnvServiceSpec],
+) -> None:
+    """Reject ``env_image`` Pod settings without an image, unbindable sessions, and colliding env names.
+
+    :param env_image: The env image, or ``None``.
+    :param env_vars: Container environment of each session.
+    :param env_sessions_per_host: Sessions per Pod.
+    :param env_session_ports: Per-session port variables.
+    :param env_host_memory_limit_bytes: Memory limit per Pod.
+    :param env_host_ready_timeout_s: Readiness timeout of each session Pod.
+    :param env_services: Backing services.
+    """
+    if env_image is None:
+        if env_vars:
+            msg = "env_vars set container environment on an env_image Pod."
+            raise ValueError(msg)
+        if (
+            env_sessions_per_host is not None
+            or env_session_ports
+            or env_host_memory_limit_bytes is not None
+            or env_host_ready_timeout_s is not None
+            or env_services
+        ):
+            msg = (
+                "env_sessions_per_host, env_session_ports, "
+                "env_host_memory_limit_bytes, env_host_ready_timeout_s and "
+                "env_services configure env_image Pods; set env_image."
+            )
+            raise ValueError(msg)
+        return
+    # Sessions share the Pod's network; only env_session_ports tells each its port.
+    if (env_sessions_per_host or 1) > 1 and not env_session_ports:
+        msg = (
+            f"env_sessions_per_host={env_sessions_per_host} needs "
+            "env_session_ports: sessions share one Pod network, so each "
+            "container must be told its own port (e.g. {PORT: 8000} gives "
+            "session s PORT=8000+s)."
+        )
+        raise ValueError(msg)
+    service_names = [service.name for service in env_services]
+    if len(set(service_names)) != len(service_names):
+        msg = f"env_services repeats a service name: {service_names}."
+        raise ValueError(msg)
+    names = [service.url_env for service in env_services]
+    names += list(env_vars) + list(env_session_ports)
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        msg = (
+            f"{repeated} set more than once across env_vars, env_session_ports "
+            "and env_services url_env."
+        )
+        raise ValueError(msg)
+
+
+class LLMEnvType(str, Enum):
+    """Type of LLM environment.
+
+    ``ROLLOUT`` covers every generative regime: single-turn reasoning is simply
+    ``max_turns=1``. ``DATASET`` covers the teacher-forced regimes, selected by
+    :attr:`LLMEnvSpec.objective`.
+    """
+
+    ROLLOUT = "rollout"
+    DATASET = "dataset"
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
+class EnvSpecBase(BaseModel):
+    """Fields every environment section carries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    num_envs: int = Field(
+        default=1, ge=1, description="Environment copies stepped in parallel."
+    )
+    version: str | int | None = Field(
+        default=None,
+        description=(
+            "Version of the environment implementation. For a custom "
+            "environment this selects which uploaded archive the run uses; "
+            "unset takes the latest."
+        ),
+    )
+
+
+class LLMEnvSpec(EnvSpecBase):
+    """The dataset or interactive environment an LLM algorithm fine-tunes against.
+
+    A ``rollout`` env is generative and comes from exactly one source:
+
+    * dataset rows plus a rubric — a single-turn env over labelled rows;
+    * ``entrypoint`` — a callable returning a text env, run where training runs
+      (or on env hosts under the hosting fields, which need the Ray runtime);
+    * ``env_url`` — an OpenEnv service someone else hosts;
+    * ``env_image`` — a prebuilt env image the Ray runtime runs as its own Pod.
+
+    A built-in (:data:`BUNDLED_ENVIRONMENTS`) may name no source.
+
+    A ``dataset`` env is teacher-forced over the rows; ``objective`` picks the
+    loss.
+    """
+
+    num_envs: int | None = Field(
+        default=None,
+        ge=1,
+        description="Environment copies stepped in parallel.",
+    )
+    env_type: Literal["rollout", "dataset"] = Field(
+        description=(
+            "Which LLM regime drives the run: a generative environment the "
+            "model acts in (rollout), or teacher-forced learning over dataset "
+            "rows (dataset)."
+        )
+    )
+    objective: Literal["preference", "sft"] | None = Field(
+        default=None,
+        description=(
+            "Teacher-forced loss, required with env_type dataset: sft, or "
+            "preference (DPO) over chosen/rejected pairs."
+        ),
+    )
+
+    dataset: str | None = Field(
+        default=None,
+        description="HuggingFace dataset id, or a Parquet or JSONL path, for the dataset sources.",
+    )
+    dataset_format: Literal["traces"] | None = Field(
+        default=None,
+        description=(
+            "traces: rows are recorded session segments, OpenAI chat messages "
+            "in a messages column with optional tools. A rollout renders each "
+            "target assistant turn's history as a single-turn prompt and "
+            "needs no prompt_template; with no rubric_file_path it scores 0, "
+            "which OPD trains on as pure distillation. objective sft trains "
+            "every target assistant turn. Takes no columns mapping."
+        ),
+    )
+    dataset_path: str | None = Field(
+        default=None, description="Object-store path to a user-supplied dataset."
+    )
+    hf_dataset_id: str | None = Field(
+        default=None,
+        description="HuggingFace dataset id, when set apart from `dataset`.",
+    )
+    columns: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Maps your dataset's column names onto the ones the run expects "
+            "(question, answer; prompt, target, or multi-turn messages and "
+            "tools for SFT). Unset assumes they already match."
+        ),
+    )
+    response_column: str | None = Field(
+        default=None,
+        description="Column holding the target response. SFT only.",
+    )
+    prompt_template: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Conversation template, keyed 'role_index' (system_0, user_1, ...) "
+            "so ordering is explicit. Values may use {question} and {answer}, "
+            "filled from the mapped columns; other braces are literal. "
+            "Required for a rollout over dataset rows, except traces."
+        ),
+    )
+    rubric_file_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
+        description=(
+            "Path to the Python module holding the rubric (or reward function) "
+            "that scores every turn. Required for a rollout over dataset rows, "
+            "except under OPD, where unset scores every turn 0; on an env, its "
+            "score replaces the env's reward, which it can "
+            "read as an input."
+        ),
+    )
+    rubric_name: str | None = Field(
+        default=None,
+        min_length=1,
+        validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
+        description="Name of the rubric (or reward callable) to import from that module.",
+    )
+    group_rubric_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Name of a GroupRubric in the rubric_file_path module. It scores each "
+            "finished group of completions together, and each score is added to "
+            "that completion's final-turn reward. Leave rubric_name unset to keep "
+            "the env's own turn reward. Group replay is off with a group rubric."
+        ),
+    )
+    judge: JudgeSpec | None = Field(
+        default=None,
+        description=(
+            "LLM judge handed to the rubric: a Rubric class whose __init__ takes "
+            "judge is built with it. Needs rubric_file_path."
+        ),
+    )
+    reward: RewardSpec | None = Field(
+        default=None,
+        description="Built-in reward scoring each turn, in place of rubric_file_path.",
+    )
+    max_reward: float | None = Field(
+        default=None,
+        description="Reward at which a rollout counts as solved, used for the success metric.",
+    )
+    min_reward: float | None = Field(
+        default=None,
+        description=(
+            "Lowest reward the env gives. Scores a turn whose tool calls are "
+            "malformed or missing, which never reaches the env. Unset scores 0."
+        ),
+    )
+    include_reasoning: bool | None = Field(
+        default=None,
+        description=(
+            "Send the env each turn's reasoning with its markers, not only "
+            "the text after the reasoning ends; a Rubric class reads that text "
+            "as TurnAction.message. Unset sends it over dataset rows and not "
+            "to an env that runs the action. A reward function gets the whole "
+            "turn as completion either way."
+        ),
+    )
+    train_test_split: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of the dataset used for training; the rest is held out for evaluation.",
+    )
+
+    entrypoint: str | None = Field(
+        default=None,
+        description=(
+            "The env to build: a registry id, or `module:Class` (or "
+            "`module:attr` constructor) for a custom upload."
+        ),
+    )
+    factory: str | None = Field(
+        default=None,
+        description=(
+            "Optional `module:attr` callable that receives the entrypoint as "
+            "its first argument, e.g. gem:make. Unset constructs entrypoint "
+            "as a class or callable."
+        ),
+    )
+    env_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Keyword arguments forwarded to the factory or constructor after "
+            "the env id. Not a place for env_id. system_prompt is reserved "
+            "and set on the built env."
+        ),
+    )
+    name: str | None = Field(
+        default=None,
+        description="Catalog / dataset label only. Not the env id.",
+    )
+    env_packages: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What the entrypoint needs installed, as {'uv': [...]} or "
+            "{'pip': [...]}. Installed where the env runs the first time the "
+            "entrypoint is not importable."
+        ),
+    )
+    max_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Turn budget per episode. Unset puts no cap on turns: the episode "
+            "ends when the env terminates or truncates, or when the next prompt "
+            "no longer fits the model's context. Required with env_url, "
+            "segment_prompt_tokens or segment_max_images."
+        ),
+    )
+    segment_prompt_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Restart the episode's context when the next prompt would exceed "
+            "this many tokens; each segment trains as its own row. Unset keeps "
+            "one row per episode."
+        ),
+    )
+    segment_max_images: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Restart the episode's context when the next prompt would carry "
+            "more than this many images; set it to the engine's "
+            "limit_mm_per_prompt image count. Unset puts no image limit on a "
+            "segment."
+        ),
+    )
+    restart_keep_turns: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Turns a restarted context repeats word for word (the model's "
+            "tokens and the observation after each), oldest dropped to leave "
+            "room for one more turn under segment_prompt_tokens. Must be below "
+            "segment_max_images. 0 keeps only the list of past actions."
+        ),
+    )
+    restart_older_obs_field: str = Field(
+        default="",
+        description=(
+            "Observation field a restarted context shows, as 'field: value', "
+            "for each kept turn before the latest, in place of that turn's "
+            "full observation text. Needs restart_keep_turns of 2 or more. "
+            "Empty repeats every kept observation in full."
+        ),
+    )
+    restart_older_images: bool = Field(
+        default=True,
+        description=(
+            "Whether kept turns before the latest keep their images in a "
+            "restarted context. False needs restart_keep_turns of 2 or more."
+        ),
+    )
+    action_error_field: str = Field(
+        default="",
+        description=(
+            "Observation field holding the error text of the action just "
+            "taken. A restarted context lists it after that action. Empty "
+            "lists the actions alone."
+        ),
+    )
+    repeat_system_prompt: bool = Field(
+        default=False,
+        description=(
+            "Also put env_config.system_prompt after the first observation and "
+            "after each image observation, ahead of a trailing 'Question:' "
+            "block. False sends each observation unchanged."
+        ),
+    )
+    strict_chat_template_boundary: bool | None = Field(
+        default=None,
+        description=(
+            "Fail when the chat template cannot render a clean multi-turn "
+            "boundary, rather than falling back to ChatML markers."
+        ),
+    )
+
+    observation_field: str | None = Field(
+        default=None,
+        description=(
+            "The field an env's observation carries its text in. Unset reads "
+            "the standard shapes, or the single text field the observation "
+            "carries."
+        ),
+    )
+    observation_processor: str | None = Field(
+        default=None,
+        description=(
+            "module:fn entrypoint rendering an observation payload to prompt "
+            "text, for envs that need more than a field lookup. Mutually "
+            "exclusive with observation_field."
+        ),
+    )
+    action_processor: str | None = Field(
+        default=None,
+        description=(
+            "module:fn entrypoint that turns the post-</think> action text "
+            "into what the env receives. Unset sends that text unchanged."
+        ),
+    )
+    screenshot_field: str | None = Field(
+        default=None,
+        description=(
+            "Observation field holding the page image. Empty or unset reads no "
+            "page image. A field named image is always read when present."
+        ),
+    )
+    goal_images_field: str | None = Field(
+        default=None,
+        description=(
+            "Observation field holding the task images that follow the first "
+            "prompt. Empty or unset reads none."
+        ),
+    )
+    modality: Literal["text", "vision"] | None = Field(
+        default=None,
+        description=(
+            "What the env's observations carry: text only, or text and images "
+            "(vision). text lets a vision-language model's rollout engine skip "
+            "its multimodal towers. Unset is unknown and keeps them."
+        ),
+    )
+
+    env_url: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "URL of an already-hosted OpenEnv service. A list is a set of "
+            "interchangeable replicas dealt across rollout slots."
+        ),
+    )
+    answer_tool: str | None = Field(
+        default=None,
+        description=(
+            "For an MCP-backed env, one of its real tools receiving a turn's "
+            "prose when the turn has no tool call. Unset answers such a turn "
+            "with retry feedback."
+        ),
+    )
+    action_field: str | None = Field(
+        default=None,
+        description=(
+            "The action field an env receives the model's text in — message by "
+            "default, but code or action_str elsewhere; for an MCP tool it is "
+            "the argument name."
+        ),
+    )
+    request_timeout_s: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Per-message client timeout in seconds for an env reached over "
+            "HTTP. Unset applies a 300 s bound; 0 disables the bound."
+        ),
+    )
+    max_concurrent_resets: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Env resets one rollout engine runs at once (Ray runtime only). "
+            "Unset runs every reset at once; set it to what the env's backing "
+            "services can serve."
+        ),
+    )
+    adaptive_task_sampling: bool = Field(
+        default=DEFAULT_ADAPTIVE_TASK_SAMPLING,
+        description=(
+            "Draw each group's task row in proportion to how often that row's "
+            "recent groups had differing rewards, so tasks that keep giving tied "
+            "groups are drawn less (Ray async rollouts over task rows only). "
+            "false keeps the per-epoch shuffle."
+        ),
+    )
+    task_family_field: str | None = Field(
+        default=None,
+        description=(
+            "Field of each env_config.tasks row naming the row's family, such "
+            "as a template id. Under adaptive_task_sampling, a row with few "
+            "groups is drawn by its family's pooled rate of differing rewards. "
+            "The field is not sent to the env. Unset puts no row in a family."
+        ),
+    )
+    task_family_prior_strength: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "Groups' worth of weight a family's rate carries in a row's "
+            "estimate; a row with more groups than this is drawn mostly by "
+            "its own rate."
+        ),
+    )
+
+    env_hosts: int | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
+        ge=1,
+        description=(
+            "Number of env hosts to serve the env on (Ray runtime only). Unset "
+            "with no image or packages runs an entrypoint in-process in each "
+            "rollout slot, unless cpus_per_env_host, env_host_memory_bytes or "
+            "env_host_resource is set, which asks for one host."
+        ),
+    )
+    env_image: str | None = Field(
+        default=None,
+        description=(
+            "Prebuilt env image run verbatim as its own Pod per host, serving "
+            "on env_port (Ray runtime only)."
+        ),
+    )
+    env_port: int | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
+        ge=1,
+        le=65535,
+        description="TCP port the env_image server listens on.",
+    )
+    env_sessions_per_host: int | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED,
+        ge=1,
+        description=(
+            "Sessions per env_image Pod: one container each, serving on "
+            "env_port, env_port + 1, ... Unset is 1. More than 1 needs "
+            "env_session_ports."
+        ),
+    )
+    env_session_ports: dict[str, int] = Field(
+        default_factory=dict,
+        json_schema_extra=ADVANCED,
+        description=(
+            "Container environment set to base + session index in each session "
+            "container, so sessions sharing a Pod bind distinct ports."
+        ),
+    )
+    cpus_per_env_host: float | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
+        gt=0.0,
+        description=(
+            "CPUs reserved per env host; an env_image Pod requests them with no "
+            "CPU limit."
+        ),
+    )
+    env_host_memory_bytes: int | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED_PLATFORM_WRITTEN,
+        gt=0,
+        description="Memory reserved per env host.",
+    )
+    env_host_memory_limit_bytes: int | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED,
+        gt=0,
+        description="Memory limit per env_image Pod. Unset sets no limit.",
+    )
+    env_host_ready_timeout_s: float | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED,
+        gt=0.0,
+        description=(
+            "Seconds each env_image session Pod may take to become ready, "
+            "image pull included. Unset is 600."
+        ),
+    )
+    env_services: list[EnvServiceSpec] = Field(
+        default_factory=list,
+        json_schema_extra=ADVANCED,
+        description=(
+            "Backing services the env_image sessions share, started with the "
+            "job and deleted with it (Ray runtime on Kubernetes only)."
+        ),
+    )
+    env_host_resource: str | None = Field(
+        default=None,
+        json_schema_extra=ADVANCED,
+        description=(
+            "Where env hosts land: a custom Ray resource, or (for env_image) "
+            "the Pod nodeSelector — key=value, or a bare pool name."
+        ),
+    )
+    env_vars: dict[str, str] = Field(
+        default_factory=dict,
+        description="Container environment for each env_image Pod.",
+    )
+
+    chat_template_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Defaults injected into apply_chat_template, e.g. {'enable_thinking': false}.",
+    )
+    chat_template_path: str | None = Field(
+        default=None,
+        description="Jinja file whose template replaces the tokenizer's own.",
+    )
+    apply_chat_template: bool = Field(
+        default=True,
+        description=(
+            "Render prompts through the tokenizer chat template. Digit-token "
+            "multi-turn probes set this false and encode observations raw."
+        ),
+    )
+
+    @property
+    def label(self) -> str:
+        """Human-readable label: catalog name, dataset, URL, entrypoint, or image."""
+        if self.name is not None:
+            return self.name
+        named = self._named_dataset()
+        if named is not None:
+            return named
+        if isinstance(self.env_url, str):
+            return self.env_url
+        if self.env_url:
+            return str(self.env_url[0])
+        return self.entrypoint or self.env_image or "rollout"
+
+    @property
+    def dataset_backed_rollout(self) -> bool:
+        """Whether this rollout env serves labelled rows scored by a rubric."""
+        return self.env_type == "rollout" and self._named_dataset() is not None
+
+    @property
+    def name_only_built_in(self) -> bool:
+        """Whether this rollout names a built-in and no source."""
+        if self.env_type != "rollout" or self.name not in BUNDLED_ENVIRONMENTS:
+            return False
+        return (
+            self._named_dataset() is None
+            and self.entrypoint is None
+            and self.env_url is None
+            and self.env_image is None
+        )
+
+    @property
+    def sends_reasoning(self) -> bool:
+        """Whether each turn's reasoning reaches the env or reward function."""
+        if self.include_reasoning is not None:
+            return self.include_reasoning
+        return self.dataset_backed_rollout
+
+    @property
+    def text_only(self) -> bool:
+        """Whether every observation is text: declared text, or dataset rows."""
+        return self.modality == "text" or self.dataset_backed_rollout
+
+    def _named_dataset(self) -> str | None:
+        for value in (self.dataset, self.dataset_path, self.hf_dataset_id):
+            if value is not None:
+                return str(value)
+        return None
+
+    def _dataset_identity_backed(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.dataset,
+                self.dataset_path,
+                self.hf_dataset_id,
+                self.columns,
+                self.prompt_template,
+            )
+        )
+
+    @model_validator(mode="after")
+    def _check_rollout(self) -> Self:
+        reject_legacy_llm_env_spelling(
+            entrypoint=self.entrypoint,
+            factory=self.factory,
+            env_config=self.env_config,
+        )
+        if self.entrypoint is not None and self.factory is None:
+            check_factoryless_entrypoint(self.entrypoint)
+        if self.env_type != "rollout":
+            return self
+        if self.task_family_field is not None and not self.adaptive_task_sampling:
+            msg = (
+                "task_family_field weights rows under adaptive_task_sampling; "
+                "set adaptive_task_sampling: true or drop it."
+            )
+            raise ValueError(msg)
+        dataset = self._named_dataset()
+        sources = {
+            "a dataset": dataset,
+            "entrypoint": self.entrypoint,
+            "env_url": self.env_url,
+            "env_image": self.env_image,
+        }
+        named = [name for name, value in sources.items() if value is not None]
+        if len(named) != 1 and not self.name_only_built_in:
+            got = ", ".join(named) or "none"
+            msg = (
+                "A rollout environment needs exactly one source: dataset rows "
+                "plus a rubric, `entrypoint` (an env we build), `env_url` (an "
+                "OpenEnv service someone else hosts), or `env_image` (a "
+                f"prebuilt image we run). Got {got}."
+            )
+            raise ValueError(msg)
+        if self.env_config is not None and dataset is not None:
+            msg = (
+                "env_config configures an environment; a rollout over dataset "
+                "rows has no env to configure."
+            )
+            raise ValueError(msg)
+        if self.env_packages is not None:
+            if self.entrypoint is None:
+                msg = (
+                    "env_packages installs the dependencies of an entrypoint "
+                    "env; a dataset, env_url or env_image source has nothing "
+                    "to install for."
+                )
+                raise ValueError(msg)
+            _check_env_packages(self.env_packages)
+        if (
+            self.env_hosts is not None
+            and self.entrypoint is None
+            and (self.env_image is None)
+        ):
+            msg = (
+                "env_hosts serves an env we build (`entrypoint` or "
+                "`env_image`); it does not apply to this source."
+            )
+            raise ValueError(msg)
+        if (
+            self.answer_tool is not None or self.request_timeout_s is not None
+        ) and dataset is not None:
+            msg = (
+                "answer_tool / request_timeout_s configure an env reached over "
+                "HTTP; a rollout over dataset rows has no such env."
+            )
+            raise ValueError(msg)
+        check_env_pod_fields(
+            env_image=self.env_image,
+            env_vars=self.env_vars,
+            env_sessions_per_host=self.env_sessions_per_host,
+            env_session_ports=self.env_session_ports,
+            env_host_memory_limit_bytes=self.env_host_memory_limit_bytes,
+            env_host_ready_timeout_s=self.env_host_ready_timeout_s,
+            env_services=self.env_services,
+        )
+        if (
+            self.action_field is not None
+            and self.action_field != "message"
+            and dataset is not None
+        ):
+            msg = (
+                "action_field names the field an env receives the model's text "
+                "in; a dataset-backed rollout has no such env."
+            )
+            raise ValueError(msg)
+        if (
+            self.observation_field is not None
+            and self.observation_processor is not None
+        ):
+            msg = (
+                "observation_field and observation_processor are mutually "
+                "exclusive: the field names where the default processor reads "
+                "the text, the processor replaces that default."
+            )
+            raise ValueError(msg)
+        if (
+            self.observation_field is not None or self.observation_processor is not None
+        ) and dataset is not None:
+            msg = (
+                "observation_field / observation_processor render an env's "
+                "observations; a dataset-backed rollout builds its own prompts."
+            )
+            raise ValueError(msg)
+        if self.action_processor is not None and dataset is not None:
+            msg = (
+                "action_processor rewrites the text an env receives; a "
+                "dataset-backed rollout has no such env."
+            )
+            raise ValueError(msg)
+        if dataset is not None and (
+            (self.screenshot_field is not None and self.screenshot_field != "")
+            or (self.goal_images_field is not None and self.goal_images_field != "")
+        ):
+            msg = (
+                "screenshot_field and goal_images_field name env observation "
+                "keys; a dataset-backed rollout has no such observation."
+            )
+            raise ValueError(msg)
+        if self.env_url is not None and self.max_turns is None:
+            msg = (
+                "max_turns is required with env_url: set the remote env's turn "
+                "budget explicitly (1 for single-turn)."
+            )
+            raise ValueError(msg)
+        if dataset is not None:
+            if self.dataset_format != TRACES_DATASET_FORMAT:
+                if self.prompt_template is None:
+                    msg = "Prompt template is required for dataset-backed rollout environments"
+                    raise ValueError(msg)
+                check_row_placeholders(self.prompt_template, self.columns)
+            if self.max_turns not in (None, 1):
+                msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
+                raise ValueError(msg)
+            self.max_turns = 1
+        if self.max_turns is None and (
+            self.segment_prompt_tokens is not None
+            or self.segment_max_images is not None
+        ):
+            msg = (
+                "max_turns is required with segment_prompt_tokens or "
+                "segment_max_images: a restarted context never fills, so only "
+                "the turn cap ends an episode the env does not end."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_modality(self) -> Self:
+        if self.modality == "text" and (
+            self.screenshot_field or self.goal_images_field
+        ):
+            msg = (
+                "modality text means the env sends no images; drop "
+                "screenshot_field and goal_images_field, or set modality vision."
+            )
+            raise ValueError(msg)
+        if self.modality == "vision" and self.dataset_backed_rollout:
+            msg = (
+                "modality vision needs image observations; a dataset-backed "
+                "rollout sends text only."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_restart_keep_turns(self) -> Self:
+        check_restart_keep_turns(
+            restart_keep_turns=self.restart_keep_turns,
+            segment_prompt_tokens=self.segment_prompt_tokens,
+            segment_max_images=self.segment_max_images,
+            restart_older_obs_field=self.restart_older_obs_field,
+            restart_older_images=self.restart_older_images,
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _check_dataset(self) -> Self:
+        if self.env_type != "dataset":
+            return self
+        if self._named_dataset() is None:
+            msg = (
+                "A dataset environment must name its dataset via 'dataset', "
+                "'dataset_path' or 'hf_dataset_id'."
+            )
+            raise ValueError(msg)
+        if self.objective is None:
+            msg = "objective is required for dataset environments"
+            raise ValueError(msg)
+        named_envs = [
+            f"{field}={value!r}"
+            for field, value in (
+                ("entrypoint", self.entrypoint),
+                ("env_url", self.env_url),
+                ("env_image", self.env_image),
+            )
+            if value is not None
+        ]
+        if named_envs:
+            msg = (
+                "A dataset environment is teacher-forced over its rows; drop "
+                f"{', '.join(named_envs)} — keeping both would silently ignore "
+                "the env."
+            )
+            raise ValueError(msg)
+        pod_fields = [
+            field
+            for field, value in (
+                ("env_vars", self.env_vars),
+                ("env_sessions_per_host", self.env_sessions_per_host),
+                ("env_session_ports", self.env_session_ports),
+                ("env_host_memory_limit_bytes", self.env_host_memory_limit_bytes),
+                ("env_host_ready_timeout_s", self.env_host_ready_timeout_s),
+                ("env_services", self.env_services),
+            )
+            if value
+        ]
+        if pod_fields:
+            msg = (
+                f"{', '.join(pod_fields)} configure env_image Pods; a dataset "
+                "environment runs no env, so drop them."
+            )
+            raise ValueError(msg)
+        if self.rubric_file_path is not None:
+            msg = "rubric_file_path has been specified, but is not supported for dataset environments."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_traces_format(self) -> Self:
+        if self.dataset_format != TRACES_DATASET_FORMAT:
+            return self
+        if self._named_dataset() is None:
+            msg = "dataset_format traces describes dataset rows; name the dataset too."
+            raise ValueError(msg)
+        expected = "sft" if self.env_type == "dataset" else None
+        if self.objective != expected:
+            msg = (
+                "A traces dataset trains SFT (env_type dataset, objective sft) or a "
+                f"rollout (env_type rollout, no objective); objective {self.objective!r} "
+                f"on env_type {self.env_type!r} is not supported."
+            )
+            raise ValueError(msg)
+        mapped = [
+            field
+            for field, value in (
+                ("columns", self.columns),
+                ("prompt_template", self.prompt_template),
+            )
+            if value is not None
+        ]
+        if mapped:
+            msg = (
+                f"A traces dataset's column names are the spec; drop {', '.join(mapped)}. "
+                "Each row's prompt messages are the rollout prompt."
+            )
+            raise ValueError(msg)
+        if self.response_column not in (None, "completion"):
+            msg = "A traces dataset trains its completion column; drop response_column."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_env_image_host_defaults(self) -> Self:
+        if self.env_image is not None:
+            if self.env_port is None:
+                self.env_port = 8000
+            if self.cpus_per_env_host is None:
+                self.cpus_per_env_host = ENV_POD_DEFAULT_CPUS
+            if self.env_sessions_per_host is None:
+                self.env_sessions_per_host = 1
+            if self.env_host_ready_timeout_s is None:
+                self.env_host_ready_timeout_s = ENV_POD_READY_TIMEOUT_S
+        elif (
+            self.env_hosts is None
+            and self.entrypoint is not None
+            and (
+                self.cpus_per_env_host is not None
+                or self.env_host_memory_bytes is not None
+                or self.env_host_resource is not None
+            )
+        ):
+            self.env_hosts = 1
+        return self
+
+    @model_validator(mode="after")
+    def _check_reward_fields(self) -> Self:
+        check_reward_fields(self)
+        return self
+
+    @model_validator(mode="after")
+    def _apply_conditional_defaults(self) -> Self:
+        if self._dataset_identity_backed() and self.train_test_split is None:
+            self.train_test_split = 0.9
+        if (
+            self.rubric_file_path is not None
+            and self.rubric_name is None
+            and self.group_rubric_name is None
+        ):
+            self.rubric_name = "reward_fn"
+        if self.env_type == "dataset" and self.response_column is None:
+            self.response_column = (
+                "completion"
+                if self.dataset_format == TRACES_DATASET_FORMAT
+                else "response"
+            )
+        if self.env_type == "rollout":
+            # Unset here: a submitted default replaces the bundled profile's value.
+            if not self.name_only_built_in:
+                if self.num_envs is None:
+                    self.num_envs = 1
+                if self.strict_chat_template_boundary is None:
+                    self.strict_chat_template_boundary = True
+            env_backed = (
+                self.entrypoint is not None
+                or self.env_url is not None
+                or self.env_image is not None
+            )
+            if env_backed and self.action_field is None:
+                self.action_field = "message"
+        return self
+
+
+def _check_env_packages(env_packages: dict[str, Any]) -> None:
+    """Check ``env_packages`` names at least one package under ``uv`` or ``pip``."""
+    packages: list[Any] = []
+    for field in ("uv", "pip"):
+        value = env_packages.get(field)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            packages.extend(value.get("packages") or [])
+        elif isinstance(value, list):
+            packages.extend(value)
+        else:
+            msg = (
+                f"env_packages.{field} must be a list of packages or "
+                f"{{'packages': [...]}}, got {type(value).__name__}."
+            )
+            raise ValueError(msg)
+    if not packages:
+        msg = (
+            f"env_packages named no packages to install: {env_packages!r}. "
+            "Expected {'uv': [...]} or {'pip': [...]}."
+        )
+        raise ValueError(msg)
+
+
+EnvSpec = LLMEnvSpec
