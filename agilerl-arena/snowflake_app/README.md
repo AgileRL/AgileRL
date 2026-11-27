@@ -23,7 +23,7 @@ just snowflake-app-build CONNECTION TAG   # TAG like 38.0.4-py313-cu130
 `CONNECTION` is a Snowflake CLI connection to the provider account. The
 recipe runs the Snowflake CLI with `uvx --from snowflake-cli` and needs
 [`crane`](https://github.com/google/go-containerregistry/tree/main/cmd/crane) on
-`PATH`; no Docker. It:
+`PATH`, plus the AWS CLI; no Docker. It:
 
 1. Copies this directory to `dist/snowflake-app/` and replaces the
    `0.0.0-py313-cu130` placeholder in `manifest.yml` and `app_code/*.py` with `TAG`.
@@ -34,9 +34,13 @@ recipe runs the Snowflake CLI with `uvx --from snowflake-cli` and needs
    namespace package. The procedures import `agilerl.arena.snowflake` from it
    instead of copying code.
 3. Creates `arena_provider.images.repo` if missing and runs `crane copy` from
-   `public.ecr.aws/x7s7d0o8/containers/snowflake-job:TAG` to that repository.
-   The registry password is the whole JSON output of
-   `snow spcs image-registry token --format JSON`.
+   private ECR, `761296822462.dkr.ecr.us-east-1.amazonaws.com/containers/snowflake-job:TAG`,
+   to that repository. It logs crane in to ECR with
+   `aws ecr get-login-password --region us-east-1`, so it needs AWS credentials
+   that can pull from that repository (the developers IAM group can). The
+   Snowflake registry password is the whole JSON output of
+   `snow spcs image-registry token --format JSON`. The image is about 12 GB, so
+   the copy takes a while.
 4. Runs `snow app version create v<TAG with _ for punctuation>` for the
    `arena_app_pkg` package in `snowflake.yml`.
 
