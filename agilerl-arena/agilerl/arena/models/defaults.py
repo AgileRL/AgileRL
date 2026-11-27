@@ -13,9 +13,13 @@ from pydantic import ValidationError
 from agilerl.arena.models import LLMAlgorithmSpec, visibility
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.bundled_envs import manifest_model
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import REWARD_FILE_AT_SUBMIT, TrainingManifest
+from agilerl.arena.models.model_info import DEFAULT_MODEL
+from agilerl.arena.models.prompt_template import DEFAULT_PROMPT_TEMPLATE
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.models.training import (
     LLM_EVALUATION_INTERVAL,
     LLM_REPORTING_INTERVAL,
@@ -35,7 +39,7 @@ def default_verdict(
     """Fill *document* with Arena's defaults for its LLM algorithm, as a verdict; the reward file may come at submit.
 
     :param document: A partial manifest: ``algorithm.name``, the environment,
-        and ``network.pretrained_model_name_or_path``.
+        and optionally a model on ``network`` or ``algorithm``.
     :type document: dict[str, Any]
     :param user_view: Leave out the fields Arena chooses (:mod:`~agilerl.arena.models.visibility`).
     :type user_view: bool
@@ -62,6 +66,23 @@ def default_verdict(
                 }
             ]
         )
+
+    if manifest_model(draft) is None:
+        network = draft.setdefault("network", {})
+        network["pretrained_model_name_or_path"] = DEFAULT_MODEL
+    environment = draft.get("environment", {})
+    prompts_rows = (
+        environment.get("env_type") == "rollout"
+        and any(
+            environment.get(key) is not None
+            for key in ("dataset", "dataset_path", "hf_dataset_id")
+        )
+        and environment.get("dataset_format") != TRACES_DATASET_FORMAT
+    )
+    if prompts_rows:
+        environment.setdefault("prompt_template", dict(DEFAULT_PROMPT_TEMPLATE))
+        # The built-in rewards score a correct answer 1; the success metric counts those.
+        environment.setdefault("max_reward", 1.0)
 
     unsupported = unsupported_model_failures(draft)
     if unsupported:

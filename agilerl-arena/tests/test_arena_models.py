@@ -1822,6 +1822,46 @@ class TestLLMEnvSpecSurfaces:
         with pytest.raises(ValidationError, match="factory is set but entrypoint"):
             LLMEnvSpec(env_type="rollout", factory="gem:make")
 
+    def test_registry_id_entrypoint_without_factory_is_rejected(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        with pytest.raises(ValidationError, match="is a registry id"):
+            LLMEnvSpec(env_type="rollout", entrypoint="game:GuessTheNumber-v0-easy")
+
+    def test_registry_id_entrypoint_with_factory_is_accepted(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            entrypoint="game:GuessTheNumber-v0-easy",
+            factory="gem:make",
+        )
+        assert spec.factory == "gem:make"
+
+    @pytest.mark.parametrize(
+        "entrypoint", ["my_pkg.envs:MyEnv", "envs/my-env.py:MyEnv"]
+    )
+    def test_import_path_entrypoint_without_factory_is_accepted(
+        self, entrypoint: str
+    ) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        spec = LLMEnvSpec(env_type="rollout", entrypoint=entrypoint)
+        assert spec.factory is None
+
+    @pytest.mark.parametrize("entrypoint", ["CartPole-v1", ":MyEnv"])
+    def test_entrypoint_without_module_is_rejected(self, entrypoint: str) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        with pytest.raises(ValidationError, match="not a module:attr import path"):
+            LLMEnvSpec(env_type="rollout", entrypoint=entrypoint)
+
+    def test_url_entrypoint_is_rejected(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        with pytest.raises(ValidationError, match="use env_url instead"):
+            LLMEnvSpec(env_type="rollout", entrypoint="https://env.example.com")
+
     def test_gem_rollout_sets_rollout_defaults_leaves_dataset_fields_none(self) -> None:
         from agilerl.arena.models.env import LLMEnvSpec
 
