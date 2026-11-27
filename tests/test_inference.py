@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from agilerl.auth import EXTERNAL_USER_ID_HEADER
 from agilerl.exceptions import ArenaAuthError, ArenaInferenceError
 from agilerl.inference import (
     Agent,
+    DeploymentAssertion,
     LLMParams,
     LLMResults,
     SessionDetail,
@@ -1128,3 +1130,147 @@ class TestStatusWithoutAgentInfo:
         agent.metadata = None
         with pytest.raises(ArenaInferenceError, match="Metadata not loaded"):
             agent.generate("hi")
+
+
+ASSERTION_HEADER = "x-arena-deployment-assertion"
+
+
+class OnPremPod:
+    """A deployment behind the on-prem proxy, which drops ``Authorization``."""
+
+    def __init__(self) -> None:
+        self.valid: set[str] = set()
+        self.seen: list[tuple[str, str | None]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        assertion = request.headers.get(ASSERTION_HEADER)
+        self.seen.append((path, assertion))
+        if path == "/status":
+            return httpx.Response(
+                200, json={"deployment_id": "658", "agent": {"llm": True}}
+            )
+        if assertion not in self.valid:
+            return httpx.Response(401, json={"detail": "unauthorized"})
+        if path == "/generate_stream":
+            return httpx.Response(200, text="42")
+        return httpx.Response(200, json=_body_for_path(path))
+
+
+class AssertionMinter:
+    """Stands in for Arena's ``POST /api/deployments/{id}/inference-assertion``."""
+
+    def __init__(self, pod: OnPremPod | None) -> None:
+        self.pod = pod
+        self.minted_for: list[str] = []
+
+    def __call__(self, deployment_id: str) -> DeploymentAssertion:
+        self.minted_for.append(deployment_id)
+        assertion = f"arena_dpa_{len(self.minted_for)}"
+        if self.pod is not None:
+            self.pod.valid = {assertion}
+        return DeploymentAssertion(
+            assertion=assertion, header=ASSERTION_HEADER, expires_in=60
+        )
+
+
+def _agent_over(
+    handler: Callable[[httpx.Request], httpx.Response], minter: AssertionMinter
+) -> Agent:
+    real = httpx.Client
+    with patch(
+        "agilerl.inference.agent.httpx.Client",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    ):
+        return Agent("http://pod", api_key=SECRET, assertion_source=minter)
+
+
+class TestDeploymentAssertion:
+    def test_generate_mints_for_the_status_deployment_id_and_retries(self):
+        pod = OnPremPod()
+        minter = AssertionMinter(pod)
+        agent = _agent_over(pod.handler, minter)
+
+        result = agent.generate("hi")
+
+        assert result.results[0].completion == "yo"
+        assert minter.minted_for == ["658"]
+        assert pod.seen == [
+            ("/status", None),
+            ("/generate", None),
+            ("/generate", "arena_dpa_1"),
+        ]
+
+    def test_generate_stream_mints_and_retries(self):
+        pod = OnPremPod()
+        agent = _agent_over(pod.handler, AssertionMinter(pod))
+
+        assert "".join(agent.generate_stream("hi")) == "42"
+
+    def test_later_requests_reuse_the_assertion_until_it_nears_expiry(self):
+        pod = OnPremPod()
+        minter = AssertionMinter(pod)
+        agent = _agent_over(pod.handler, minter)
+        clock = [1000.0]
+
+        with patch("agilerl.inference.agent.time.monotonic", lambda: clock[0]):
+            agent.generate("hi")
+            clock[0] += 45
+            agent.list_sessions()
+            clock[0] += 10
+            agent.list_sessions()
+
+        assert minter.minted_for == ["658", "658"]
+        assert pod.seen[-2:] == [
+            ("/sessions", "arena_dpa_1"),
+            ("/sessions", "arena_dpa_2"),
+        ]
+
+    def test_cloud_deployment_never_mints(self):
+        seen: list[str | None] = []
+
+        def cloud(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get(ASSERTION_HEADER))
+            return httpx.Response(200, json=_body_for_path(request.url.path))
+
+        minter = AssertionMinter(None)
+        agent = _agent_over(cloud, minter)
+        agent.generate("hi")
+        agent.list_sessions()
+
+        assert minter.minted_for == []
+        assert seen == [None, None, None]
+
+    def test_still_unauthorized_after_one_retry_asks_for_login(self):
+        def always_401(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/status":
+                return httpx.Response(200, json={"deployment_id": "7"})
+            return httpx.Response(401, json={})
+
+        minter = AssertionMinter(None)
+        agent = _agent_over(always_401, minter)
+
+        with pytest.raises(ArenaAuthError, match="401 Unauthorized"):
+            agent.generate("hi")
+        assert minter.minted_for == ["7"]
+
+    def test_a_401_before_metadata_loads_raises_instead_of_minting(self):
+        minter = AssertionMinter(None)
+        real = httpx.Client
+        with patch(
+            "agilerl.inference.agent.httpx.Client",
+            lambda **kw: real(
+                transport=httpx.MockTransport(lambda _: httpx.Response(401)), **kw
+            ),
+        ):
+            agent = Agent("http://pod", probe_on_init=False, assertion_source=minter)
+
+        with pytest.raises(ArenaInferenceError, match="Metadata not loaded"):
+            agent.status()
+        assert minter.minted_for == []
+
+    def test_assertion_absent_from_repr(self):
+        assertion = DeploymentAssertion(
+            assertion="arena_dpa_secret", header=ASSERTION_HEADER, expires_in=60
+        )
+        assert "arena_dpa_secret" not in repr(assertion)

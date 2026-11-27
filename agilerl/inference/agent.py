@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Generator, Iterator
 from typing import Any
 
 import httpx
@@ -23,6 +24,7 @@ __all__ = [
     "Agent",
     "AgentInfo",
     "AgentMetadata",
+    "DeploymentAssertion",
     "GenerateCompletion",
     "GenerateParams",
     "GenerateResult",
@@ -193,6 +195,68 @@ class SessionDetail(SessionInfo):
     messages: list[SessionMessage] = Field(default_factory=list)
 
 
+class DeploymentAssertion(BaseModel):
+    """Short-lived credential Arena mints for one deployment on a customer's cluster.
+
+    The proxy in front of such a deployment drops ``Authorization``, so the
+    caller sends this in *header* instead.
+
+    :param assertion: The credential. Never logged or shown in :func:`repr`.
+    :type assertion: str
+    :param header: Request header the deployment reads it from.
+    :type header: str
+    :param expires_in: Seconds until it expires.
+    :type expires_in: int
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    assertion: str = Field(repr=False)
+    header: str
+    expires_in: int
+
+
+class DeploymentAssertionAuth(httpx.Auth):
+    """Adds a deployment assertion once a deployment answers 401 without one.
+
+    Cloud deployments read ``Authorization`` and never answer 401 to a valid
+    caller, so they never trigger a mint. After the first 401 every request
+    carries the assertion, re-minted shortly before it expires, and a request
+    still answered 401 is retried once with a fresh one.
+
+    :param mint: Returns a new assertion for this deployment.
+    :type mint: Callable[[], DeploymentAssertion]
+    """
+
+    def __init__(self, mint: Callable[[], DeploymentAssertion]) -> None:
+        self._mint = mint
+        self._assertion: DeploymentAssertion | None = None
+        self._expires_at = 0.0
+
+    def _refresh(self) -> DeploymentAssertion:
+        assertion = self._mint()
+        self._assertion = assertion
+        self._expires_at = time.monotonic() + assertion.expires_in
+        return assertion
+
+    def auth_flow(
+        self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
+        """Send *request*, minting and retrying once if the deployment answers 401."""
+        assertion = self._assertion
+        if assertion is not None:
+            # Leave time for the request to reach the deployment before expiry.
+            if time.monotonic() > self._expires_at - 10:
+                assertion = self._refresh()
+            request.headers[assertion.header] = assertion.assertion
+        response = yield request
+        if response.status_code != 401:
+            return
+        assertion = self._refresh()
+        request.headers[assertion.header] = assertion.assertion
+        yield request
+
+
 class Agent:
     """HTTP client for a deployed Arena inference endpoint.
 
@@ -225,6 +289,9 @@ class Agent:
     :type generate_params: LLMParams | None
     :param probe_on_init: If ``True``, fetch ``GET /status`` during ``__init__``.
     :type probe_on_init: bool
+    :param assertion_source: Mints a :class:`DeploymentAssertion` for the
+        deployment id in :attr:`metadata`.
+    :type assertion_source: Callable[[str], DeploymentAssertion] | None
     """
 
     def __init__(
@@ -237,6 +304,7 @@ class Agent:
         timeout: int = 30,
         generate_params: LLMParams | None = None,
         probe_on_init: bool = True,
+        assertion_source: Callable[[str], DeploymentAssertion] | None = None,
     ) -> None:
         self._base_url = endpoint.rstrip("/")
 
@@ -255,6 +323,13 @@ class Agent:
 
         self._http = httpx.Client(
             headers=headers,
+            auth=(
+                None
+                if assertion_source is None
+                else DeploymentAssertionAuth(
+                    lambda: assertion_source(self._loaded_metadata().deployment_id)
+                )
+            ),
             timeout=timeout,
             follow_redirects=True,
         )
@@ -377,12 +452,15 @@ class Agent:
         body = self._request_json("GET", "/status")
         return StatusResponse.model_validate(body)
 
-    def _agent_info(self) -> AgentInfo | None:
-        """Agent shape from ``GET /status``, or ``None`` if it did not report one."""
+    def _loaded_metadata(self) -> StatusResponse:
         if self.metadata is None:
             msg = "Metadata not loaded. Call status() or construct with probe_on_init=True."
             raise ArenaInferenceError(msg)
-        return self.metadata.agent
+        return self.metadata
+
+    def _agent_info(self) -> AgentInfo | None:
+        """Agent shape from ``GET /status``, or ``None`` if it did not report one."""
+        return self._loaded_metadata().agent
 
     def _ensure_llm(self) -> None:
         agent = self._agent_info()

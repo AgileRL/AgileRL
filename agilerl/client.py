@@ -48,7 +48,7 @@ from agilerl.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.inference import Agent
+from agilerl.inference import Agent, DeploymentAssertion
 from agilerl.inference.cache import (
     load_binding,
     normalized_deployment_name,
@@ -2491,7 +2491,15 @@ class ArenaClient:
             org_key=self._org_key,
             external_user_id=self._external_user_id,
             timeout=timeout or self._request_timeout,
+            assertion_source=self._mint_deployment_assertion,
         )
+
+    def _mint_deployment_assertion(self, deployment_id: str) -> DeploymentAssertion:
+        """Mint the assertion a deployment on a customer's cluster reads instead of ``Authorization``."""
+        body = self._request(
+            "POST", f"/api/deployments/{deployment_id}/inference-assertion"
+        )
+        return DeploymentAssertion.model_validate(body)
 
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""

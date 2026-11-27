@@ -3515,6 +3515,7 @@ class TestOpenInferenceAgent:
             org_key=None,
             external_user_id=None,
             timeout=api_key_client._request_timeout,
+            assertion_source=api_key_client._mint_deployment_assertion,
         )
         assert result is mock_agent
 
@@ -3867,6 +3868,53 @@ class TestOpenInferenceAgentAfterARedeploy:
         assert agent.metadata is not None
         assert agent.metadata.agent.algo == "GRPO"
         assert repr(agent) == "<Agent endpoint='http://fresh'>"
+
+
+class TestByocDeploymentAssertion:
+    """A deployment on a customer's cluster only sees the assertion Arena mints."""
+
+    def test_generate_sends_an_assertion_minted_by_the_platform(self, api_key_client):
+        minted: list[tuple[str, str | None]] = []
+        pod_seen: list[tuple[str, str | None, str | None]] = []
+
+        def platform(request: httpx.Request) -> httpx.Response:
+            minted.append((request.url.path, request.headers.get("authorization")))
+            return httpx.Response(
+                200,
+                json={
+                    "assertion": "arena_dpa_abc",
+                    "header": "x-arena-deployment-assertion",
+                    "expires_in": 60,
+                },
+            )
+
+        def pod(request: httpx.Request) -> httpx.Response:
+            assertion = request.headers.get("x-arena-deployment-assertion")
+            pod_seen.append((request.url.path, assertion, request.method))
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200, json={"deployment_id": "658", "agent": {"llm": True}}
+                )
+            if assertion != "arena_dpa_abc":
+                return httpx.Response(401, json={})
+            return httpx.Response(200, text="52")
+
+        _quote_transport(api_key_client, platform)
+        api_key_client._ensure_inference_binding = MagicMock(
+            return_value="https://dep.on-prem.example"
+        )
+        real_client = httpx.Client
+        with patch(
+            "agilerl.inference.agent.httpx.Client",
+            lambda **kw: real_client(transport=httpx.MockTransport(pod), **kw),
+        ):
+            agent = api_key_client.open_inference_agent("dep1")
+
+        assert "".join(agent.generate_stream("What is 12 + 40?")) == "52"
+        assert minted == [
+            ("/api/deployments/658/inference-assertion", "Bearer test-key")
+        ]
+        assert pod_seen[-1] == ("/generate_stream", "arena_dpa_abc", "POST")
 
 
 class TestListModels:
