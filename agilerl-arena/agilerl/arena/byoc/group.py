@@ -23,6 +23,7 @@ from agilerl.arena.byoc.commands import (
     build_cluster_connect_command,
     build_cluster_destroy_command,
     build_cluster_generate_spec_command,
+    build_cluster_manifest_command,
     build_cluster_plan_command,
     build_cluster_preflight_command,
     build_cluster_provision_command,
@@ -256,6 +257,7 @@ class ClusterDynamicGroup(click.Group):
         self.add_command(build_cluster_unregister_command())
         self.add_command(build_cluster_rotate_token_command())
         self.add_command(build_cluster_upgrade_command())
+        self.add_command(build_cluster_manifest_command())
         self.add_command(build_cluster_smoke_command())
         self.add_command(build_cluster_generate_spec_command())
         self.add_command(build_cluster_provision_command())
