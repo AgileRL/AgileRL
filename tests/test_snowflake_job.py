@@ -536,7 +536,8 @@ class TestContainerEnv:
             "ARENA_RUN_ID": RUN_ID,
             "JOB_ID": str(int("abc123", 16)),
             "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
-            "UCX_NET_DEVICES": "lo",
+            "UCX_NET_DEVICES": "lo,eth0",
+            "LD_PRELOAD": "/usr/local/lib/libnetlink_done.so",
         }
         assert "APP_PULSAR_URL" not in env
 

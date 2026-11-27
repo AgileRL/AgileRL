@@ -749,6 +749,10 @@ def cpu_memory_gib(family: str) -> int:
     return found
 
 
+NETLINK_DONE_LIBRARY = "/usr/local/lib/libnetlink_done.so"
+"""recv() and __recv_chk() that return an embedded NLMSG_DONE on the next read."""
+
+
 def container_env(run_id: str) -> dict[str, str]:
     """Container environment Ray passes from each raylet to its actors.
 
@@ -765,11 +769,13 @@ def container_env(run_id: str) -> dict[str, str]:
         "AGILERL_DEBUG": "none",
         "ARENA_RUN_ID": run_id,
         "JOB_ID": str(job_id_from_run_id(run_id)),
-        # SPCS never answers UCX's netlink route dump, which TCP reachability
-        # checks run for any device but loopback. NIXL needs TCP for its peer
-        # failure handling, so it runs on one node over lo.
+        # NIXL weight sync runs over UCX TCP: lo on one node, eth0 between
+        # nodes. TCP reachability reads the routes over netlink, and SPCS ends
+        # the IPv6 dump in a way UCX waits on forever; the preloaded recv()
+        # wrapper from the image splits it as Linux does.
         "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
-        "UCX_NET_DEVICES": "lo",
+        "UCX_NET_DEVICES": "lo,eth0",
+        "LD_PRELOAD": NETLINK_DONE_LIBRARY,
     }
 
 

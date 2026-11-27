@@ -192,11 +192,11 @@ class TestManifestFits:
                 ARENA_AUTH,
             )
 
-    def test_an_rl_run_on_one_gpu_nodes_is_refused(
+    def test_an_rl_run_on_too_few_gpus_is_refused_with_the_count_to_ask_for(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        arena = _arena_answers(monkeypatch, _estimate(0, {"fits": True}))
+        _arena_answers(monkeypatch, _estimate(2, {"error": "1 GPUs, the job needs 2"}))
 
         # Act
         with pytest.raises(GpuShortfallError) as raised:
@@ -204,42 +204,16 @@ class TestManifestFits:
                 _write(tmp_path, _grpo()),
                 "GPU_NV_S",
                 _gpu("GPU_NV_S", 1, 24, 8),
-                2,
+                1,
                 ARENA_URL,
                 ARENA_AUTH,
             )
 
         # Assert
         assert str(raised.value) == (
-            "On Snowflake, reinforcement learning runs on one GPU node so the "
-            "trainer can share weights with the rollout engines.\n"
-            "GPU_NV_S has 1 GPU(s) per node, and GRPO needs at least 2 on one node.\n"
-            "Use a GPU family with at least 2 GPUs per node, and ask for at most "
-            "its GPUs per node.\n"
-            "Nothing was started."
-        )
-        assert arena.calls == []
-
-    def test_an_rl_run_spanning_nodes_is_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _arena_answers(monkeypatch, _estimate(0, {"fits": True}))
-
-        with pytest.raises(GpuShortfallError) as raised:
-            manifest_fits(
-                _write(tmp_path, _grpo()),
-                "GPU_NV_M",
-                _gpu("GPU_NV_M", 4, 24, 8),
-                8,
-                ARENA_URL,
-                ARENA_AUTH,
-            )
-
-        assert str(raised.value) == (
-            "On Snowflake, reinforcement learning runs on one GPU node so the "
-            "trainer can share weights with the rollout engines.\n"
-            "GPU_NV_M has 4 GPUs per node, so 8 GPUs would span 2 nodes.\n"
-            "Ask for 4 GPUs.\n"
+            "GRPO needs at least 2 GPUs on GPU_NV_S: training and rollout "
+            "generation run on separate GPUs.\n"
+            "Ask for 2 GPUs or more.\n"
             "Nothing was started."
         )
 
@@ -250,7 +224,7 @@ class TestManifestFits:
 
         with pytest.raises(GpuShortfallError, match="holds 1 GPUs, so raise"):
             manifest_fits(
-                _write(tmp_path, _sft()),
+                _write(tmp_path, _grpo()),
                 "GPU_NV_S",
                 _gpu("GPU_NV_S", 1, 24, 1),
                 1,
@@ -258,20 +232,30 @@ class TestManifestFits:
                 ARENA_AUTH,
             )
 
-    def test_a_teacher_run_needs_trainer_engine_and_teacher_on_one_node(
+    def test_a_teacher_run_on_one_gpu_nodes_is_refused_when_it_fits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Arrange
         _arena_answers(monkeypatch, _estimate(0, {"fits": True}))
 
-        with pytest.raises(GpuShortfallError, match="OPD needs at least 3 on one node"):
+        # Act
+        with pytest.raises(GpuShortfallError) as raised:
             manifest_fits(
                 _write(tmp_path, _opd_teacher()),
                 "GPU_NV_S",
                 _gpu("GPU_NV_S", 1, 24, 8),
-                1,
+                2,
                 ARENA_URL,
                 ARENA_AUTH,
             )
+
+        # Assert
+        assert str(raised.value) == (
+            "OPD with a separate teacher model runs each rollout engine and its "
+            "teacher on one node, 2 GPUs, but GPU_NV_S has 1 GPU(s) per node.\n"
+            "Use a GPU family with at least 2 GPUs per node.\n"
+            "Nothing was started."
+        )
 
     def test_a_teacher_run_fits_a_node_that_holds_the_bundle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

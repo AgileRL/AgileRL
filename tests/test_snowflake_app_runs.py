@@ -397,12 +397,6 @@ def nv_m_setup(max_gpus: int = 8) -> dict:
     return {**SETUP, "pools": {**SETUP["pools"], "gpu": {"GPU_NV_M": nv_m}}}
 
 
-def one_node_session(arena: Arena) -> AppSession:
-    """Submit session whose only priced pool is one 4-GPU GPU_NV_M node."""
-    arena.replies = [capabilities(["GPU_NV_M"]), FITS]
-    return submit_session(nv_m_setup(4), [Row(name="GPU_NV_M", gpu_count=4)])
-
-
 def capabilities(priced: list[str] | None) -> httpx.Response:
     """Arena capabilities with ``priced`` as the priced families, or none listed."""
     features: dict[str, object] = {"snowflakeTraining": True}
@@ -592,14 +586,12 @@ class TestSubmit:
             for s in session.statements
         )
 
-    def test_stages_a_built_in_reward_in_the_manifest(
-        self, priced_arena: Arena
-    ) -> None:
+    def test_stages_a_built_in_reward_in_the_manifest(self) -> None:
         manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "numeric"})
-        session = one_node_session(priced_arena)
+        session = submit_session()
 
         text = submit(
-            session, manifest, 4, "SOURCE_VIEW", "gsm8k", "GPU_NV_M", None, None, None
+            session, manifest, 2, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
@@ -699,15 +691,13 @@ class TestSubmit:
         assert session.statements == [REWARD_REFS]
         assert session.file.puts == {}
 
-    def test_starts_a_function_reward_once_a_function_is_bound(
-        self, priced_arena: Arena
-    ) -> None:
+    def test_starts_a_function_reward_once_a_function_is_bound(self) -> None:
         manifest = grpo_manifest("Qwen/Qwen3.5-0.8B", {"type": "snowflake_function"})
-        session = one_node_session(priced_arena)
+        session = submit_session()
         session.routes.append(exact(REWARD_REFS, [Row(REFS='["ref-1"]')]))
 
         text = submit(
-            session, manifest, 4, "SOURCE_VIEW", "gsm8k", "GPU_NV_M", None, None, None
+            session, manifest, 2, "SOURCE_VIEW", "gsm8k", "GPU_NV_S", None, None, None
         )
 
         run_id = text.splitlines()[0].removeprefix("run_id: ")
@@ -717,7 +707,7 @@ class TestSubmit:
         assert staged["environment"]["reward"] == {"type": "snowflake_function"}
         assert len(executes(session)) == 3
 
-    def test_returns_the_manifest_warnings(self, priced_arena: Arena) -> None:
+    def test_returns_the_manifest_warnings(self) -> None:
         manifest = yaml.safe_dump(
             {
                 "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
@@ -733,9 +723,9 @@ class TestSubmit:
                 "training": {"max_steps": 2},
             }
         )
-        session = one_node_session(priced_arena)
+        session = submit_session()
 
-        text = submit(session, manifest, 4, None, None, None, None, None, None)
+        text = submit(session, manifest, 2, None, None, None, None, None, None)
 
         [warning] = [line for line in text.splitlines() if line.startswith("warning:")]
         assert warning.startswith("warning: env_url must be reachable from the job.")
@@ -1075,7 +1065,7 @@ class TestSubmit:
         manifest = grpo_manifest("Qwen/Qwen3.5-0.8B")
 
         # Act
-        with pytest.raises(ValueError, match="runs on one GPU node") as exc:
+        with pytest.raises(ValueError, match="GRPO needs at least 2 GPUs") as exc:
             submit(
                 session,
                 manifest,
@@ -1090,11 +1080,9 @@ class TestSubmit:
 
         # Assert
         assert str(exc.value) == (
-            "On Snowflake, reinforcement learning runs on one GPU node so the "
-            "trainer can share weights with the rollout engines.\n"
-            "GPU_NV_S has 1 GPU(s) per node, and GRPO needs at least 2 on one node.\n"
-            "Use a GPU family with at least 2 GPUs per node, and ask for at most "
-            "its GPUs per node.\n"
+            "GRPO needs at least 2 GPUs on GPU_NV_S: training and rollout "
+            "generation run on separate GPUs.\n"
+            "Ask for 2 GPUs or more.\n"
             "Nothing was started."
         )
         assert executes(session) == []
@@ -1106,7 +1094,7 @@ class TestSubmit:
         priced_arena.replies = [capabilities(["GPU_NV_S"]), SHORT_OF_GPUS]
         session = submit_session()
 
-        with pytest.raises(ValueError, match="GRPO needs at least 2 on one node"):
+        with pytest.raises(ValueError, match="GRPO needs at least 2 GPUs on GPU_NV_S"):
             submit(
                 session,
                 grpo_manifest("Qwen/Qwen3.5-0.8B"),

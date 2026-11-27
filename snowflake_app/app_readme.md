@@ -273,7 +273,7 @@ training:
 -- Returns the run ID. Keep it for the calls below.
 ```
 
-Reinforcement learning (GRPO, CISPO, GSPO, OPD) runs on one GPU node, so the trainer can share weights with the engines that generate answers. Use a GPU family with several GPUs per node, such as GPU_NV_M (4 GPUs), and ask for its GPUs per node. One GPU trains and the rest generate; OPD with a separate teacher model needs at least 3 on the node. `submit` refuses a request that would need more than one node, or a family with too few GPUs per node, and says what to ask for. SFT and DPO can use several nodes.
+Reinforcement learning (GRPO, CISPO) needs at least 2 GPUs: one trains while another generates answers. OPD with a separate teacher model needs a GPU family with at least 2 GPUs per node. `submit` refuses a smaller request and says what to ask for.
 
 `columns` maps the names the trainer expects (left) to your column names (right). For SFT, use `name: SFT`, `env_type: dataset`, `objective: sft` and map `prompt` and `target` columns.
 
