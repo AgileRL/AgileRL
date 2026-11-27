@@ -45,6 +45,7 @@ from agilerl.snowflake.profile import (
     GpuPool,
 )
 from agilerl.snowflake.rewards import check_reward_file
+from agilerl.snowflake.session import node_limit_reached
 from agilerl.snowflake.source import (
     QuerySource,
     SnowflakeRow,
@@ -104,6 +105,10 @@ class JobDocument(TypedDict):
     warehouse: str
     workers: int
     workers_service: str
+
+
+class ServiceLeftRunningError(RuntimeError):
+    """A run's start failed and one of the services it started could not be dropped."""
 
 
 @dataclass(frozen=True)
@@ -458,8 +463,9 @@ def submit_job(
     :param run_id: Run id to use. ``None`` generates one.
     :return: ``(run_id, services)``.
     :raises ValueError: A pool family is unknown, the worker pool's
-        ``MAX_NODES`` is below the worker count, or the run to resume has no
-        checkpoint that can be copied.
+        ``MAX_NODES`` is below the worker count, the run to resume has no
+        checkpoint that can be copied, or the account's node limit is reached.
+        Services already started are dropped.
     """
     manifest = load_manifest(manifest_path)
     exports_source = validate_manifest(
@@ -759,6 +765,11 @@ def container_env(run_id: str) -> dict[str, str]:
         "AGILERL_DEBUG": "none",
         "ARENA_RUN_ID": run_id,
         "JOB_ID": str(job_id_from_run_id(run_id)),
+        # SPCS never answers UCX's netlink route dump, which TCP reachability
+        # checks run for any device but loopback. NIXL needs TCP for its peer
+        # failure handling, so it runs on one node over lo.
+        "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
+        "UCX_NET_DEVICES": "lo",
     }
 
 
@@ -1246,9 +1257,20 @@ def _execute_services(
         for name, statement in statements:
             session.sql(statement).collect()
             started.append(name)
-    except Exception:
-        for name in reversed(started):
-            session.sql(drop_service_sql(name)).collect()
+    except Exception as exc:
+        dropping = ""
+        try:
+            for dropping in reversed(started):
+                session.sql(drop_service_sql(dropping)).collect()
+        except Exception as drop_error:
+            msg = f"Service {dropping} started but could not be dropped after: {exc}"
+            raise ServiceLeftRunningError(msg) from drop_error
+        if node_limit_reached(exc):
+            msg = (
+                "Your Snowflake account's node limit is reached; wait for running "
+                "jobs or ask Snowflake to raise it.\nNothing was started."
+            )
+            raise ValueError(msg) from exc
         raise
 
 

@@ -535,6 +535,8 @@ class TestContainerEnv:
             "AGILERL_DEBUG": "none",
             "ARENA_RUN_ID": RUN_ID,
             "JOB_ID": str(int("abc123", 16)),
+            "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
+            "UCX_NET_DEVICES": "lo",
         }
         assert "APP_PULSAR_URL" not in env
 

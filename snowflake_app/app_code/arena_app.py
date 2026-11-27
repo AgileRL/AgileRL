@@ -66,6 +66,8 @@ from agilerl.snowflake.catalog import (
 from agilerl.snowflake.gpu_fit import gpu_counts_message, pool_gpus
 from agilerl.snowflake.job import (
     ROLES,
+    RunServices,
+    ServiceLeftRunningError,
     SubmitSettings,
     cancel_run,
     choose_gpu_family,
@@ -579,8 +581,9 @@ def submit(
         the source is not a bound reference, the manifest names a rubric file
         or a snowflake_function reward with no function bound, a model is
         outside the catalog or runs remote code, the
-        pools are not set, Arena has no price for the family, or the manifest
-        cannot run on them.
+        pools are not set, Arena has no price for the family, the manifest
+        cannot run on them, or the account's node limit is reached. A failed
+        start leaves no service and no usage item.
     :raises PermissionError: The trial has ended and the listing is not purchased.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
@@ -625,14 +628,7 @@ def submit(
             claim_account(session),
         )
         run_id = new_run_id()
-        # Recorded before any service starts, so a started run is always billed.
-        collect(
-            session,
-            "INSERT INTO app_state.usage_items (kind, usage_id, opened_at) "
-            f"VALUES ('run', {string_literal(run_id)}, CURRENT_TIMESTAMP())",
-        )
-        collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
-        _, services = submit_job(session, job_manifest, settings, run_id)
+        services = start_billed_run(session, job_manifest, settings, run_id)
     lines = [
         f"run_id: {run_id}",
         f"broker: {services.broker}",
@@ -645,6 +641,43 @@ def submit(
         if issubclass(item.category, UserWarning)
     )
     return "\n".join(lines)
+
+
+def start_billed_run(
+    session: SnowflakeSession, job_manifest: Path, settings: SubmitSettings, run_id: str
+) -> RunServices:
+    """Record the run for billing, then start its services.
+
+    :param session: Procedure session.
+    :param job_manifest: Manifest the run stages.
+    :param settings: The run's submit settings.
+    :param run_id: The new run's id.
+    :return: The started services.
+    :raises ValueError: The account's node limit is reached. A failed start
+        leaves no usage item.
+    :raises ServiceLeftRunningError: A service could not be dropped; its usage
+        item stays so it is billed.
+    """
+    # Recorded before any service starts, so a started run is always billed.
+    collect(
+        session,
+        "INSERT INTO app_state.usage_items (kind, usage_id, opened_at) "
+        f"VALUES ('run', {string_literal(run_id)}, CURRENT_TIMESTAMP())",
+    )
+    collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
+    try:
+        _, services = submit_job(session, job_manifest, settings, run_id)
+    except ServiceLeftRunningError:
+        raise
+    except Exception:
+        # submit_job dropped every service it started, so there is nothing to bill.
+        collect(
+            session,
+            "DELETE FROM app_state.usage_items WHERE kind = 'run' "
+            f"AND usage_id = {string_literal(run_id)}",
+        )
+        raise
+    return services
 
 
 def run_family(

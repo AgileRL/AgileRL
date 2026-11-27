@@ -30,7 +30,7 @@ from agilerl.models import __version__
 from agilerl.models.manifest import TrainingManifest
 from agilerl.snowflake.gpu_fit import (
     GpuShortfallError,
-    check_rollout_bundle,
+    check_one_node,
     shortfall_needed,
     shortfall_refusal,
 )
@@ -58,12 +58,14 @@ def manifest_fits(
     :param base_url: Arena origin.
     :param headers: Authorization headers for Arena.
     :return: Whether both phases fit with the underprediction buffer.
-    :raises GpuShortfallError: The run needs more GPUs, or a node larger
-        than the family's, for its rollout engines.
+    :raises GpuShortfallError: The run needs more GPUs, or a reinforcement
+        learning run's trainer and rollout engines would not share one node.
     :raises SnowflakeUpgradeRequiredError: Arena refuses this agilerl.
     :raises ValueError: Arena cannot be reached, rejects the request, or
         cannot size the manifest.
     """
+    manifest = load_manifest(manifest_path)
+    check_one_node(manifest, family, pool, gpus)
     origin = base_url.rstrip("/")
     body = memory_estimate_body(
         TrainingManifest.load(str(manifest_path)),
@@ -111,8 +113,5 @@ def manifest_fits(
         needed = shortfall_needed(estimate.usage_error)
         if needed is None:
             raise ValueError(estimate.usage_error)
-        manifest = load_manifest(manifest_path)
-        check_rollout_bundle(manifest, family, pool)
         raise GpuShortfallError(shortfall_refusal(manifest, family, pool, needed))
-    check_rollout_bundle(load_manifest(manifest_path), family, pool)
     return estimate.exit_code == EXIT_OK
