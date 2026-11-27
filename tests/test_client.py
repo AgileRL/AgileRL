@@ -3509,14 +3509,13 @@ class TestOpenInferenceAgent:
 
         result = api_key_client.open_inference_agent("dep1")
 
-        mock_agent_cls.assert_called_once_with(
-            "http://url",
-            api_key="test-key",
-            org_key=None,
-            external_user_id=None,
-            timeout=api_key_client._request_timeout,
-            assertion_source=api_key_client._mint_deployment_assertion,
-        )
+        kwargs = mock_agent_cls.call_args[1]
+        assert mock_agent_cls.call_args[0] == ("http://url",)
+        assert kwargs["api_key"]() == "test-key"
+        assert kwargs["org_key"] is None
+        assert kwargs["external_user_id"] is None
+        assert kwargs["timeout"] == api_key_client._request_timeout
+        assert kwargs["assertion_source"] == api_key_client._mint_deployment_assertion
         assert result is mock_agent
 
     @patch("agilerl.client.Agent")
@@ -3529,7 +3528,7 @@ class TestOpenInferenceAgent:
 
         api_key_client.open_inference_agent("dep1")
 
-        assert mock_agent_cls.call_args[1]["api_key"] == "arena_pat_abc"
+        assert mock_agent_cls.call_args[1]["api_key"]() == "arena_pat_abc"
 
     @patch("agilerl.client.Agent")
     def test_falls_back_to_the_oauth_token(self, mock_agent_cls, token_client):
@@ -3537,7 +3536,27 @@ class TestOpenInferenceAgent:
 
         token_client.open_inference_agent("dep1")
 
-        assert mock_agent_cls.call_args[1]["api_key"] == "tok_access"
+        assert mock_agent_cls.call_args[1]["api_key"]() == "tok_access"
+
+    @patch("agilerl.client.Agent")
+    def test_refreshes_an_expiring_oauth_token_when_the_agent_asks(
+        self, mock_agent_cls, token_client
+    ):
+        # Arrange
+        token_client._ensure_inference_binding = MagicMock(return_value="http://url")
+        token_client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
+        token_client.open_inference_agent("dep1")
+        credential = mock_agent_cls.call_args[1]["api_key"]
+        token_client._tokens.access_token = _jwt_with_exp(int(time.time()) + 30)
+        token_client._auth.refresh_access_token = MagicMock(
+            return_value={"access_token": "tok_fresh", "refresh_token": "r2"}
+        )
+
+        # Act
+        sent = credential()
+
+        # Assert
+        assert sent == "tok_fresh"
 
     @patch("agilerl.client.Agent")
     def test_no_credential_passes_none(self, mock_agent_cls, api_key_client):
@@ -3547,7 +3566,7 @@ class TestOpenInferenceAgent:
 
         api_key_client.open_inference_agent("dep1")
 
-        assert mock_agent_cls.call_args[1]["api_key"] is None
+        assert mock_agent_cls.call_args[1]["api_key"]() is None
 
     @patch("agilerl.client.Agent")
     def test_forwards_org_key_and_external_user_id(self, mock_agent_cls):

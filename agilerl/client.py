@@ -2437,7 +2437,9 @@ class ArenaClient:
         Attempts to load the deployment from the cache, and if not found, fetches it from the API.
 
         The agent carries this client's own credential, so run :meth:`login` or set
-        ``ARENA_API_KEY`` before using a deployment that keeps memory per user.
+        ``ARENA_API_KEY`` before using a deployment that keeps memory per user. It
+        reads the credential on each request, so a login's access token is
+        refreshed before it expires.
 
         :param deployment_name: The name of the deployment to open.
         :type deployment_name: str
@@ -2484,9 +2486,7 @@ class ArenaClient:
         """Build an agent for *url*, probing it to confirm the URL still serves."""
         return Agent(
             url,
-            api_key=(
-                None if self._org_key is not None else self._inference_credential()
-            ),
+            api_key=None if self._org_key is not None else self._inference_credential,
             org_key=self._org_key,
             external_user_id=self._external_user_id,
             timeout=timeout or self._request_timeout,

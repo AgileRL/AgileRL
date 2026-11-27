@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -277,13 +278,17 @@ class TestGenerate:
         sent = agent._http.request.call_args[1]["json"]
         assert sent["session_id"] == "sess-1"
 
-    def test_generate_omits_session_id_when_none(self):
+    def test_generate_sends_a_new_session_id_when_none(self):
         agent = self._make_agent_with_mock_http()
         agent._http.request.return_value = _llm_response()
 
         agent.generate("hi")
-        sent = agent._http.request.call_args[1]["json"]
-        assert "session_id" not in sent
+        first = agent._http.request.call_args[1]["json"]["session_id"]
+        agent.generate("hi")
+        second = agent._http.request.call_args[1]["json"]["session_id"]
+
+        assert uuid.UUID(first).version == 4
+        assert first != second
 
     def test_generate_rejects_blank_session_id(self):
         agent = self._make_agent_with_mock_http()
@@ -316,13 +321,27 @@ class TestGenerateStream:
         sent = agent._http.stream.call_args[1]["json"]
         assert sent["session_id"] == "sess-1"
 
-    def test_stream_omits_session_id_when_none(self):
+    def test_stream_sends_a_new_session_id_when_none(self):
         agent = _llm_agent()
         agent._http.stream.return_value = _stream_response(["ok"])
 
         list(agent.generate_stream("hi"))
         sent = agent._http.stream.call_args[1]["json"]
-        assert "session_id" not in sent
+
+        assert uuid.UUID(sent["session_id"]).version == 4
+
+    def test_stream_error_reports_the_status_and_detail(self):
+        agent = _llm_agent()
+        agent._http = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(422, json={"detail": "bad prompt"})
+            )
+        )
+
+        with pytest.raises(ArenaInferenceError, match="bad prompt") as exc_info:
+            list(agent.generate_stream("hi"))
+
+        assert exc_info.value.status_code == 422
 
     def test_stream_rejects_blank_session_id(self):
         agent = _llm_agent()
@@ -386,6 +405,54 @@ class TestAgentCredentialResolution:
                 org_key="arena_org_secret",
                 probe_on_init=False,
             )
+
+
+def _recording_transport(seen: list[str | None]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json=_body_for_path(request.url.path))
+
+    return httpx.MockTransport(handler)
+
+
+class TestAgentCallableCredential:
+    def test_reads_the_credential_for_every_request(self):
+        # Arrange
+        seen: list[str | None] = []
+        tokens = iter(["tok-1", "tok-2", "tok-3"])
+        real_client = httpx.Client
+        transport = _recording_transport(seen)
+
+        # Act
+        with patch(
+            "agilerl.inference.agent.httpx.Client",
+            lambda **kwargs: real_client(transport=transport, **kwargs),
+        ):
+            agent = Agent("http://endpoint", api_key=lambda: next(tokens))
+        agent.generate("hi")
+        agent.generate("hi again")
+
+        # Assert
+        assert seen == ["Bearer tok-1", "Bearer tok-2", "Bearer tok-3"]
+
+    def test_sends_no_header_while_the_callable_returns_none(self):
+        seen: list[str | None] = []
+        real_client = httpx.Client
+        transport = _recording_transport(seen)
+
+        with patch(
+            "agilerl.inference.agent.httpx.Client",
+            lambda **kwargs: real_client(transport=transport, **kwargs),
+        ):
+            Agent("http://endpoint", api_key=lambda: None)
+
+        assert seen == [None]
+
+    @patch("agilerl.inference.agent.httpx.Client")
+    def test_sets_no_static_header(self, mock_http_cls):
+        Agent("http://endpoint", api_key=lambda: SECRET, probe_on_init=False)
+
+        assert mock_http_cls.call_args[1]["headers"] == {}
 
 
 SECRET = "arena_pat_supersecret"
@@ -1225,6 +1292,33 @@ class TestDeploymentAssertion:
             ("/sessions", "arena_dpa_1"),
             ("/sessions", "arena_dpa_2"),
         ]
+
+    def test_callable_credential_is_sent_with_the_assertion_on_retry(self):
+        # Arrange
+        pod = OnPremPod()
+        minter = AssertionMinter(pod)
+        tokens = iter(["tok-1", "tok-2", "tok-3"])
+        authorizations: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            authorizations.append(request.headers.get("authorization"))
+            return pod.handler(request)
+
+        real = httpx.Client
+        with patch(
+            "agilerl.inference.agent.httpx.Client",
+            lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+        ):
+            agent = Agent(
+                "http://pod", api_key=lambda: next(tokens), assertion_source=minter
+            )
+
+        # Act
+        agent.generate("hi")
+
+        # Assert
+        assert authorizations == ["Bearer tok-1", "Bearer tok-2", "Bearer tok-2"]
+        assert pod.seen[-1] == ("/generate", "arena_dpa_1")
 
     def test_cloud_deployment_never_mints(self):
         seen: list[str | None] = []

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from collections.abc import Callable, Generator, Iterator
 from typing import Any
 
@@ -257,6 +258,37 @@ class DeploymentAssertionAuth(httpx.Auth):
         yield request
 
 
+class RefreshingBearerAuth(httpx.Auth):
+    """Sends ``Authorization: Bearer`` with the credential *get_credential* returns per request.
+
+    :param get_credential: Returns the current credential, or ``None`` to send none.
+    :type get_credential: Callable[[], str | None]
+    :param next_auth: Auth flow that sends the request once the header is set,
+        or ``None`` to send it as is.
+    :type next_auth: httpx.Auth | None
+    """
+
+    def __init__(
+        self,
+        get_credential: Callable[[], str | None],
+        next_auth: httpx.Auth | None = None,
+    ) -> None:
+        self.get_credential = get_credential
+        self.next_auth = next_auth
+
+    def auth_flow(
+        self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
+        """Set the header from a fresh credential, then send the request."""
+        credential = self.get_credential()
+        if credential:
+            request.headers["Authorization"] = f"Bearer {credential}"
+        if self.next_auth is None:
+            yield request
+        else:
+            yield from self.next_auth.auth_flow(request)
+
+
 class Agent:
     """HTTP client for a deployed Arena inference endpoint.
 
@@ -272,10 +304,12 @@ class Agent:
 
     :param endpoint: Base URL of the Arena inference deployment.
     :type endpoint: str
-    :param api_key: Profile PAT (``arena_pat_<uuid>_<secret>``) or an access token
-        from :meth:`~agilerl.client.ArenaClient.login`. Falls back to the
-        ``ARENA_API_KEY`` environment variable.
-    :type api_key: str | None
+    :param api_key: Profile PAT (``arena_pat_<uuid>_<secret>``) or access token, or
+        a callable that returns one for each request. A login's access token
+        expires within minutes, so
+        :meth:`~agilerl.client.ArenaClient.open_inference_agent` passes a callable
+        that refreshes it. Falls back to the ``ARENA_API_KEY`` environment variable.
+    :type api_key: str | Callable[[], str | None] | None
     :param org_key: Organisation API key (``arena_org_…``). Requires
         *external_user_id*. Falls back to ``ARENA_ORG_KEY``.
     :type org_key: str | None
@@ -298,7 +332,7 @@ class Agent:
         self,
         endpoint: str,
         *,
-        api_key: str | None = None,
+        api_key: str | Callable[[], str | None] | None = None,
         org_key: str | None = None,
         external_user_id: str | None = None,
         timeout: int = 30,
@@ -313,23 +347,26 @@ class Agent:
         validate_partner_credentials(org_key, external_user_id)
 
         headers: dict[str, str] = {}
+        auth: httpx.Auth | None = (
+            None
+            if assertion_source is None
+            else DeploymentAssertionAuth(
+                lambda: assertion_source(self._loaded_metadata().deployment_id)
+            )
+        )
         if org_key is not None and external_user_id is not None:
             headers["Authorization"] = f"Bearer {org_key}"
             headers[EXTERNAL_USER_ID_HEADER] = external_user_id
         else:
             credential = api_key or os.environ.get("ARENA_API_KEY")
-            if credential:
+            if callable(credential):
+                auth = RefreshingBearerAuth(credential, auth)
+            elif credential:
                 headers["Authorization"] = f"Bearer {credential}"
 
         self._http = httpx.Client(
             headers=headers,
-            auth=(
-                None
-                if assertion_source is None
-                else DeploymentAssertionAuth(
-                    lambda: assertion_source(self._loaded_metadata().deployment_id)
-                )
-            ),
+            auth=auth,
             timeout=timeout,
             follow_redirects=True,
         )
@@ -435,6 +472,9 @@ class Agent:
         url = self._url(path)
         try:
             with self._http.stream("POST", url, json=json_body) as resp:
+                if resp.status_code != 200:
+                    # The error detail is read from the body.
+                    resp.read()
                 self._raise_for_status(resp)
                 for chunk in resp.iter_text():
                     if chunk.startswith("\n[ERROR:"):
@@ -492,6 +532,13 @@ class Agent:
             raise ArenaInferenceError(detail="session_id must be a non-empty string.")
         return session_id.strip()
 
+    @classmethod
+    def _session_id_for_request(cls, session_id: str | None) -> str:
+        """Return *session_id* checked, or a new id: the deployment requires one."""
+        if session_id is None:
+            return str(uuid.uuid4())
+        return cls._validate_session_id(session_id)
+
     def _merge_llm_params(
         self,
         params: LLMParams | dict[str, Any] | None,
@@ -534,9 +581,8 @@ class Agent:
         :param params: The parameters to the agent.
         :type params: LLMParams | dict[str, Any] | None
         :param session_id: Chat session to continue, as listed by
-            :meth:`list_sessions`. When omitted the field is left out of the
-            request and the deployment starts a new conversation; no session id
-            is minted here.
+            :meth:`list_sessions`. When omitted, a new session id is sent, so the
+            call starts a new conversation.
         :type session_id: str | None
         :return: The LLM results.
         :rtype: LLMResults
@@ -547,9 +593,8 @@ class Agent:
         payload: dict[str, Any] = {
             "prompts": prompt_list,
             "params": self._merge_llm_params(params),
+            "session_id": self._session_id_for_request(session_id),
         }
-        if session_id is not None:
-            payload["session_id"] = self._validate_session_id(session_id)
         body = self._request_json("POST", "/generate", json_body=payload)
         return LLMResults.model_validate(body)
 
@@ -567,9 +612,8 @@ class Agent:
         :param params: The parameters to the agent.
         :type params: LLMParams | dict[str, Any] | None
         :param session_id: Chat session to continue, as listed by
-            :meth:`list_sessions`. When omitted the field is left out of the
-            request and the deployment starts a new conversation; no session id
-            is minted here.
+            :meth:`list_sessions`. When omitted, a new session id is sent, so the
+            call starts a new conversation.
         :type session_id: str | None
         :return: An iterator of strings.
         :rtype: Iterator[str]
@@ -579,9 +623,8 @@ class Agent:
         payload: dict[str, Any] = {
             "prompt": prompt,
             "params": self._merge_llm_params(params),
+            "session_id": self._session_id_for_request(session_id),
         }
-        if session_id is not None:
-            payload["session_id"] = self._validate_session_id(session_id)
         yield from self._request_stream("/generate_stream", json_body=payload)
 
     def list_sessions(self) -> list[SessionInfo]:
