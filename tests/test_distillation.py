@@ -16,6 +16,7 @@ from agilerl.models.algorithms.opd import (
     teacher_engine_gpus,
 )
 from agilerl.models.distillation import (
+    SCORING_OUTPUT_TOKENS,
     DistillationTeacherConfig,
     DistillationTeacherModel,
 )
@@ -81,7 +82,7 @@ class TestDistillationTeacherConfig:
         config = DistillationTeacherConfig(max_context_tokens=256)
 
         assert config.context_tokens == 256
-        assert config.rollout_engine_context_tokens == 256
+        assert config.rollout_engine_context_tokens == 256 + 1
 
     def test_a_teacher_model_takes_no_reference_unless_named(self) -> None:
         model = DistillationTeacherModel(pretrained_model_name_or_path="big/model")
@@ -91,6 +92,20 @@ class TestDistillationTeacherConfig:
         assert config.context_key is None
         assert config.context_tokens == 0
         assert model.gpus == 1
+
+    def test_scoring_leaves_room_for_the_one_output_token_vllm_requires(
+        self,
+    ) -> None:
+        # vLLM refuses a scoring request whose prompt fills max_model_len.
+        model = DistillationTeacherModel(pretrained_model_name_or_path="big/model")
+
+        no_reference = DistillationTeacherConfig(model=model)
+        with_reference = DistillationTeacherConfig(
+            model=model, context_key="trace", max_context_tokens=256
+        )
+
+        assert no_reference.scoring_context_tokens == SCORING_OUTPUT_TOKENS == 1
+        assert with_reference.scoring_context_tokens == 256 + 1
 
     def test_a_teacher_model_with_a_reference_reserves_it_on_its_own_engine(
         self,
@@ -113,13 +128,13 @@ class TestDistillationTeacherConfig:
             adapter="s3://bucket/grpo/checkpoint", context_key="trace"
         )
 
-        assert config.rollout_engine_context_tokens == config.max_context_tokens
+        assert config.rollout_engine_context_tokens == config.max_context_tokens + 1
 
     def test_a_teacher_adapter_takes_no_reference_unless_named(self) -> None:
         config = DistillationTeacherConfig(adapter="/ckpt")
 
         assert config.context_key is None
-        assert config.rollout_engine_context_tokens == 0
+        assert config.rollout_engine_context_tokens == 1
 
     def test_a_base_teacher_scores_on_base_weights_without_a_reference(self) -> None:
         config = DistillationTeacherConfig(base=True)

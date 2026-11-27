@@ -15,6 +15,9 @@ DEFAULT_TEACHER_TEMPLATE = (
     "task as that reference does.\n\n{reference}"
 )
 DEFAULT_TEACHER_CONTEXT_KEY = "reference_trace"
+# vLLM refuses a prompt that leaves no room for an output token, so each
+# scoring request asks for one and the scoring engine holds one more token.
+SCORING_OUTPUT_TOKENS = 1
 
 
 class DistillationTeacherModel(BaseModel):
@@ -191,6 +194,11 @@ class DistillationTeacherConfig(BaseModel):
         return 0 if self.context_key is None else self.max_context_tokens
 
     @property
+    def scoring_context_tokens(self) -> int:
+        """Context the scoring engine adds to the policy's: the reference and one output token."""
+        return self.context_tokens + SCORING_OUTPUT_TOKENS
+
+    @property
     def rollout_engine_context_tokens(self) -> int:
-        """Context the rollout engine itself reserves: none when a teacher model scores."""
-        return 0 if self.model is not None else self.context_tokens
+        """Context the rollout engine itself adds: none when a teacher model scores."""
+        return 0 if self.model is not None else self.scoring_context_tokens
