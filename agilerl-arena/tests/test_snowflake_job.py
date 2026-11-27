@@ -533,6 +533,7 @@ class TestContainerEnv:
         assert env == {
             "APP_TOPIC_PREFIX": "non-persistent://arena/run",
             "AGILERL_ROLLOUT_TOPIC_ROUTE": "persistent://arena/run/llm-rollout",
+            "AGILERL_DEBUG": "none",
             "ARENA_RUN_ID": RUN_ID,
             "JOB_ID": str(int("abc123", 16)),
         }
