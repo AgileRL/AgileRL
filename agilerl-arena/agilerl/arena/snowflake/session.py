@@ -13,6 +13,8 @@ from typing import Any, Protocol
 from agilerl.arena.snowflake import APPLICATION
 from agilerl.arena.snowflake.source import SnowflakeSession
 
+NODE_LIMIT_ERROR = 395034
+"""Snowflake error code: the requested nodes exceed the account's node limit."""
 BROWSER_SIGN_IN = frozenset({"EXTERNALBROWSER", "OAUTH_AUTHORIZATION_CODE"})
 
 
@@ -146,6 +148,23 @@ def sql_errors() -> tuple[type[Exception], ...]:
     except ImportError:
         return ()
     return (DatabaseError, SnowparkSQLException)
+
+
+def node_limit_reached(exc: Exception) -> bool:
+    """Whether a statement failed because the account's SPCS node limit is reached.
+
+    :param exc: The error the statement raised.
+    :return: True for Snowflake error 395034.
+    """
+    # Deferred optional extra: snowflake.
+    try:
+        from snowflake.connector.errors import DatabaseError
+        from snowflake.snowpark.exceptions import SnowparkSQLException
+    except ImportError:
+        return False
+    if isinstance(exc, SnowparkSQLException):
+        return exc.sql_error_code == NODE_LIMIT_ERROR
+    return isinstance(exc, DatabaseError) and exc.errno == NODE_LIMIT_ERROR
 
 
 def connections_file() -> Path:

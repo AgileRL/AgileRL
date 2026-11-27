@@ -49,6 +49,7 @@ from app_trial import refuse_ended_trial
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
+from agilerl.arena.models.manifest import IN_SNOWFLAKE_APP, TrainingManifest
 from agilerl.arena.models.model_info import (
     REMOTE_CODE_MODEL_TYPES,
     SUPPORTED_MODEL_INFO,
@@ -63,12 +64,16 @@ from agilerl.arena.snowflake.catalog import (
     load_families,
     remote_profile,
 )
+from agilerl.arena.snowflake.cli import run_status, service_logs
 from agilerl.arena.snowflake.gpu_fit import gpu_counts_message, pool_gpus
 from agilerl.arena.snowflake.job import (
     ROLES,
+    RunServices,
+    ServiceLeftRunningError,
     SubmitSettings,
     cancel_run,
     choose_gpu_family,
+    load_manifest,
     lowered,
     manifest_fits,
     new_run_id,
@@ -88,7 +93,6 @@ from agilerl.arena.snowflake.license import (
     snowflake_priced_families,
     snowflake_training_enabled,
 )
-from agilerl.arena.snowflake.manifest_refusal import load_app_manifest
 from agilerl.arena.snowflake.profile import (
     CPU_POOL_MAX_NODES,
     CPU_POOL_MIN_NODES,
@@ -136,10 +140,8 @@ from agilerl.arena.snowflake.setup_sql import (
     string_literal,
 )
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
-from agilerl.arena.snowflake.status import run_status, service_logs
 
 if TYPE_CHECKING:
-    from agilerl.arena.models.manifest import TrainingManifest
     from agilerl.arena.snowflake.catalog import GpuFamily
 
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
@@ -568,7 +570,7 @@ def submit(
     :param source_reference: ``source_table`` or ``source_view``, or ``None``
         when the manifest trains on no rows.
     :param source_alias: Alias of the bound object the run reads.
-    :param gpu_family: GPU family. ``None`` picks one with ``choose_gpu_family``.
+    :param gpu_family: GPU family. ``None`` picks one as ``arena snowflake submit`` does.
     :param reward_file: Refused unless ``None``: the app runs no code from
         outside its package.
     :param checkpoint_steps: Training steps between checkpoints, or ``None``.
@@ -579,8 +581,9 @@ def submit(
         the source is not a bound reference, the manifest names a rubric file
         or a snowflake_function reward with no function bound, a model is
         outside the catalog or runs remote code, the
-        pools are not set, Arena has no price for the family, or the manifest
-        cannot run on them.
+        pools are not set, Arena has no price for the family, the manifest
+        cannot run on them, or the account's node limit is reached. A failed
+        start leaves no service and no usage item.
     :raises PermissionError: The trial has ended and the listing is not purchased.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
@@ -606,7 +609,7 @@ def submit(
         submitted = directory / "submitted.yaml"
         submitted.write_text(manifest, encoding="utf-8")
         job_manifest = write_job_manifest(submitted, source, False, directory)
-        parsed = load_app_manifest(job_manifest)
+        parsed = load_manifest(job_manifest, {IN_SNOWFLAKE_APP: True})
         refuse_remote_code(parsed)
         check_app_reward(session, parsed)
         if source_reference is not None and source_alias is not None:
@@ -625,14 +628,7 @@ def submit(
             claim_account(session),
         )
         run_id = new_run_id()
-        # Recorded before any service starts, so a started run is always billed.
-        collect(
-            session,
-            "INSERT INTO app_state.usage_items (kind, usage_id, opened_at) "
-            f"VALUES ('run', {string_literal(run_id)}, CURRENT_TIMESTAMP())",
-        )
-        collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
-        _, services = submit_job(session, job_manifest, settings, run_id)
+        services = start_billed_run(session, job_manifest, settings, run_id)
     lines = [
         f"run_id: {run_id}",
         f"broker: {services.broker}",
@@ -645,6 +641,43 @@ def submit(
         if issubclass(item.category, UserWarning)
     )
     return "\n".join(lines)
+
+
+def start_billed_run(
+    session: SnowflakeSession, job_manifest: Path, settings: SubmitSettings, run_id: str
+) -> RunServices:
+    """Record the run for billing, then start its services.
+
+    :param session: Procedure session.
+    :param job_manifest: Manifest the run stages.
+    :param settings: The run's submit settings.
+    :param run_id: The new run's id.
+    :return: The started services.
+    :raises ValueError: The account's node limit is reached. A failed start
+        leaves no usage item.
+    :raises ServiceLeftRunningError: A service could not be dropped; its usage
+        item stays so it is billed.
+    """
+    # Recorded before any service starts, so a started run is always billed.
+    collect(
+        session,
+        "INSERT INTO app_state.usage_items (kind, usage_id, opened_at) "
+        f"VALUES ('run', {string_literal(run_id)}, CURRENT_TIMESTAMP())",
+    )
+    collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
+    try:
+        _, services = submit_job(session, job_manifest, settings, run_id)
+    except ServiceLeftRunningError:
+        raise
+    except Exception:
+        # submit_job dropped every service it started, so there is nothing to bill.
+        collect(
+            session,
+            "DELETE FROM app_state.usage_items WHERE kind = 'run' "
+            f"AND usage_id = {string_literal(run_id)}",
+        )
+        raise
+    return services
 
 
 def run_family(

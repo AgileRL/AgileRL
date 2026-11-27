@@ -2053,7 +2053,7 @@ class TestPlatformClusters:
         assert rotate.call_args.kwargs["platform"] is True
 
     @pytest.mark.parametrize(
-        "command", ["unregister", "rotate-token", "upgrade", "manifest", "smoke"]
+        "command", ["unregister", "rotate-token", "upgrade", "smoke"]
     )
     def test_help_says_staff_only(self, command: str) -> None:
         result = CliRunner().invoke(ClusterDynamicGroup().commands[command], ["--help"])

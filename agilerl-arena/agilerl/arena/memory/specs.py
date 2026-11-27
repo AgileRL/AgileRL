@@ -983,6 +983,8 @@ class DeviceSpec(BaseModel):
     all_reduce_latency_seconds: float | None = None
     # GPUs of one node talk over NVLink, not PCIe.
     nvlink: bool = False
+    # GPUs of one node can read each other's memory over NVLink or PCIe P2P.
+    peer_to_peer: bool = True
     # Host RAM one GPU's process may hold, from
     # :func:`~agilerl.arena.memory.formulas.host_bytes_per_gpu`; ``None`` skips
     # the host check.

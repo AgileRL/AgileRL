@@ -76,7 +76,7 @@ CLAIM_START_FAILED = "Could not start connecting this Snowflake account to Arena
 CLAIM_PROVE_FAILED = "Could not prove this Snowflake install to Arena."
 CLAIM_KEY_FAILED = "Could not collect the Arena org key."
 ROTATE_FAILED = "Could not rotate the Arena org key."
-UPDATE_TRAINER_IMAGE = "then upgrade the Arena app: ALTER APPLICATION <app> UPGRADE."
+UPDATE_TRAINER_IMAGE = "then run arena snowflake setup to update the trainer image."
 
 logger = logging.getLogger(__name__)
 

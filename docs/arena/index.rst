@@ -725,11 +725,11 @@ In-account Snowflake
 --------------------
 
 Train on a Snowflake table and serve the model without the data leaving the
-account, with the Arena Native App from the Snowflake Marketplace. See
-`Arena Native App on Snowflake <https://docs.arena.agilerl.com/partners/snowflake-native-app/>`_.
+account. See :doc:`snowflake`.
 
 .. toctree::
    :maxdepth: 1
 
    prompts_and_rewards
    traces
+   snowflake

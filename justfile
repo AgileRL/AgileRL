@@ -68,8 +68,7 @@ snowflake-app-validate:
     bash scripts/run-tests.sh agilerl-arena/tests/test_snowflake_app_manifest.py
 
 # Copy the snowflake-job image into the provider repository and add a version
-# to the application package. Needs crane, AWS credentials that can pull from
-# private ECR in us-east-1, and a Snowflake CLI connection.
+# to the application package. Needs crane and a Snowflake CLI connection.
 # Usage: just snowflake-app-build CONNECTION TAG   (TAG like 38.0.4-py313-cu130)
 snowflake-app-build connection tag:
     #!/usr/bin/env bash
@@ -94,9 +93,7 @@ snowflake-app-build connection tag:
     registry="$($snow spcs image-registry url --connection "{{ connection }}")"
     $snow spcs image-registry token --connection "{{ connection }}" --format JSON \
         | crane auth login "$registry" -u 0sessiontoken --password-stdin
-    ecr=761296822462.dkr.ecr.us-east-1.amazonaws.com
-    aws ecr get-login-password --region us-east-1 | crane auth login "$ecr" -u AWS --password-stdin
-    crane copy --platform linux/amd64 "$ecr/containers/snowflake-job:$tag" \
+    crane copy --platform linux/amd64 "public.ecr.aws/x7s7d0o8/containers/snowflake-job:$tag" \
         "$registry/arena_provider/images/repo/snowflake-job:$tag"
     $snow app version create "v${tag//[^A-Za-z0-9]/_}" --project "$build" \
         --connection "{{ connection }}" --skip-git-check --no-interactive --force

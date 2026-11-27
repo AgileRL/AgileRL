@@ -18,9 +18,13 @@ DISTRIBUTION = "agilerl-arena"
 CLI_MODULE = "agilerl.arena.cli"
 AUTO_UPGRADE_ENV = "ARENA_AUTO_UPGRADE"
 UPGRADE_RETRIED_ENV = "ARENA_UPGRADE_RETRIED"
+SNOWFLAKE_EXTRA = "snowflake"
+SNOWFLAKE_SETUP_NOTE = (
+    "The Snowflake trainer image only updates when you re-run: arena snowflake setup"
+)
 
 
-def offer_upgrade(description: str) -> None:
+def offer_upgrade(description: str, snowflake: bool) -> None:
     """Offer to upgrade agilerl-arena, then re-run the command on the new release.
 
     Prompts on a TTY, or upgrades without asking when ``ARENA_AUTO_UPGRADE=1``.
@@ -29,6 +33,7 @@ def offer_upgrade(description: str) -> None:
     exits with that command's status.
 
     :param description: Arena's 426 description, which names the pip command.
+    :param snowflake: The command is an ``arena snowflake`` command.
     :raises click.exceptions.Exit: The user declined, or pip failed.
     :raises SystemExit: Windows, with the status of the re-run command.
     """
@@ -43,13 +48,15 @@ def offer_upgrade(description: str) -> None:
         "Upgrade agilerl-arena now?", default=True, err=True
     ):
         raise click.exceptions.Exit(1)
-    requirement = upgrade_requirement(description)
+    requirement = upgrade_requirement(description, snowflake)
     result = subprocess.run(
         [sys.executable, "-m", "pip", "install", "-U", requirement], check=False
     )
     if result.returncode != 0:
         click.echo(f'The upgrade failed. Run: pip install -U "{requirement}"', err=True)
         raise click.exceptions.Exit(1)
+    if snowflake:
+        click.echo(SNOWFLAKE_SETUP_NOTE, err=True)
     os.environ[UPGRADE_RETRIED_ENV] = "1"
     _reexec_cli()
 
@@ -64,16 +71,19 @@ def _reexec_cli() -> None:
     os.execv(sys.executable, argv)
 
 
-def upgrade_requirement(description: str) -> str:
+def upgrade_requirement(description: str, snowflake: bool) -> str:
     """The pip requirement that upgrades agilerl-arena with its current extras.
 
     :param description: Arena's 426 description; extras it names are kept.
+    :param snowflake: Add the ``snowflake`` extra.
     :return: ``agilerl-arena`` or ``agilerl-arena[extra,...]``.
     """
     description_extras = re.compile(r"agilerl-arena\[([A-Za-z0-9_.,\- ]+)\]")
     extras = set(installed_extras())
     for match in description_extras.findall(description):
         extras.update(extra.strip() for extra in match.split(",") if extra.strip())
+    if snowflake:
+        extras.add(SNOWFLAKE_EXTRA)
     if not extras:
         return DISTRIBUTION
     return f"{DISTRIBUTION}[{','.join(sorted(extras))}]"

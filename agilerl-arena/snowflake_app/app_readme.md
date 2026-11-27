@@ -171,9 +171,9 @@ All procedures are in the app's `app_code` schema. Call them as `arena_app.app_c
 
 | Procedure | Role | What it does |
 |---|---|---|
-| `SUBMIT(manifest STRING, gpus NUMBER, source_reference STRING DEFAULT NULL, source_alias STRING DEFAULT NULL, gpu_family STRING DEFAULT NULL, reward_file STRING DEFAULT NULL, checkpoint_steps NUMBER DEFAULT NULL, resume_from STRING DEFAULT NULL)` | `app_admin` | Starts a training run from a YAML manifest on the bound table or view. Returns the run ID. Leave `reward_file` as `NULL`: set the reward in the manifest. Before it starts anything, it checks that the alias is bound, that the app has a pool for the GPU family and that the pool can run that many GPUs. If a check fails, or the manifest has a missing, misspelled or wrong-typed field, it names the field, says what to change and starts nothing. |
+| `SUBMIT(manifest STRING, gpus NUMBER, source_reference STRING DEFAULT NULL, source_alias STRING DEFAULT NULL, gpu_family STRING DEFAULT NULL, reward_file STRING DEFAULT NULL, checkpoint_steps NUMBER DEFAULT NULL, resume_from STRING DEFAULT NULL)` | `app_admin` | Starts a training run from a YAML manifest on the bound table or view. Returns the run ID. Leave `reward_file` as `NULL`: set the reward in the manifest. Before it starts anything, it checks that the alias is bound, that the app has a pool for the GPU family and that the pool can run that many GPUs. If a check fails, it says what to change and starts nothing. |
 | `STATUS(run_id STRING)` | `app_user` | Shows the state of the run's services and the run: `running`, `succeeded`, `failed`, `cancelling`, `cancelled` or `gone`. `cancel` drops the run's services, so a run you cancel reads `gone`. |
-| `LOGS(run_id STRING, role STRING DEFAULT 'head', instance NUMBER DEFAULT 0)` | `app_user` | Shows the log of one service: `head`, `broker` or `worker`, at INFO level and above. While its GPU node is still starting, it says the container has not started yet. Logs of a finished job need an active event table in your account. |
+| `LOGS(run_id STRING, role STRING DEFAULT 'head', instance NUMBER DEFAULT 0)` | `app_user` | Shows the log of one service: `head`, `broker` or `worker`. While its GPU node is still starting, it says the container has not started yet. Logs of a finished job need an active event table in your account. |
 | `CANCEL(run_id STRING)` | `app_admin` | Stops a run and suspends GPU pools left with nothing on them. |
 
 ### Models and serving
@@ -216,7 +216,7 @@ SELECT arena_app.app_state.math_agent_v1!__CALL__(
 | Table | Role | Contents |
 |---|---|---|
 | `app_state.arena_metrics` | `app_user` | Training metrics for each run. |
-| `app_state.usage_items` | `app_admin` | Runs and served models the app bills. `unbilled_reason` says why a run was not charged. |
+| `app_state.usage_items` | `app_admin` | Runs and served models the app bills. |
 | `app_state.billed_hours` | `app_admin` | One row per billed usage hour. |
 | `app_state.served_models` | `app_admin` | What each inference service serves. |
 
@@ -330,8 +330,6 @@ The listing has one usage-based plan, and Snowflake bills both parts:
 
 - A monthly fee of $12,500, charged only in calendar months you use the app. Any query that references the app counts as use, including a call to `status`. So does a month in which any of the app's compute pools runs, even briefly before it auto-suspends.
 - $0.01 for each usage unit your training and serving jobs consume. One usage unit is 1 cent of job cost. Job cost is GPUs × hours × the GPU family's Arena price per GPU-hour.
-
-Training counts from the start of the first GPU node to the end of the run. A run that ends before its first training step, for example because it failed while starting up, is not charged. A run that fails partway through training is charged up to the failure.
 
 Snowflake also charges you as usual for the app's compute pools, warehouse, storage and serverless task.
 

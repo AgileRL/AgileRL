@@ -41,6 +41,7 @@ from agilerl.arena.snowflake.job import (
     manifest_fits,
     new_run_id,
     node_resources,
+    qualified_table,
     render_broker_spec,
     render_head_spec,
     render_workers_spec,
@@ -533,9 +534,11 @@ class TestContainerEnv:
         assert env == {
             "APP_TOPIC_PREFIX": "non-persistent://arena/run",
             "AGILERL_ROLLOUT_TOPIC_ROUTE": "persistent://arena/run/llm-rollout",
-            "AGILERL_DEBUG": "none",
             "ARENA_RUN_ID": RUN_ID,
             "JOB_ID": str(int("abc123", 16)),
+            "UCX_TLS": "self,sm,cuda_copy,cuda_ipc,tcp",
+            "UCX_NET_DEVICES": "lo,eth0",
+            "LD_PRELOAD": "/usr/local/lib/libnetlink_done.so",
         }
         assert "APP_PULSAR_URL" not in env
 
@@ -893,6 +896,27 @@ class TestRunState:
         assert run_state({"broker": broker, "head": head, "worker": worker}) == state
 
 
+class TestQualifiedTable:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "arena.training.prompts",
+            ' db."My Schema".T$1 ',
+            '"db"."s.x"."t""q"',
+        ],
+    )
+    def test_three_part_names_pass(self, name: str) -> None:
+        assert qualified_table(name) == name.strip()
+
+    @pytest.mark.parametrize(
+        "name",
+        ["prompts", "training.prompts", "a.b.c.d", "a..b", "db.s.t; drop", 'db.s."t'],
+    )
+    def test_other_names_are_rejected(self, name: str) -> None:
+        with pytest.raises(ValueError, match=r"must be database\.schema\.table"):
+            qualified_table(name)
+
+
 class TestDescribeInstanceFamily:
     def test_reads_the_family(self) -> None:
         session = Session(rows=[Row(INSTANCE_FAMILY="GPU_NV_S")])
@@ -998,7 +1022,7 @@ class TestSubmitJob:
     ) -> None:
         session = Session()
 
-        with pytest.raises(ValueError, match="Pass a source table or view"):
+        with pytest.raises(ValueError, match="Pass --source-table or --source-query"):
             submit_job(session, _write(tmp_path, document), _settings(None), RUN_ID)
 
         assert session.events == []
@@ -1007,7 +1031,7 @@ class TestSubmitJob:
         reward = tmp_path / "reward.py"
         reward.write_text("", encoding="utf-8")
 
-        with pytest.raises(ValueError, match="Pass a source table or view"):
+        with pytest.raises(ValueError, match="Pass --source-table or --source-query"):
             submit_job(
                 Session(),
                 _write(tmp_path, _dataset_rl()),
@@ -1041,7 +1065,7 @@ class TestSubmitJob:
     ) -> None:
         session = Session()
 
-        with pytest.raises(ValueError, match=r"needs environment\.reward"):
+        with pytest.raises(ValueError, match="needs --reward-file"):
             submit_job(session, _write(tmp_path, _dataset_rl()), _settings(), RUN_ID)
 
         assert session.events == []
@@ -1633,7 +1657,7 @@ class TestChooseGpuFamily:
         with pytest.raises(ValueError, match="no GPU pool") as raised:
             choose_gpu_family({}, 2, None, _rejects)
 
-        assert "app_code.set_pools" in str(raised.value)
+        assert "Run arena snowflake setup again." in str(raised.value)
 
 
 class TestManifestFits:
@@ -1838,7 +1862,7 @@ class TestSubmitServices:
         )
 
         with pytest.raises(
-            ValueError, match=r"set_pools\(\['GPU_NV_M'\], 8\)"
+            ValueError, match="pools set GPU_NV_M --max-gpus 8"
         ) as raised:
             submit_job(session, _write(tmp_path, _sft()), settings, RUN_ID)
 

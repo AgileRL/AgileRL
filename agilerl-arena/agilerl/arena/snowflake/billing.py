@@ -25,34 +25,27 @@ from agilerl.arena.snowflake.source import SnowflakeSession
 
 logger = logging.getLogger(__name__)
 
-UNTRAINED_REASON = "The run ended before training started."
-
 
 def reconcile(
     session: SnowflakeSession,
     fetch: Callable[[str, str], SnowflakeUsage],
-    trained: Callable[[str], bool],
     now_ms: int,
 ) -> str:
     """Bill each unsettled usage item from Arena's hours, then settle finished items.
 
     Items are read least recently checked first. A closed item settles once
-    every charged hour has been attempted. A run with no billed hours is not
-    billed until it records a training step: while open it waits, and once
-    closed it settles unbilled. An item Arena answers 404 for settles only
-    when Arena never answered for it, it has no billed hours, and the 404s
-    have lasted 30 days; until then it is read at most daily. The first
-    failed read other than a 404 stops reading for this run.
+    every charged hour has been attempted. An item Arena answers 404 for
+    settles only when Arena never answered for it, it has no billed hours,
+    and the 404s have lasted 30 days; until then it is read at most daily.
+    The first failed read other than a 404 stops reading for this run.
 
     :param session: Procedure session.
     :param fetch: Arena usage of ``(kind, usage_id)``.
-    :param trained: Whether a run has recorded a training step.
     :param now_ms: Current time in epoch milliseconds.
     :return: Counts of items, settled items, emitted events, failed items,
         items Arena answered 404 for, items skipped until their daily read,
-        items open over 7 days, hours attempted over an hour ago that
-        Snowflake never confirmed, runs waiting for their first training
-        step, and runs settled unbilled because they ended before training.
+        items open over 7 days, and hours attempted over an hour ago that
+        Snowflake never confirmed.
     """
     day_ms = 24 * 3_600_000
     items = collect(
@@ -65,18 +58,27 @@ def reconcile(
         "FROM app_state.usage_items WHERE settled_at IS NULL "
         "ORDER BY last_checked_at NULLS FIRST",
     )
-    settled = emitted = failed = missing = skipped = stale = waiting = untrained = 0
+    settled = emitted = failed = missing = skipped = stale = 0
     for item in items:
         values = lowered(item)
         kind, usage_id = str(values["kind"]), str(values["usage_id"])
+        seen_ms, missing_ms = (
+            epoch_ms(values["seen_ms"]),
+            epoch_ms(values["missing_ms"]),
+        )
         if checked_today(session, kind, usage_id, values, now_ms):
             skipped += 1
             continue
         try:
             usage = fetch(kind, usage_id)
         except UnknownUsageError:
+            mark_checked(session, kind, usage_id, now_ms, "first_404_at")
             missing += 1
-            settled += settle_missing(session, kind, usage_id, values, now_ms)
+            first_404_ms = now_ms if missing_ms is None else missing_ms
+            if settle_missing(
+                session, kind, usage_id, seen_ms is not None, first_404_ms, now_ms
+            ):
+                settled += 1
             continue
         except (SnowflakeLicenseError, ValueError) as exc:
             mark_checked(session, kind, usage_id, now_ms, None)
@@ -90,14 +92,6 @@ def reconcile(
             failed += 1
             break
         mark_checked(session, kind, usage_id, now_ms, "first_seen_at")
-        if kind == "run" and not run_billable(session, usage_id, trained):
-            if usage.state == "open":
-                waiting += 1
-                continue
-            settle_untrained(session, usage_id, now_ms)
-            settled += 1
-            untrained += 1
-            continue
         try:
             billed = bill_hours(session, kind, usage_id, usage.billable_hours, now_ms)
         except (TypeError, ValueError, RuntimeError, *sql_errors()) as exc:
@@ -119,58 +113,7 @@ def reconcile(
     return (
         f"items: {len(items)}, settled: {settled}, events: {emitted}, "
         f"failed: {failed}, missing: {missing}, skipped: {skipped}, stale: {stale}, "
-        f"unconfirmed: {unconfirmed}, waiting: {waiting}, untrained: {untrained}"
-    )
-
-
-def training_started(
-    session: SnowflakeSession, metrics_table: str, run_id: str
-) -> bool:
-    """Whether a run's metrics hold a step count above zero.
-
-    Trainers report ``agent_<n>/steps`` once a learn step has started, including
-    one that raises, and not before.
-
-    :param session: Procedure session.
-    :param metrics_table: Table the run's metrics merge into.
-    :param run_id: Run id.
-    :return: True once the run has recorded a training step.
-    """
-    rows = collect(
-        session,
-        f"SELECT 1 AS STEPPED FROM {metrics_table}, LATERAL FLATTEN(input => METRICS) "
-        f"WHERE RUN_ID = {string_literal(run_id)} AND ENDSWITH(KEY, '/steps') "
-        "AND TRY_TO_DOUBLE(TO_VARCHAR(VALUE)) > 0 LIMIT 1",
-    )
-    return bool(rows)
-
-
-def run_billable(
-    session: SnowflakeSession, run_id: str, trained: Callable[[str], bool]
-) -> bool:
-    """Whether a run may be billed: it has billed hours already, or it has trained.
-
-    :param session: Procedure session.
-    :param run_id: Run id.
-    :param trained: Whether a run has recorded a training step.
-    :return: True when its hours are billed.
-    """
-    return has_billed_hours(session, "run", run_id) or trained(run_id)
-
-
-def settle_untrained(session: SnowflakeSession, run_id: str, now_ms: int) -> None:
-    """Settle a run that ended before its first training step, unbilled, with the reason.
-
-    :param session: Procedure session.
-    :param run_id: Run id.
-    :param now_ms: Current time in epoch milliseconds.
-    """
-    logger.info("Run %s ended before training started. It is not billed.", run_id)
-    collect(
-        session,
-        f"UPDATE app_state.usage_items SET settled_at = TO_TIMESTAMP_TZ({now_ms}, 3), "
-        f"unbilled_reason = {string_literal(UNTRAINED_REASON)} "
-        f"WHERE kind = 'run' AND usage_id = {string_literal(run_id)}",
+        f"unconfirmed: {unconfirmed}"
     )
 
 
@@ -229,22 +172,20 @@ def settle_missing(
     session: SnowflakeSession,
     kind: str,
     usage_id: str,
-    values: dict[str, object],
+    seen: bool,
+    first_404_ms: int,
     now_ms: int,
 ) -> bool:
-    """Stamp a 404 on an item, and settle it unbilled once that is safe.
+    """Settle an item Arena answered 404 for, unbilled, once that is safe.
 
     :param session: Procedure session.
     :param kind: ``run`` or ``deployment``.
     :param usage_id: Run or deployment id.
-    :param values: Lower-cased ``usage_items`` row with the epoch columns.
+    :param seen: Arena has answered 200 for the item.
+    :param first_404_ms: First 404 in epoch milliseconds.
     :param now_ms: Current time in epoch milliseconds.
     :return: Whether the item settled.
     """
-    mark_checked(session, kind, usage_id, now_ms, "first_404_at")
-    seen = epoch_ms(values["seen_ms"]) is not None
-    missing_ms = epoch_ms(values["missing_ms"])
-    first_404_ms = now_ms if missing_ms is None else missing_ms
     if seen or has_billed_hours(session, kind, usage_id):
         logger.warning(
             "Arena has no %s %s, but it reported usage for it before. Keeping it.",

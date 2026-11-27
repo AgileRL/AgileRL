@@ -385,10 +385,29 @@ class TestEnginesPerMember:
 class TestTierSyncLink:
     @pytest.mark.parametrize("gpus_per_node", [None, 8])
     def test_one_node_syncs_over_cuda_ipc(self, gpus_per_node):
-        assert tier_sync_link(8, gpus_per_node) == "cuda_ipc"
+        device = (
+            lookup_gpu("H100")
+            .device_spec()
+            .model_copy(update={"gpus_per_node": gpus_per_node})
+        )
+
+        assert tier_sync_link(8, device) == "cuda_ipc"
+
+    def test_one_node_without_p2p_syncs_over_tcp(self):
+        device = (
+            lookup_gpu("NVIDIA A10G")
+            .device_spec()
+            .model_copy(update={"gpus_per_node": 4})
+        )
+
+        assert tier_sync_link(4, device) == "tcp"
 
     def test_allocation_across_nodes_has_no_known_link(self):
-        assert tier_sync_link(16, 8) is None
+        device = (
+            lookup_gpu("H100").device_spec().model_copy(update={"gpus_per_node": 8})
+        )
+
+        assert tier_sync_link(16, device) is None
 
 
 class TestColocatedManifest:
@@ -1621,7 +1640,7 @@ class TestCheckTiers:
         # Arrange
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
         device = lookup_gpu("NVIDIA L4").device_spec()
-        sync_link = tier_sync_link(4, device.gpus_per_node)
+        sync_link = tier_sync_link(4, device)
         lengths = ExpectedLengths(
             prompt_tokens=200, generated_tokens_per_turn=250, turns=1
         )
@@ -1654,7 +1673,7 @@ class TestCheckTiers:
         # Arrange
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
         device = lookup_gpu("NVIDIA L4").device_spec()
-        sync_link = tier_sync_link(4, device.gpus_per_node)
+        sync_link = tier_sync_link(4, device)
         laid_out, plan = split_manifest(manifest, 4, device, sync_link=sync_link)
 
         # Act

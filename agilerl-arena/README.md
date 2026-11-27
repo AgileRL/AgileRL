@@ -268,17 +268,6 @@ until its Ray head is Ready, removes it, and the command prints whether that
 passed or the reason it failed. The release asks for no GPU and mounts no
 storage. `--timeout` sets how long to wait (default 3600 seconds).
 
-`arena cluster manifest --name my-cluster --format argocd|flux` writes the
-GitOps manifest that installs the agent at Arena's current release: an Argo CD
-`Application`, or a Flux `HelmRepository` and `HelmRelease`, pinned to the
-chart version and carrying the cluster's values, which hold no secrets. `-o`
-writes it to a file instead of standard output. On a new cluster, first run the
-bootstrap command from the install package's `INSTALL.md`, which creates the
-Secrets the agent reads. To upgrade a GitOps install, commit the manifest again
-after an Arena release; the command prints any ClusterRole changes, which your
-GitOps tool needs the rights to apply. Arena serves manifests only when it
-publishes the agent chart to a private registry.
-
 Every command that talks to Kubernetes (`preflight`, `connect`,
 `register --install`, `register --install-storage`, `unregister`,
 `rotate-token`, `upgrade`, `smoke`) takes
@@ -297,7 +286,7 @@ reported. After that, `connect`, `rotate-token`, `upgrade` and `unregister`
 stop before they change anything when the context points at a different
 Kubernetes cluster, and `smoke` starts nothing.
 
-`unregister`, `rotate-token`, `upgrade`, `manifest` and `smoke` look the cluster up in your active
+`unregister`, `rotate-token`, `upgrade` and `smoke` look the cluster up in your active
 org. `--platform` targets AgileRL's own platform clusters instead, which needs
 AgileRL staff access. Register, `register-classes` and `destroy` take the
 scope from `--byoc-scope` or the spec's `byoc_scope`.

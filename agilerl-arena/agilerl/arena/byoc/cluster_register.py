@@ -72,9 +72,7 @@ class ClusterResourceClass:
 
 
 def _write_yaml(path: Path, data: object, force: bool) -> None:
-    """Serialize Helm values as YAML to *path* with mode ``0600``.
-
-    The values hold credentials: the cluster token and the registry pull secret.
+    """Serialize *data* as YAML to *path*.
 
     :param path: Destination file path.
     :type path: Path
@@ -87,7 +85,6 @@ def _write_yaml(path: Path, data: object, force: bool) -> None:
     """
     text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
     write_text_atomic(path, text, force=force)
-    os.chmod(path, 0o600)
 
 
 def _write_token(path: Path, token: str, force: bool) -> None:

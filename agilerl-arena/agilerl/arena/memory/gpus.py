@@ -28,6 +28,8 @@ class GpuInfo(BaseModel):
     all_reduce_latency_us: float | None = None
     # GPUs of one node talk over NVLink, not PCIe.
     nvlink: bool = False
+    # GPUs of one node can read each other's memory over NVLink or PCIe P2P.
+    peer_to_peer: bool = True
 
     def device_spec(self) -> DeviceSpec:
         return DeviceSpec(
@@ -35,6 +37,7 @@ class GpuInfo(BaseModel):
             name=self.name,
             compute_capability=(self.cc_major, self.cc_minor),
             nvlink=self.nvlink,
+            peer_to_peer=self.peer_to_peer,
             peak_bf16_flops=(
                 None if self.bf16_tflops is None else self.bf16_tflops * 1e12
             ),
@@ -179,6 +182,8 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             memory_gb_per_second=600,
             all_reduce_gb_per_second=20,
             all_reduce_latency_us=20,
+            # AWS g5 and Snowflake GPU_NV_M nodes report no P2P between A10Gs.
+            peer_to_peer=False,
         ),
     ),
     (

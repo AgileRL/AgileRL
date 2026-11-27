@@ -391,7 +391,7 @@ def _planned_layout(
         manifest, device, num_gpus, device.gpus_per_node or num_gpus
     )
     manifest = colocated_manifest(manifest, num_gpus)
-    sync_link = tier_sync_link(num_gpus, device.gpus_per_node)
+    sync_link = tier_sync_link(num_gpus, device)
     if searches_gpu_split(manifest):
         try:
             laid_out, plan = split_manifest(
