@@ -392,6 +392,27 @@ def opd_teacher_manifest(
     )
 
 
+class TestEstimateTeacherGeneration:
+    def test_the_teacher_engine_is_sized_to_score_a_full_episode(
+        self, monkeypatch
+    ) -> None:
+        # Arrange: a 2048-token episode plus the output token vLLM requires.
+        sized = []
+        monkeypatch.setattr(
+            "agilerl.arena.memory.manifest.estimate_generation",
+            lambda model, device, settings, orchestrated: sized.append(settings),
+        )
+        manifest = opd_teacher_manifest("Qwen/Qwen3.5-9B")
+
+        # Act
+        estimate_teacher_generation(
+            manifest, lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec(), 1, 1
+        )
+
+        # Assert
+        assert [settings.max_model_len for settings in sized] == [2048 + 1]
+
+
 class TestResolveTeacherTensorParallel:
     def test_an_unset_width_is_the_narrowest_that_serves_every_sequence(
         self,

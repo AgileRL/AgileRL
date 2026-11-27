@@ -324,8 +324,16 @@ class TestTrainingSettings:
 
         settings = generation_settings_from_manifest(doc)
 
-        assert settings.max_model_len == 512 + 256
+        # The reference, then one token for the output vLLM requires room for.
+        assert settings.max_model_len == 512 + 256 + 1
         assert settings.scores_prompt_logprobs is True
+
+    def test_an_adapter_teacher_leaves_room_to_score_a_full_episode(self):
+        doc = manifest(algorithm={"name": "OPD", "teacher": {"adapter": "/ckpt"}})
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_model_len == 512 + 1
 
     def test_an_unset_utilization_reserves_the_scoring_buffer(self):
         doc = manifest(

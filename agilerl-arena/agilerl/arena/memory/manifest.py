@@ -1123,7 +1123,7 @@ def estimate_teacher_generation(
             vllm.gpu_memory_utilization, False, hub_id
         ),
         max_num_seqs=_max_num_seqs(manifest, spec, vllm, rollout_engines),
-        max_model_len=spec.max_model_len + teacher.context_tokens,
+        max_model_len=spec.max_model_len + teacher.scoring_context_tokens,
         scores_prompt_logprobs=True,
         reserves_prompt_logprobs=vllm.gpu_memory_utilization is None,
         max_num_batched_tokens=(
