@@ -78,8 +78,8 @@ if __name__ == "__main__":
     # Create a population of DQN agents
     pop: list[DQN] = create_population(
         algo="DQN",  # Algorithm
-        observation_space=env.observation_space,  # Observation space
-        action_space=env.action_space,  # Action space
+        observation_space=observation_space,  # Observation space
+        action_space=action_space,  # Action space
         net_config=None,  # Network configuration set as None
         actor_network=evolvable_mlp,  # Custom evolvable actor
         INIT_HP=INIT_HP,  # Initial hyperparameters
