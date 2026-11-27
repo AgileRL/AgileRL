@@ -148,11 +148,11 @@ if __name__ == "__main__":
 
                 # Save experience to replay buffer
                 transition: TensorDictBase = Transition(
-                    obs,
-                    action,
-                    reward,
-                    next_obs,
-                    terminated,
+                    obs=obs,
+                    action=action,
+                    reward=reward
+                    next_obs=next_obs,
+                    terminated=terminated,
                 )
                 transition = transition.to_tensordict()
                 transition.batch_size = [num_envs]
