@@ -1456,7 +1456,7 @@ class TestLLMEnvSpecRolloutSource:
         spec = LLMEnvSpec(name="AgentWorldModel", env_type="rollout", **source)
 
         assert spec.name_only_built_in is False
-        assert spec.num_envs == 1
+        assert spec.num_envs is None
         assert spec.strict_chat_template_boundary is True
 
     def test_a_dataset_named_like_a_built_in_is_not_name_only(self) -> None:
@@ -1834,7 +1834,7 @@ class TestLLMEnvSpecSurfaces:
         assert gem.response_column is None
         assert gem.rubric_name is None
         assert gem.strict_chat_template_boundary is True
-        assert gem.num_envs == 1
+        assert gem.num_envs is None
         assert gem.action_field == "message"
 
     def test_dataset_backed_rollout_fills_conditional_defaults(self) -> None:
@@ -1850,7 +1850,7 @@ class TestLLMEnvSpecSurfaces:
         assert rollout.response_column is None
         assert rollout.rubric_name == "reward_fn"
         assert rollout.strict_chat_template_boundary is True
-        assert rollout.num_envs == 1
+        assert rollout.num_envs is None
         assert rollout.action_field is None
 
     def test_dataset_env_type_fills_split_and_response_column(self) -> None:

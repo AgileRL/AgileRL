@@ -1903,7 +1903,7 @@ class TestSchema:
 
         environment = TrainingManifest.model_validate(doc).to_payload()["environment"]
 
-        assert environment["num_envs"] == 1
+        assert "num_envs" not in environment
         assert environment["strict_chat_template_boundary"] is True
         assert environment["env_services"] == []
         assert environment["restart_keep_turns"] == 0
@@ -2722,12 +2722,7 @@ class TestSchema:
             for c in conditionals
             if c.get("if") == environment_rollout_type_if()
             and c.get("then")
-            == environment_then(
-                {
-                    "num_envs": {"default": 1},
-                    "strict_chat_template_boundary": {"default": True},
-                }
-            )
+            == environment_then({"strict_chat_template_boundary": {"default": True}})
         )
         assert rollout_cond is not None
 
@@ -2738,7 +2733,6 @@ class TestSchema:
             }
         }
         assert self._applied_environment_defaults(gem_rollout) == {
-            "num_envs": 1,
             "strict_chat_template_boundary": True,
         }
 
@@ -2754,7 +2748,7 @@ class TestSchema:
         assert applied["strict_chat_template_boundary"] is True
         assert "response_column" not in applied
         assert "rubric_name" not in applied
-        assert applied["num_envs"] == 1
+        assert "num_envs" not in applied
 
         dataset_sft = {
             "environment": {

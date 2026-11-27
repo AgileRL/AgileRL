@@ -565,7 +565,10 @@ class LLMEnvSpec(EnvSpecBase):
     num_envs: int | None = Field(
         default=None,
         ge=1,
-        description="Environment copies stepped in parallel.",
+        description=(
+            "Ignored for LLM runs: rollout concurrency comes from the batch and "
+            "group size."
+        ),
     )
     env_type: Literal["rollout", "dataset"] = Field(
         description=(
@@ -1396,11 +1399,11 @@ class LLMEnvSpec(EnvSpecBase):
             )
         if self.env_type == "rollout":
             # Unset here: a submitted default replaces the bundled profile's value.
-            if not self.name_only_built_in:
-                if self.num_envs is None:
-                    self.num_envs = 1
-                if self.strict_chat_template_boundary is None:
-                    self.strict_chat_template_boundary = True
+            if (
+                not self.name_only_built_in
+                and self.strict_chat_template_boundary is None
+            ):
+                self.strict_chat_template_boundary = True
             env_backed = (
                 self.entrypoint is not None
                 or self.env_url is not None

@@ -597,7 +597,7 @@ class TestLLMEnvSpec:
             rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{question}"},
         )
-        assert spec.num_envs == 1
+        assert spec.num_envs is None
         for field in ("custom", "default_type", "sync", "env_wrappers"):
             assert field not in type(spec).model_fields
 

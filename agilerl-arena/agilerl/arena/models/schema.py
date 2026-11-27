@@ -330,10 +330,7 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         {
             "if": environment_rollout_type_if(),
             "then": environment_then(
-                {
-                    "num_envs": {"default": 1},
-                    "strict_chat_template_boundary": {"default": True},
-                }
+                {"strict_chat_template_boundary": {"default": True}}
             ),
         },
     ]
@@ -626,7 +623,7 @@ def attach_training_schema(schema: dict[str, Any]) -> None:
 
 
 def _strip_llm_env_schema_defaults(schema: dict[str, Any]) -> None:
-    """Null is not a property default. Root conditionals set these fields."""
+    """Null is not a property default. Root conditionals set any real default."""
     properties = schema["$defs"]["LLMEnvSpec"]["properties"]
     for name in LLM_ENV_SCHEMA_DEFAULT_FIELDS:
         properties[name].pop("default", None)
