@@ -516,6 +516,7 @@ class TestSetupScriptObjects:
             ("closed_at", "TIMESTAMP_TZ"),
             ("last_error", "STRING"),
             ("last_error_at", "TIMESTAMP_TZ"),
+            ("unbilled_reason", "STRING"),
         ]
         assert SETUP_SQL.index("ALTER TABLE app_state.usage_items") > create
 

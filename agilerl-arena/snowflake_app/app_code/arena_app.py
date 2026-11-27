@@ -49,7 +49,6 @@ from app_trial import refuse_ended_trial
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
-from agilerl.arena.models.manifest import IN_SNOWFLAKE_APP, TrainingManifest
 from agilerl.arena.models.model_info import (
     REMOTE_CODE_MODEL_TYPES,
     SUPPORTED_MODEL_INFO,
@@ -70,7 +69,6 @@ from agilerl.arena.snowflake.job import (
     SubmitSettings,
     cancel_run,
     choose_gpu_family,
-    load_manifest,
     lowered,
     manifest_fits,
     new_run_id,
@@ -90,6 +88,7 @@ from agilerl.arena.snowflake.license import (
     snowflake_priced_families,
     snowflake_training_enabled,
 )
+from agilerl.arena.snowflake.manifest_refusal import load_app_manifest
 from agilerl.arena.snowflake.profile import (
     CPU_POOL_MAX_NODES,
     CPU_POOL_MIN_NODES,
@@ -140,6 +139,7 @@ from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
 from agilerl.arena.snowflake.status import run_status, service_logs
 
 if TYPE_CHECKING:
+    from agilerl.arena.models.manifest import TrainingManifest
     from agilerl.arena.snowflake.catalog import GpuFamily
 
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
@@ -606,7 +606,7 @@ def submit(
         submitted = directory / "submitted.yaml"
         submitted.write_text(manifest, encoding="utf-8")
         job_manifest = write_job_manifest(submitted, source, False, directory)
-        parsed = load_manifest(job_manifest, {IN_SNOWFLAKE_APP: True})
+        parsed = load_app_manifest(job_manifest)
         refuse_remote_code(parsed)
         check_app_reward(session, parsed)
         if source_reference is not None and source_alias is not None:

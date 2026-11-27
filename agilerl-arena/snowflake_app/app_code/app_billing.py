@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from app_trial import end_trial, trial_ended
 from snowflake.snowpark.exceptions import SnowparkSQLException
 
-from agilerl.arena.snowflake.billing import reconcile
+from agilerl.arena.snowflake.billing import reconcile, training_started
 from agilerl.arena.snowflake.catalog import collect, whole_number
 from agilerl.arena.snowflake.job import lowered
 from agilerl.arena.snowflake.license import (
@@ -36,6 +36,7 @@ from agilerl.arena.snowflake.license import (
     partner_headers,
     snowflake_usage,
 )
+from agilerl.arena.snowflake.profile import METRICS_TABLE
 from agilerl.arena.snowflake.publish import (
     create_chat_function_sql,
     drop_chat_function_sql,
@@ -218,7 +219,12 @@ def reconcile_summary(session: SnowflakeSession) -> str:
         DeploymentCalls(open_call, heartbeat, close),
         datetime.now(timezone.utc),
     )
-    summary = f"{metered}; {reconcile(session, fetch, int(time.time() * 1000))}"
+
+    def trained(run_id: str) -> bool:
+        return training_started(session, f"{APP_SCHEMA}.{METRICS_TABLE}", run_id)
+
+    billed = reconcile(session, fetch, trained, int(time.time() * 1000))
+    summary = f"{metered}; {billed}"
     return summary if ended is None else f"{ended}; {summary}"
 
 
