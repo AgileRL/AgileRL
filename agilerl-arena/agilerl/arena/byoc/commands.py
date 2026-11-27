@@ -33,6 +33,7 @@ from agilerl.arena.byoc.cluster_helm import (
     normalize_agent_namespace,
     uninstall_byoc_releases,
 )
+from agilerl.arena.byoc.cluster_manifest import MANIFEST_KEYS, run_cluster_manifest
 from agilerl.arena.byoc.cluster_register import (
     ClassAvailability,
     ClusterResourceClass,
@@ -1625,6 +1626,52 @@ def build_cluster_upgrade_command() -> click.Command:
             )
 
     return upgrade_cmd
+
+
+def build_cluster_manifest_command() -> click.Command:
+    """Build ``arena cluster manifest``."""
+
+    @click.command("manifest")
+    @click.option("--name", required=True, help="Registered cluster name.")
+    @click.option(
+        "--format",
+        "manifest_format",
+        type=click.Choice(sorted(MANIFEST_KEYS)),
+        required=True,
+        help="argocd: an Argo CD Application. flux: a Flux HelmRepository and HelmRelease.",
+    )
+    @click.option(
+        "--output",
+        "-o",
+        type=click.Path(dir_okay=False, path_type=Path),
+        default=None,
+        help="File to write. Standard output when omitted.",
+    )
+    @_platform_option
+    @click.pass_obj
+    def manifest_cmd(
+        config: CommandConfig,
+        name: str,
+        manifest_format: str,
+        output: Path | None,
+        platform: bool,
+    ) -> None:
+        """Write the GitOps manifest for the agent at this Arena release.
+
+        The manifest pins the agent chart and holds no secrets. On a new
+        cluster, run the install package's bootstrap command first. To upgrade,
+        commit the new manifest.
+        """
+        with arena_client(config) as client:
+            run_cluster_manifest(
+                client,
+                name=name,
+                manifest_format=manifest_format,
+                output=output,
+                platform=platform,
+            )
+
+    return manifest_cmd
 
 
 def build_cluster_smoke_command() -> click.Command:
