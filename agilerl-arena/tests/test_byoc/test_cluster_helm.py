@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import stat
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -73,6 +76,95 @@ rewardFunctionValidator:
     tag: latest""",
         encoding="utf-8",
     )
+
+
+PULL_SECRET = '{"auths":{"registry.example.com":{"auth":"cHVsbC1zZWNyZXQ="}}}'
+
+IMAGE_PULL_VALUES = {
+    "mode": "api",
+    "credential": {
+        "dockerConfigJson": PULL_SECRET,
+        "expiresAt": "2026-11-27T12:00:00Z",
+    },
+}
+
+
+def _write_chart_with_image_pull_defaults(chart_dir: Path) -> None:
+    _write_agent_chart_defaults(chart_dir)
+    with (chart_dir / "values.yaml").open("a", encoding="utf-8") as values:
+        values.write(
+            "\nimagePull:\n  mode: public\n  credential:\n"
+            "    dockerConfigJson: ''\n    expiresAt: ''\n"
+        )
+
+
+class TestInstallFromInstallPackageRootImagePull:
+    def test_passes_credential_to_helm_unchanged_without_logging_it(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Arrange
+        package_root = tmp_path / "arena-byoc-install"
+        _write_chart_with_image_pull_defaults(package_root / AGENT_CHART / "chart")
+        (package_root / "agent-helm-values.yaml").write_text(
+            yaml.safe_dump({"cluster": {"id": 1}, "imagePull": IMAGE_PULL_VALUES}),
+            encoding="utf-8",
+        )
+        helm_values: list[dict[str, object]] = []
+
+        def run_helm(cmd: list[str], **_kwargs: object) -> MagicMock:
+            values_file = Path(cmd[cmd.index("-f") + 1])
+            helm_values.append(yaml.safe_load(values_file.read_text(encoding="utf-8")))
+            return MagicMock(returncode=0)
+
+        # Act
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch(
+                "agilerl.arena.byoc.cluster_helm.shutil.which",
+                return_value="/usr/bin/helm",
+            ),
+            patch(
+                "agilerl.arena.byoc.cluster_helm.subprocess.run", side_effect=run_helm
+            ) as run_mock,
+        ):
+            install_from_install_package_root(package_root, wait=False)
+
+        # Assert
+        assert helm_values[0]["imagePull"] == IMAGE_PULL_VALUES
+        assert PULL_SECRET not in " ".join(run_mock.call_args.args[0])
+        captured = capsys.readouterr()
+        assert PULL_SECRET not in captured.out + captured.err + caplog.text
+        merged = package_root / "agent-helm-values-merged.yaml"
+        if sys.platform != "win32":
+            assert stat.S_IMODE(merged.stat().st_mode) == 0o600
+
+    def test_enterprise_install_writes_owner_only_merged_values(
+        self, tmp_path: Path
+    ) -> None:
+        charts_root = tmp_path / "helm-setup"
+        _write_chart_with_image_pull_defaults(charts_root / AGENT_CHART / "chart")
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "agent-helm-values.yaml").write_text(
+            yaml.safe_dump({"imagePull": IMAGE_PULL_VALUES}), encoding="utf-8"
+        )
+
+        with (
+            patch("agilerl.arena.byoc.cluster_helm.helm_upgrade_install"),
+            patch("agilerl.arena.byoc.cluster_helm.run_agent_chart_validate"),
+        ):
+            install_enterprise_agent_chart(out, charts_dir=charts_root)
+
+        merged = out / "agent-helm-values-merged.yaml"
+        assert (
+            yaml.safe_load(merged.read_text(encoding="utf-8"))["imagePull"]
+            == IMAGE_PULL_VALUES
+        )
+        if sys.platform != "win32":
+            assert stat.S_IMODE(merged.stat().st_mode) == 0o600
 
 
 def test_merge_agent_chart_defaults_loads_chart_values(tmp_path: Path) -> None:
