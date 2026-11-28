@@ -96,7 +96,10 @@ def manifest_fits(
         detail = ArenaAPIError.from_response_body(
             response.text, status_code=response.status_code
         ).detail
-        msg = f"Arena could not estimate the manifest's memory: {detail}"
+        msg = (
+            f"Arena at {origin} could not estimate the manifest's memory "
+            f"(HTTP {response.status_code}): {detail}"
+        )
         raise ValueError(msg)
     try:
         data = response.json()

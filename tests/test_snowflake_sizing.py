@@ -144,6 +144,50 @@ class TestManifestFits:
                 ARENA_AUTH,
             )
 
+    def test_an_error_names_the_status_and_the_api_description(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _arena_answers(
+            monkeypatch,
+            httpx.Response(
+                503,
+                json={
+                    "error": "service_unavailable",
+                    "description": "Memory estimator is unavailable.",
+                },
+            ),
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Arena at https://arena\.test could not estimate the manifest's "
+            r"memory \(HTTP 503\): Memory estimator is unavailable\.$",
+        ):
+            manifest_fits(
+                _write(tmp_path, _sft()),
+                "GPU_NV_S",
+                _gpu("GPU_NV_S", 1, 24, 8),
+                1,
+                ARENA_URL,
+                ARENA_AUTH,
+            )
+
+    def test_an_empty_error_still_names_the_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A gateway that does not route the path answers 404 with no body.
+        _arena_answers(monkeypatch, httpx.Response(404))
+
+        with pytest.raises(ValueError, match=r"arena\.test .*\(HTTP 404\)"):
+            manifest_fits(
+                _write(tmp_path, _sft()),
+                "GPU_NV_S",
+                _gpu("GPU_NV_S", 1, 24, 8),
+                1,
+                ARENA_URL,
+                ARENA_AUTH,
+            )
+
     def test_a_non_json_success_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
