@@ -768,7 +768,7 @@ class TestServiceQueries:
             f"SHOW SERVICE CONTAINERS IN SERVICE {SERVICE}"
         )
         assert service_logs_sql(SERVICE, 0) == (
-            f"SELECT SYSTEM$GET_SERVICE_LOGS('{SERVICE}', 0, 'main')"
+            f"SELECT SYSTEM$GET_SERVICE_LOGS('{SERVICE}', 0, 'main', 1000)"
         )
 
     def test_run_status_lists_roles_containers_and_the_run_state(self) -> None:

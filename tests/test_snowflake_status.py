@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from agilerl.snowflake.status import run_status, service_logs
@@ -17,6 +19,17 @@ HEAD = f"{STEM}_HEAD"
 WORKERS = f"{STEM}_WORKERS"
 STATUS_COMMAND = f"CALL arena_app.app_code.status('{RUN_ID}')"
 READY = [Row(instance_id=0, container_name="main", status="READY")]
+# Size SYSTEM$GET_SERVICE_LOGS cuts its result to, measured on a running service.
+LOGS_RESULT_BYTES = 212_992
+
+
+def service_logs_result(log: str, lines: int) -> str:
+    """What ``SYSTEM$GET_SERVICE_LOGS`` returns for a container's whole log.
+
+    The newest ``lines`` lines, then cut to its size limit from the newest end.
+    """
+    newest = "".join(log.splitlines(keepends=True)[-lines:])
+    return newest.encode()[:LOGS_RESULT_BYTES].decode(errors="ignore")
 
 
 class RunSession:
@@ -48,7 +61,9 @@ class RunSession:
         if text.startswith("SHOW SERVICE CONTAINERS"):
             return list(self.containers)
         if "SYSTEM$GET_SERVICE_LOGS" in text:
-            return [Row(**{"SYSTEM$GET_SERVICE_LOGS": self.live})]
+            lines = int(re.findall(r"\d+", text)[-1])
+            result = service_logs_result(self.live, lines)
+            return [Row(**{"SYSTEM$GET_SERVICE_LOGS": result})]
         if "SPCS_GET_LOGS" in text:
             return [Row(LOG=line) for line in reversed(self.stored)]
         return []
@@ -101,8 +116,31 @@ class TestServiceLogs:
         assert text == "trainer started"
         assert session.statements[-2:] == [
             f"SHOW SERVICE CONTAINERS IN SERVICE {HEAD}",
-            f"SELECT SYSTEM$GET_SERVICE_LOGS('{HEAD}', 0, 'main')",
+            f"SELECT SYSTEM$GET_SERVICE_LOGS('{HEAD}', 0, 'main', 1000)",
         ]
+
+    def test_a_long_running_log_shows_its_newest_lines(self) -> None:
+        # A Ray head writes lines of up to ~4.5 KB, so 1000 lines pass the size cut.
+        log = "".join(f"line {i:05d} {'x' * 4500}\n" for i in range(3000))
+        session = RunSession({HEAD: "RUNNING"}, READY, live=log)
+
+        text = service_logs(session, RUN_ID, 0, status_command=STATUS_COMMAND)
+
+        lines = text.splitlines()
+        assert lines[-1].startswith("line 02999 ")
+        assert len(lines) > 20
+        assert text == "".join(log.splitlines(keepends=True)[-len(lines) :])
+
+    def test_a_single_line_longer_than_the_cut_still_returns(self) -> None:
+        log = f"start\nprogress {'#' * (LOGS_RESULT_BYTES * 2)}"
+        session = RunSession({HEAD: "RUNNING"}, READY, live=log)
+
+        text = service_logs(session, RUN_ID, 0, status_command=STATUS_COMMAND)
+
+        assert text.startswith("progress ")
+        assert session.statements[-1] == (
+            f"SELECT SYSTEM$GET_SERVICE_LOGS('{HEAD}', 0, 'main', 1)"
+        )
 
     def test_a_pending_container_names_the_status_command(self) -> None:
         pending = [Row(instance_id=0, container_name="main", status="PENDING")]

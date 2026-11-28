@@ -10,13 +10,12 @@ from agilerl.snowflake.job import (
     format_run_status,
     in_schema,
     job_services_sql,
-    log_text,
     lowered,
     role_states,
     service_event_logs_sql,
     service_for_role,
-    service_logs_sql,
     service_status_sql,
+    tail_service_logs,
 )
 from agilerl.snowflake.source import SnowflakeRow, SnowflakeSession
 
@@ -55,9 +54,9 @@ def service_logs(
 ) -> str:
     """Logs of the main container of one role.
 
-    A running service reads ``SYSTEM$GET_SERVICE_LOGS`` once its container has
-    started. A finished one reads the event table, since its node may already
-    be released.
+    A running service reads the newest lines from ``SYSTEM$GET_SERVICE_LOGS``
+    once its container has started. A finished one reads the event table,
+    since its node may already be released.
 
     :param session: Snowpark session.
     :param run_id: Run id.
@@ -81,8 +80,7 @@ def service_logs(
                 "Its node can take several minutes to start; GPU nodes take longest. "
                 f"Check progress with {status_command}."
             )
-        live = session.sql(service_logs_sql(service, instance)).collect()
-        return log_text(list(live)) or (
+        return tail_service_logs(session, service, instance) or (
             f"The {role} container has started but has written no logs yet. "
             "Check again in a minute."
         )

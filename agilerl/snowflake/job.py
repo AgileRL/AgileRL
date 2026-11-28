@@ -60,6 +60,11 @@ UPLOADED_MARKER = re.compile(r"^checkpoint_(\d+)/\.uploaded$")
 COPY_FILES_MAX_BYTES = 5 * 10**9
 ROLES = ("broker", "head", "worker")
 CONTAINER_NAME = "main"
+# SYSTEM$GET_SERVICE_LOGS takes the newest lines asked for, at most 1000, then
+# cuts the result to about 208 KiB by dropping its newest lines. A result this
+# long may have lost them, so ask again for fewer lines.
+SERVICE_LOG_MAX_LINES = 1000
+SERVICE_LOG_CUT_BYTES = 200_000
 # The stage volume mounts @<runs stage>/<run_id> here on every instance.
 RUN_MOUNT = "/arena/run"
 # The snowflake-job image runs as user:users. SPCS mounts a stage volume as
@@ -985,15 +990,40 @@ def service_status_sql(service: str) -> str:
     return f"SHOW SERVICE CONTAINERS IN SERVICE {name}"
 
 
-def service_logs_sql(service: str, instance: int) -> str:
-    """``SYSTEM$GET_SERVICE_LOGS`` for the ``main`` container.
+def service_logs_sql(
+    service: str, instance: int, lines: int = SERVICE_LOG_MAX_LINES
+) -> str:
+    """``SYSTEM$GET_SERVICE_LOGS`` for the newest lines of the ``main`` container.
 
     :param service: Service name.
     :param instance: Instance id, starting at 0.
+    :param lines: Number of newest lines, 1 to 1000.
     :return: The SQL statement.
     """
     name = snowflake_identifier(service, "service")
-    return f"SELECT SYSTEM$GET_SERVICE_LOGS('{name}', {instance}, '{CONTAINER_NAME}')"
+    return (
+        f"SELECT SYSTEM$GET_SERVICE_LOGS('{name}', {instance}, "
+        f"'{CONTAINER_NAME}', {lines})"
+    )
+
+
+def tail_service_logs(session: SnowflakeSession, service: str, instance: int) -> str:
+    """Newest lines of a running ``main`` container that fit in one logs result.
+
+    Asks for fewer lines while the result is long enough to have been cut.
+
+    :param session: Snowpark session.
+    :param service: Service name.
+    :param instance: Instance id, starting at 0.
+    :return: The log text, or an empty string.
+    """
+    lines = SERVICE_LOG_MAX_LINES
+    while True:
+        rows = session.sql(service_logs_sql(service, instance, lines)).collect()
+        text = log_text(list(rows))
+        if len(text.encode()) < SERVICE_LOG_CUT_BYTES or lines == 1:
+            return text
+        lines = max(1, min(lines - 1, text.count("\n") * 3 // 4))
 
 
 def service_event_logs_sql(service: str, instance: int) -> str:

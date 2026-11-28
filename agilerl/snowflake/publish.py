@@ -26,7 +26,6 @@ from agilerl.snowflake.job import (
     describe_instance_family,
     in_schema,
     job_state,
-    log_text,
     lowered,
     node_resources,
     put_file,
@@ -35,6 +34,7 @@ from agilerl.snowflake.job import (
     service_status_sql,
     snowflake_identifier,
     stage_volume,
+    tail_service_logs,
 )
 from agilerl.snowflake.source import (
     SnowflakeFiles,
@@ -256,7 +256,7 @@ def wait_for_publish(
         if state == "done":
             return
         if state != "running":
-            logs = log_text(session.sql(service_logs_sql(job.name, 0)).collect())
+            logs = tail_service_logs(session, job.name, 0)
             msg = f"Publish job {job.name} {state}:\n{logs}"
             raise RuntimeError(msg)
         if clock() >= deadline:

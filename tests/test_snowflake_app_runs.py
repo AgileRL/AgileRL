@@ -1365,7 +1365,7 @@ class TestLogs:
 
         assert text == "step 1 loss 0.5"
         assert session.statements[-1] == (
-            f"SELECT SYSTEM$GET_SERVICE_LOGS('app_state.{STEM}_WORKERS', 1, 'main')"
+            f"SELECT SYSTEM$GET_SERVICE_LOGS('app_state.{STEM}_WORKERS', 1, 'main', 1000)"
         )
 
     @pytest.mark.parametrize(

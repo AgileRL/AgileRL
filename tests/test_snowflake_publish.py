@@ -620,7 +620,7 @@ class TestWaitForPublish:
                 "It keeps running in Snowflake."
             ),
             "Status: SHOW SERVICE CONTAINERS IN SERVICE ARENA_PUBLISH_X",
-            "Logs: SELECT SYSTEM$GET_SERVICE_LOGS('ARENA_PUBLISH_X', 0, 'main')",
+            "Logs: SELECT SYSTEM$GET_SERVICE_LOGS('ARENA_PUBLISH_X', 0, 'main', 1000)",
             (
                 "Endpoint, once the job is done: "
                 "CALL <app>.app_code.endpoint('arena_policy', 'checkpoint_10')"
